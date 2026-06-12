@@ -64,6 +64,7 @@ pnpm --filter @torqclaw/console dev         # console http://localhost:3000
 | `TORQCLAW_GATEWAY_TOKEN` | _(unset = dev mode)_ | required in any non-loopback deployment |
 | `HERMES_ENGINE_URL` / `HERMES_ENGINE_TOKEN` | `http://127.0.0.1:8000/mcp` | move to a GPU box = change config, not code |
 | `OLLAMA_HOST` / `TORQCLAW_LOCAL_MODEL` | `localhost:11434` / `torq-local` | |
+| `HERMES_MODEL` / `HERMES_PROVIDER` / `HERMES_API_KEY` | _(unset = stub mode)_ | real agent execution; see `mcp_wrapper/hermes_runner.py` |
 
 ## Design invariants
 

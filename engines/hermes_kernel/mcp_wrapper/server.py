@@ -20,22 +20,31 @@ mcp = FastMCP(
 
 
 async def run_hermes_loop(task_id: str, payload: dict) -> None:
-    """Integration point with the vendored submodule (vendor/hermes-agent).
-    v1 stub proves the transport + cursor plumbing end-to-end."""
+    """Real Hermes execution via mcp_wrapper.hermes_runner (callbacks ->
+    cursor events). Falls back to a labeled stub when the vendored agent
+    or its provider config isn't available, so the pipeline stays testable."""
+    from .hermes_runner import hermes_available, run_hermes_sync
+
     try:
         prompt = payload["payload"]["prompt"]
         task_type = payload["payload"]["taskType"]
-        task_store.emit(task_id, "SYSTEM", f"Hermes loop booted for {task_type}")
+        available, why = hermes_available()
 
-        # --- Replace with the real loop: ---
-        # import sys; sys.path.insert(0, str(Path(__file__).parents[1] / "vendor" / "hermes-agent"))
-        # from hermes_agent import Agent
-        # result = await Agent(...).execute(prompt, on_event=lambda t, m: task_store.emit(task_id, t, m))
+        if available and os.environ.get("HERMES_MODEL"):
+            task_store.emit(task_id, "SYSTEM", f"Hermes agent booted for {task_type}")
+            # run_conversation is synchronous — never block the event loop.
+            out = await asyncio.to_thread(run_hermes_sync, task_id, payload)
+            task_store.complete(task_id, out["result"], out["telemetry"])
+            return
+
+        reason = why or "HERMES_MODEL unset"
+        task_store.emit(task_id, "SYSTEM", f"STUB MODE ({reason}) for {task_type}")
         await asyncio.sleep(1)
-        result = f"[stub] Hermes processed: {prompt[:120]}"
-        # ------------------------------------
-
-        task_store.complete(task_id, result, {"engineUsed": "hermes-stub"})
+        task_store.complete(
+            task_id,
+            f"[stub] Hermes processed: {prompt[:120]}",
+            {"engineUsed": "hermes-stub"},
+        )
     except Exception as exc:  # noqa: BLE001
         task_store.fail(task_id, str(exc))
 
