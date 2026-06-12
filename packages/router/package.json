@@ -4,6 +4,14 @@
   "type": "module",
   "main": "dist/engine.js",
   "types": "dist/engine.d.ts",
-  "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc --noEmit" },
-  "dependencies": { "@torqclaw/contracts": "workspace:*" }
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@torqclaw/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22"
+  }
 }

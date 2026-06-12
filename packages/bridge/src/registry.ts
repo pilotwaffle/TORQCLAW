@@ -30,7 +30,7 @@ const DEFAULT_WRITE_PATTERNS = [/write/i, /delete/i, /push/i, /create/i, /update
 export async function connectServer(cfg: ServerConfig): Promise<void> {
   const client = new Client(
     { name: 'torqclaw-gateway', version: '0.1.0' },
-    { capabilities: { tools: {} } },
+    { capabilities: {} },
   );
   const transport =
     cfg.transport.type === 'streamable-http'

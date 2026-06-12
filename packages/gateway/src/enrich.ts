@@ -24,6 +24,7 @@ export async function enrichCommand(
     receivedAt: new Date().toISOString(),
     payload: {
       prompt: cmd.prompt,
+      assembledContext: history || undefined,
       contextSize,
       requiredTools: predictTools(cls.taskType),
       taskType: cls.taskType,

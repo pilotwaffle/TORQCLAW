@@ -8,7 +8,9 @@ import { z } from 'zod';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GatewayRequestSchema, GatewayEventSchema, ClientCommandSchema } from '../src/index.ts';
+// Import from dist (tsc runs first in the build script): the NodeNext-style
+// `.js` extension imports inside src/ don't resolve under --experimental-strip-types.
+import { GatewayRequestSchema, GatewayEventSchema, ClientCommandSchema } from '../dist/index.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const targets = [

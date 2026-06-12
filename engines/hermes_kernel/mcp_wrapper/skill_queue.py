@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 DATA_DIR = Path(os.environ.get("TORQCLAW_DATA_DIR", Path.home() / ".torqclaw"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)  # import order independence
 SKILLS_DIR = Path(os.environ.get("HERMES_SKILLS_DIR", Path.home() / ".hermes" / "skills"))
 
 _conn = sqlite3.connect(DATA_DIR / "hermes_tasks.db", check_same_thread=False)

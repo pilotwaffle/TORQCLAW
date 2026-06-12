@@ -4,10 +4,16 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc --noEmit" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit"
+  },
   "dependencies": {
+    "@torqclaw/bridge": "workspace:*",
     "@torqclaw/contracts": "workspace:*",
-    "@torqclaw/router": "workspace:*",
-    "@torqclaw/bridge": "workspace:*"
+    "@torqclaw/router": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22"
   }
 }

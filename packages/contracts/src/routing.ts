@@ -30,6 +30,8 @@ export const GatewayRequestSchema = z.object({
   receivedAt: z.iso.datetime(),
   payload: z.object({
     prompt: z.string(),
+    /** Tiered memory (recent turns + FTS5 recall) assembled by the gateway. */
+    assembledContext: z.string().optional(),
     contextSize: z.number(),
     requiredTools: z.array(z.string()),
     taskType: TaskTypeSchema,

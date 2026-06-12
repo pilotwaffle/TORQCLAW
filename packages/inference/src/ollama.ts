@@ -39,13 +39,14 @@ export async function executeLocalEdge(
   const { openAITools, resolveAlias, requiresApproval } =
     await getToolsForTask(req.payload.taskType, 'LOCAL_EDGE');
 
+  const context = req.payload.assembledContext;
   const messages: any[] = [
     {
       role: 'system',
       content:
         'You are TORQCLAW, an autonomous agent. Use tools when necessary. ' +
-        'Be concise and concrete.\n\n' +
-        (req as any).assembledContext ?? '',
+        'Be concise and concrete.' +
+        (context ? `\n\n${context}` : ''),
     },
     { role: 'user', content: req.payload.prompt },
   ];
