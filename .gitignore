@@ -10,6 +10,5 @@ dist/
 *.db-shm
 __pycache__/
 .venv/
-engines/hermes_kernel/vendor/
 packages/contracts/generated/
 engines/hermes_kernel/mcp_wrapper/schemas/
