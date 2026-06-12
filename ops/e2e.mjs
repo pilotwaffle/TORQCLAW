@@ -2,9 +2,11 @@
 // pipeline, print the typed event stream, clean up. Exits 0 on RESULT.
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 
-const ROOT = new URL('..', import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const VENV_PY = process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python';
 const children = [];
 const launch = (cmd, args, cwd, logPrefix) => {
   const p = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -22,7 +24,7 @@ const waitForHttp = async (url, tries = 30) => {
   throw new Error(`not up: ${url}`);
 };
 
-launch(`${ROOT}engines/hermes_kernel/.venv/bin/python`, ['-m', 'mcp_wrapper.server'],
+launch(`${ROOT}engines/hermes_kernel/${VENV_PY}`, ['-m', 'mcp_wrapper.server'],
   `${ROOT}engines/hermes_kernel`, 'engine');
 await waitForHttp('http://127.0.0.1:8000/mcp');
 console.log('=== engine up ===');
