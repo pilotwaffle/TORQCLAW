@@ -97,5 +97,13 @@ export async function connectBridge(): Promise<void> {
   } catch (err: any) {
     console.warn(`[bridge] hermes engine unreachable (${err.message}) — FRONTIER tier degraded`);
   }
-  // Additional servers (filesystem, github, ...) load from ~/.torqclaw/servers.json — TODO.
+  // User-managed roster: ~/.torqclaw/servers.json (validated, per-server fault isolation)
+  const { loadServerConfigs } = await import('./serverConfig.js');
+  for (const cfg of loadServerConfigs()) {
+    try {
+      await connectServer(cfg);
+    } catch (err: any) {
+      console.warn(`[bridge] ${cfg.id} unreachable (${err.message}) — its tools are unavailable this session`);
+    }
+  }
 }

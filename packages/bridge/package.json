@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@torqclaw/contracts": "workspace:*"
+    "@torqclaw/contracts": "workspace:*",
+    "zod": "^4"
   },
   "devDependencies": {
     "@types/node": "^22"

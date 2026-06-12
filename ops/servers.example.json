@@ -1,0 +1,18 @@
+{
+  "servers": [
+    {
+      "id": "filesystem",
+      "transport": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/workspace"]
+      },
+      "approvalPatterns": ["write", "edit", "move", "create"]
+    },
+    {
+      "id": "github",
+      "transport": { "type": "streamable-http", "url": "https://api.githubcopilot.com/mcp/", "token": "ghp_..." },
+      "enabled": false
+    }
+  ]
+}

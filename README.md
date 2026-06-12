@@ -66,6 +66,18 @@ pnpm --filter @torqclaw/console dev         # console http://localhost:3000
 | `OLLAMA_HOST` / `TORQCLAW_LOCAL_MODEL` | `localhost:11434` / `torq-local` | |
 | `HERMES_MODEL` / `HERMES_PROVIDER` / `HERMES_API_KEY` | _(unset = stub mode)_ | real agent execution; see `mcp_wrapper/hermes_runner.py` |
 
+## Adding tools (MCP servers)
+
+Copy `ops/servers.example.json` to `~/.torqclaw/servers.json`. Each entry's
+`id` becomes the tool namespace prefix (`filesystem__read_file`). Both `stdio`
+(spawned command) and `streamable-http` (remote URL + optional bearer token)
+transports are supported. `approvalPatterns` are regexes — matching tools
+require a human click on LOCAL_EDGE runs; omit to use the default
+write/delete/push/create/update/send/exec set. A malformed file or an
+unreachable server degrades that server only, never the gateway. Update
+`TOOL_ROUTING_MAP` in `packages/bridge/src/toolFilter.ts` to expose new
+namespaces to the task types that need them.
+
 ## Design invariants
 
 1. **Every frame is contract-validated** — at the WS boundary, inside the gateway
