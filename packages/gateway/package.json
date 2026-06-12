@@ -1,0 +1,20 @@
+{
+  "name": "@torqclaw/gateway",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --experimental-strip-types src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@torqclaw/contracts": "workspace:*",
+    "@torqclaw/router": "workspace:*",
+    "@torqclaw/inference": "workspace:*",
+    "@torqclaw/bridge": "workspace:*",
+    "fastify": "^5.0.0",
+    "@fastify/websocket": "^11.0.0",
+    "better-sqlite3": "^11.0.0"
+  },
+  "devDependencies": { "@types/better-sqlite3": "^7.6.0", "@types/ws": "^8.5.0" }
+}

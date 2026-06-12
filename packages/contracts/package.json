@@ -1,0 +1,12 @@
+{
+  "name": "@torqclaw/contracts",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node --experimental-strip-types scripts/emit-schemas.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": { "zod": "^4.0.0" }
+}

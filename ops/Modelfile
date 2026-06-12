@@ -1,0 +1,5 @@
+# TORQCLAW local edge model.
+# The /v1 OpenAI-compat endpoint cannot set num_ctx per-request, so we bake
+# the router's 8k context assumption into the model itself.
+FROM llama3.1:8b
+PARAMETER num_ctx 8192

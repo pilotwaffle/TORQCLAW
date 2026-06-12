@@ -1,0 +1,7 @@
+@import "tailwindcss";
+
+/* TORQ design tokens */
+:root {
+  --torq-base: #0a0a0a;
+  --torq-accent: #E24B4A;
+}

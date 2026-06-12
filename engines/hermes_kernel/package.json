@@ -1,0 +1,9 @@
+{
+  "name": "@torqclaw/hermes-kernel",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "uv run python -m mcp_wrapper.server",
+    "typecheck": "echo 'python engine: skipped'"
+  }
+}
