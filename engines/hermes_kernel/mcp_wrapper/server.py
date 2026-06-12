@@ -71,6 +71,14 @@ async def draft_and_queue_skill(proposed_name: str, skill_markdown: str,
     """Overrides Hermes auto-deploy: drafts land in the approval queue, only
     a human decision writes to the skills directory."""
     queue_id = skill_queue.queue_skill(proposed_name, skill_markdown, source_task_id)
+    if source_task_id:
+        # Surfaces in the console as an approval row with allow/deny buttons.
+        task_store.emit(
+            source_task_id,
+            "PENDING_APPROVAL",
+            f"New skill drafted: {proposed_name}",
+            {"queueId": queue_id, "skillName": proposed_name},
+        )
     return {"status": "pending_approval", "queue_id": queue_id}
 
 

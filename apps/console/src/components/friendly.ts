@@ -1,0 +1,76 @@
+// Translation layer: raw pipeline vocabulary -> end-user language.
+// Raw values stay available via tooltips; users should never need to
+// decode enum names or router diagnostics.
+import type { GatewayEvent } from '@torqclaw/contracts';
+
+export const TASK_LABELS: Record<string, string> = {
+  DATA_EXTRACTION: 'Extracting data',
+  SUMMARIZATION: 'Summarizing',
+  ROUTINE_AUTOMATION: 'Quick task',
+  AUTONOMOUS_RESEARCH: 'Research task',
+  COMPLEX_CODING: 'Coding task',
+};
+
+export const TYPE_LABELS: Record<string, string> = {
+  CONNECTED: 'connected',
+  USER_PROMPT: 'you',
+  ROUTING: 'understood',
+  TIER_SELECTED: 'routed',
+  TOOL_CALL: 'working',
+  SYSTEM: 'status',
+  RESULT: 'answer',
+  PENDING_APPROVAL: 'needs you',
+  ERROR: 'problem',
+};
+
+export function tierLabel(tier: GatewayEvent['tier']): { text: string; hint: string } | null {
+  if (tier === 'OLLAMA_LOCAL')
+    return { text: 'on this machine', hint: 'Running on your local model — private, no API cost' };
+  if (tier === 'API_EXTERNAL')
+    return { text: 'cloud model', hint: 'Using a frontier cloud model for deeper reasoning' };
+  return null;
+}
+
+/** Human rendering of an event message; falls back to the raw message. */
+export function friendlyMessage(ev: GatewayEvent): string {
+  const meta = (ev.metadata ?? {}) as Record<string, any>;
+  switch (ev.type) {
+    case 'CONNECTED':
+      return meta.resumed ? 'Picked up where you left off' : 'Ready — type a task below';
+    case 'ROUTING': {
+      const m = ev.message.match(/Classified as (\w+)/);
+      return m ? `Got it — ${(TASK_LABELS[m[1]!] ?? m[1]!).toLowerCase()}` : ev.message;
+    }
+    case 'TIER_SELECTED': {
+      const r = String(meta.reason ?? ev.message);
+      if (r.startsWith('PRIVACY_OVERRIDE')) return 'Marked private — staying on this machine';
+      if (r.startsWith('TOOL_COUNT_OVERFLOW')) return 'Needs several tools — using the cloud model';
+      if (r.startsWith('LOW_CLASSIFIER_CONFIDENCE')) return 'Tricky to size up — using the cloud model to be safe';
+      if (r.startsWith('LATENCY_CRITICAL')) return 'Local model is waking up — using the cloud for a fast answer';
+      const score = Number(meta.score ?? NaN);
+      if (!Number.isNaN(score))
+        return score < 50
+          ? 'Simple enough to run locally — free and private'
+          : 'Complex task — using the cloud model';
+      return ev.message;
+    }
+    case 'TOOL_CALL': {
+      const m = ev.message.match(/Executing (?:(\w+)__)?(\w+)/);
+      if (m) {
+        const action = m[2]!.replace(/_/g, ' ');
+        return m[1] ? `Using ${action} (${m[1]})` : `Using ${action}`;
+      }
+      return ev.message;
+    }
+    case 'PENDING_APPROVAL': {
+      const m = ev.message.match(/Tool (?:(\w+)__)?(\w+)/);
+      if (m) return `Wants to ${m[2]!.replace(/_/g, ' ')} — needs your OK`;
+      if (ev.message.toLowerCase().includes('skill')) return 'Learned a new skill — review before it can be used';
+      return ev.message;
+    }
+    case 'ERROR':
+      return `Something went wrong: ${ev.message.replace(/^Execution failed: /, '')}`;
+    default:
+      return ev.message;
+  }
+}
