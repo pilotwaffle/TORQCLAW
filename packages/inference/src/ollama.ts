@@ -14,6 +14,26 @@ export function setCancelCheck(fn: CancelCheck): void {
 
 const FINALIZE_TIMEOUT_MS = 10_000;
 
+/** P3: cap a tool result to `max` chars keeping the HEAD (60%) and TAIL (40%),
+ *  with a marker between that names the dropped span. Head-only truncation
+ *  loses the useful end of a result (errors, totals, the last rows); keeping
+ *  both ends preserves the parts a model most often needs. Pure + exported for
+ *  unit-testing the boundary math. Returns the input unchanged when it fits. */
+export function truncateHeadTail(body: string, max: number): string {
+  if (body.length <= max) return body;
+  const headLen = Math.floor(max * 0.6);
+  const tailLen = max - headLen;
+  const head = body.slice(0, headLen);
+  const tail = body.slice(body.length - tailLen);
+  const dropped = body.length - headLen - tailLen;
+  return (
+    head +
+    `\n[TRUNCATED: kept first ${headLen} and last ${tailLen} of ${body.length} chars` +
+    ` — ${dropped} omitted; request a narrower range]\n` +
+    tail
+  );
+}
+
 const OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://localhost:11434';
 // 'torq-local' is built by `pnpm model:setup` (ops/Modelfile): llama3.1:8b
 // with num_ctx 8192 baked in — the /v1 endpoint can't set num_ctx per-request.
@@ -173,13 +193,9 @@ export async function executeLocalEdge(
       emit('TOOL_CALL', `Executing ${realName}`, { args: toolArgs });
       try {
         const toolResult = await executeTool(realName, toolArgs);
-        // FIX (b): cap result size; tell the model WHY the data ends.
-        const body = JSON.stringify(toolResult);
-        const content =
-          body.length > MAX_TOOL_RESULT_CHARS
-            ? body.slice(0, MAX_TOOL_RESULT_CHARS) +
-              `\n[TRUNCATED: ${body.length} chars total — request a narrower range]`
-            : body;
+        // P3: head+tail truncation — keep the start AND end. Errors and the
+        // useful tail of a result cluster at log ends; a head-only cut drops them.
+        const content = truncateHeadTail(JSON.stringify(toolResult), MAX_TOOL_RESULT_CHARS);
         messages.push({ role: 'tool', tool_call_id: toolCall.id, name: alias, content });
       } catch (err: any) {
         messages.push({

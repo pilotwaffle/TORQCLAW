@@ -31,6 +31,21 @@ function resolveBudget(req: GatewayRequest): number | undefined {
   return Number.isFinite(env) && env > 0 ? env : undefined;
 }
 
+/** P2.5: build a task receipt from REAL telemetry only — every field is sourced
+ *  from what was actually collected; absent fields are omitted, never invented
+ *  (no "remaining risk", no fake costs). The console renders this as a footer. */
+function buildReceipt(tier: ComputeTier, telemetry: Record<string, unknown>): Record<string, unknown> {
+  const r: Record<string, unknown> = { tier };
+  const cost = telemetry.costUsd;
+  if (typeof cost === 'number') r.costUsd = cost;
+  const elapsed = telemetry.inferenceLatencyMs;
+  if (typeof elapsed === 'number') r.elapsedMs = elapsed;
+  if (typeof telemetry.iterations === 'number') r.iterations = telemetry.iterations;
+  if (telemetry.cancelled === true) r.cancelled = true;
+  if (typeof telemetry.blockedOn === 'string') r.blockedOn = telemetry.blockedOn;
+  return r;
+}
+
 /** The grant-notice prepended to the re-run's assembledContext so the model
  *  knows the prior pause was only to obtain permission, not a real failure. */
 function grantNotice(toolName: string): string {
@@ -104,7 +119,12 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
     emit(
       'ERROR',
       'Cloud engine is unreachable. Retry, or resend with "This machine only".',
-      { recovery: ['RETRY', 'RETRY_LOCAL'], prompt: req.payload.prompt },
+      {
+        recovery: ['RETRY', 'RETRY_LOCAL'],
+        prompt: req.payload.prompt,
+        // Never reached the engine, so nothing ran.
+        sideEffectNote: 'Nothing ran — the request never reached the cloud engine.',
+      },
     );
     cancellations.clear(req.id);
     return;
@@ -125,6 +145,9 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
         );
       }
       emit('RESULT', result.text, result.telemetry);
+      // P2.5 receipt: a compact, honest summary from REAL telemetry only.
+      // toolsUsed is reconstructed console-side from TOOL_CALL events.
+      emit('SYSTEM', 'Done', { receipt: buildReceipt(diag.tier, result.telemetry) });
     } catch (error: any) {
       // (A) Gated tool with no grant — NOT a failure. This is the terminal
       //     state of a blocked run. Dispatch (sole DB + terminal owner)
@@ -144,16 +167,30 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
         return; // do NOT fall through to ERROR
       }
 
-      const reason =
-        error instanceof CircuitBreakerError
-          ? `BUDGET: ${error.message}`
-          : String(error?.message ?? error);
+      const isBudget = error instanceof CircuitBreakerError;
+      const reason = isBudget ? `BUDGET: ${error.message}` : String(error?.message ?? error);
       taskStore.fail(req.id, reason);
-      // Recovery chips: generic failures offer retry + copy-diagnostic.
-      emit('ERROR', `Execution failed: ${sanitize(humanizeError(reason))}`, {
-        recovery: ['RETRY', 'COPY_DIAGNOSTIC'],
+      // P3.5 recovery chips, chosen by failure site:
+      //   budget  -> RETRY with a raised-budget prefill (suggestedBudget)
+      //   generic -> RETRY + COPY_DIAGNOSTIC
+      // Honesty: on LOCAL_EDGE with no approved write tool, no side effect can
+      // have occurred — say so. Otherwise some steps may have completed.
+      const noSideEffects = diag.tier === ComputeTier.LOCAL_EDGE;
+      const metaOut: Record<string, unknown> = {
         prompt: req.payload.prompt,
-      });
+        sideEffectNote: noSideEffects
+          ? 'No changes were made — this task ran locally with no approved write tools.'
+          : 'Some steps may have completed before the failure.',
+      };
+      if (isBudget) {
+        metaOut.recovery = ['RETRY'];
+        // Suggest doubling the breached budget so a retry has headroom.
+        const cur = typeof req.constraints.maxCost === 'number' ? req.constraints.maxCost : undefined;
+        if (cur !== undefined) metaOut.suggestedBudget = Math.round(cur * 2 * 100) / 100;
+      } else {
+        metaOut.recovery = ['RETRY', 'COPY_DIAGNOSTIC'];
+      }
+      emit('ERROR', `Execution failed: ${sanitize(humanizeError(reason))}`, metaOut);
     } finally {
       cancellations.clear(req.id);
     }

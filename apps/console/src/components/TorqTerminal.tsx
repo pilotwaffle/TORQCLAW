@@ -93,6 +93,19 @@ export default function TorqTerminal() {
     return !!last && !['RESULT', 'ERROR', 'CONNECTED', 'PENDING_APPROVAL'].includes(last.type);
   }, [events]);
 
+  // P2.5: friendly tool names actually executed, per request — reconstructed
+  // from TOOL_CALL events so the receipt's toolsUsed is from real activity.
+  const toolsByRequest = useMemo(() => {
+    const map: Record<string, string[]> = {};
+    for (const ev of events) {
+      if (ev.type !== 'TOOL_CALL' || !ev.requestId) continue;
+      const m = ev.message.match(/Executing (?:\w+__)?(.+)$/);
+      const name = (m?.[1] ?? ev.message).replace(/_/g, ' ');
+      (map[ev.requestId] ??= []).push(name);
+    }
+    return map;
+  }, [events]);
+
   // Privacy SUGGESTION (suggest-only — never sets the flag, never blocks).
   // Debounced 500ms so the regex pass never runs on the keystroke hot path,
   // keeping typing smooth even at the 32K-char prompt ceiling.
@@ -116,6 +129,28 @@ export default function TorqTerminal() {
 
   const resendLocal = (prompt: string) => {
     sendCommand(buildSubmit(prompt, { ...controls, mode: 'LOCAL_ONLY', budget: controls.budget === '' ? 'free' : controls.budget }));
+  };
+
+  // P3.5: plain retry resubmits the same prompt with current controls; a
+  // suggested budget (after a breach) raises the budget for the retry.
+  const retry = (prompt: string, suggestedBudget?: number) => {
+    if (typeof suggestedBudget === 'number') {
+      sendCommand(buildSubmit(prompt, { ...controls, budget: 'custom', customBudget: String(suggestedBudget) }));
+    } else {
+      sendCommand(buildSubmit(prompt, controls));
+    }
+  };
+
+  // P3.5: copy a paste-ready diagnostic — requestId, reason, last 10 messages.
+  const copyDiagnostic = (errEvent: GatewayEvent) => {
+    const recent = events.slice(-10).map((e) => `[${e.type}] ${e.message}`);
+    const block = [
+      `requestId: ${errEvent.requestId ?? '(none)'}`,
+      `reason: ${errEvent.message}`,
+      '--- last 10 events ---',
+      ...recent,
+    ].join('\n');
+    navigator.clipboard?.writeText(block).catch(() => {});
   };
 
   const stop = () => {
@@ -161,7 +196,17 @@ export default function TorqTerminal() {
           </p>
         )}
         {events.map((ev) => (
-          <EventRow key={ev.id} event={ev} decided={decided} onDecideSkill={decideSkill} onDecideTool={decideTool} onResendLocal={resendLocal} />
+          <EventRow
+            key={ev.id}
+            event={ev}
+            decided={decided}
+            toolsByRequest={toolsByRequest}
+            onDecideSkill={decideSkill}
+            onDecideTool={decideTool}
+            onResendLocal={resendLocal}
+            onRetry={retry}
+            onCopyDiagnostic={copyDiagnostic}
+          />
         ))}
         {busy && (
           <p className="flex items-center gap-3 px-2 py-1 text-neutral-500">
@@ -274,13 +319,17 @@ function Elapsed() {
 }
 
 function EventRow({
-  event, decided, onDecideSkill, onDecideTool, onResendLocal,
+  event, decided, toolsByRequest, onDecideSkill, onDecideTool, onResendLocal,
+  onRetry, onCopyDiagnostic,
 }: {
   event: GatewayEvent;
   decided: Record<string, 'APPROVE' | 'REJECT'>;
+  toolsByRequest: Record<string, string[]>;
   onDecideSkill: (queueId: string, decision: 'APPROVE' | 'REJECT') => void;
   onDecideTool: (approvalId: string, decision: 'APPROVE' | 'REJECT') => void;
   onResendLocal: (prompt: string) => void;
+  onRetry: (prompt: string, suggestedBudget?: number) => void;
+  onCopyDiagnostic: (errEvent: GatewayEvent) => void;
 }) {
   const tier = tierLabel(event.tier);
   const meta = (event.metadata ?? {}) as Record<string, any>;
@@ -292,6 +341,12 @@ function EventRow({
   const isToolApproval = event.type === 'PENDING_APPROVAL' && !!approvalId;
   const isUser = event.type === 'USER_PROMPT';
   const recovery: string[] = Array.isArray(meta.recovery) ? meta.recovery : [];
+
+  // P2.5: a SYSTEM event carrying a receipt renders as a footer card, not a row.
+  if (event.type === 'SYSTEM' && meta.receipt) {
+    const tools = event.requestId ? (toolsByRequest[event.requestId] ?? []) : [];
+    return <ReceiptCard receipt={meta.receipt} tools={tools} />;
+  }
 
   return (
     <article
@@ -369,16 +424,62 @@ function EventRow({
           </span>
         )}
 
-        {/* Failure recovery: one-click resend on this machine. */}
-        {event.type === 'ERROR' && recovery.includes('RETRY_LOCAL') && meta.prompt && (
-          <button
-            onClick={() => onResendLocal(String(meta.prompt))}
-            className="ml-3 rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-[#E24B4A]/60 hover:text-[#E24B4A]"
-          >
-            run on this machine
-          </button>
+        {/* P3.5 failure recovery: action chips chosen by the failure site. */}
+        {event.type === 'ERROR' && recovery.length > 0 && (
+          <div className="ml-14 mt-1 flex flex-wrap items-center gap-2">
+            {recovery.includes('RETRY') && meta.prompt && (
+              <button
+                onClick={() => onRetry(String(meta.prompt), typeof meta.suggestedBudget === 'number' ? meta.suggestedBudget : undefined)}
+                className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-[#E24B4A]/60 hover:text-[#E24B4A]"
+              >
+                {typeof meta.suggestedBudget === 'number' ? `retry at $${meta.suggestedBudget}` : 'retry'}
+              </button>
+            )}
+            {recovery.includes('RETRY_LOCAL') && meta.prompt && (
+              <button
+                onClick={() => onResendLocal(String(meta.prompt))}
+                className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-[#E24B4A]/60 hover:text-[#E24B4A]"
+              >
+                run on this machine
+              </button>
+            )}
+            {recovery.includes('COPY_DIAGNOSTIC') && (
+              <button
+                onClick={() => onCopyDiagnostic(event)}
+                className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-neutral-500"
+              >
+                copy diagnostic
+              </button>
+            )}
+            {typeof meta.sideEffectNote === 'string' && (
+              <span className="text-[10px] text-neutral-600">{meta.sideEffectNote}</span>
+            )}
+          </div>
         )}
       </div>
+    </article>
+  );
+}
+
+/** P2.5 receipt footer: a compact "what happened" line from REAL telemetry
+ *  only. Renders whichever fields are present; never invents (invariant 6). */
+function ReceiptCard({ receipt, tools }: { receipt: any; tools: string[] }) {
+  const where = receipt.tier === 'OLLAMA_LOCAL' ? 'local' : 'cloud';
+  const cost =
+    receipt.tier === 'OLLAMA_LOCAL' ? 'free'
+    : typeof receipt.costUsd === 'number' ? `$${receipt.costUsd.toFixed(2)}`
+    : 'cost n/a';
+  const parts: string[] = [where, cost];
+  if (typeof receipt.elapsedMs === 'number') parts.push(`${(receipt.elapsedMs / 1000).toFixed(1)}s`);
+  if (tools.length) parts.push(`tools: ${tools.join(', ')}`);
+  if (receipt.cancelled) parts.push('cancelled');
+  if (receipt.blockedOn) parts.push(`paused for ${receipt.blockedOn}`);
+
+  return (
+    <article className="ml-14 mt-1 inline-flex rounded border border-neutral-800 bg-neutral-900/40 px-3 py-1 text-[11px] text-neutral-500">
+      <span className="text-neutral-400">Done</span>
+      <span className="mx-2 text-neutral-700">·</span>
+      {parts.join(' · ')}
     </article>
   );
 }

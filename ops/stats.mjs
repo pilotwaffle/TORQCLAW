@@ -110,10 +110,19 @@ hr('Approval funnel');
 const hasSkillQueue = one(`SELECT name FROM sqlite_master WHERE type='table' AND name='skill_queue'`);
 if (hasSkillQueue) {
   const funnel = rows(`SELECT status, COUNT(*) AS n FROM skill_queue GROUP BY status`);
-  if (funnel.length === 0) console.log('  pending 0 · approved 0 · rejected 0');
-  else for (const r of funnel) console.log(`  ${String(r.status).padEnd(12)} ${r.n}`);
+  if (funnel.length === 0) console.log('  skills:  pending 0 · approved 0 · rejected 0');
+  else console.log('  skills:  ' + funnel.map((r) => `${r.status} ${r.n}`).join(' · '));
 } else {
-  console.log('  (skill_queue table not present)');
+  console.log('  skills:  (skill_queue table not present)');
+}
+// P2 tool-approval funnel: pending → approved/rejected (the re-run gate).
+const hasToolApprovals = one(`SELECT name FROM sqlite_master WHERE type='table' AND name='tool_approvals'`);
+if (hasToolApprovals) {
+  const tf = rows(`SELECT status, COUNT(*) AS n FROM tool_approvals GROUP BY status`);
+  if (tf.length === 0) console.log('  tools:   pending 0 · approved 0 · rejected 0');
+  else console.log('  tools:   ' + tf.map((r) => `${r.status} ${r.n}`).join(' · '));
+} else {
+  console.log('  tools:   (tool_approvals table not present)');
 }
 
 // Truncation pressure (errors cluster at log ends; informs P3).

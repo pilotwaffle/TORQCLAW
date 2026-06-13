@@ -38,6 +38,7 @@ export async function executeHermesTask(
   emit: Emitter,
 ): Promise<HermesResult> {
   const client = getClient('hermes');
+  const startedAt = Date.now(); // for the P2.5 receipt's elapsedMs
 
   const submit = parseToolResult(
     await client.callTool({ name: 'submit_task', arguments: { payload: req } }),
@@ -93,7 +94,10 @@ export async function executeHermesTask(
 
     if (status.state === 'completed') {
       engineTaskByRequest.delete(req.id);
-      return { text: status.result ?? '', telemetry: status.telemetry ?? {} };
+      return {
+        text: status.result ?? '',
+        telemetry: { ...(status.telemetry ?? {}), inferenceLatencyMs: Date.now() - startedAt },
+      };
     }
     if (status.state === 'failed') {
       engineTaskByRequest.delete(req.id);
