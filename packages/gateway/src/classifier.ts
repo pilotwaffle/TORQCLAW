@@ -78,10 +78,11 @@ const RULES: Array<[RegExp, TaskType]> = [
   [/\b(refactor|debug|implement|function|class|typescript|python|compile|stack trace)\b/i, 'COMPLEX_CODING'],
   [/\b(research|investigate|compare|find out|look up|deep dive)\b/i, 'AUTONOMOUS_RESEARCH'],
   [/\b(extract|parse|pull|csv|json|fields?|values?)\b/i, 'DATA_EXTRACTION'],
-  [/\b(summar|tldr|recap|condense|brief)\b/i, 'SUMMARIZATION'],
+  // 'summar' is a prefix (summary/summarize/summarise), not a whole word.
+  [/\b(summar\w*|tldr|recap|condense|brief)\b/i, 'SUMMARIZATION'],
 ];
 
-function keywordFallback(prompt: string): Omit<Classification, 'latencyMs'> {
+export function keywordFallback(prompt: string): Omit<Classification, 'latencyMs'> {
   for (const [re, taskType] of RULES) {
     if (re.test(prompt)) return { taskType, confidence: 0.6, method: 'KEYWORD_FALLBACK' };
   }
