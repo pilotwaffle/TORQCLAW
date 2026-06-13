@@ -153,11 +153,26 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
     prompt: str = req["prompt"]
     context: str | None = req.get("assembledContext")
     task_type: str = req.get("taskType", "ROUTINE_AUTOMATION")
+    granted: list[str] = req.get("grantedTools", []) or []
 
     enabled = _frontier_enabled_toolsets(task_type)
     task_store.emit(
         task_id, "SYSTEM",
         f"Cloud tools enabled: {', '.join(enabled) if enabled else 'all (override)'}",
+    )
+
+    # Per-tool approval gate on the cloud tier (fork-free, via the vendored
+    # pre_tool_call plugin hook). A write-capable Hermes tool without a grant is
+    # BLOCKED before it runs; the task ends as blocked and the bridge turns that
+    # into the single terminal PENDING_APPROVAL (invariant 7). Enabled only when
+    # the hook actually registered against the vendored plugin system.
+    from . import approval_hook
+    gate_on = approval_hook.register()
+    approval_hook.set_task_context(
+        task_id,
+        granted=granted,
+        emit=lambda t, m, meta=None: task_store.emit(task_id, t, m, meta),
+        enabled=gate_on,
     )
 
     agent = AIAgent(
@@ -218,15 +233,21 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
             system_message=system_message,  # grounding + gateway tiered memory
             task_id=task_id,
         )
-        return {
-            "result": result.get("final_response", ""),
-            "telemetry": {
-                "engineUsed": f"hermes:{os.environ.get('HERMES_MODEL', 'default')}",
-                "messageCount": len(result.get("messages", [])),
-                "costUsd": get_spend_usd(agent, task_id),
-            },
+        # If the approval hook blocked a tool, this run is BLOCKED, not done —
+        # surface blockedOn so run_hermes_loop emits the terminal PENDING_APPROVAL
+        # instead of completing with a (likely fabricated-around-the-block) answer.
+        blocked = approval_hook.was_blocked(task_id)
+        telemetry = {
+            "engineUsed": f"hermes:{os.environ.get('HERMES_MODEL', 'default')}",
+            "messageCount": len(result.get("messages", [])),
+            "costUsd": get_spend_usd(agent, task_id),
         }
+        if blocked:
+            telemetry["blockedOn"] = blocked["toolName"]
+            telemetry["blockedArgs"] = blocked["args"]
+        return {"result": result.get("final_response", ""), "telemetry": telemetry}
     finally:
+        approval_hook.clear_task_context(task_id)
         RUNNING.pop(task_id, None)
         _USAGE_BASELINE.pop(task_id, None)
         try:

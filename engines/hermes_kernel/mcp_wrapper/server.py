@@ -34,8 +34,21 @@ async def run_hermes_loop(task_id: str, payload: dict) -> None:
             task_store.emit(task_id, "SYSTEM", f"Hermes agent booted for {task_type}")
             # run_conversation is synchronous — never block the event loop.
             out = await asyncio.to_thread(run_hermes_sync, task_id, payload)
+            tele = out.get("telemetry", {})
+            # Per-tool approval block (FRONTIER): a write-capable tool was hit
+            # without a grant. End as 'blocked' so the gateway emits the single
+            # terminal PENDING_APPROVAL and the operator can Allow once (re-run).
+            blocked_on = tele.get("blockedOn")
+            if blocked_on:
+                task_store.emit(
+                    task_id, "PENDING_APPROVAL",
+                    f"Tool {blocked_on} requires approval",
+                    {"toolName": blocked_on, "args": tele.get("blockedArgs", {})},
+                )
+                task_store.complete(task_id, "", {"blockedOn": blocked_on})
+                return
             # null cost = breaker is blind; say so once, never report 0.00.
-            if out.get("telemetry", {}).get("costUsd") is None:
+            if tele.get("costUsd") is None:
                 task_store.emit(
                     task_id, "SYSTEM",
                     "Spend reporting unavailable for this provider — budget "
@@ -47,6 +60,27 @@ async def run_hermes_loop(task_id: str, payload: dict) -> None:
 
         reason = why or "HERMES_MODEL unset"
         task_store.emit(task_id, "SYSTEM", f"STUB MODE ({reason}) for {task_type}")
+
+        # E2E seam: simulate the FRONTIER per-tool approval block deterministically
+        # (no live model). Mirrors the LOCAL_EDGE force-gate; honors the grant so
+        # the APPROVE re-run proceeds. Inert unless the env var is set.
+        forced = os.environ.get("TORQCLAW_E2E_FORCE_GATED_TOOL")
+        if forced:
+            granted = payload["payload"].get("grantedTools", []) or []
+            if forced not in granted:
+                task_store.emit(
+                    task_id, "PENDING_APPROVAL", f"Tool {forced} requires approval",
+                    {"toolName": forced, "args": {"e2e": True}},
+                )
+                task_store.complete(task_id, "", {"blockedOn": forced})
+                return
+            task_store.emit(task_id, "TOOL_CALL", f"Executing {forced}", {"granted": True})
+            task_store.complete(
+                task_id, f"[e2e] executed {forced} under grant",
+                {"engineUsed": "hermes-stub", "costUsd": 0.0},
+            )
+            return
+
         from .hermes_runner import get_spend_usd
 
         cost = get_spend_usd(None, task_id)  # stub: HERMES_STUB_COST_* flags

@@ -1,4 +1,4 @@
-import type { GatewayRequest, GatewayEventType } from '@torqclaw/contracts';
+import { type GatewayRequest, type GatewayEventType, ToolApprovalRequired } from '@torqclaw/contracts';
 import { getClient } from './registry.js';
 
 type Emitter = (type: GatewayEventType, message: string, metadata?: unknown) => void;
@@ -64,6 +64,13 @@ export async function executeHermesTask(
     );
 
     for (const ev of status.events ?? []) {
+      // Suppress the engine's raw PENDING_APPROVAL: it lacks the gateway-side
+      // approvalId. Dispatch emits the real terminal PENDING_APPROVAL after we
+      // throw ToolApprovalRequired below (the P2 single-emission-point path).
+      if (ev.type === 'PENDING_APPROVAL' && (ev.metadata?.toolName || ev.metadata?.tool_name)) {
+        cursor = ev.cursor ?? cursor;
+        continue;
+      }
       emit(ev.type ?? 'SYSTEM', ev.message ?? '', ev.metadata);
       cursor = ev.cursor ?? cursor;
     }
@@ -90,6 +97,17 @@ export async function executeHermesTask(
           `Budget exceeded: $${costUsd.toFixed(2)} of $${budget.toFixed(2)} limit`,
         );
       }
+    }
+
+    // FRONTIER per-tool approval: the engine blocked a gated tool. Throw so
+    // dispatch registers the approval + emits the ONE terminal PENDING_APPROVAL
+    // (same path as LOCAL_EDGE; invariant 7). Honors the grant on the re-run.
+    if (status.state === 'completed' && status.telemetry?.blockedOn) {
+      engineTaskByRequest.delete(req.id);
+      throw new ToolApprovalRequired(
+        String(status.telemetry.blockedOn),
+        status.telemetry.blockedArgs ?? {},
+      );
     }
 
     if (status.state === 'completed') {
