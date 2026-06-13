@@ -51,6 +51,13 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
         api_key=os.environ.get("HERMES_API_KEY"),
         base_url=os.environ.get("HERMES_BASE_URL"),
         max_iterations=int(os.environ.get("HERMES_MAX_ITERATIONS", "30")),
+        # TORQCLAW's router owns orchestration; Hermes sub-agents run outside
+        # our callback hijack, so delegation burns budget invisibly.
+        disabled_toolsets=[
+            t.strip()
+            for t in os.environ.get("HERMES_DISABLED_TOOLSETS", "delegation").split(",")
+            if t.strip()
+        ] or None,
         # TORQCLAW owns memory (FTS5 layer) and context files; batch_runner
         # uses the same isolation flags for programmatic runs.
         skip_memory=True,

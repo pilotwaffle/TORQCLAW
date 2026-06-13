@@ -7,7 +7,7 @@ import threading
 import uuid
 from pathlib import Path
 
-DATA_DIR = Path(os.environ.get("TORQCLAW_DATA_DIR", Path.home() / ".torqclaw"))
+DATA_DIR = Path(os.environ.get("TORQCLAW_DATA_DIR") or Path.home() / ".torqclaw")
 DATA_DIR.mkdir(parents=True, exist_ok=True)  # import order independence
 SKILLS_DIR = Path(os.environ.get("HERMES_SKILLS_DIR", Path.home() / ".hermes" / "skills"))
 

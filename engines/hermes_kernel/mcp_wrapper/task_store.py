@@ -8,7 +8,9 @@ import threading
 import uuid
 from pathlib import Path
 
-DATA_DIR = Path(os.environ.get("TORQCLAW_DATA_DIR", Path.home() / ".torqclaw"))
+# `or` (not get-default): an empty TORQCLAW_DATA_DIR= line must fall through,
+# matching the gateway's `process.env.X || default` semantics.
+DATA_DIR = Path(os.environ.get("TORQCLAW_DATA_DIR") or Path.home() / ".torqclaw")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 _conn = sqlite3.connect(DATA_DIR / "hermes_tasks.db", check_same_thread=False)

@@ -34,17 +34,21 @@ await sleep(3500);
 console.log('=== gateway up, connecting operator client ===');
 
 const ws = new WebSocket('ws://127.0.0.1:18790/ws');
-const deadline = setTimeout(() => { console.log('E2E TIMEOUT'); cleanup(1); }, 30_000);
+// Stub round-trips in seconds; a live Hermes run makes real model/tool calls.
+const DEADLINE_MS = process.env.HERMES_MODEL ? 300_000 : 30_000;
+const deadline = setTimeout(() => { console.log('E2E TIMEOUT'); cleanup(1); }, DEADLINE_MS);
 
 ws.on('open', () => {
   ws.send(JSON.stringify({
-    role: 'operator', token: 'dev',
+    role: 'operator', token: process.env.TORQCLAW_GATEWAY_TOKEN || 'dev',
     clientInfo: { name: 'e2e-client', version: '0.1.0' },
   }));
+  // Optional CLI overrides: node ops/e2e.mjs "<prompt>" [--sensitive]
+  // --sensitive triggers the router's privacy override -> LOCAL_EDGE.
   setTimeout(() => ws.send(JSON.stringify({
     action: 'SUBMIT_PROMPT',
-    prompt: 'Investigate which MCP gateways support tool namespacing and compare them',
-    sensitive: false, urgent: false, attachmentIds: [],
+    prompt: process.argv[2] || 'Investigate which MCP gateways support tool namespacing and compare them',
+    sensitive: process.argv.includes('--sensitive'), urgent: false, attachmentIds: [],
   })), 400);
 });
 
