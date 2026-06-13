@@ -11,6 +11,7 @@ Upstream API (verified against vendor/hermes-agent @ shallow HEAD):
 """
 import os
 import sys
+import time
 from pathlib import Path
 
 from . import task_store
@@ -45,32 +46,49 @@ RUNNING: dict[str, "AIAgent"] = {}
 # Per-task account-usage baseline for the provider-delta cost fallback.
 _USAGE_BASELINE: dict[str, float | None] = {}
 
+# Throttle the provider usage API. get_spend_usd runs on EVERY bridge poll
+# (~2s); the providers' usage endpoints rate-limit (429), so cache the snapshot
+# and only refresh past this interval. Between refreshes the breaker reuses the
+# last value — a worst-case ~20s lag before it sees fresh spend, acceptable.
+_USAGE_MIN_INTERVAL_S = float(os.environ.get("HERMES_USAGE_POLL_S", "20"))
+_usage_cache: dict[str, float | None] = {"value": None, "at": 0.0}
 
-def _snapshot_account_usage_usd() -> float | None:
+
+def _snapshot_account_usage_usd(*, force: bool = False) -> float | None:
     """Account-level total spend in USD from the provider, or None if the
     provider/credentials don't expose it. Account-level, so concurrent tasks
-    share attribution — acceptable for single-operator v1."""
+    share attribution — acceptable for single-operator v1.
+
+    Throttled to _USAGE_MIN_INTERVAL_S to avoid 429s; pass force=True to bypass
+    the cache (used once at task start to set the baseline)."""
+    now = time.monotonic()
+    if not force and (now - _usage_cache["at"]) < _USAGE_MIN_INTERVAL_S:
+        return _usage_cache["value"]
+
     try:
         from agent.account_usage import fetch_account_usage  # type: ignore
     except Exception:
+        _usage_cache.update(value=None, at=now)
         return None
     snap = fetch_account_usage(
         os.environ.get("HERMES_PROVIDER"),
         base_url=os.environ.get("HERMES_BASE_URL") or None,
         api_key=os.environ.get("HERMES_API_KEY") or None,
     )
-    if snap is None:
-        return None
-    # OpenRouter snapshot carries "API key usage: $X.XX total" in details.
-    import re
-    for detail in getattr(snap, "details", ()) or ():
-        m = re.search(r"usage:\s*\$([0-9]+(?:\.[0-9]+)?)\s*total", str(detail))
-        if m:
-            try:
-                return float(m.group(1))
-            except ValueError:
-                return None
-    return None
+    value: float | None = None
+    if snap is not None:
+        # OpenRouter snapshot carries "API key usage: $X.XX total" in details.
+        import re
+        for detail in getattr(snap, "details", ()) or ():
+            m = re.search(r"usage:\s*\$([0-9]+(?:\.[0-9]+)?)\s*total", str(detail))
+            if m:
+                try:
+                    value = float(m.group(1))
+                except ValueError:
+                    value = None
+                break
+    _usage_cache.update(value=value, at=now)
+    return value
 
 
 def get_spend_usd(agent, task_id: str) -> float | None:
@@ -139,7 +157,7 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
     # Register BEFORE run so cancel_task can interrupt; baseline the usage
     # delta source in case credits-micros is unavailable for this provider.
     RUNNING[task_id] = agent
-    _USAGE_BASELINE[task_id] = _snapshot_account_usage_usd()
+    _USAGE_BASELINE[task_id] = _snapshot_account_usage_usd(force=True)
     try:
         result = agent.run_conversation(
             prompt,

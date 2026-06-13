@@ -62,6 +62,7 @@ export default function TorqTerminal() {
   const { events, isConnected, sendCommand } = useGatewayStream(GATEWAY_URL, GATEWAY_TOKEN);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [input, setInput] = useState('');
+  const [debouncedInput, setDebouncedInput] = useState('');
   const [controls, setControls] = useState<Controls>(DEFAULT_CONTROLS);
   const [hintDismissed, setHintDismissed] = useState(false);
   const [decided, setDecided] = useState<Record<string, 'APPROVE' | 'REJECT'>>({});
@@ -93,8 +94,17 @@ export default function TorqTerminal() {
   }, [events]);
 
   // Privacy SUGGESTION (suggest-only — never sets the flag, never blocks).
-  const hint = useMemo(() => (controls.privateMode ? null : privacyHint(input)), [input, controls.privateMode]);
-  useEffect(() => { setHintDismissed(false); }, [input]);
+  // Debounced 500ms so the regex pass never runs on the keystroke hot path,
+  // keeping typing smooth even at the 32K-char prompt ceiling.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedInput(input), 500);
+    return () => clearTimeout(t);
+  }, [input]);
+  const hint = useMemo(
+    () => (controls.privateMode ? null : privacyHint(debouncedInput)),
+    [debouncedInput, controls.privateMode],
+  );
+  useEffect(() => { setHintDismissed(false); }, [debouncedInput]);
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
