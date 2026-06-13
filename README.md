@@ -148,6 +148,30 @@ unreachable server degrades that server only, never the gateway. Update
 `TOOL_ROUTING_MAP` in `packages/bridge/src/toolFilter.ts` to expose new
 namespaces to the task types that need them.
 
+### Workspace path scoping (P5)
+
+A server entry may declare a filesystem scope, enforced in the bridge **before**
+a tool runs:
+
+```json
+"pathArgKeys": ["path", "paths", "source", "destination"],
+"paths": {
+  "read":  ["/path/to/workspace"],
+  "write": ["/path/to/workspace"],
+  "deny":  ["~/.ssh", "~/.aws", "~/.config", ".env"]
+}
+```
+
+Every path-like argument (keys from `pathArgKeys`, else common defaults) is
+**resolved** — `~` expanded, `..` collapsed — before matching, so
+`/work/../etc/passwd` or `~/.ssh/../.ssh/id_rsa` cannot slip past a rule. `deny`
+always wins; an empty `read`/`write` list means that mode is unconstrained;
+write-capable tools check `write`, others `read`. A denied path becomes a tool
+error fed back to the model plus a SYSTEM event.
+
+This is **defense in depth alongside** the MCP server's own sandboxing (e.g. the
+filesystem server's allowed-dirs args) — both layers apply; either can deny.
+
 ## Tool approval (both tiers)
 
 A write-capable tool never runs without a human OK — on **either** tier, via one

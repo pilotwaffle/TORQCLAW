@@ -2,6 +2,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
+import { type PathScope, checkPath, extractPaths } from './pathScope.js';
+
 export interface RegisteredTool {
   /** Namespaced: `${serverId}__${toolName}` */
   name: string;
@@ -11,6 +13,10 @@ export interface RegisteredTool {
   rawName: string;
   /** Policy gate: write-capable tools pause LOCAL_EDGE execution for a human. */
   requiresApproval: boolean;
+  /** P5: per-server filesystem scope (deny/read/write) inherited from config. */
+  pathScope?: PathScope;
+  /** P5: which arg keys hold path-like values for this server's tools. */
+  pathArgKeys?: string[];
 }
 
 export interface ServerConfig {
@@ -20,6 +26,10 @@ export interface ServerConfig {
     | { type: 'stdio'; command: string; args: string[] };
   /** Tool rawName patterns that need human approval (e.g. /write|push|delete/i). */
   approvalPatterns?: RegExp[];
+  /** P5: filesystem scope — deny always wins; empty read/write = unconstrained. */
+  paths?: PathScope;
+  /** P5: arg keys holding path-like values (hint for scope enforcement). */
+  pathArgKeys?: string[];
 }
 
 const clients = new Map<string, Client>();
@@ -54,6 +64,8 @@ export async function connectServer(cfg: ServerConfig): Promise<void> {
       inputSchema: t.inputSchema as object,
       sourceServerId: cfg.id,
       requiresApproval: patterns.some((p) => p.test(t.name)),
+      pathScope: cfg.paths,
+      pathArgKeys: cfg.pathArgKeys,
     });
   }
   console.log(`[bridge] ${cfg.id}: registered ${tools.length} tools`);
@@ -78,6 +90,19 @@ export function isHermesAvailable(): boolean {
 export async function executeTool(namespacedName: string, args: unknown): Promise<unknown> {
   const entry = registry.find((t) => t.name === namespacedName);
   if (!entry) throw new Error(`Unknown tool '${namespacedName}'`);
+
+  // P5: enforce the server's filesystem scope BEFORE the call. Resolve every
+  // path-like arg (normalizes ~ and .. so traversal can't bypass a deny) and
+  // check it; deny always wins. A write-capable tool checks 'write' scope, else
+  // 'read'. Throwing here surfaces as a tool error back to the model.
+  if (entry.pathScope) {
+    const mode = entry.requiresApproval ? 'write' : 'read';
+    for (const p of extractPaths(args, entry.pathArgKeys)) {
+      const denial = checkPath(p, entry.pathScope, mode);
+      if (denial) throw new Error(`Path scope ${denial}`);
+    }
+  }
+
   const result = await getClient(entry.sourceServerId).callTool({
     name: entry.rawName,
     arguments: args as Record<string, unknown>,

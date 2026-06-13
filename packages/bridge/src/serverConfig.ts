@@ -26,6 +26,15 @@ const ServerEntrySchema = z.object({
   /** Regex strings; matching tool names require human approval on LOCAL_EDGE.
    *  Omit to use the default write/delete/push/create/update/send/exec set. */
   approvalPatterns: z.array(z.string()).optional(),
+  /** P5: filesystem scope. deny always wins; empty read/write = unconstrained.
+   *  Paths are resolved (~ and .. normalized) before matching. */
+  paths: z.object({
+    read: z.array(z.string()).optional(),
+    write: z.array(z.string()).optional(),
+    deny: z.array(z.string()).optional(),
+  }).optional(),
+  /** P5: which tool-arg keys hold path-like values (precise scope enforcement). */
+  pathArgKeys: z.array(z.string()).optional(),
   enabled: z.boolean().default(true),
 });
 
@@ -61,5 +70,7 @@ export function loadServerConfigs(): ServerConfig[] {
         ? { type: 'stdio' as const, command: s.transport.command, args: s.transport.args }
         : { type: 'streamable-http' as const, url: s.transport.url, token: s.transport.token },
       approvalPatterns: s.approvalPatterns?.map((p) => new RegExp(p, 'i')),
+      paths: s.paths,
+      pathArgKeys: s.pathArgKeys,
     }));
 }
