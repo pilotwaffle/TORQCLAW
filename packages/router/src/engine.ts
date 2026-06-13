@@ -109,8 +109,17 @@ export class TorqClawRouter {
     if (req.payload.contextSize > 8192) score += 40; // matches ops/Modelfile num_ctx
     score += req.payload.requiredTools.length * 10;
 
-    const tier = score >= 50 ? ComputeTier.FRONTIER : ComputeTier.LOCAL_EDGE;
-    return { score, reason: `HEURISTIC_EVAL: calculated score ${score}/100.`, tier };
+    // PREFER_CLOUD: on hardware where local inference is impractically slow
+    // (e.g. a firmware-throttled dGPU at ~2 tok/s), the cloud is the right
+    // default workhorse. Privacy / LOCAL_ONLY / LOCAL_INTENT already routed
+    // local ABOVE this rule, so the privacy guarantee is untouched — this only
+    // shifts the AMBIGUOUS confident-middle toward cloud. Threshold drops from
+    // 50 to 1, so only a genuinely trivial task (score 0) still runs local.
+    const preferCloud = process.env.TORQCLAW_PREFER_CLOUD === '1';
+    const threshold = preferCloud ? 1 : 50;
+    const tier = score >= threshold ? ComputeTier.FRONTIER : ComputeTier.LOCAL_EDGE;
+    const note = preferCloud ? ' (prefer-cloud: slow local hardware)' : '';
+    return { score, reason: `HEURISTIC_EVAL: calculated score ${score}/100.${note}`, tier };
   }
 }
 

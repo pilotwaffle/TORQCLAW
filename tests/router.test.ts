@@ -104,6 +104,45 @@ describe('router rule hierarchy', () => {
   });
 });
 
+describe('PREFER_CLOUD (slow local hardware)', () => {
+  const orig = process.env.TORQCLAW_PREFER_CLOUD;
+  afterEach(() => {
+    if (orig === undefined) delete process.env.TORQCLAW_PREFER_CLOUD;
+    else process.env.TORQCLAW_PREFER_CLOUD = orig;
+  });
+
+  it('routes a confident simple task to FRONTIER when set', () => {
+    process.env.TORQCLAW_PREFER_CLOUD = '1';
+    const r = new TorqClawRouter();
+    // ROUTINE_AUTOMATION, no tools, small context => score 0 normally local.
+    const d = r.evaluateRequest(makeRequest({ taskType: 'DATA_EXTRACTION', requiredTools: ['a'] }));
+    expect(d.tier).toBe(ComputeTier.FRONTIER); // score 10 >= threshold 1
+    expect(d.reason).toMatch(/prefer-cloud/);
+  });
+
+  it('still keeps a trivial (score 0) task local even when set', () => {
+    process.env.TORQCLAW_PREFER_CLOUD = '1';
+    const r = new TorqClawRouter();
+    const d = r.evaluateRequest(makeRequest({ taskType: 'SUMMARIZATION', requiredTools: [], contextSize: 100 }));
+    expect(d.tier).toBe(ComputeTier.LOCAL_EDGE); // score 0 < threshold 1
+  });
+
+  it('privacy still forces local even with prefer-cloud', () => {
+    process.env.TORQCLAW_PREFER_CLOUD = '1';
+    const r = new TorqClawRouter();
+    const d = r.evaluateRequest(makeRequest({ containsSensitiveData: true, taskType: 'AUTONOMOUS_RESEARCH' }));
+    expect(d.tier).toBe(ComputeTier.LOCAL_EDGE);
+    expect(d.reason).toMatch(/^PRIVACY_OVERRIDE/);
+  });
+
+  it('default (unset) keeps the 50 threshold', () => {
+    delete process.env.TORQCLAW_PREFER_CLOUD;
+    const r = new TorqClawRouter();
+    const d = r.evaluateRequest(makeRequest({ taskType: 'DATA_EXTRACTION', requiredTools: ['a'] }));
+    expect(d.tier).toBe(ComputeTier.LOCAL_EDGE); // score 10 < 50
+  });
+});
+
 describe('warm-lease expiry', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());

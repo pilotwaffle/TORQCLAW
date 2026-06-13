@@ -131,6 +131,11 @@ export default function TorqTerminal() {
     sendCommand(buildSubmit(prompt, { ...controls, mode: 'LOCAL_ONLY', budget: controls.budget === '' ? 'free' : controls.budget }));
   };
 
+  // Slow local hardware fallback: resend forcing the cloud tier.
+  const resendCloud = (prompt: string) => {
+    sendCommand(buildSubmit(prompt, { ...controls, mode: 'CLOUD_OK', budget: controls.budget === 'free' ? '' : controls.budget }));
+  };
+
   // P3.5: plain retry resubmits the same prompt with current controls; a
   // suggested budget (after a breach) raises the budget for the retry.
   const retry = (prompt: string, suggestedBudget?: number) => {
@@ -204,6 +209,7 @@ export default function TorqTerminal() {
             onDecideSkill={decideSkill}
             onDecideTool={decideTool}
             onResendLocal={resendLocal}
+            onResendCloud={resendCloud}
             onRetry={retry}
             onCopyDiagnostic={copyDiagnostic}
           />
@@ -320,7 +326,7 @@ function Elapsed() {
 
 function EventRow({
   event, decided, toolsByRequest, onDecideSkill, onDecideTool, onResendLocal,
-  onRetry, onCopyDiagnostic,
+  onResendCloud, onRetry, onCopyDiagnostic,
 }: {
   event: GatewayEvent;
   decided: Record<string, 'APPROVE' | 'REJECT'>;
@@ -328,6 +334,7 @@ function EventRow({
   onDecideSkill: (queueId: string, decision: 'APPROVE' | 'REJECT') => void;
   onDecideTool: (approvalId: string, decision: 'APPROVE' | 'REJECT') => void;
   onResendLocal: (prompt: string) => void;
+  onResendCloud: (prompt: string) => void;
   onRetry: (prompt: string, suggestedBudget?: number) => void;
   onCopyDiagnostic: (errEvent: GatewayEvent) => void;
 }) {
@@ -441,6 +448,14 @@ function EventRow({
                 className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-[#E24B4A]/60 hover:text-[#E24B4A]"
               >
                 run on this machine
+              </button>
+            )}
+            {recovery.includes('RETRY_CLOUD') && meta.prompt && (
+              <button
+                onClick={() => onResendCloud(String(meta.prompt))}
+                className="rounded border border-[#E24B4A]/50 px-2 py-0.5 text-[10px] text-[#E24B4A] transition-colors hover:bg-[#E24B4A]/15"
+              >
+                run on cloud (faster)
               </button>
             )}
             {recovery.includes('COPY_DIAGNOSTIC') && (

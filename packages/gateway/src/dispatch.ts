@@ -12,8 +12,12 @@ const sanitize = (msg: string) => msg.replace(/Bearer\s+\S+/gi, 'Bearer ***').sl
 /** Translate opaque transport failures into something the operator can act on.
  *  A raw "fetch failed" almost always means the provider rejected the call —
  *  most often a billing/credit limit on a long run. */
-function humanizeError(raw: string): string {
+function humanizeError(raw: string, tier?: ComputeTier): string {
   const s = raw.toLowerCase();
+  // Local timeout: on slow/throttled hardware the on-device model can't finish
+  // in time. Tell the user plainly and point them at the cloud.
+  if ((s.includes('timeout') || s.includes('aborted')) && tier === ComputeTier.LOCAL_EDGE)
+    return 'The local model ran out of time — it is slow on this hardware. Try again on a cloud model.';
   if (s.includes('payment') || s.includes('credit') || s.includes('insufficient') || s.includes('billing'))
     return 'Cloud provider rejected the request — check your account credit/billing. (original: ' + raw.slice(0, 120) + ')';
   if (s.includes('429') || s.includes('rate limit'))
@@ -182,15 +186,20 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
           ? 'No changes were made — this task ran locally with no approved write tools.'
           : 'Some steps may have completed before the failure.',
       };
+      const isLocalTimeout =
+        diag.tier === ComputeTier.LOCAL_EDGE && /timeout|aborted/i.test(reason);
       if (isBudget) {
         metaOut.recovery = ['RETRY'];
         // Suggest doubling the breached budget so a retry has headroom.
         const cur = typeof req.constraints.maxCost === 'number' ? req.constraints.maxCost : undefined;
         if (cur !== undefined) metaOut.suggestedBudget = Math.round(cur * 2 * 100) / 100;
+      } else if (isLocalTimeout) {
+        // Slow local hardware: offer a one-click retry on the cloud tier.
+        metaOut.recovery = ['RETRY_CLOUD', 'COPY_DIAGNOSTIC'];
       } else {
         metaOut.recovery = ['RETRY', 'COPY_DIAGNOSTIC'];
       }
-      emit('ERROR', `Execution failed: ${sanitize(humanizeError(reason))}`, metaOut);
+      emit('ERROR', `Execution failed: ${sanitize(humanizeError(reason, diag.tier))}`, metaOut);
     } finally {
       cancellations.clear(req.id);
     }
