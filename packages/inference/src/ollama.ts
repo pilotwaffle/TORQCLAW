@@ -77,13 +77,27 @@ export async function executeLocalEdge(
   const { openAITools, resolveAlias, requiresApproval } =
     await getToolsForTask(req.payload.taskType, 'LOCAL_EDGE');
 
+  // Small local models improvise without hard grounding: they fabricate tool
+  // output, claim capabilities they lack, and role-play. Pin them to reality —
+  // the exact tools available, and an explicit ban on inventing results.
+  const toolList = openAITools.length
+    ? openAITools.map((t) => `- ${t.function.name}: ${t.function.description}`).join('\n')
+    : '(none available for this task)';
   const context = req.payload.assembledContext;
   const messages: any[] = [
     {
       role: 'system',
       content:
-        'You are TORQCLAW, an autonomous agent. Use tools when necessary. ' +
-        'Be concise and concrete.' +
+        'You are TORQCLAW running on a local model. Be concise and concrete.\n\n' +
+        'RULES:\n' +
+        '1. You can ONLY act through the tools listed below. You have no other ' +
+        'abilities — no internet, no memory, no file access except via these tools.\n' +
+        '2. To use a tool, emit a real function call. NEVER write tool output, ' +
+        'JSON results, status objects, or queue messages yourself — that is ' +
+        'fabrication. Wait for the actual tool result.\n' +
+        '3. If no tool can do what the user asks, say so plainly. Do not pretend.\n' +
+        '4. Answer only from real tool results or your own knowledge — never invent data.\n\n' +
+        `AVAILABLE TOOLS:\n${toolList}` +
         (context ? `\n\n${context}` : ''),
     },
     { role: 'user', content: req.payload.prompt },

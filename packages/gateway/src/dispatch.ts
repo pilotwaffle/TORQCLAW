@@ -7,6 +7,20 @@ import { cancellations } from './cancellations.js';
 
 const sanitize = (msg: string) => msg.replace(/Bearer\s+\S+/gi, 'Bearer ***').slice(0, 2_000);
 
+/** Translate opaque transport failures into something the operator can act on.
+ *  A raw "fetch failed" almost always means the provider rejected the call —
+ *  most often a billing/credit limit on a long run. */
+function humanizeError(raw: string): string {
+  const s = raw.toLowerCase();
+  if (s.includes('payment') || s.includes('credit') || s.includes('insufficient') || s.includes('billing'))
+    return 'Cloud provider rejected the request — check your account credit/billing. (original: ' + raw.slice(0, 120) + ')';
+  if (s.includes('429') || s.includes('rate limit'))
+    return 'Cloud provider rate-limited the request — wait a moment and retry.';
+  if (s === 'fetch failed' || s.includes('fetch failed'))
+    return 'Cloud request failed mid-run — usually a provider credit/billing limit or a dropped connection. Check your account, then retry.';
+  return raw;
+}
+
 /** Budget precedence: per-request maxCost → env default → unlimited.
  *  Resolved here so the bridge sees one number and the warning fires once. */
 function resolveBudget(req: GatewayRequest): number | undefined {
@@ -70,7 +84,11 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
           ? `BUDGET: ${error.message}`
           : String(error?.message ?? error);
       taskStore.fail(req.id, reason);
-      emit('ERROR', `Execution failed: ${sanitize(reason)}`);
+      // Recovery chips: generic failures offer retry + copy-diagnostic.
+      emit('ERROR', `Execution failed: ${sanitize(humanizeError(reason))}`, {
+        recovery: ['RETRY', 'COPY_DIAGNOSTIC'],
+        prompt: req.payload.prompt,
+      });
     } finally {
       cancellations.clear(req.id);
     }
