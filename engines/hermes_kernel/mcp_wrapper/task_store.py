@@ -74,6 +74,15 @@ def fail(task_id: str, error: str) -> None:
         _conn.commit()
 
 
+def state_of(task_id: str) -> str | None:
+    """Current lifecycle state, or None if the task is unknown."""
+    with _lock:
+        row = _conn.execute(
+            "SELECT state FROM tasks WHERE task_id=?", (task_id,)
+        ).fetchone()
+    return row[0] if row else None
+
+
 def status(task_id: str, since: int = 0) -> dict:
     with _lock:
         row = _conn.execute(

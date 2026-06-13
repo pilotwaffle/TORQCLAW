@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     request_json TEXT NOT NULL,                 -- full GatewayRequest (audit + replay)
     result TEXT,
     error TEXT,
+    telemetry_json TEXT,                        -- final telemetry incl. costUsd
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     finished_at DATETIME
 );

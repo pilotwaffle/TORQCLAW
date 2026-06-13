@@ -64,11 +64,13 @@ export const taskStore = {
        VALUES (?, ?, ?, ?, ?)`,
     ).run(req.id, req.sessionId, diag.tier, diag.reason, JSON.stringify(req));
   },
-  complete(requestId: string, result: string): void {
+  complete(requestId: string, result: string, telemetry?: unknown): void {
+    // telemetry_json is added by the P1 migration; until then it's ignored.
     db.prepare(
-      `UPDATE tasks SET state='completed', result=?, finished_at=CURRENT_TIMESTAMP
+      `UPDATE tasks SET state='completed', result=?, telemetry_json=?,
+                        finished_at=CURRENT_TIMESTAMP
        WHERE request_id=?`,
-    ).run(result, requestId);
+    ).run(result, telemetry === undefined ? null : JSON.stringify(telemetry), requestId);
   },
   fail(requestId: string, error: string): void {
     db.prepare(

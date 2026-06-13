@@ -11,7 +11,12 @@ import { enrichCommand } from './enrich.js';
 import { dispatch } from './dispatch.js';
 import { makeEmitter, sessionBus, persistAndPublish } from './events.js';
 import { router } from '@torqclaw/router';
-import { connectBridge, approveSkill } from '@torqclaw/bridge';
+import { connectBridge, approveSkill, cancelHermesTask } from '@torqclaw/bridge';
+import { setCancelCheck } from '@torqclaw/inference';
+import { cancellations } from './cancellations.js';
+
+// Let the LOCAL_EDGE loop observe cancellations without importing the gateway DB.
+setCancelCheck((requestId) => cancellations.isCancelled(requestId));
 
 // Port deliberately != 18789 so TORQCLAW can coexist with a stock OpenClaw
 // install on the same box during comparison testing.
@@ -110,8 +115,18 @@ app.get('/ws', { websocket: true }, (socket) => {
         break;
       }
       case 'CANCEL_TASK': {
-        // v1: mark failed; engine-side cancellation lands with task polling.
-        makeEmitter(sid, cmd.data.taskId, null)('SYSTEM', 'Cancellation requested');
+        const reqId = cmd.data.taskId; // gateway request_id
+        const emitCancel = makeEmitter(sid, reqId, null);
+        emitCancel('SYSTEM', 'Cancellation requested');
+        // FRONTIER: interrupt the Python agent via the bridge. LOCAL_EDGE: flip
+        // the in-memory flag the ollama loop polls. Set both — the flag is free
+        // and the bridge call no-ops if this wasn't a tracked frontier task.
+        cancellations.request(reqId);
+        try {
+          await cancelHermesTask(reqId, 'USER_CANCELLED');
+        } catch (err: any) {
+          emitCancel('SYSTEM', `Cancel relay failed: ${String(err?.message ?? err)}`);
+        }
         break;
       }
     }

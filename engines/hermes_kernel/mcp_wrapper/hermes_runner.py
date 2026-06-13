@@ -38,6 +38,66 @@ def _clip(obj, n: int = 500) -> str:
     return s if len(s) <= n else s[:n] + f"…[+{len(s) - n}]"
 
 
+# Live agent registry: lets cancel_task reach the AIAgent.interrupt() of a
+# running task from another MCP request. Single-process only (see server.py).
+RUNNING: dict[str, "AIAgent"] = {}
+
+# Per-task account-usage baseline for the provider-delta cost fallback.
+_USAGE_BASELINE: dict[str, float | None] = {}
+
+
+def _snapshot_account_usage_usd() -> float | None:
+    """Account-level total spend in USD from the provider, or None if the
+    provider/credentials don't expose it. Account-level, so concurrent tasks
+    share attribution — acceptable for single-operator v1."""
+    try:
+        from agent.account_usage import fetch_account_usage  # type: ignore
+    except Exception:
+        return None
+    snap = fetch_account_usage(
+        os.environ.get("HERMES_PROVIDER"),
+        base_url=os.environ.get("HERMES_BASE_URL") or None,
+        api_key=os.environ.get("HERMES_API_KEY") or None,
+    )
+    if snap is None:
+        return None
+    # OpenRouter snapshot carries "API key usage: $X.XX total" in details.
+    import re
+    for detail in getattr(snap, "details", ()) or ():
+        m = re.search(r"usage:\s*\$([0-9]+(?:\.[0-9]+)?)\s*total", str(detail))
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                return None
+    return None
+
+
+def get_spend_usd(agent, task_id: str) -> float | None:
+    """USD spent so far on this task. Source chain (verified vs vendored src):
+      1. agent.get_credits_spent_micros()/1e6 — Nous portal; micros ARE USD.
+      2. delta of account_usage total (OpenRouter/Anthropic) since task start.
+      3. None — caller MUST surface that the budget is unenforceable, never 0.
+    Stub mode returns HERMES_STUB_COST_USD if set, else 0.0 (stub IS free)."""
+    if agent is None:  # stub mode
+        if os.environ.get("HERMES_STUB_COST_UNAVAILABLE") == "1":
+            return None
+        return float(os.environ.get("HERMES_STUB_COST_USD", "0.0"))
+
+    try:
+        micros = agent.get_credits_spent_micros()
+    except Exception:
+        micros = None
+    if micros is not None:
+        return float(micros) / 1_000_000.0
+
+    current = _snapshot_account_usage_usd()
+    baseline = _USAGE_BASELINE.get(task_id)
+    if current is not None and baseline is not None:
+        return max(0.0, current - baseline)
+    return None
+
+
 def run_hermes_sync(task_id: str, payload: dict) -> dict:
     """BLOCKING — call via asyncio.to_thread. Returns {result, telemetry}."""
     req = payload["payload"]
@@ -76,6 +136,10 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
             task_id, "SYSTEM", f"[{kind}] {_clip(msg, 300)}",
         ),
     )
+    # Register BEFORE run so cancel_task can interrupt; baseline the usage
+    # delta source in case credits-micros is unavailable for this provider.
+    RUNNING[task_id] = agent
+    _USAGE_BASELINE[task_id] = _snapshot_account_usage_usd()
     try:
         result = agent.run_conversation(
             prompt,
@@ -87,9 +151,12 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
             "telemetry": {
                 "engineUsed": f"hermes:{os.environ.get('HERMES_MODEL', 'default')}",
                 "messageCount": len(result.get("messages", [])),
+                "costUsd": get_spend_usd(agent, task_id),
             },
         }
     finally:
+        RUNNING.pop(task_id, None)
+        _USAGE_BASELINE.pop(task_id, None)
         try:
             agent.close()
         except Exception:

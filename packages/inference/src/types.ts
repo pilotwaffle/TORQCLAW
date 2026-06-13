@@ -10,5 +10,7 @@ export interface ExecutionResult {
     iterations: number;
     toolCallCount: number;
     inferenceLatencyMs: number;
+    cancelled?: boolean;
+    costUsd?: number | null;
   };
 }

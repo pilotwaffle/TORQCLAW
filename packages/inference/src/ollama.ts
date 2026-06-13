@@ -3,6 +3,16 @@ import { router } from '@torqclaw/router';
 import { getToolsForTask, executeTool } from '@torqclaw/bridge';
 import type { Emitter, ExecutionResult } from './types.js';
 
+/** Cancellation probe injected by the gateway (decoupled so inference never
+ *  imports the gateway DB). Defaults to never-cancelled for standalone use. */
+export type CancelCheck = (requestId: string) => boolean;
+let isCancelled: CancelCheck = () => false;
+export function setCancelCheck(fn: CancelCheck): void {
+  isCancelled = fn;
+}
+
+const FINALIZE_TIMEOUT_MS = 10_000;
+
 const OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://localhost:11434';
 // 'torq-local' is built by `pnpm model:setup` (ops/Modelfile): llama3.1:8b
 // with num_ctx 8192 baked in — the /v1 endpoint can't set num_ctx per-request.
@@ -12,10 +22,10 @@ const MAX_ITERATIONS = 5;
 const MAX_TOOL_RESULT_CHARS = 6_000; // ~1.5k tokens; raw file reads must not nuke the window
 const INFERENCE_TIMEOUT_MS = 120_000;
 
-async function callOllama(messages: unknown[], tools?: unknown[]) {
+async function callOllama(messages: unknown[], tools?: unknown[], signal?: AbortSignal) {
   const res = await fetch(`${OLLAMA_HOST}/v1/chat/completions`, {
     method: 'POST',
-    signal: AbortSignal.timeout(INFERENCE_TIMEOUT_MS),
+    signal: signal ?? AbortSignal.timeout(INFERENCE_TIMEOUT_MS),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: LOCAL_MODEL,
@@ -27,6 +37,34 @@ async function callOllama(messages: unknown[], tools?: unknown[]) {
   });
   if (!res.ok) throw new Error(`Ollama API error: ${res.status} ${res.statusText}`);
   return res.json();
+}
+
+/** Stop immediately on user cancel: one finalization pass, capped at 10s; on
+ *  timeout return the honest cancelled message rather than keep thinking. */
+async function finalizeCancelled(
+  messages: any[], start: number, iterations: number, toolCallCount: number,
+  emit: Emitter,
+): Promise<ExecutionResult> {
+  emit('SYSTEM', 'Stopping — wrapping up any answer so far');
+  try {
+    const final = await callOllama(
+      [...messages, {
+        role: 'user',
+        content: 'Stop now. Give a brief answer from what you have, or say you were stopped.',
+      }],
+      undefined,
+      AbortSignal.timeout(FINALIZE_TIMEOUT_MS),
+    );
+    return doneCancelled(
+      final.choices?.[0]?.message?.content ?? '(cancelled)',
+      start, iterations, toolCallCount,
+    );
+  } catch {
+    return doneCancelled(
+      '(cancelled — no further work will run; some earlier steps may have completed)',
+      start, iterations, toolCallCount,
+    );
+  }
 }
 
 export async function executeLocalEdge(
@@ -55,6 +93,10 @@ export async function executeLocalEdge(
   let toolCallCount = 0;
 
   while (iterations < MAX_ITERATIONS) {
+    // Cancellation check #1: between iterations.
+    if (isCancelled(req.id)) {
+      return finalizeCancelled(messages, start, iterations, toolCallCount, emit);
+    }
     iterations++;
     const result = await callOllama(messages, openAITools);
     router.markLocalModelWarm(); // feed the cold-start rule real data
@@ -67,6 +109,11 @@ export async function executeLocalEdge(
     }
 
     for (const toolCall of message.tool_calls) {
+      // Cancellation check #2: between tool calls within an iteration. Stop
+      // before firing any further tool — no side effects after stop.
+      if (isCancelled(req.id)) {
+        return finalizeCancelled(messages, start, iterations, toolCallCount, emit);
+      }
       toolCallCount++;
       const alias = toolCall.function.name;
       const realName = resolveAlias(alias);
@@ -140,4 +187,12 @@ function done(
       inferenceLatencyMs: Math.round(performance.now() - start),
     },
   };
+}
+
+function doneCancelled(
+  text: string, start: number, iterations: number, toolCallCount: number,
+): ExecutionResult {
+  const r = done(text, start, iterations, toolCallCount);
+  r.telemetry.cancelled = true;
+  return r;
 }
