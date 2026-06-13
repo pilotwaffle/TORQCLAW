@@ -43,12 +43,13 @@ ws.on('open', () => {
     role: 'operator', token: process.env.TORQCLAW_GATEWAY_TOKEN || 'dev',
     clientInfo: { name: 'e2e-client', version: '0.1.0' },
   }));
-  // Optional CLI overrides: node ops/e2e.mjs "<prompt>" [--sensitive]
-  // --sensitive triggers the router's privacy override -> LOCAL_EDGE.
+  // Optional CLI overrides: node ops/e2e.mjs "<prompt>" [--sensitive] [--local-only]
+  // --sensitive triggers the privacy override; --local-only the user LOCAL_ONLY rule.
   setTimeout(() => ws.send(JSON.stringify({
     action: 'SUBMIT_PROMPT',
     prompt: process.argv[2] || 'Investigate which MCP gateways support tool namespacing and compare them',
     sensitive: process.argv.includes('--sensitive'), urgent: false, attachmentIds: [],
+    executionMode: process.argv.includes('--local-only') ? 'LOCAL_ONLY' : 'AUTO',
   })), 400);
 });
 

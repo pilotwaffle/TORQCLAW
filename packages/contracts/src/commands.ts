@@ -9,6 +9,9 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     sensitive: z.boolean().default(false),
     urgent: z.boolean().default(false),
     attachmentIds: z.array(z.string()).default([]),
+    // User judgments only the user can make — budget, where it may run.
+    maxCostUsd: z.number().min(0).max(100).optional(),
+    executionMode: z.enum(['AUTO', 'LOCAL_ONLY', 'CLOUD_OK']).default('AUTO'),
   }),
   z.object({
     action: z.literal('APPROVE_SKILL'),

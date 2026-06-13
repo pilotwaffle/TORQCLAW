@@ -40,6 +40,16 @@ export class TorqClawRouter {
       };
     }
 
+    // RULE 1a: User chose "this machine only" — a hard rule, same force as
+    // the privacy override. The user's explicit choice is never overridden.
+    if (req.constraints.executionMode === 'LOCAL_ONLY') {
+      return {
+        score: 0,
+        reason: 'USER_LOCAL_ONLY: user restricted this task to the local edge.',
+        tier: ComputeTier.LOCAL_EDGE,
+      };
+    }
+
     // RULE 1.5: Low classifier confidence -> tool prediction and complexity
     // score are both suspect. Buy capability headroom.
     if (req.enrichment.classifierConfidence < 0.5) {

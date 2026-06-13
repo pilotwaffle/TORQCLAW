@@ -31,7 +31,9 @@ export async function enrichCommand(
     },
     constraints: {
       latencySensitivity: cmd.urgent ? 'HIGH' : 'LOW',
+      maxCost: cmd.maxCostUsd,
       containsSensitiveData: cmd.sensitive,
+      executionMode: cmd.executionMode,
     },
     enrichment: {
       classifierUsed: cls.method,

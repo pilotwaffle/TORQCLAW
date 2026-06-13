@@ -1,6 +1,6 @@
 import { ComputeTier, type GatewayRequest, type RouterDiagnostics } from '@torqclaw/contracts';
 import { executeLocalEdge } from '@torqclaw/inference';
-import { executeHermesTask, CircuitBreakerError } from '@torqclaw/bridge';
+import { executeHermesTask, CircuitBreakerError, isHermesAvailable } from '@torqclaw/bridge';
 import { makeEmitter, taskStore } from './events.js';
 import { sessions } from './sessions.js';
 import { cancellations } from './cancellations.js';
@@ -35,6 +35,19 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
   }
 
   taskStore.create(effectiveReq, diag); // persist BEFORE executing
+
+  // Graceful frontier degradation: don't throw a bare error if the engine
+  // never connected — tell the user plainly and offer a local re-run.
+  if (diag.tier === ComputeTier.FRONTIER && !isHermesAvailable()) {
+    taskStore.fail(req.id, 'FRONTIER_UNAVAILABLE: hermes engine unreachable');
+    emit(
+      'ERROR',
+      'Cloud engine is unreachable. Retry, or resend with "This machine only".',
+      { recovery: ['RETRY', 'RETRY_LOCAL'], prompt: req.payload.prompt },
+    );
+    cancellations.clear(req.id);
+    return;
+  }
 
   void (async () => {
     try {

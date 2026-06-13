@@ -40,6 +40,9 @@ export const GatewayRequestSchema = z.object({
     latencySensitivity: z.enum(['HIGH', 'LOW']),
     maxCost: z.number().optional(),
     containsSensitiveData: z.boolean(),
+    // Carried verbatim so request_json captures exactly what the user chose;
+    // pnpm stats reads user-forced vs router-chosen routing from here.
+    executionMode: z.enum(['AUTO', 'LOCAL_ONLY', 'CLOUD_OK']).default('AUTO'),
   }),
   enrichment: EnrichmentMetaSchema,
 });

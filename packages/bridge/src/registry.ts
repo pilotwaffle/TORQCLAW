@@ -69,6 +69,12 @@ export function getClient(serverId: string): Client {
   return c;
 }
 
+/** True if the Hermes engine connected at boot. Lets dispatch degrade a
+ *  FRONTIER task gracefully instead of throwing a bare "no client" error. */
+export function isHermesAvailable(): boolean {
+  return clients.has('hermes');
+}
+
 export async function executeTool(namespacedName: string, args: unknown): Promise<unknown> {
   const entry = registry.find((t) => t.name === namespacedName);
   if (!entry) throw new Error(`Unknown tool '${namespacedName}'`);

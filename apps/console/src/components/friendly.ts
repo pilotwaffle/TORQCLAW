@@ -44,6 +44,7 @@ export function friendlyMessage(ev: GatewayEvent): string {
     case 'TIER_SELECTED': {
       const r = String(meta.reason ?? ev.message);
       if (r.startsWith('PRIVACY_OVERRIDE')) return 'Marked private — staying on this machine';
+      if (r.startsWith('USER_LOCAL_ONLY')) return 'This machine only — as you asked';
       if (r.startsWith('TOOL_COUNT_OVERFLOW')) return 'Needs several tools — using the cloud model';
       if (r.startsWith('LOW_CLASSIFIER_CONFIDENCE')) return 'Tricky to size up — using the cloud model to be safe';
       if (r.startsWith('LATENCY_CRITICAL')) return 'Local model is waking up — using the cloud for a fast answer';
@@ -73,4 +74,33 @@ export function friendlyMessage(ev: GatewayEvent): string {
     default:
       return ev.message;
   }
+}
+
+/**
+ * Client-side privacy SUGGESTION patterns. Rules (load-bearing — invariant 2):
+ *  - This is suggest-only. A match surfaces an inline hint; it must NEVER set
+ *    or clear the private flag itself, NEVER block or delay submission, and a
+ *    false positive must be dismissible for the current prompt without changing
+ *    the stored private-mode preference.
+ *  - No automatic system may clear containsSensitiveData; automation may only
+ *    suggest setting it.
+ * Patterns target obvious credential/PII shapes, anchored to avoid tripping on
+ * ordinary words (e.g. "ski", "ssn" inside "lesson").
+ */
+export const PRIVACY_PATTERNS: Array<{ re: RegExp; label: string }> = [
+  { re: /\bsk-[A-Za-z0-9_-]{16,}\b/, label: 'an API key' },
+  { re: /\bghp_[A-Za-z0-9]{20,}\b/, label: 'a GitHub token' },
+  { re: /\bAKIA[0-9A-Z]{16}\b/, label: 'an AWS access key' },
+  { re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/, label: 'a private key' },
+  { re: /\b\d{3}-\d{2}-\d{4}\b/, label: 'an SSN' },
+  { re: /\b(?:\d[ -]?){13,16}\b/, label: 'a card number' },
+];
+
+/** Returns a hint label if the text looks like it carries credentials/PII,
+ *  else null. Pure + synchronous so it can run on every keystroke cheaply. */
+export function privacyHint(text: string): string | null {
+  for (const { re, label } of PRIVACY_PATTERNS) {
+    if (re.test(text)) return label;
+  }
+  return null;
 }
