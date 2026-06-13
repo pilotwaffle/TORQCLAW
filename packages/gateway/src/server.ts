@@ -5,7 +5,7 @@ import {
   ConnectFrameSchema,
   GatewayRequestSchema,
 } from '@torqclaw/contracts';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { sessions } from './sessions.js';
 import { enrichCommand } from './enrich.js';
 import { dispatch } from './dispatch.js';
@@ -24,7 +24,10 @@ function verifyToken(token: string): boolean {
     console.warn('[gateway] TORQCLAW_GATEWAY_TOKEN unset — accepting all loopback clients (dev only)');
     return true;
   }
-  return token === GATEWAY_TOKEN;
+  // Constant-time compare: plain === leaks match length/position via timing.
+  const received = Buffer.from(token);
+  const expected = Buffer.from(GATEWAY_TOKEN);
+  return received.length === expected.length && timingSafeEqual(received, expected);
 }
 
 const app = Fastify({ logger: true });
