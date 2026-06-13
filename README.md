@@ -65,6 +65,47 @@ pnpm --filter @torqclaw/console dev         # console http://localhost:3000
 | `HERMES_ENGINE_URL` / `HERMES_ENGINE_TOKEN` | `http://127.0.0.1:8000/mcp` | move to a GPU box = change config, not code |
 | `OLLAMA_HOST` / `TORQCLAW_LOCAL_MODEL` | `localhost:11434` / `torq-local` | |
 | `HERMES_MODEL` / `HERMES_PROVIDER` / `HERMES_API_KEY` | _(unset = stub mode)_ | real agent execution; see `mcp_wrapper/hermes_runner.py` |
+| `TORQCLAW_DEFAULT_MAX_COST` | _(unset = unlimited)_ | fallback USD budget when a task sets none; a FRONTIER task with no budget logs a one-line warning |
+| `HERMES_MAX_ITERATIONS` | `30` | hard cap on the agent loop; the budget guard of last resort when spend reporting is unavailable |
+| `HERMES_STUB_COST_USD` | `0.0` | stub-mode reported spend (testing the breaker) |
+| `HERMES_STUB_COST_UNAVAILABLE` | _(unset)_ | `1` makes stub spend report `null` (testing the unenforceable-budget path) |
+
+## Run controls (per task)
+
+The console's controls strip sets, per submission, what the user alone can
+decide:
+
+- **Budget** — `default` (env fallback), `Free (local only)`, `$0.25/$1/$5`, or
+  a custom amount. Maps to `maxCostUsd`; the gateway enforces it from
+  **provider-reported spend** (no static pricing table) and cancels on breach.
+  If a provider can't report spend, the run says so once — the budget is then
+  unenforceable and `HERMES_MAX_ITERATIONS` is the only guard.
+- **Mode** — `Auto`, `This machine only` (`LOCAL_ONLY`, a hard router rule), or
+  `Cloud allowed`. `Free (local only)` forces `LOCAL_ONLY`.
+- **fast** (`urgent`) and **private** (`containsSensitiveData`, never cleared by
+  any automation — only the user sets it).
+- **stop** cancels a running task within ~one poll interval.
+
+A client-side regex surfaces a *suggestion* to keep a prompt private when it
+looks like it contains credentials — it never sets the flag or blocks
+submission. Choices persist in `sessionStorage`.
+
+## Stats
+
+```bash
+pnpm stats   # node ops/stats.mjs — reads ~/.torqclaw/state.db (read-only)
+```
+
+Aggregates entirely in SQL (`->>` JSON operators): tasks by tier×state,
+FRONTIER cost (total/avg/max/p95 + cost per completed task), classifier method
+& confidence, router-reason distribution, and product metrics — non-Auto
+submission share, budget-breaker firings, user cancellations, the approval
+funnel, and tool-result truncation pressure. Every section handles zero rows.
+
+The `tasks.telemetry_json` column (cost, iterations, tools) is added by an
+idempotent boot migration (`PRAGMA table_info` check), so an existing dev DB
+upgrades in place. Pre-release, deleting `~/.torqclaw/state.db` to start fresh
+is also fine.
 
 ## Adding tools (MCP servers)
 

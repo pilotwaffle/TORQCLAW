@@ -12,10 +12,12 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "engine:setup": "cd engines/hermes_kernel && uv sync && git submodule update --init --recursive",
-    "model:setup": "ollama create torq-local -f ops/Modelfile"
+    "model:setup": "ollama create torq-local -f ops/Modelfile",
+    "stats": "node ops/stats.mjs"
   },
   "devDependencies": {
     "@modelcontextprotocol/server-filesystem": "^2026.1.14",
+    "better-sqlite3": "^12",
     "turbo": "^2.0.0",
     "typescript": "^5.5.0",
     "ws": "^8"
