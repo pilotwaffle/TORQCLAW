@@ -28,6 +28,9 @@ export async function enrichCommand(
       contextSize,
       requiredTools: predictTools(cls.taskType),
       taskType: cls.taskType,
+      // Fresh request: no grants. Built explicitly (never spread from cmd) so a
+      // client-injected grantedTools can never reach a GatewayRequest.
+      grantedTools: [],
     },
     constraints: {
       latencySensitivity: cmd.urgent ? 'HIGH' : 'LOW',

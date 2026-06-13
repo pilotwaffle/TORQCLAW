@@ -1,9 +1,11 @@
 import { ComputeTier, type GatewayRequest, type RouterDiagnostics } from '@torqclaw/contracts';
-import { executeLocalEdge } from '@torqclaw/inference';
+import { executeLocalEdge, ToolApprovalRequired } from '@torqclaw/inference';
 import { executeHermesTask, CircuitBreakerError, isHermesAvailable } from '@torqclaw/bridge';
 import { makeEmitter, taskStore } from './events.js';
 import { sessions } from './sessions.js';
 import { cancellations } from './cancellations.js';
+import { registerApproval } from './approvals.js';
+import { randomUUID } from 'node:crypto';
 
 const sanitize = (msg: string) => msg.replace(/Bearer\s+\S+/gi, 'Bearer ***').slice(0, 2_000);
 
@@ -27,6 +29,51 @@ function resolveBudget(req: GatewayRequest): number | undefined {
   if (typeof req.constraints.maxCost === 'number') return req.constraints.maxCost;
   const env = Number(process.env.TORQCLAW_DEFAULT_MAX_COST);
   return Number.isFinite(env) && env > 0 ? env : undefined;
+}
+
+/** The grant-notice prepended to the re-run's assembledContext so the model
+ *  knows the prior pause was only to obtain permission, not a real failure. */
+function grantNotice(toolName: string): string {
+  return `Note: you now have permission to use ${toolName}; a prior attempt was paused only to obtain it. Proceed.\n\n`;
+}
+
+/**
+ * APPROVE re-run (P2): mint a NEW GatewayRequest from the blocked task's stored
+ * request_json, identical in every way EXCEPT — new id, fresh receivedAt,
+ * gateway-owned grantedTools=[tool], and the grant-notice prepended to
+ * assembledContext. Constraints (private/executionMode/maxCost/latency) are
+ * preserved VERBATIM, so a private task still routes local. Re-routes through
+ * the router (a fresh decision on the same constraints) and dispatches as its
+ * OWN task with its OWN terminal event.
+ */
+export function mintGrantedRequest(requestJson: string, toolName: string): GatewayRequest {
+  const orig = JSON.parse(requestJson) as GatewayRequest;
+  const existing = orig.payload.assembledContext ?? '';
+  return {
+    ...orig,
+    id: randomUUID(),
+    receivedAt: new Date().toISOString(),
+    payload: {
+      ...orig.payload,
+      grantedTools: Array.from(new Set([...(orig.payload.grantedTools ?? []), toolName])),
+      assembledContext: grantNotice(toolName) + existing,
+    },
+    // constraints + sessionId + prompt copied verbatim by the spread above.
+  };
+}
+
+/** REJECT (P2): the operator denied the tool. Per the review refinement and
+ *  invariant 7, this is a degenerate task — its ONE terminal is an ERROR
+ *  ("Task aborted by user: tool denied") with recovery chips. A separate task
+ *  from the original blocked run (which already terminated with PENDING_APPROVAL). */
+export function emitToolDenied(req: GatewayRequest, toolName: string, diag: RouterDiagnostics): void {
+  const emit = makeEmitter(req.sessionId, req.id, diag.tier);
+  taskStore.create(req, diag);
+  taskStore.fail(req.id, `DENIED: tool ${toolName} denied by user`);
+  emit('ERROR', `Task aborted by user: tool ${toolName} denied.`, {
+    recovery: ['RETRY', 'COPY_DIAGNOSTIC'],
+    prompt: req.payload.prompt,
+  });
 }
 
 /** Fire-and-forget: the WS handler returns immediately; execution reports to
@@ -79,6 +126,24 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
       }
       emit('RESULT', result.text, result.telemetry);
     } catch (error: any) {
+      // (A) Gated tool with no grant — NOT a failure. This is the terminal
+      //     state of a blocked run. Dispatch (sole DB + terminal owner)
+      //     registers the approval and emits the ONE terminal PENDING_APPROVAL.
+      //     The task is DONE (completed-with-blockedOn), not failed; it writes
+      //     no RESULT and skips storeEpisode, so getContextWindow (USER_PROMPT
+      //     + RESULT only) can never surface the aborted attempt.
+      if (error instanceof ToolApprovalRequired) {
+        const approvalId = registerApproval(req.id, error.toolName, error.args);
+        taskStore.complete(req.id, '', { blockedOn: error.toolName });
+        emit('PENDING_APPROVAL', `Tool ${error.toolName} requires approval`, {
+          approvalId,
+          toolName: error.toolName,
+          requestId: req.id,
+          args: error.args,
+        });
+        return; // do NOT fall through to ERROR
+      }
+
       const reason =
         error instanceof CircuitBreakerError
           ? `BUDGET: ${error.message}`

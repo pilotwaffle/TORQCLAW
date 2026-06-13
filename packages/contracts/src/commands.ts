@@ -19,6 +19,14 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     decision: z.enum(['APPROVE', 'REJECT']),
   }),
   z.object({
+    // P2: decide a one-time tool grant. Carries NO tool name — the granted
+    // tool is read server-side from the approval row, so a client can never
+    // widen the grant. decision APPROVE re-runs; REJECT aborts with an ERROR.
+    action: z.literal('APPROVE_TOOL'),
+    approvalId: z.string(),
+    decision: z.enum(['APPROVE', 'REJECT']),
+  }),
+  z.object({
     action: z.literal('CANCEL_TASK'),
     taskId: z.uuid(),
   }),

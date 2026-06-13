@@ -35,6 +35,10 @@ export const GatewayRequestSchema = z.object({
     contextSize: z.number(),
     requiredTools: z.array(z.string()),
     taskType: TaskTypeSchema,
+    /** One-time tool grants (P2). GATEWAY-OWNED ONLY — never on a client
+     *  command; set solely by the APPROVE_TOOL re-mint. default([]) so fresh
+     *  requests carry [] and the gate fires on the first attempt. */
+    grantedTools: z.array(z.string()).default([]),
   }),
   constraints: z.object({
     latencySensitivity: z.enum(['HIGH', 'LOW']),

@@ -91,3 +91,20 @@ CREATE TABLE IF NOT EXISTS skill_queue (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     decided_at DATETIME
 );
+
+-- 8. Pending tool approvals (P2: one-shot tool grant over the LOCAL_EDGE loop).
+--    A gated-tool hit registers a row; the gateway emits the terminal
+--    PENDING_APPROVAL carrying approval_id. APPROVE re-mints the GatewayRequest
+--    from tasks.request_json with grantedTools=[tool_name]; REJECT -> terminal
+--    ERROR. args_json is the model-proposed args (display/audit only; NEVER
+--    replayed — the re-run regenerates the call under the grant).
+CREATE TABLE IF NOT EXISTS tool_approvals (
+    approval_id TEXT PRIMARY KEY,
+    request_id  TEXT NOT NULL,                 -- the BLOCKED task's request id
+    tool_name   TEXT NOT NULL,                 -- real (namespaced) name = grant unit
+    args_json   TEXT NOT NULL,                 -- proposed args, display/audit only
+    status      TEXT NOT NULL DEFAULT 'pending',  -- pending | approved | rejected
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    decided_at  DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_tool_approvals_request ON tool_approvals(request_id);

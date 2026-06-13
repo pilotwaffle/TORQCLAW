@@ -2,6 +2,7 @@ import type { GatewayRequest } from '@torqclaw/contracts';
 import { router } from '@torqclaw/router';
 import { getToolsForTask, executeTool } from '@torqclaw/bridge';
 import type { Emitter, ExecutionResult } from './types.js';
+import { ToolApprovalRequired } from './approval.js';
 
 /** Cancellation probe injected by the gateway (decoupled so inference never
  *  imports the gateway DB). Defaults to never-cancelled for standalone use. */
@@ -103,6 +104,19 @@ export async function executeLocalEdge(
     { role: 'user', content: req.payload.prompt },
   ];
 
+  // E2E determinism seam: force a gated-tool hit so the approval loop can be
+  // tested without depending on the local model's tool-choice. Honors the grant
+  // exactly like a real gated tool, so the APPROVE re-run proceeds. Off unless
+  // the env var is set; never active in production.
+  const forced = process.env.TORQCLAW_E2E_FORCE_GATED_TOOL;
+  if (forced) {
+    if (!req.payload.grantedTools.includes(forced)) {
+      throw new ToolApprovalRequired(forced, { e2e: true, prompt: req.payload.prompt });
+    }
+    emit('TOOL_CALL', `Executing ${forced}`, { granted: true });
+    return done(`[e2e] executed ${forced} under grant`, start, 1, 1);
+  }
+
   let iterations = 0;
   let toolCallCount = 0;
 
@@ -145,14 +159,15 @@ export async function executeLocalEdge(
         continue;
       }
 
-      // Approval gate: write-capable tools on LOCAL_EDGE pause for a human.
-      if (requiresApproval(realName)) {
-        emit('PENDING_APPROVAL', `Tool ${realName} requires approval`, { args: toolArgs });
-        messages.push({
-          role: 'tool', tool_call_id: toolCall.id, name: alias,
-          content: 'DEFERRED: this tool requires human approval. It has been queued; continue with read-only work or finalize.',
-        });
-        continue;
+      // Approval gate (P2 fail-fast): a write-capable tool on LOCAL_EDGE needs
+      // a one-time grant. If the grant isn't present, STOP the whole run by
+      // throwing — dispatch catches this, registers the approval, and emits the
+      // single terminal PENDING_APPROVAL (invariant 7). No further tool fires
+      // (no side effects after the gate); the blocked attempt produces no RESULT
+      // and is never stored to memory.
+      const granted = req.payload.grantedTools.includes(realName);
+      if (requiresApproval(realName) && !granted) {
+        throw new ToolApprovalRequired(realName, toolArgs);
       }
 
       emit('TOOL_CALL', `Executing ${realName}`, { args: toolArgs });

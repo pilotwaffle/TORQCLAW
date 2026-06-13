@@ -122,9 +122,14 @@ export default function TorqTerminal() {
     if (activeRequestId) sendCommand({ action: 'CANCEL_TASK', taskId: activeRequestId });
   };
 
-  const decide = (queueId: string, decision: 'APPROVE' | 'REJECT') => {
+  const decideSkill = (queueId: string, decision: 'APPROVE' | 'REJECT') => {
     sendCommand({ action: 'APPROVE_SKILL', queueId, decision });
     setDecided((d) => ({ ...d, [queueId]: decision }));
+  };
+
+  const decideTool = (approvalId: string, decision: 'APPROVE' | 'REJECT') => {
+    sendCommand({ action: 'APPROVE_TOOL', approvalId, decision });
+    setDecided((d) => ({ ...d, [approvalId]: decision }));
   };
 
   const set = <K extends keyof Controls>(k: K, v: Controls[K]) =>
@@ -156,7 +161,7 @@ export default function TorqTerminal() {
           </p>
         )}
         {events.map((ev) => (
-          <EventRow key={ev.id} event={ev} decided={decided} onDecide={decide} onResendLocal={resendLocal} />
+          <EventRow key={ev.id} event={ev} decided={decided} onDecideSkill={decideSkill} onDecideTool={decideTool} onResendLocal={resendLocal} />
         ))}
         {busy && (
           <p className="flex items-center gap-3 px-2 py-1 text-neutral-500">
@@ -269,17 +274,22 @@ function Elapsed() {
 }
 
 function EventRow({
-  event, decided, onDecide, onResendLocal,
+  event, decided, onDecideSkill, onDecideTool, onResendLocal,
 }: {
   event: GatewayEvent;
   decided: Record<string, 'APPROVE' | 'REJECT'>;
-  onDecide: (queueId: string, decision: 'APPROVE' | 'REJECT') => void;
+  onDecideSkill: (queueId: string, decision: 'APPROVE' | 'REJECT') => void;
+  onDecideTool: (approvalId: string, decision: 'APPROVE' | 'REJECT') => void;
   onResendLocal: (prompt: string) => void;
 }) {
   const tier = tierLabel(event.tier);
   const meta = (event.metadata ?? {}) as Record<string, any>;
+  // Two kinds of PENDING_APPROVAL: skill (queueId) and tool (approvalId).
   const queueId: string | undefined = meta.queueId ?? meta.queue_id;
-  const decision = queueId ? decided[queueId] : undefined;
+  const approvalId: string | undefined = meta.approvalId ?? meta.approval_id;
+  const cardId = approvalId ?? queueId; // the id this row decides under
+  const decision = cardId ? decided[cardId] : undefined;
+  const isToolApproval = event.type === 'PENDING_APPROVAL' && !!approvalId;
   const isUser = event.type === 'USER_PROMPT';
   const recovery: string[] = Array.isArray(meta.recovery) ? meta.recovery : [];
 
@@ -325,25 +335,37 @@ function EventRow({
           {friendlyMessage(event)}
         </span>
 
-        {event.type === 'PENDING_APPROVAL' && queueId && !decision && (
+        {/* Skill approval — compact allow/deny (existing path, unchanged). */}
+        {event.type === 'PENDING_APPROVAL' && queueId && !approvalId && !decision && (
           <span className="ml-3 inline-flex gap-2 align-middle">
             <button
-              onClick={() => onDecide(queueId, 'APPROVE')}
+              onClick={() => onDecideSkill(queueId, 'APPROVE')}
               className="rounded border border-[#E24B4A]/50 px-2 py-0.5 text-[10px] text-[#E24B4A] transition-colors hover:bg-[#E24B4A]/15"
             >
               allow
             </button>
             <button
-              onClick={() => onDecide(queueId, 'REJECT')}
+              onClick={() => onDecideSkill(queueId, 'REJECT')}
               className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-400 transition-colors hover:bg-neutral-800"
             >
               deny
             </button>
           </span>
         )}
+
+        {/* Tool approval — expanded permission card (P2). */}
+        {isToolApproval && approvalId && !decision && (
+          <ToolPermissionCard
+            toolName={String(meta.toolName ?? meta.tool_name ?? '')}
+            args={meta.args}
+            onAllow={() => onDecideTool(approvalId, 'APPROVE')}
+            onDeny={() => onDecideTool(approvalId, 'REJECT')}
+          />
+        )}
+
         {decision && (
           <span className="ml-3 text-[10px] text-neutral-500">
-            {decision === 'APPROVE' ? '✓ allowed' : '✕ denied'}
+            {decision === 'APPROVE' ? '✓ allowed once' : '✕ denied'}
           </span>
         )}
 
@@ -358,5 +380,68 @@ function EventRow({
         )}
       </div>
     </article>
+  );
+}
+
+/** P2 tool-approval card: shows ONLY facts the system knows (action, exact tool
+ *  name, args, one-time scope). No risk scores or invented assessments
+ *  (invariant 6). Allow once -> APPROVE_TOOL re-runs the task with the grant. */
+function ToolPermissionCard({
+  toolName, args, onAllow, onDeny,
+}: {
+  toolName: string;
+  args: unknown;
+  onAllow: () => void;
+  onDeny: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  // Friendly verb: take the segment after the last "__", underscores -> spaces.
+  // Use lastIndexOf (not a \w+ regex) so hyphenated/dotted MCP names survive.
+  const friendly = (toolName.includes('__')
+    ? toolName.slice(toolName.lastIndexOf('__') + 2)
+    : toolName
+  ).replace(/_/g, ' ');
+
+  const pretty = useMemo(() => {
+    try { return JSON.stringify(args ?? {}, null, 2); }
+    catch { return String(args); }
+  }, [args]);
+  const TRUNC = 500;
+  const isLong = pretty.length > TRUNC;
+  const shown = expanded || !isLong ? pretty : pretty.slice(0, TRUNC) + '\n…';
+
+  return (
+    <div className="ml-2 mt-2 max-w-2xl rounded border border-[#E24B4A]/40 bg-[#E24B4A]/5 p-3">
+      <p className="text-neutral-200">
+        This task wants to <span className="font-semibold text-neutral-100">{friendly}</span> to finish.
+      </p>
+      <dl className="mt-2 space-y-1 text-[11px]">
+        <div className="flex gap-2">
+          <dt className="w-16 shrink-0 uppercase tracking-widest text-neutral-500">tool</dt>
+          <dd className="font-mono text-neutral-300">{toolName || '(unknown)'}</dd>
+        </div>
+        <div className="flex gap-2">
+          <dt className="w-16 shrink-0 uppercase tracking-widest text-neutral-500">scope</dt>
+          <dd className="text-neutral-400">One-time — applies to a single re-run</dd>
+        </div>
+      </dl>
+      <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded bg-black/40 p-2 text-[11px] text-neutral-400">
+        {shown}
+      </pre>
+      {isLong && (
+        <button onClick={() => setExpanded((v) => !v)} className="mt-1 text-[10px] text-neutral-500 hover:text-neutral-300">
+          {expanded ? 'show less' : `show all (${pretty.length} chars)`}
+        </button>
+      )}
+      <div className="mt-3 flex gap-2">
+        <button onClick={onAllow} className="rounded border border-[#E24B4A]/50 px-3 py-1 text-[11px] text-[#E24B4A] hover:bg-[#E24B4A]/15">
+          Allow once
+        </button>
+        <button onClick={onDeny} className="rounded border border-neutral-700 px-3 py-1 text-[11px] text-neutral-400 hover:bg-neutral-800">
+          Deny
+        </button>
+      </div>
+    </div>
   );
 }

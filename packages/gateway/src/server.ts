@@ -4,11 +4,13 @@ import {
   ClientCommandSchema,
   ConnectFrameSchema,
   GatewayRequestSchema,
+  type GatewayRequest,
 } from '@torqclaw/contracts';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { sessions } from './sessions.js';
 import { enrichCommand } from './enrich.js';
-import { dispatch } from './dispatch.js';
+import { dispatch, mintGrantedRequest, emitToolDenied } from './dispatch.js';
+import { decideApproval } from './approvals.js';
 import { makeEmitter, sessionBus, persistAndPublish } from './events.js';
 import { router } from '@torqclaw/router';
 import { connectBridge, approveSkill, cancelHermesTask } from '@torqclaw/bridge';
@@ -112,6 +114,41 @@ app.get('/ws', { websocket: true }, (socket) => {
         makeEmitter(sid, null, null)(
           'SYSTEM', `Skill ${cmd.data.queueId}: ${cmd.data.decision}`,
         );
+        break;
+      }
+      case 'APPROVE_TOOL': {
+        // Decide the grant. decideApproval is idempotent + exactly-once: a
+        // double-click returns null and we no-op (invariant 7 — no second
+        // re-dispatch). The granted tool is read from the DB row, never the
+        // client frame, so a client can't widen the grant.
+        const decided = decideApproval(cmd.data.approvalId, cmd.data.decision);
+        if (!decided) {
+          makeEmitter(sid, null, null)('SYSTEM', 'Approval already decided or unknown.');
+          break;
+        }
+        if (!decided.requestJson) {
+          makeEmitter(sid, null, null)('SYSTEM', 'Approval has no original request to re-run.');
+          break;
+        }
+        if (cmd.data.decision === 'APPROVE') {
+          // Mint a NEW task: original constraints verbatim + grant + notice.
+          const reqB = mintGrantedRequest(decided.requestJson, decided.toolName);
+          GatewayRequestSchema.parse(reqB); // assert our re-mint obeys contracts
+          const reqEmit = makeEmitter(reqB.sessionId, reqB.id, null);
+          reqEmit('ROUTING', `Re-running with permission for ${decided.toolName}`, reqB.enrichment);
+          const diag = router.evaluateRequest(reqB);
+          makeEmitter(reqB.sessionId, reqB.id, diag.tier)('TIER_SELECTED', diag.reason, diag);
+          dispatch(reqB, diag);
+        } else {
+          // REJECT: degenerate task whose ONE terminal is an ERROR.
+          const reqDeny: GatewayRequest = {
+            ...(JSON.parse(decided.requestJson) as GatewayRequest),
+            id: randomUUID(),
+            receivedAt: new Date().toISOString(),
+          };
+          const diag = router.evaluateRequest(reqDeny);
+          emitToolDenied(reqDeny, decided.toolName, diag);
+        }
         break;
       }
       case 'CANCEL_TASK': {
