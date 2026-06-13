@@ -163,6 +163,25 @@ def _frontier_enabled_toolsets(task_type: str, prompt: str = "") -> list[str] | 
     return base
 
 
+def _provider_config(task_type: str) -> dict:
+    """Pick the provider/model/key/base for this task. COMPLEX_CODING uses the
+    HERMES_CODING_* override when set (e.g. Kimi K2.7 Code — long context +
+    agentic coding); everything else uses the default HERMES_* (DeepSeek)."""
+    if task_type == "COMPLEX_CODING" and os.environ.get("HERMES_CODING_MODEL"):
+        return {
+            "model": os.environ.get("HERMES_CODING_MODEL", ""),
+            "provider": os.environ.get("HERMES_CODING_PROVIDER"),
+            "api_key": os.environ.get("HERMES_CODING_API_KEY"),
+            "base_url": os.environ.get("HERMES_CODING_BASE_URL"),
+        }
+    return {
+        "model": os.environ.get("HERMES_MODEL", ""),
+        "provider": os.environ.get("HERMES_PROVIDER"),
+        "api_key": os.environ.get("HERMES_API_KEY"),
+        "base_url": os.environ.get("HERMES_BASE_URL"),
+    }
+
+
 def run_hermes_sync(task_id: str, payload: dict) -> dict:
     """BLOCKING — call via asyncio.to_thread. Returns {result, telemetry}."""
     req = payload["payload"]
@@ -170,6 +189,9 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
     context: str | None = req.get("assembledContext")
     task_type: str = req.get("taskType", "ROUTINE_AUTOMATION")
     granted: list[str] = req.get("grantedTools", []) or []
+
+    pconf = _provider_config(task_type)
+    task_store.emit(task_id, "SYSTEM", f"Model: {pconf['provider']}/{pconf['model']}")
 
     enabled = _frontier_enabled_toolsets(task_type, prompt)
     task_store.emit(
@@ -192,11 +214,12 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
     )
 
     agent = AIAgent(
-        # Provider config is env-driven; Hermes supports many backends.
-        model=os.environ.get("HERMES_MODEL", ""),
-        provider=os.environ.get("HERMES_PROVIDER"),
-        api_key=os.environ.get("HERMES_API_KEY"),
-        base_url=os.environ.get("HERMES_BASE_URL"),
+        # Provider config is env-driven + per-task (coding override). Hermes
+        # supports many backends; see _provider_config.
+        model=pconf["model"],
+        provider=pconf["provider"],
+        api_key=pconf["api_key"],
+        base_url=pconf["base_url"],
         max_iterations=int(os.environ.get("HERMES_MAX_ITERATIONS", "30")),
         # Per-task toolset allowlist — keeps cloud research off the host shell.
         enabled_toolsets=enabled,
@@ -261,7 +284,7 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
         # instead of completing with a (likely fabricated-around-the-block) answer.
         blocked = approval_hook.was_blocked(task_id)
         telemetry = {
-            "engineUsed": f"hermes:{os.environ.get('HERMES_MODEL', 'default')}",
+            "engineUsed": f"hermes:{pconf['model'] or 'default'}",
             "messageCount": len(result.get("messages", [])),
             "costUsd": get_spend_usd(agent, task_id),
         }
