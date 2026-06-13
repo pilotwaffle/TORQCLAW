@@ -22,13 +22,26 @@ const waitForHttp = async (url, tries = 30) => {
   for (let i = 0; i < tries; i++) { try { await fetch(url); return; } catch { await sleep(500); } }
   throw new Error(`not up: ${url}`);
 };
+const waitForWs = async (url, tries = 40) => {
+  for (let i = 0; i < tries; i++) {
+    const ok = await new Promise((res) => {
+      const probe = new WebSocket(url);
+      const done = (v) => { try { probe.close(); } catch {} res(v); };
+      probe.on('open', () => done(true));
+      probe.on('error', () => done(false));
+    });
+    if (ok) return;
+    await sleep(500);
+  }
+  throw new Error(`ws not up: ${url}`);
+};
 
 launch(`${ROOT}engines/hermes_kernel/${VENV_PY}`, ['-m', 'mcp_wrapper.server'],
   `${ROOT}engines/hermes_kernel`, 'engine', { HERMES_STUB_DELAY_S: '20' });
 await waitForHttp('http://127.0.0.1:8000/mcp');
 console.log('=== engine up (stub held 20s) ===');
 launch('node', ['dist/server.js'], `${ROOT}packages/gateway`, 'gw');
-await sleep(3500);
+await waitForWs('ws://127.0.0.1:18790/ws');
 
 const ws = new WebSocket('ws://127.0.0.1:18790/ws');
 const deadline = setTimeout(() => { console.log('E2E TIMEOUT'); cleanup(1); }, 30_000);

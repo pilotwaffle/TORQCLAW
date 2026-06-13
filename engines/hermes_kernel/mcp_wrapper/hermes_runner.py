@@ -10,6 +10,7 @@ Upstream API (verified against vendor/hermes-agent @ shallow HEAD):
                status_callback(kind, msg)
 """
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -136,7 +137,18 @@ _FRONTIER_TOOLSETS = {
 }
 
 
-def _frontier_enabled_toolsets(task_type: str) -> list[str] | None:
+# Intent signals that a task needs to touch the filesystem even when the
+# classifier labeled it research/summarize/extract. Without this, "write a file"
+# lands in a web-only toolset and can NEVER succeed (it has no write_file). The
+# `files` toolset IS approval-gated (P6 pre_tool_call hook), so granting it stays
+# safe — a write still requires the human's Allow once.
+_FILE_INTENT = re.compile(
+    r"\b(write|save|create|append|edit|update|delete|read|open)\b.{0,40}\b(file|notes?|\.txt|\.md|\.json|\.csv|workspace|document)",
+    re.IGNORECASE,
+)
+
+
+def _frontier_enabled_toolsets(task_type: str, prompt: str = "") -> list[str] | None:
     """The toolset allowlist for a FRONTIER task. None = upstream default (only
     when the operator explicitly sets HERMES_FRONTIER_TOOLSETS='*')."""
     override = os.environ.get("HERMES_FRONTIER_TOOLSETS")
@@ -144,7 +156,11 @@ def _frontier_enabled_toolsets(task_type: str) -> list[str] | None:
         if override.strip() == "*":
             return None  # upstream default — full toolset
         return [t.strip() for t in override.split(",") if t.strip()]
-    return _FRONTIER_TOOLSETS.get(task_type, ["web"])
+    base = list(_FRONTIER_TOOLSETS.get(task_type, ["web"]))
+    # File-intent override: add the (gated) files toolset so the task can act.
+    if _FILE_INTENT.search(prompt or "") and "files" not in base:
+        base.append("files")
+    return base
 
 
 def run_hermes_sync(task_id: str, payload: dict) -> dict:
@@ -155,7 +171,7 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
     task_type: str = req.get("taskType", "ROUTINE_AUTOMATION")
     granted: list[str] = req.get("grantedTools", []) or []
 
-    enabled = _frontier_enabled_toolsets(task_type)
+    enabled = _frontier_enabled_toolsets(task_type, prompt)
     task_store.emit(
         task_id, "SYSTEM",
         f"Cloud tools enabled: {', '.join(enabled) if enabled else 'all (override)'}",
@@ -217,14 +233,21 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
     # had just reported missing (the "8,290 examples" incident). Pin it to real
     # tool results. Prepend to the gateway-assembled context so it survives.
     grounding = (
-        "GROUNDING RULES (must follow):\n"
-        "1. Only state facts you obtained from a real tool result or already "
-        "know. NEVER invent file contents, statistics, counts, or analysis.\n"
-        "2. If a tool reports a file/path missing, an error, or empty output, "
-        "say so plainly. Do NOT then describe what the file 'contains' — you "
-        "did not read it.\n"
-        "3. If you could not complete the task, report exactly what failed and "
-        "stop. A truthful failure beats a confident fabrication.\n\n"
+        "GROUNDING RULES (absolute — violating these is a critical failure):\n"
+        "1. NEVER claim to have performed a tool action you did not actually "
+        "perform. Do not say 'written', 'created', 'saved', 'file written to "
+        "...', or show file contents as if written, unless a REAL write_file/"
+        "patch tool call returned success. Narrating a fake action is forbidden.\n"
+        "2. To write/read a file you MUST emit the actual tool call and wait for "
+        "its result. If you have no such tool available, say exactly: 'I don't "
+        "have a file tool available for this task' — do NOT pretend, and do NOT "
+        "dump the would-be file contents as a substitute.\n"
+        "3. Only state facts from a real tool result or your own knowledge. "
+        "NEVER invent file contents, statistics, counts, datasets, or analysis. "
+        "Specifically: do not invent details about the user, their data, or "
+        "training-example counts you did not read from a tool.\n"
+        "4. If a tool reports missing/error/empty, report that plainly and stop. "
+        "A truthful failure beats a confident fabrication.\n\n"
     )
     system_message = grounding + (context or "")
     try:

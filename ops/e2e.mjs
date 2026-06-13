@@ -24,13 +24,29 @@ const waitForHttp = async (url, tries = 30) => {
   throw new Error(`not up: ${url}`);
 };
 
+// Wait until the gateway WS actually accepts a connection — robust to the
+// variable boot time (bridge connect + filesystem npx spawn before listen).
+const waitForWs = async (url, tries = 40) => {
+  for (let i = 0; i < tries; i++) {
+    const ok = await new Promise((res) => {
+      const probe = new WebSocket(url);
+      const done = (v) => { try { probe.close(); } catch {} res(v); };
+      probe.on('open', () => done(true));
+      probe.on('error', () => done(false));
+    });
+    if (ok) return;
+    await sleep(500);
+  }
+  throw new Error(`ws not up: ${url}`);
+};
+
 launch(`${ROOT}engines/hermes_kernel/${VENV_PY}`, ['-m', 'mcp_wrapper.server'],
   `${ROOT}engines/hermes_kernel`, 'engine');
 await waitForHttp('http://127.0.0.1:8000/mcp');
 console.log('=== engine up ===');
 
 launch('node', ['dist/server.js'], `${ROOT}packages/gateway`, 'gw');
-await sleep(3500);
+await waitForWs('ws://127.0.0.1:18790/ws');
 console.log('=== gateway up, connecting operator client ===');
 
 const ws = new WebSocket('ws://127.0.0.1:18790/ws');
