@@ -13,18 +13,23 @@ ERROR carries P3.5 `recovery` metadata so the user gets retry / copy-diagnostic
 chips. Add an acceptance assertion: a rejected approval ends the task `failed`
 with one ERROR event.
 
-## P4 (Approve-with-edits) — textarea Tab key
+## P4 (Approve-with-edits) — textarea Tab key  [DONE — commit 09dbf91]
 The skill-draft `<textarea>` holds SKILL.md with Python (indentation-sensitive).
 Plain `<textarea>` maps Tab to focus-change. Add an `onKeyDown` that intercepts
 Tab, `preventDefault()`, and inserts two spaces at the cursor (and Shift+Tab to
 dedent). Keeps the lean no-Monaco approach usable for code edits.
+Shipped in SkillApprovalCard.onKeyDown.
 
-## P5 (Workspace scoping) — normalize before matching
+## P5 (Workspace scoping) — normalize before matching  [DONE — commit c8e16de]
 `servers.json` path scopes `{ read, write, deny }` must be checked against
 `path.resolve()`-normalized argument paths, never raw substring match — else
 `~/projects/../.ssh` bypasses a `~/.ssh` deny. `deny` always wins. Resolve the
 tilde and relative segments first, then compare. Defense-in-depth alongside the
 MCP server's own allowed-dirs; document both layers.
+Shipped in pathScope.ts (normalizePath + checkPath), enforced in bridge
+executeTool, 14 unit tests incl. the traversal-bypass cases.
+
+## All three refinements are now shipped (Sprint 3 complete).
 
 ## Already fixed in Sprint 1 (for the record)
 - **Usage-API rate-limit trap (P0):** `get_spend_usd`'s provider-usage fallback
