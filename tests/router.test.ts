@@ -32,6 +32,29 @@ describe('router rule hierarchy', () => {
     expect(d.reason).toMatch(/^PRIVACY_OVERRIDE/);
   });
 
+  it('RULE 1b: local-intent phrasing forces LOCAL_EDGE despite low confidence', () => {
+    const r = new TorqClawRouter();
+    for (const prompt of [
+      'can you use this data to learn from and improve the local agent',
+      'train the local model on these files',
+      'run this on this machine',
+      'fine-tune the on-device model',
+    ]) {
+      const d = r.evaluateRequest(makeRequest({ prompt, classifierConfidence: 0.3 }));
+      expect(d.tier, prompt).toBe(ComputeTier.LOCAL_EDGE);
+      expect(d.reason, prompt).toMatch(/^LOCAL_INTENT/);
+    }
+  });
+
+  it('RULE 1b does NOT trip on unrelated prompts (still routes normally)', () => {
+    const r = new TorqClawRouter();
+    // "localize" must not match; a normal research prompt routes to FRONTIER.
+    const d = r.evaluateRequest(makeRequest({
+      prompt: 'localize this app into French', taskType: 'AUTONOMOUS_RESEARCH',
+    }));
+    expect(d.reason).not.toMatch(/^LOCAL_INTENT/);
+  });
+
   it('RULE 1.5: low classifier confidence buys FRONTIER', () => {
     const r = new TorqClawRouter();
     const d = r.evaluateRequest(makeRequest({ classifierConfidence: 0.4 }));

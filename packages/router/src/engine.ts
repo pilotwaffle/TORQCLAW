@@ -13,6 +13,13 @@ import {
  *   3. Cold-start + latency-critical      -> FRONTIER (5-10s local spin-up)
  *   4. Heuristic score for the confident middle.
  */
+/** Phrases that mean "do this on/about the local agent or this machine." Such
+ *  tasks must stay on the local tier — routing them to the cloud is wrong intent
+ *  AND lets cloud tools touch the machine ungated. Word-boundary anchored to
+ *  avoid tripping on substrings (e.g. "localize"). */
+const LOCAL_INTENT =
+  /\b(local agent|local model|on[- ]device|this machine|on this machine|local edge|locally|(train|fine[- ]?tune|improve|teach).{0,30}\b(local|agent|model|on[- ]device))\b/i;
+
 export class TorqClawRouter {
   private isLocalModelWarm: boolean;
   private warmTimer: ReturnType<typeof setTimeout> | null = null;
@@ -46,6 +53,19 @@ export class TorqClawRouter {
       return {
         score: 0,
         reason: 'USER_LOCAL_ONLY: user restricted this task to the local edge.',
+        tier: ComputeTier.LOCAL_EDGE,
+      };
+    }
+
+    // RULE 1b: Local-intent override. A task ABOUT the local agent / on-device
+    // work / training-or-improving the local model belongs ON the local tier —
+    // sending it to the cloud is both wrong and a safety leak (it would run
+    // cloud tools against the machine). Beats the low-confidence bounce below,
+    // which otherwise sends these ambiguous prompts to FRONTIER.
+    if (LOCAL_INTENT.test(req.payload.prompt)) {
+      return {
+        score: 0,
+        reason: 'LOCAL_INTENT: task targets the local agent/machine; keeping it local.',
         tier: ComputeTier.LOCAL_EDGE,
       };
     }

@@ -2,6 +2,7 @@ import type { GatewayRequest } from '@torqclaw/contracts';
 
 /** Minimal valid GatewayRequest; override any leaf for a specific case. */
 export function makeRequest(overrides: {
+  prompt?: string;
   taskType?: GatewayRequest['payload']['taskType'];
   requiredTools?: string[];
   contextSize?: number;
@@ -17,7 +18,7 @@ export function makeRequest(overrides: {
     sourceChannel: 'test',
     receivedAt: '2026-01-01T00:00:00.000Z',
     payload: {
-      prompt: 'test prompt',
+      prompt: overrides.prompt ?? 'test prompt',
       contextSize: overrides.contextSize ?? 100,
       requiredTools: overrides.requiredTools ?? [],
       taskType: overrides.taskType ?? 'ROUTINE_AUTOMATION',
