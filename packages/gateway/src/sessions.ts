@@ -107,6 +107,22 @@ export const sessions = {
        VALUES (?, ?, ?, ?, ?, ?)`,
     ).run(requestId, sessionId, taskType, prompt, result, summary);
   },
+
+  /** P4.5: episode summaries this session remembers (newest first). */
+  showEpisodes(sessionId: string): Array<{ taskType: string; summary: string; timestamp: string }> {
+    return db.prepare(
+      `SELECT task_type AS taskType, summary, timestamp
+         FROM task_episodes WHERE session_id = ? ORDER BY rowid DESC LIMIT 50`,
+    ).all(sessionId) as Array<{ taskType: string; summary: string; timestamp: string }>;
+  },
+
+  /** P4.5: forget this session's memory. Deleting the rows fires the FTS5
+   *  delete trigger (schema §6), which keeps the search index consistent — the
+   *  exact reason those triggers exist. Returns the number forgotten. */
+  forgetSession(sessionId: string): number {
+    const info = db.prepare('DELETE FROM task_episodes WHERE session_id = ?').run(sessionId);
+    return Number(info.changes);
+  },
 };
 
 function rowToEvent(r: any): GatewayEvent {

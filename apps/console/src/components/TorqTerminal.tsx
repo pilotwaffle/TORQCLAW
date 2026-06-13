@@ -20,10 +20,11 @@ interface Controls {
   mode: ExecutionMode;
   fast: boolean;
   privateMode: boolean;
+  useMemory: boolean;
 }
 
 const DEFAULT_CONTROLS: Controls = {
-  budget: '', customBudget: '', mode: 'AUTO', fast: false, privateMode: false,
+  budget: '', customBudget: '', mode: 'AUTO', fast: false, privateMode: false, useMemory: true,
 };
 
 function loadControls(): Controls {
@@ -54,6 +55,7 @@ function buildSubmit(prompt: string, c: Controls): Extract<ClientCommand, { acti
     urgent: c.fast,
     attachmentIds: [],
     executionMode: mode,
+    useMemory: c.useMemory,
     ...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
   };
 }
@@ -327,6 +329,17 @@ export default function TorqTerminal() {
             <input type="checkbox" checked={controls.privateMode} onChange={(e) => set('privateMode', e.target.checked)} className="accent-[#E24B4A]" />
             private
           </label>
+          <label className="flex cursor-pointer items-center gap-1.5" title="Use past-task memory as context for this task">
+            <input type="checkbox" checked={controls.useMemory} onChange={(e) => set('useMemory', e.target.checked)} className="accent-[#E24B4A]" />
+            memory
+          </label>
+          <span className="text-neutral-700">·</span>
+          <button type="button" onClick={() => sendCommand({ action: 'MEMORY', op: 'SHOW' })} className="text-neutral-500 hover:text-neutral-300">
+            show memory
+          </button>
+          <button type="button" onClick={() => sendCommand({ action: 'MEMORY', op: 'FORGET_SESSION' })} className="text-neutral-500 hover:text-[#E24B4A]">
+            forget session
+          </button>
         </div>
       </form>
     </section>
@@ -494,6 +507,7 @@ function EventRow({
 /** P2.5 receipt footer: a compact "what happened" line from REAL telemetry
  *  only. Renders whichever fields are present; never invents (invariant 6). */
 function ReceiptCard({ receipt, tools }: { receipt: any; tools: string[] }) {
+  const [showCtx, setShowCtx] = useState(false);
   const where = receipt.tier === 'OLLAMA_LOCAL' ? 'local' : 'cloud';
   const cost =
     receipt.tier === 'OLLAMA_LOCAL' ? 'free'
@@ -504,12 +518,28 @@ function ReceiptCard({ receipt, tools }: { receipt: any; tools: string[] }) {
   if (tools.length) parts.push(`tools: ${tools.join(', ')}`);
   if (receipt.cancelled) parts.push('cancelled');
   if (receipt.blockedOn) parts.push(`paused for ${receipt.blockedOn}`);
+  // P4.5: memory transparency.
+  if (receipt.memoryUsed === false) parts.push('memory off');
+  else if (typeof receipt.contextChars === 'number') parts.push(`context: ${receipt.contextChars} chars`);
+  const ctx: string | undefined = typeof receipt.assembledContext === 'string' ? receipt.assembledContext : undefined;
 
   return (
-    <article className="ml-14 mt-1 inline-flex rounded border border-neutral-800 bg-neutral-900/40 px-3 py-1 text-[11px] text-neutral-500">
-      <span className="text-neutral-400">Done</span>
-      <span className="mx-2 text-neutral-700">·</span>
-      {parts.join(' · ')}
+    <article className="ml-14 mt-1 max-w-3xl rounded border border-neutral-800 bg-neutral-900/40 px-3 py-1 text-[11px] text-neutral-500">
+      <div className="flex flex-wrap items-center gap-x-2">
+        <span className="text-neutral-400">Done</span>
+        <span className="text-neutral-700">·</span>
+        <span>{parts.join(' · ')}</span>
+        {ctx && (
+          <button onClick={() => setShowCtx((v) => !v)} className="ml-2 text-neutral-500 underline hover:text-neutral-300">
+            {showCtx ? 'hide context' : 'view context used'}
+          </button>
+        )}
+      </div>
+      {showCtx && ctx && (
+        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-black/40 p-2 text-[11px] text-neutral-400">
+          {ctx}
+        </pre>
+      )}
     </article>
   );
 }

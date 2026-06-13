@@ -38,7 +38,9 @@ function resolveBudget(req: GatewayRequest): number | undefined {
 /** P2.5: build a task receipt from REAL telemetry only — every field is sourced
  *  from what was actually collected; absent fields are omitted, never invented
  *  (no "remaining risk", no fake costs). The console renders this as a footer. */
-function buildReceipt(tier: ComputeTier, telemetry: Record<string, unknown>): Record<string, unknown> {
+function buildReceipt(
+  tier: ComputeTier, telemetry: Record<string, unknown>, req: GatewayRequest,
+): Record<string, unknown> {
   const r: Record<string, unknown> = { tier };
   const cost = telemetry.costUsd;
   if (typeof cost === 'number') r.costUsd = cost;
@@ -47,6 +49,12 @@ function buildReceipt(tier: ComputeTier, telemetry: Record<string, unknown>): Re
   if (typeof telemetry.iterations === 'number') r.iterations = telemetry.iterations;
   if (telemetry.cancelled === true) r.cancelled = true;
   if (typeof telemetry.blockedOn === 'string') r.blockedOn = telemetry.blockedOn;
+  // P4.5: what memory the model actually received — chars + the verbatim string
+  // ("show context used"). Nothing builds trust in memory like showing it.
+  const ctx = req.payload.assembledContext ?? '';
+  r.contextChars = ctx.length;
+  r.memoryUsed = req.enrichment.memoryUsed;
+  if (ctx.length > 0) r.assembledContext = ctx;
   return r;
 }
 
@@ -151,7 +159,7 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
       emit('RESULT', result.text, result.telemetry);
       // P2.5 receipt: a compact, honest summary from REAL telemetry only.
       // toolsUsed is reconstructed console-side from TOOL_CALL events.
-      emit('SYSTEM', 'Done', { receipt: buildReceipt(diag.tier, result.telemetry) });
+      emit('SYSTEM', 'Done', { receipt: buildReceipt(diag.tier, result.telemetry, effectiveReq) });
     } catch (error: any) {
       // (A) Gated tool with no grant — NOT a failure. This is the terminal
       //     state of a blocked run. Dispatch (sole DB + terminal owner)

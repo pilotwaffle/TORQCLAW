@@ -20,6 +20,8 @@ export const EnrichmentMetaSchema = z.object({
   classifierConfidence: z.number().min(0).max(1),
   classifierLatencyMs: z.number(),
   estimatedTokens: z.number(),
+  // P4.5: whether tiered memory was assembled for this task (useMemory toggle).
+  memoryUsed: z.boolean().default(true),
 });
 
 /** The fully-enriched internal request. Built ONLY by the gateway. */

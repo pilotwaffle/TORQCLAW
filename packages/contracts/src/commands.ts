@@ -12,6 +12,9 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     // User judgments only the user can make — budget, where it may run.
     maxCostUsd: z.number().min(0).max(100).optional(),
     executionMode: z.enum(['AUTO', 'LOCAL_ONLY', 'CLOUD_OK']).default('AUTO'),
+    // P4.5: when false, enrich skips memory recall for this task (no past
+    // context assembled). Default true = normal tiered-memory behavior.
+    useMemory: z.boolean().default(true),
   }),
   z.object({
     action: z.literal('APPROVE_SKILL'),
@@ -38,6 +41,12 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
   z.object({
     action: z.literal('CANCEL_TASK'),
     taskId: z.uuid(),
+  }),
+  z.object({
+    // P4.5: memory controls. SHOW lists this session's episodes; FORGET_SESSION
+    // deletes them (+ FTS entries via the delete triggers).
+    action: z.literal('MEMORY'),
+    op: z.enum(['SHOW', 'FORGET_SESSION']),
   }),
 ]);
 export type ClientCommand = z.infer<typeof ClientCommandSchema>;

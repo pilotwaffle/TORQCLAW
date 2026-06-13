@@ -164,6 +164,19 @@ app.get('/ws', { websocket: true }, (socket) => {
         }
         break;
       }
+      case 'MEMORY': {
+        const emitMem = makeEmitter(sid, null, null);
+        if (cmd.data.op === 'SHOW') {
+          const episodes = sessions.showEpisodes(sid);
+          emitMem('SYSTEM', `Memory: ${episodes.length} episode(s) this session`, {
+            memory: 'SHOW', episodes,
+          });
+        } else {
+          const n = sessions.forgetSession(sid);
+          emitMem('SYSTEM', `Forgot ${n} episode(s) for this session`, { memory: 'FORGET_SESSION', forgotten: n });
+        }
+        break;
+      }
       case 'CANCEL_TASK': {
         const reqId = cmd.data.taskId; // gateway request_id
         const emitCancel = makeEmitter(sid, reqId, null);

@@ -12,7 +12,9 @@ export async function enrichCommand(
   sessionId: string,
   sourceChannel: string,
 ): Promise<GatewayRequest> {
-  const history = sessions.getContextWindow(sessionId, cmd.prompt);
+  // P4.5: useMemory=false skips recall entirely — no past context assembled.
+  const useMemory = cmd.useMemory ?? true;
+  const history = useMemory ? sessions.getContextWindow(sessionId, cmd.prompt) : '';
   const contextSize = estimateTokens(cmd.prompt) + estimateTokens(history);
 
   const cls = await classifyTaskType(cmd.prompt); // never throws
@@ -43,6 +45,7 @@ export async function enrichCommand(
       classifierConfidence: cls.confidence,
       classifierLatencyMs: cls.latencyMs,
       estimatedTokens: contextSize,
+      memoryUsed: useMemory,
     },
   };
 }
