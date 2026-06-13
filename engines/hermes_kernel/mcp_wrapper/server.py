@@ -160,19 +160,31 @@ async def draft_and_queue_skill(proposed_name: str, skill_markdown: str,
     queue_id = skill_queue.queue_skill(proposed_name, skill_markdown, source_task_id)
     if source_task_id:
         # Surfaces in the console as an approval row with allow/deny buttons.
+        # P4: ride the draft markdown along when small (<=8KB) so the editor can
+        # prefill without a round trip; larger drafts fetch via GET_SKILL_DRAFT.
+        meta = {"queueId": queue_id, "skillName": proposed_name}
+        if len(skill_markdown) <= 8192:
+            meta["skillMarkdown"] = skill_markdown
         task_store.emit(
-            source_task_id,
-            "PENDING_APPROVAL",
-            f"New skill drafted: {proposed_name}",
-            {"queueId": queue_id, "skillName": proposed_name},
+            source_task_id, "PENDING_APPROVAL",
+            f"New skill drafted: {proposed_name}", meta,
         )
     return {"status": "pending_approval", "queue_id": queue_id}
 
 
 @mcp.tool()
-async def decide_skill(queue_id: str, decision: str) -> dict:
-    """Called by the gateway when the console operator approves/rejects."""
-    return skill_queue.decide(queue_id, decision)
+async def decide_skill(queue_id: str, decision: str,
+                       edited_markdown: str | None = None) -> dict:
+    """Called by the gateway when the console operator approves/rejects.
+    P4: edited_markdown (APPROVE only) writes the operator's edits instead of
+    the draft."""
+    return skill_queue.decide(queue_id, decision, edited_markdown)
+
+
+@mcp.tool()
+async def get_skill_draft(queue_id: str) -> dict:
+    """P4: return a draft's full markdown for the console editor (large drafts)."""
+    return skill_queue.get_draft(queue_id)
 
 
 if __name__ == "__main__":

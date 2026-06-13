@@ -104,3 +104,28 @@ export function privacyHint(text: string): string | null {
   }
   return null;
 }
+
+/** P4: minimal line-level diff (LCS) — added/removed/unchanged rows. No
+ *  dependency; enough to review a SKILL.md edit. Pure, exported for testing. */
+export function lineDiff(a: string, b: string): Array<{ t: '+' | '-' | ' '; line: string }> {
+  const A = a.split('\n'), B = b.split('\n');
+  const n = A.length, m = B.length;
+  const W = m + 1;
+  const dp = new Int32Array((n + 1) * (m + 1));
+  const g = (k: number): number => dp[k] as number; // Int32Array never holds undefined
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i * W + j] = A[i] === B[j]
+        ? g((i + 1) * W + (j + 1)) + 1
+        : Math.max(g((i + 1) * W + j), g(i * W + (j + 1)));
+  const out: Array<{ t: '+' | '-' | ' '; line: string }> = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { out.push({ t: ' ', line: A[i] ?? '' }); i++; j++; }
+    else if (g((i + 1) * W + j) >= g(i * W + (j + 1))) { out.push({ t: '-', line: A[i] ?? '' }); i++; }
+    else { out.push({ t: '+', line: B[j] ?? '' }); j++; }
+  }
+  while (i < n) out.push({ t: '-', line: A[i++] ?? '' });
+  while (j < m) out.push({ t: '+', line: B[j++] ?? '' });
+  return out;
+}

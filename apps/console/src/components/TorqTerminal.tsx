@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GatewayEvent, ClientCommand } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
-import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint } from './friendly';
+import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff } from './friendly';
 
 const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL ?? 'ws://localhost:18790/ws';
 const GATEWAY_TOKEN = process.env.NEXT_PUBLIC_GATEWAY_TOKEN ?? '';
@@ -66,6 +66,18 @@ export default function TorqTerminal() {
   const [controls, setControls] = useState<Controls>(DEFAULT_CONTROLS);
   const [hintDismissed, setHintDismissed] = useState(false);
   const [decided, setDecided] = useState<Record<string, 'APPROVE' | 'REJECT'>>({});
+
+  // P4: full skill-draft markdown fetched via GET_SKILL_DRAFT, keyed by queueId.
+  const draftsByQueue = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const ev of events) {
+      const md = (ev.metadata as any)?.skillMarkdown;
+      const qid = (ev.metadata as any)?.queueId;
+      if ((ev.metadata as any)?.skillDraft && qid && typeof md === 'string') m[qid] = md;
+    }
+    return m;
+  }, [events]);
+  const getDraft = (queueId: string) => sendCommand({ action: 'GET_SKILL_DRAFT', queueId });
 
   // Load persisted controls after mount (sessionStorage is client-only).
   useEffect(() => { setControls(loadControls()); }, []);
@@ -162,8 +174,13 @@ export default function TorqTerminal() {
     if (activeRequestId) sendCommand({ action: 'CANCEL_TASK', taskId: activeRequestId });
   };
 
-  const decideSkill = (queueId: string, decision: 'APPROVE' | 'REJECT') => {
-    sendCommand({ action: 'APPROVE_SKILL', queueId, decision });
+  // P4: approve a skill, optionally with edited markdown.
+  const decideSkill = (queueId: string, decision: 'APPROVE' | 'REJECT', editedMarkdown?: string) => {
+    sendCommand(
+      editedMarkdown !== undefined && decision === 'APPROVE'
+        ? { action: 'APPROVE_SKILL', queueId, decision, editedMarkdown }
+        : { action: 'APPROVE_SKILL', queueId, decision },
+    );
     setDecided((d) => ({ ...d, [queueId]: decision }));
   };
 
@@ -206,7 +223,9 @@ export default function TorqTerminal() {
             event={ev}
             decided={decided}
             toolsByRequest={toolsByRequest}
+            draftsByQueue={draftsByQueue}
             onDecideSkill={decideSkill}
+            onGetDraft={getDraft}
             onDecideTool={decideTool}
             onResendLocal={resendLocal}
             onResendCloud={resendCloud}
@@ -325,13 +344,15 @@ function Elapsed() {
 }
 
 function EventRow({
-  event, decided, toolsByRequest, onDecideSkill, onDecideTool, onResendLocal,
-  onResendCloud, onRetry, onCopyDiagnostic,
+  event, decided, toolsByRequest, draftsByQueue, onDecideSkill, onGetDraft,
+  onDecideTool, onResendLocal, onResendCloud, onRetry, onCopyDiagnostic,
 }: {
   event: GatewayEvent;
   decided: Record<string, 'APPROVE' | 'REJECT'>;
   toolsByRequest: Record<string, string[]>;
-  onDecideSkill: (queueId: string, decision: 'APPROVE' | 'REJECT') => void;
+  draftsByQueue: Record<string, string>;
+  onDecideSkill: (queueId: string, decision: 'APPROVE' | 'REJECT', editedMarkdown?: string) => void;
+  onGetDraft: (queueId: string) => void;
   onDecideTool: (approvalId: string, decision: 'APPROVE' | 'REJECT') => void;
   onResendLocal: (prompt: string) => void;
   onResendCloud: (prompt: string) => void;
@@ -397,22 +418,16 @@ function EventRow({
           {friendlyMessage(event)}
         </span>
 
-        {/* Skill approval — compact allow/deny (existing path, unchanged). */}
+        {/* Skill approval — allow / deny / edit-and-approve (P4). */}
         {event.type === 'PENDING_APPROVAL' && queueId && !approvalId && !decision && (
-          <span className="ml-3 inline-flex gap-2 align-middle">
-            <button
-              onClick={() => onDecideSkill(queueId, 'APPROVE')}
-              className="rounded border border-[#E24B4A]/50 px-2 py-0.5 text-[10px] text-[#E24B4A] transition-colors hover:bg-[#E24B4A]/15"
-            >
-              allow
-            </button>
-            <button
-              onClick={() => onDecideSkill(queueId, 'REJECT')}
-              className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-400 transition-colors hover:bg-neutral-800"
-            >
-              deny
-            </button>
-          </span>
+          <SkillApprovalCard
+            queueId={queueId}
+            skillName={String(meta.skillName ?? 'skill')}
+            draft={typeof meta.skillMarkdown === 'string' ? meta.skillMarkdown : undefined}
+            fetchedDraft={draftsByQueue[queueId]}
+            onGetDraft={() => onGetDraft(queueId)}
+            onDecide={onDecideSkill}
+          />
         )}
 
         {/* Tool approval — expanded permission card (P2). */}
@@ -502,6 +517,112 @@ function ReceiptCard({ receipt, tools }: { receipt: any; tools: string[] }) {
 /** P2 tool-approval card: shows ONLY facts the system knows (action, exact tool
  *  name, args, one-time scope). No risk scores or invented assessments
  *  (invariant 6). Allow once -> APPROVE_TOOL re-runs the task with the grant. */
+/** P4 skill approval: allow as-is, deny, or edit-and-approve. The editor is a
+ *  plain textarea (no Monaco) with Tab->2-spaces so Python indentation is
+ *  editable; an inline line-diff shows the operator's changes vs the draft. */
+function SkillApprovalCard({
+  queueId, skillName, draft, fetchedDraft, onGetDraft, onDecide,
+}: {
+  queueId: string;
+  skillName: string;
+  draft?: string;          // rode along in the event (<=8KB)
+  fetchedDraft?: string;   // fetched via GET_SKILL_DRAFT (large)
+  onGetDraft: () => void;
+  onDecide: (queueId: string, decision: 'APPROVE' | 'REJECT', editedMarkdown?: string) => void;
+}) {
+  const original = draft ?? fetchedDraft;
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState('');
+
+  const startEdit = () => {
+    if (original === undefined) { onGetDraft(); return; } // fetch then user clicks again
+    setText(original);
+    setEditing(true);
+  };
+
+  // Tab inserts two spaces (Shift+Tab dedents) so indentation-sensitive code is
+  // editable in a plain textarea.
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key !== 'Tab') return;
+    e.preventDefault();
+    const ta = e.currentTarget;
+    const { selectionStart: s, selectionEnd: en } = ta;
+    if (e.shiftKey) {
+      const lineStart = text.lastIndexOf('\n', s - 1) + 1;
+      if (text.slice(lineStart, lineStart + 2) === '  ') {
+        const next = text.slice(0, lineStart) + text.slice(lineStart + 2);
+        setText(next);
+        requestAnimationFrame(() => { ta.selectionStart = ta.selectionEnd = Math.max(lineStart, s - 2); });
+      }
+    } else {
+      const next = text.slice(0, s) + '  ' + text.slice(en);
+      setText(next);
+      requestAnimationFrame(() => { ta.selectionStart = ta.selectionEnd = s + 2; });
+    }
+  };
+
+  const diff = editing && original !== undefined ? lineDiff(original, text) : [];
+
+  return (
+    <div className="ml-2 mt-2 max-w-3xl rounded border border-[#E24B4A]/40 bg-[#E24B4A]/5 p-3">
+      <p className="text-neutral-200">
+        Learned a new skill: <span className="font-semibold text-neutral-100">{skillName}</span> — review before it can be used.
+      </p>
+
+      {editing && (
+        <>
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={onKeyDown}
+            spellCheck={false}
+            className="mt-2 h-48 w-full resize-y rounded bg-black/50 p-2 font-mono text-[11px] text-neutral-200 focus:outline-none"
+          />
+          {diff.some((d) => d.t !== ' ') && (
+            <pre className="mt-2 max-h-40 overflow-auto rounded bg-black/40 p-2 font-mono text-[11px]">
+              {diff.map((d, k) => (
+                <div
+                  key={k}
+                  className={
+                    d.t === '+' ? 'bg-green-500/10 text-green-400'
+                    : d.t === '-' ? 'bg-[#E24B4A]/15 text-[#E24B4A]'
+                    : 'text-neutral-500'
+                  }
+                >
+                  {d.t} {d.line}
+                </div>
+              ))}
+            </pre>
+          )}
+        </>
+      )}
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          onClick={() => onDecide(queueId, 'APPROVE', editing ? text : undefined)}
+          className="rounded border border-[#E24B4A]/50 px-3 py-1 text-[11px] text-[#E24B4A] hover:bg-[#E24B4A]/15"
+        >
+          {editing ? 'Approve with edits' : 'Allow'}
+        </button>
+        {!editing && (
+          <button
+            onClick={startEdit}
+            className="rounded border border-neutral-700 px-3 py-1 text-[11px] text-neutral-300 hover:border-neutral-500"
+          >
+            {original === undefined ? 'load draft to edit' : 'Edit'}
+          </button>
+        )}
+        <button
+          onClick={() => onDecide(queueId, 'REJECT')}
+          className="rounded border border-neutral-700 px-3 py-1 text-[11px] text-neutral-400 hover:bg-neutral-800"
+        >
+          Deny
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ToolPermissionCard({
   toolName, args, onAllow, onDeny,
 }: {

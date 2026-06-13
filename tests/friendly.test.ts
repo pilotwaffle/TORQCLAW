@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { GatewayEvent } from '@torqclaw/contracts';
-import { friendlyMessage, privacyHint } from '../apps/console/src/components/friendly.js';
+import { friendlyMessage, privacyHint, lineDiff } from '../apps/console/src/components/friendly.js';
 
 function ev(partial: Partial<GatewayEvent>): GatewayEvent {
   return {
@@ -60,4 +60,29 @@ describe('privacyHint — false positives must NOT trip', () => {
   it('a short hyphenated number is not an SSN', () => expect(privacyHint('order 12-34')).toBeNull());
   it('the word "task" alone is clean', () => expect(privacyHint('write a task about skiing')).toBeNull());
   it('empty string is clean', () => expect(privacyHint('')).toBeNull());
+});
+
+describe('lineDiff (P4 skill edit)', () => {
+  it('identical text is all unchanged', () => {
+    const d = lineDiff('a\nb\nc', 'a\nb\nc');
+    expect(d.every((r) => r.t === ' ')).toBe(true);
+    expect(d.map((r) => r.line)).toEqual(['a', 'b', 'c']);
+  });
+  it('a changed middle line shows as remove + add', () => {
+    const d = lineDiff('a\nb\nc', 'a\nB\nc');
+    expect(d.filter((r) => r.t === '-').map((r) => r.line)).toContain('b');
+    expect(d.filter((r) => r.t === '+').map((r) => r.line)).toContain('B');
+    // unchanged anchors survive
+    expect(d.filter((r) => r.t === ' ').map((r) => r.line)).toEqual(['a', 'c']);
+  });
+  it('pure addition only adds', () => {
+    const d = lineDiff('a', 'a\nb');
+    expect(d.find((r) => r.t === '+')?.line).toBe('b');
+    expect(d.some((r) => r.t === '-')).toBe(false);
+  });
+  it('pure deletion only removes', () => {
+    const d = lineDiff('a\nb', 'a');
+    expect(d.find((r) => r.t === '-')?.line).toBe('b');
+    expect(d.some((r) => r.t === '+')).toBe(false);
+  });
 });

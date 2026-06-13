@@ -13,7 +13,7 @@ import { dispatch, mintGrantedRequest, emitToolDenied } from './dispatch.js';
 import { decideApproval } from './approvals.js';
 import { makeEmitter, sessionBus, persistAndPublish } from './events.js';
 import { router } from '@torqclaw/router';
-import { connectBridge, approveSkill, cancelHermesTask } from '@torqclaw/bridge';
+import { connectBridge, approveSkill, getSkillDraft, cancelHermesTask } from '@torqclaw/bridge';
 import { setCancelCheck } from '@torqclaw/inference';
 import { cancellations } from './cancellations.js';
 
@@ -110,10 +110,23 @@ app.get('/ws', { websocket: true }, (socket) => {
         break;
       }
       case 'APPROVE_SKILL': {
-        await approveSkill(cmd.data.queueId, cmd.data.decision);
+        await approveSkill(cmd.data.queueId, cmd.data.decision, cmd.data.editedMarkdown);
+        const edited = cmd.data.decision === 'APPROVE' && cmd.data.editedMarkdown !== undefined;
         makeEmitter(sid, null, null)(
-          'SYSTEM', `Skill ${cmd.data.queueId}: ${cmd.data.decision}`,
+          'SYSTEM',
+          `Skill ${cmd.data.queueId}: ${cmd.data.decision}${edited ? ' (with edits)' : ''}`,
         );
+        break;
+      }
+      case 'GET_SKILL_DRAFT': {
+        // P4: fetch a large draft's markdown and return it to the console so it
+        // can prefill its editor. Carried on a SYSTEM event keyed by queueId.
+        const draft = await getSkillDraft(cmd.data.queueId);
+        makeEmitter(sid, null, null)('SYSTEM', 'Skill draft loaded', {
+          queueId: cmd.data.queueId,
+          skillMarkdown: draft.skillMarkdown,
+          skillDraft: true,
+        });
         break;
       }
       case 'APPROVE_TOOL': {

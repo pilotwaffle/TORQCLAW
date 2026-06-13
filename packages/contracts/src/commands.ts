@@ -17,6 +17,15 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     action: z.literal('APPROVE_SKILL'),
     queueId: z.string(),
     decision: z.enum(['APPROVE', 'REJECT']),
+    // P4: approve-with-edits. Operator-edited SKILL.md to write instead of the
+    // draft. APPROVE only (a REJECT discards). Capped to keep frames sane.
+    editedMarkdown: z.string().max(100_000).optional(),
+  }),
+  z.object({
+    // P4: fetch a skill draft's full markdown when it was too large (>8KB) to
+    // ride along in the PENDING_APPROVAL event metadata.
+    action: z.literal('GET_SKILL_DRAFT'),
+    queueId: z.string(),
   }),
   z.object({
     // P2: decide a one-time tool grant. Carries NO tool name — the granted

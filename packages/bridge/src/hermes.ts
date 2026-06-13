@@ -124,12 +124,26 @@ export async function executeHermesTask(
   }
 }
 
-export async function approveSkill(queueId: string, decision: 'APPROVE' | 'REJECT') {
+export async function approveSkill(
+  queueId: string,
+  decision: 'APPROVE' | 'REJECT',
+  editedMarkdown?: string,
+) {
   const client = getClient('hermes');
-  await client.callTool({
-    name: 'decide_skill',
-    arguments: { queue_id: queueId, decision },
-  });
+  const args: Record<string, unknown> = { queue_id: queueId, decision };
+  if (decision === 'APPROVE' && editedMarkdown !== undefined) {
+    args.edited_markdown = editedMarkdown;
+  }
+  await client.callTool({ name: 'decide_skill', arguments: args });
+}
+
+/** P4: fetch a skill draft's full markdown for the console editor. */
+export async function getSkillDraft(queueId: string): Promise<{ skillMarkdown?: string; proposedName?: string }> {
+  const client = getClient('hermes');
+  const out = parseToolResult(
+    await client.callTool({ name: 'get_skill_draft', arguments: { queue_id: queueId } }),
+  );
+  return { skillMarkdown: out.skill_markdown, proposedName: out.proposed_name };
 }
 
 /** Cancel a running FRONTIER task by gateway request_id. Resolves the engine

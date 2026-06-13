@@ -37,7 +37,24 @@ def queue_skill(proposed_name: str, markdown: str, source_task_id: str | None = 
     return queue_id
 
 
-def decide(queue_id: str, decision: str) -> dict:
+def get_draft(queue_id: str) -> dict:
+    """Return a draft's full markdown — for the console to prefill its editor
+    when the draft was too large to ride in the approval event metadata."""
+    with _lock:
+        row = _conn.execute(
+            "SELECT proposed_name, skill_markdown, status FROM skill_queue WHERE queue_id=?",
+            (queue_id,),
+        ).fetchone()
+    if row is None:
+        return {"ok": False, "error": "unknown queue_id"}
+    name, markdown, status = row
+    return {"ok": True, "proposed_name": name, "skill_markdown": markdown, "status": status}
+
+
+def decide(queue_id: str, decision: str, edited_markdown: str | None = None) -> dict:
+    """Decide a queued skill. P4: APPROVE may carry edited_markdown to write
+    instead of the draft (status 'approved_edited'); a plain APPROVE writes the
+    draft as-is. edited_markdown is ignored on REJECT."""
     with _lock:
         row = _conn.execute(
             "SELECT proposed_name, skill_markdown, status FROM skill_queue WHERE queue_id=?",
@@ -48,15 +65,19 @@ def decide(queue_id: str, decision: str) -> dict:
         name, markdown, status = row
         if status != "pending":
             return {"ok": False, "error": f"already {status}"}
-        new_status = "approved" if decision == "APPROVE" else "rejected"
+        if decision == "APPROVE":
+            new_status = "approved_edited" if edited_markdown is not None else "approved"
+        else:
+            new_status = "rejected"
         _conn.execute(
             "UPDATE skill_queue SET status=? WHERE queue_id=?", (new_status, queue_id)
         )
         _conn.commit()
 
-    if new_status == "approved":
+    if new_status in ("approved", "approved_edited"):
         # Only an approved skill ever touches the Hermes skills directory.
+        content = edited_markdown if new_status == "approved_edited" else markdown
         skill_dir = SKILLS_DIR / name
         skill_dir.mkdir(parents=True, exist_ok=True)
-        (skill_dir / "SKILL.md").write_text(markdown)
+        (skill_dir / "SKILL.md").write_text(content)
     return {"ok": True, "status": new_status}
