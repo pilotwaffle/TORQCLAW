@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { truncateHeadTail } from '../packages/inference/src/ollama.js';
+import { truncateHeadTail, looksLikeRawToolCall } from '../packages/inference/src/ollama.js';
 
 describe('truncateHeadTail (P3)', () => {
   it('returns the input unchanged when it fits', () => {
@@ -40,5 +40,26 @@ describe('truncateHeadTail (P3)', () => {
     const kept = out.replace(marker, '');
     expect(kept.length).toBe(max);
     expect(headLen + tailLen).toBe(max);
+  });
+});
+
+describe('looksLikeRawToolCall — stray-JSON guard', () => {
+  it('detects the exact pattern from the live failure', () => {
+    expect(looksLikeRawToolCall('{"name": "web_search", "parameters": {"query": "foo"}}')).toBe(true);
+  });
+  it('detects arguments variant', () => {
+    expect(looksLikeRawToolCall('{"name":"read_file","arguments":{"path":"/x"}}')).toBe(true);
+  });
+  it('does not flag a real prose answer', () => {
+    expect(looksLikeRawToolCall("I don't have the tools needed for that.")).toBe(false);
+  });
+  it('does not flag valid JSON that is NOT a tool call', () => {
+    expect(looksLikeRawToolCall('{"result": "ok", "count": 3}')).toBe(false);
+  });
+  it('does not flag an empty string', () => {
+    expect(looksLikeRawToolCall('')).toBe(false);
+  });
+  it('does not flag a JSON array', () => {
+    expect(looksLikeRawToolCall('[{"name":"foo","parameters":{}}]')).toBe(false);
   });
 });

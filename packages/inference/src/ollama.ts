@@ -88,6 +88,26 @@ async function finalizeCancelled(
   }
 }
 
+/** Returns true when a model response looks like a raw tool-call JSON blob
+ *  rather than a real answer — e.g. `{"name":"web_search","parameters":{…}}`.
+ *  We check the trimmed content starts with `{` and contains a `"name"` key
+ *  paired with a `"parameters"` or `"arguments"` key. Conservative: would
+ *  rather miss an edge case than mangle a valid JSON answer. */
+export function looksLikeRawToolCall(text: string): boolean {
+  const t = text.trim();
+  if (!t.startsWith('{')) return false;
+  try {
+    const obj = JSON.parse(t);
+    return (
+      typeof obj === 'object' && obj !== null &&
+      typeof obj.name === 'string' &&
+      ('parameters' in obj || 'arguments' in obj)
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function executeLocalEdge(
   req: GatewayRequest,
   emit: Emitter,
@@ -153,7 +173,19 @@ export async function executeLocalEdge(
     messages.push(message);
 
     if (!message.tool_calls || message.tool_calls.length === 0) {
-      return done(message.content ?? '', start, iterations, toolCallCount);
+      // Guard: small models sometimes emit a raw JSON tool-call blob as prose
+      // instead of firing the tool (e.g. `{"name":"web_search","parameters":{…}}`).
+      // If the only content looks like a stray tool call, replace it with an
+      // honest fallback rather than returning fabricated JSON to the user.
+      const content = message.content ?? '';
+      if (looksLikeRawToolCall(content)) {
+        return done(
+          "I don't have the tools needed to complete that request on the local model. " +
+          'Try switching to Cloud mode, or ask something the local model can answer directly.',
+          start, iterations, toolCallCount,
+        );
+      }
+      return done(content, start, iterations, toolCallCount);
     }
 
     for (const toolCall of message.tool_calls) {
