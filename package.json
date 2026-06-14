@@ -14,6 +14,8 @@
     "engine:setup": "cd engines/hermes_kernel && uv sync && git submodule update --init --recursive",
     "model:setup": "ollama create torq-local -f ops/Modelfile",
     "stats": "node ops/stats.mjs",
+    "bench": "node --env-file=.env ops/bench.mjs",
+    "bench:quick": "node --env-file=.env ops/bench.mjs --quick --no-score",
     "test": "vitest run"
   },
   "devDependencies": {
