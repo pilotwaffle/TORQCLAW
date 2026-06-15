@@ -37,6 +37,13 @@ console.log('=== engine reachable — starting gateway + console ===');
 launch('node', ['dist/server.js'], `${ROOT}packages/gateway`, 'gateway');
 launch(NPX, ['next', 'dev', '-p', '3000'], `${ROOT}apps/console`, 'console');
 
+// Optional HTTP channel adapter (role:'channel'). Off by default — set
+// TORQCLAW_HTTP_CHANNEL=1 to expose POST /task at :18792. Demonstrates the
+// multi-channel architecture: an external surface bridged to the same gateway.
+if (process.env.TORQCLAW_HTTP_CHANNEL === '1') {
+  launch('node', ['dist/server.js'], `${ROOT}packages/channel-http`, 'http-channel');
+}
+
 const shutdown = () => { procs.forEach((p) => p.kill()); process.exit(0); };
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

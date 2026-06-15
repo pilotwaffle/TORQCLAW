@@ -76,6 +76,25 @@ importers:
         specifier: ^22
         version: 22.19.21
 
+  packages/channel-http:
+    dependencies:
+      '@torqclaw/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      fastify:
+        specifier: ^5.0.0
+        version: 5.8.5
+      ws:
+        specifier: ^8
+        version: 8.21.0
+    devDependencies:
+      '@types/node':
+        specifier: ^22
+        version: 22.19.21
+      '@types/ws':
+        specifier: ^8.5.0
+        version: 8.18.1
+
   packages/contracts:
     dependencies:
       zod:

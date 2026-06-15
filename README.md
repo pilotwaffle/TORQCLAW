@@ -57,6 +57,7 @@ Hermes learning paradigm, with the weaknesses of both engineered out.
 | `packages/gateway` | Fastify WS server (`:18790`), session engine, SQLite+FTS5 memory, dispatch |
 | `packages/inference` | LOCAL_EDGE Ollama tool loop (defensive parse, result caps, finalization pass) |
 | `packages/bridge` | Multi-server MCP client, `server__tool` namespacing, task-based filtering, approval policy |
+| `packages/channel-http` | HTTP channel adapter — bridges `POST /task` to the gateway via the `role: 'channel'` seat |
 | `apps/console` | Next.js TORQ terminal (reconnect, seq replay, skill approval) |
 | `engines/hermes_kernel` | Streamable-HTTP MCP wrapper over vendored `hermes-agent` |
 
@@ -193,6 +194,36 @@ then runs. **Deny** ends with a terminal `ERROR`. The blocked attempt writes no
 
 `grantedTools` lives only on the internal `GatewayRequest` — a client
 `SUBMIT_PROMPT` cannot inject it.
+
+## Channels
+
+The console is one client. The `ConnectFrame` contract reserves three roles —
+`operator` (the console), `channel` (an external surface like HTTP/Slack/
+Discord), and `node` (a future compute peer) — so any number of surfaces can
+drive the same gateway, sessions, routing, and safety gates.
+
+The first non-console channel ships in `packages/channel-http`: a plain HTTP
+adapter. It connects to the gateway as `role: 'channel'`, submits the prompt,
+waits for the single terminal event (invariant 7), and returns it as JSON.
+
+```bash
+TORQCLAW_HTTP_CHANNEL=1 node --env-file=.env ops/dev-up.mjs   # adds :18792
+
+curl -s localhost:18792/task -H 'content-type: application/json' \
+  -d '{"prompt":"research MCP gateway namespacing and compare the options"}'
+# → {"ok":true,"tier":"cloud","answer":"…","sessionId":"…"}
+```
+
+Pass `sessionId` back on the next call to keep multi-turn context; set
+`executionMode`/`sensitive`/`maxCostUsd` exactly like the console controls. A
+task that needs interactive tool approval returns `202 pending_approval` —
+a headless channel can't click a permission card, so it says so honestly rather
+than pretending the tool ran. Front-door auth via `CHANNEL_HTTP_TOKEN` (Bearer);
+the adapter's own gateway auth is the separate `TORQCLAW_GATEWAY_TOKEN`.
+
+`packages/channel-http/src/gatewayClient.ts` is the reusable bridge core — a
+Slack or Discord adapter swaps only the transport layer and keeps the same
+connect → submit → await-terminal logic.
 
 ## Design invariants
 

@@ -1,0 +1,21 @@
+{
+  "name": "@torqclaw/channel-http",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/server.js",
+  "types": "dist/server.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@torqclaw/contracts": "workspace:*",
+    "fastify": "^5.0.0",
+    "ws": "^8"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/ws": "^8.5.0"
+  }
+}
