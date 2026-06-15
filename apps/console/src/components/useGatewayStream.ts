@@ -78,10 +78,24 @@ export function useGatewayStream(url: string, token: string) {
     };
   }, [connect]);
 
-  const sendCommand = useCallback((command: ClientCommand) => {
-    const validated = ClientCommandSchema.parse(command); // client obeys contracts too
+  // Returns true if the command was actually sent. A dropped send (socket not
+  // OPEN, or schema-invalid command) returns false instead of failing silently
+  // so callers — notably the stop button — can tell the user it didn't land.
+  const sendCommand = useCallback((command: ClientCommand): boolean => {
+    let validated: ClientCommand;
+    try {
+      validated = ClientCommandSchema.parse(command); // client obeys contracts too
+    } catch (err) {
+      console.error('sendCommand: invalid command dropped', err);
+      return false;
+    }
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(validated));
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(validated));
+      return true;
+    }
+    console.warn('sendCommand: socket not open, command dropped', validated.action);
+    return false;
   }, []);
 
   return { events, isConnected, sendCommand };

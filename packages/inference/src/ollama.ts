@@ -108,6 +108,31 @@ export function looksLikeRawToolCall(text: string): boolean {
   }
 }
 
+/** Detects FABRICATED tool execution woven into a prose answer — the dangerous
+ *  failure mode where a small local model writes its own fake "Tool output:"
+ *  blocks and embedded tool-call JSON, narrating a tool run that never happened.
+ *  (Seen live: a model invented an entire fake codebase + fake file contents.)
+ *
+ *  This is stricter than looksLikeRawToolCall (which only catches a response
+ *  that IS a single tool-call blob): here we look for the tell-tale pair of
+ *  (a) a fenced or inline tool-call object with name+parameters/arguments AND
+ *  (b) a fabricated-output marker. Requiring BOTH keeps false positives low —
+ *  a genuine answer that merely mentions JSON won't trip it. Returns true only
+ *  when the model is clearly role-playing tool execution. */
+export function looksLikeFabricatedToolRun(text: string): boolean {
+  // (a) an embedded tool-call object: "name":"x" ... "parameters"|"arguments"
+  const hasEmbeddedCall =
+    /"name"\s*:\s*"[^"]+"/.test(text) &&
+    /"(?:parameters|arguments)"\s*:/.test(text);
+  if (!hasEmbeddedCall) return false;
+  // (b) a fabricated tool-output / result marker the model wrote itself
+  const hasFakeOutput =
+    /\bTool output\s*:/i.test(text) ||
+    /\bTool result\s*:/i.test(text) ||
+    /```[a-z]*\s*\n[\s\S]*?```[\s\S]*"(?:parameters|arguments)"/.test(text);
+  return hasFakeOutput;
+}
+
 export async function executeLocalEdge(
   req: GatewayRequest,
   emit: Emitter,
@@ -137,7 +162,11 @@ export async function executeLocalEdge(
         'JSON results, status objects, or queue messages yourself — that is ' +
         'fabrication. Wait for the actual tool result.\n' +
         '3. If no tool can do what the user asks, say so plainly. Do not pretend.\n' +
-        '4. Answer only from real tool results or your own knowledge — never invent data.\n\n' +
+        '4. Answer only from real tool results or your own knowledge — never invent data.\n' +
+        '5. NEVER write a line like "Tool output:" or "Tool result:" followed by ' +
+        'made-up content, and never quote file contents, code, or data you have ' +
+        'not actually received from a real tool result. If you have not received ' +
+        'a tool result, you do not know what it would say.\n\n' +
         `AVAILABLE TOOLS:\n${toolList}` +
         (context ? `\n\n${context}` : ''),
     },
@@ -182,6 +211,20 @@ export async function executeLocalEdge(
         return done(
           "I don't have the tools needed to complete that request on the local model. " +
           'Try switching to Cloud mode, or ask something the local model can answer directly.',
+          start, iterations, toolCallCount,
+        );
+      }
+      // Stronger guard: the model narrated FAKE tool execution (invented
+      // "Tool output:" blocks + embedded tool-call JSON) instead of really
+      // calling a tool. Returning that would show the user fabricated results
+      // dressed up as real ones — worse than an honest refusal. Replace it.
+      if (looksLikeFabricatedToolRun(content)) {
+        emit('SYSTEM', 'Discarded a fabricated tool run from the local model');
+        return done(
+          'The local model started inventing tool results instead of running real ' +
+          'tools, so I stopped and discarded that answer. Switch to Cloud mode for ' +
+          'this task, or rephrase it so the local model can answer from its own ' +
+          'knowledge without tools.',
           start, iterations, toolCallCount,
         );
       }

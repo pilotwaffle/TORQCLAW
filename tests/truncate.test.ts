@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { truncateHeadTail, looksLikeRawToolCall } from '../packages/inference/src/ollama.js';
+import {
+  truncateHeadTail,
+  looksLikeRawToolCall,
+  looksLikeFabricatedToolRun,
+} from '../packages/inference/src/ollama.js';
 
 describe('truncateHeadTail (P3)', () => {
   it('returns the input unchanged when it fits', () => {
@@ -61,5 +65,43 @@ describe('looksLikeRawToolCall — stray-JSON guard', () => {
   });
   it('does not flag a JSON array', () => {
     expect(looksLikeRawToolCall('[{"name":"foo","parameters":{}}]')).toBe(false);
+  });
+});
+
+describe('looksLikeFabricatedToolRun — interleaved-fabrication guard', () => {
+  it('catches the live TradingView fabrication (fake call + fake Tool output)', () => {
+    const fabricated =
+      'Let me read the file:\n' +
+      '```\n{"name": "filesystem__read_text_file", "parameters": {"path": "C:\\\\x\\\\tv.py"}}\n```\n' +
+      'Tool output:\n```python\ndef tv_get_bars(symbol): ...\n```\n' +
+      'Based on this output, we can connect to TradingView.';
+    expect(looksLikeFabricatedToolRun(fabricated)).toBe(true);
+  });
+
+  it('catches a fake "Tool result:" narration with an embedded call', () => {
+    const fabricated =
+      'I will list the directory: {"name":"filesystem__list_directory","arguments":{"path":"/w"}} ' +
+      'Tool result: [FILE] a.py [FILE] b.py';
+    expect(looksLikeFabricatedToolRun(fabricated)).toBe(true);
+  });
+
+  it('does NOT flag a real answer that merely mentions tools or JSON', () => {
+    expect(looksLikeFabricatedToolRun(
+      'You can call the filesystem tool with a "path" argument to read files.',
+    )).toBe(false);
+  });
+
+  it('does NOT flag prose with an embedded call but NO fabricated output', () => {
+    // A bare embedded call (no fake "Tool output") is handled by the
+    // raw-tool-call guard, not this stricter one — avoid double-tripping.
+    expect(looksLikeFabricatedToolRun(
+      'Maybe I should run {"name":"x","parameters":{}} next.',
+    )).toBe(false);
+  });
+
+  it('does NOT flag a normal explanatory answer', () => {
+    expect(looksLikeFabricatedToolRun(
+      'The three laws of thermodynamics describe energy conservation, entropy, and absolute zero.',
+    )).toBe(false);
   });
 });

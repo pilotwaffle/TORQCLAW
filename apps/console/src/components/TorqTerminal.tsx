@@ -68,6 +68,10 @@ export default function TorqTerminal() {
   const [controls, setControls] = useState<Controls>(DEFAULT_CONTROLS);
   const [hintDismissed, setHintDismissed] = useState(false);
   const [decided, setDecided] = useState<Record<string, 'APPROVE' | 'REJECT'>>({});
+  // Stop-button UX: 'requested' once a cancel is sent (button shows "stopping…"),
+  // 'failed' if the send was dropped so the user knows to retry. Cleared when the
+  // next task starts.
+  const [stopState, setStopState] = useState<'idle' | 'requested' | 'failed'>('idle');
 
   // P4: full skill-draft markdown fetched via GET_SKILL_DRAFT, keyed by queueId.
   const draftsByQueue = useMemo(() => {
@@ -139,6 +143,7 @@ export default function TorqTerminal() {
     if (!prompt) return;
     sendCommand(buildSubmit(prompt, controls));
     setInput('');
+    setStopState('idle'); // a fresh run clears any prior stop feedback
   };
 
   const resendLocal = (prompt: string) => {
@@ -173,7 +178,14 @@ export default function TorqTerminal() {
   };
 
   const stop = () => {
-    if (activeRequestId) sendCommand({ action: 'CANCEL_TASK', taskId: activeRequestId });
+    if (!activeRequestId) {
+      // No tracked task to cancel — the run is between requests or already
+      // finishing. Surface it rather than appear to do nothing.
+      setStopState('failed');
+      return;
+    }
+    const sent = sendCommand({ action: 'CANCEL_TASK', taskId: activeRequestId });
+    setStopState(sent ? 'requested' : 'failed');
   };
 
   // P4: approve a skill, optionally with edited markdown.
@@ -237,14 +249,22 @@ export default function TorqTerminal() {
         ))}
         {busy && (
           <p className="flex items-center gap-3 px-2 py-1 text-neutral-500">
-            <span className="inline-block animate-pulse">working…</span>
+            <span className="inline-block animate-pulse">
+              {stopState === 'requested' ? 'stopping…' : 'working…'}
+            </span>
             <Elapsed />
             <button
               onClick={stop}
-              className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] uppercase tracking-widest text-neutral-400 transition-colors hover:border-[#E24B4A]/60 hover:text-[#E24B4A]"
+              disabled={stopState === 'requested'}
+              className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] uppercase tracking-widest text-neutral-400 transition-colors hover:border-[#E24B4A]/60 hover:text-[#E24B4A] disabled:opacity-40 disabled:hover:border-neutral-700 disabled:hover:text-neutral-400"
             >
-              stop
+              {stopState === 'requested' ? 'stopping' : 'stop'}
             </button>
+            {stopState === 'failed' && (
+              <span className="text-[10px] text-amber-400">
+                couldn’t send stop — connection may be reconnecting; try again
+              </span>
+            )}
           </p>
         )}
       </div>

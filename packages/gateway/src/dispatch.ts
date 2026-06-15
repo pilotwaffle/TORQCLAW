@@ -22,6 +22,10 @@ function humanizeError(raw: string, tier?: ComputeTier): string {
     return 'Cloud provider rejected the request — check your account credit/billing. (original: ' + raw.slice(0, 120) + ')';
   if (s.includes('429') || s.includes('rate limit'))
     return 'Cloud provider rate-limited the request — wait a moment and retry.';
+  // 404 / model-not-found almost always means a wrong base_url or model id in
+  // the provider config — not a transient failure. Point at the config.
+  if (s.includes('404') || s.includes('not be found') || s.includes('not found') || s.includes('model_not_found'))
+    return 'Cloud provider returned 404 — the model id or base URL is likely misconfigured for this task type. Check the HERMES_* (or HERMES_CODING_* for coding tasks) provider settings. (original: ' + raw.slice(0, 120) + ')';
   if (s === 'fetch failed' || s.includes('fetch failed'))
     return 'Cloud request failed mid-run — usually a provider credit/billing limit or a dropped connection. Check your account, then retry.';
   return raw;
