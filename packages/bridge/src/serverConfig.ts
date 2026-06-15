@@ -35,6 +35,12 @@ const ServerEntrySchema = z.object({
   }).optional(),
   /** P5: which tool-arg keys hold path-like values (precise scope enforcement). */
   pathArgKeys: z.array(z.string()).optional(),
+  /** Optional raw-tool-name allowlist. When set, ONLY these tools are registered
+   *  from this server — the rest are dropped. Essential for big servers (e.g. a
+   *  TradingView MCP with 80+ tools) whose full schema set would overflow the
+   *  local 8K context window. Names are the server's own (un-namespaced) tool
+   *  names. Omit to register everything. */
+  tools: z.array(z.string()).optional(),
   enabled: z.boolean().default(true),
 });
 
@@ -72,5 +78,6 @@ export function loadServerConfigs(): ServerConfig[] {
       approvalPatterns: s.approvalPatterns?.map((p) => new RegExp(p, 'i')),
       paths: s.paths,
       pathArgKeys: s.pathArgKeys,
+      tools: s.tools,
     }));
 }

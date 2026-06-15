@@ -4,11 +4,11 @@ import { getRegistry, type RegisteredTool } from './registry.js';
 /** Task -> tool prefix allowlist. Defeats schema bloat: with 10+ servers the
  *  full registry is 40-100KB of schemas — fatal for an 8k local window. */
 const TOOL_ROUTING_MAP: Record<TaskType, string[]> = {
-  DATA_EXTRACTION: ['db__', 'filesystem__'],
+  DATA_EXTRACTION: ['db__', 'filesystem__', 'tradingview__'],
   SUMMARIZATION: ['filesystem__'],
-  ROUTINE_AUTOMATION: ['filesystem__', 'scheduler__'],
+  ROUTINE_AUTOMATION: ['filesystem__', 'scheduler__', 'tradingview__'],
   COMPLEX_CODING: ['filesystem__', 'github__', 'sandbox__'],
-  AUTONOMOUS_RESEARCH: ['websearch__', 'filesystem__'],
+  AUTONOMOUS_RESEARCH: ['websearch__', 'filesystem__', 'tradingview__'],
 };
 
 export function predictTools(taskType: TaskType): string[] {

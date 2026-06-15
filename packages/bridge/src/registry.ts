@@ -30,6 +30,9 @@ export interface ServerConfig {
   paths?: PathScope;
   /** P5: arg keys holding path-like values (hint for scope enforcement). */
   pathArgKeys?: string[];
+  /** Raw-tool-name allowlist. When set, only these tools register (the rest are
+   *  dropped) — keeps a large server from overflowing the local context window. */
+  tools?: string[];
 }
 
 const clients = new Map<string, Client>();
@@ -56,7 +59,11 @@ export async function connectServer(cfg: ServerConfig): Promise<void> {
 
   const { tools } = await client.listTools();
   const patterns = cfg.approvalPatterns ?? DEFAULT_WRITE_PATTERNS;
-  for (const t of tools) {
+  // Optional allowlist: register only the named tools. Drops the rest so a
+  // large server (80+ tools) can't overflow the local context window.
+  const allow = cfg.tools ? new Set(cfg.tools) : null;
+  const selected = allow ? tools.filter((t) => allow.has(t.name)) : tools;
+  for (const t of selected) {
     registry.push({
       name: `${cfg.id}__${t.name}`,
       rawName: t.name,
@@ -68,7 +75,8 @@ export async function connectServer(cfg: ServerConfig): Promise<void> {
       pathArgKeys: cfg.pathArgKeys,
     });
   }
-  console.log(`[bridge] ${cfg.id}: registered ${tools.length} tools`);
+  const note = allow ? ` (allowlisted from ${tools.length})` : '';
+  console.log(`[bridge] ${cfg.id}: registered ${selected.length} tools${note}`);
 }
 
 export function getRegistry(): RegisteredTool[] {

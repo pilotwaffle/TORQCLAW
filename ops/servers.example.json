@@ -19,6 +19,13 @@
       "id": "github",
       "transport": { "type": "streamable-http", "url": "https://api.githubcopilot.com/mcp/", "token": "ghp_..." },
       "enabled": false
+    },
+    {
+      "id": "tradingview",
+      "transport": { "type": "stdio", "command": "node", "args": ["/path/to/tradingview-mcp/src/server.js"] },
+      "tools": ["quote_get", "symbol_info", "data_get_ohlcv"],
+      "approvalPatterns": ["create", "delete", "set_", "draw_", "alert_"],
+      "enabled": false
     }
   ]
 }

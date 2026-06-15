@@ -12,3 +12,6 @@ __pycache__/
 .venv/
 packages/contracts/generated/
 engines/hermes_kernel/mcp_wrapper/schemas/
+
+# dev-up captured logs (temp)
+ops/_devup*.log

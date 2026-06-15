@@ -149,6 +149,18 @@ unreachable server degrades that server only, never the gateway. Update
 `TOOL_ROUTING_MAP` in `packages/bridge/src/toolFilter.ts` to expose new
 namespaces to the task types that need them.
 
+A `"tools": [...]` allowlist registers **only** the named (un-namespaced) tools
+from a server and drops the rest. Essential for big servers — a TradingView MCP
+exposes 80+ tools whose full schema set would overflow the local 8K context
+window; allowlisting the handful you need (e.g. `quote_get`, `symbol_info`)
+keeps LOCAL_EDGE runs viable and the model focused. Omit to register everything.
+
+> **Tier note:** bridge-registered MCP servers feed the **LOCAL_EDGE** loop.
+> The **FRONTIER** tier runs the Hermes engine's own toolsets (web/files/etc.),
+> so a task that must use a bridge tool (like TradingView) should run
+> `LOCAL_ONLY` (the "This machine only" mode) — otherwise prefer-cloud routes it
+> to FRONTIER, which can't see the bridge server.
+
 ### Workspace path scoping (P5)
 
 A server entry may declare a filesystem scope, enforced in the bridge **before**
