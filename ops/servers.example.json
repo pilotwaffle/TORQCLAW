@@ -23,7 +23,7 @@
     {
       "id": "tradingview",
       "transport": { "type": "stdio", "command": "node", "args": ["/path/to/tradingview-mcp/src/server.js"] },
-      "tools": ["quote_get", "symbol_info", "data_get_ohlcv"],
+      "tools": ["quote_get", "symbol_info", "data_get_ohlcv", "chart_set_symbol"],
       "approvalPatterns": ["create", "delete", "set_", "draw_", "alert_"],
       "enabled": false
     }

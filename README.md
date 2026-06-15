@@ -155,6 +155,12 @@ exposes 80+ tools whose full schema set would overflow the local 8K context
 window; allowlisting the handful you need (e.g. `quote_get`, `symbol_info`)
 keeps LOCAL_EDGE runs viable and the model focused. Omit to register everything.
 
+> **Stateful-server gotcha:** some MCP servers report on *current state*, not a
+> queried target. The TradingView `quote_get` reads whatever symbol the desktop
+> chart currently shows — passing `symbol` only labels the output. To quote a
+> specific instrument, allowlist `chart_set_symbol` too so the agent switches the
+> chart first, then quotes. (That write tool gates for approval on LOCAL_EDGE.)
+
 > **Tier note:** bridge-registered MCP servers feed the **LOCAL_EDGE** loop.
 > The **FRONTIER** tier runs the Hermes engine's own toolsets (web/files/etc.),
 > so a task that must use a bridge tool (like TradingView) should run
