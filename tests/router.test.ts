@@ -55,6 +55,32 @@ describe('router rule hierarchy', () => {
     expect(d.reason).not.toMatch(/^LOCAL_INTENT/);
   });
 
+  it("RULE 1b': local-tool intent forces LOCAL_EDGE (TradingView lives only on the bridge)", () => {
+    const r = new TorqClawRouter();
+    for (const prompt of [
+      'use local TV and get btc price',
+      'use my local tradingview to get the ETH price',
+      'pull the price from the local TV chart',
+      'get a quote using the local tradingview tool',
+    ]) {
+      const d = r.evaluateRequest(makeRequest({ prompt, classifierConfidence: 0.3 }));
+      expect(d.tier, prompt).toBe(ComputeTier.LOCAL_EDGE);
+      expect(d.reason, prompt).toMatch(/^LOCAL_TOOL_INTENT/);
+    }
+  });
+
+  it("RULE 1b' does NOT trip on unrelated 'local' phrasing", () => {
+    const r = new TorqClawRouter();
+    // "local news", "local time" etc. must NOT force local — no tool keyword.
+    for (const prompt of [
+      'what is the local news today',
+      'find a local restaurant near me',
+    ]) {
+      const d = r.evaluateRequest(makeRequest({ prompt, classifierConfidence: 0.9, taskType: 'AUTONOMOUS_RESEARCH' }));
+      expect(d.reason, prompt).not.toMatch(/^LOCAL_TOOL_INTENT/);
+    }
+  });
+
   it('RULE 1.5: low classifier confidence buys FRONTIER', () => {
     const r = new TorqClawRouter();
     const d = r.evaluateRequest(makeRequest({ classifierConfidence: 0.4 }));

@@ -20,6 +20,16 @@ import {
 const LOCAL_INTENT =
   /\b(local agent|local model|on[- ]device|this machine|on this machine|local edge|locally|(train|fine[- ]?tune|improve|teach).{0,30}\b(local|agent|model|on[- ]device))\b/i;
 
+/** "local <thing>" where <thing> is a local-only integration (TradingView, a
+ *  desktop app, a local tool/server). These tools live ONLY on the LOCAL_EDGE
+ *  bridge — the FRONTIER engine can't see them — so a prompt asking to use the
+ *  "local TV" or "local tradingview" MUST route local or it silently falls back
+ *  to web scraping (the live failure: "use local TV and get btc price" went to
+ *  cloud and scraped Yahoo). Matches "local" within a few words of the keyword
+ *  so "use my local TV", "local tradingview", "the local TV chart" all fire. */
+const LOCAL_TOOL_INTENT =
+  /\blocal\b.{0,20}\b(tv|trading\s*view|chart|desktop app|mcp|tool|server)\b/i;
+
 export class TorqClawRouter {
   private isLocalModelWarm: boolean;
   private warmTimer: ReturnType<typeof setTimeout> | null = null;
@@ -66,6 +76,18 @@ export class TorqClawRouter {
       return {
         score: 0,
         reason: 'LOCAL_INTENT: task targets the local agent/machine; keeping it local.',
+        tier: ComputeTier.LOCAL_EDGE,
+      };
+    }
+
+    // RULE 1b': Local-TOOL intent. "use local TV / local tradingview / local
+    // tool" names an integration that lives only on the LOCAL_EDGE bridge; the
+    // FRONTIER engine can't reach it, so it must route local (else it silently
+    // web-scrapes a substitute). Same force as LOCAL_INTENT, beats the bounce.
+    if (LOCAL_TOOL_INTENT.test(req.payload.prompt)) {
+      return {
+        score: 0,
+        reason: 'LOCAL_TOOL_INTENT: prompt names a local-only tool/integration; keeping it local.',
         tier: ComputeTier.LOCAL_EDGE,
       };
     }
