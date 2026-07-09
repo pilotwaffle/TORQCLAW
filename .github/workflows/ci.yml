@@ -6,16 +6,23 @@ on:
       - master
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ci:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
@@ -24,6 +31,33 @@ jobs:
 
       - run: pnpm --filter @torqclaw/contracts build
 
+      - run: pnpm contracts:check
+
       - run: pnpm typecheck
 
       - run: pnpm test
+
+      - uses: astral-sh/setup-uv@v8
+
+      - run: uv sync
+        working-directory: engines/hermes_kernel
+
+      - run: pnpm build
+
+      - name: e2e - one-shot prompt
+        run: node ops/e2e.mjs
+
+      - name: e2e - approval flow (local edge)
+        run: node ops/e2e-approval.mjs
+
+      - name: e2e - approval flow (frontier/cloud)
+        run: node ops/e2e-approval-cloud.mjs
+
+      - name: e2e - cancel task
+        run: node ops/e2e-cancel.mjs
+
+      - name: e2e - budget circuit breaker
+        run: node ops/e2e-budget.mjs
+
+      - name: e2e - http channel adapter
+        run: node ops/e2e-channel.mjs
