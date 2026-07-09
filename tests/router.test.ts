@@ -176,6 +176,9 @@ describe('route explanation fields (TCLAW-2A)', () => {
     overridable: boolean;
     safetyLock: string | undefined;
     reasonPrefix: RegExp;
+    /** Fixed non-zero score for rules with a constant score; omitted for the
+     *  variable HEURISTIC_EVAL rule and the score-0 lock rules. */
+    expectedScore?: number;
     build: () => ReturnType<TorqClawRouter['evaluateRequest']>;
   };
 
@@ -222,6 +225,7 @@ describe('route explanation fields (TCLAW-2A)', () => {
       overridable: true,
       safetyLock: undefined,
       reasonPrefix: /^LOW_CLASSIFIER_CONFIDENCE/,
+      expectedScore: 75,
       build: () => new TorqClawRouter().evaluateRequest(makeRequest({ classifierConfidence: 0.4 })),
     },
     {
@@ -230,6 +234,7 @@ describe('route explanation fields (TCLAW-2A)', () => {
       overridable: true,
       safetyLock: undefined,
       reasonPrefix: /^TOOL_COUNT_OVERFLOW/,
+      expectedScore: 100,
       build: () => new TorqClawRouter().evaluateRequest(makeRequest({ requiredTools: ['a', 'b', 'c', 'd'] })),
     },
     {
@@ -238,6 +243,7 @@ describe('route explanation fields (TCLAW-2A)', () => {
       overridable: true,
       safetyLock: undefined,
       reasonPrefix: /^LATENCY_CRITICAL/,
+      expectedScore: 90,
       build: () => new TorqClawRouter(false).evaluateRequest(makeRequest({ latencySensitivity: 'HIGH' })),
     },
     {
@@ -279,6 +285,16 @@ describe('route explanation fields (TCLAW-2A)', () => {
   it.each(fixtures)('$name: profile stays undefined', ({ build }) => {
     expect(build().profile).toBeUndefined();
   });
+
+  // Pin the fixed non-zero score constants (75/90/100) so an accidental score
+  // edit on these rules is caught — closes a test-strength gap G2A found where
+  // the score field for the FRONTIER rules was only range-asserted.
+  it.each(fixtures.filter((f) => f.expectedScore !== undefined))(
+    '$name: score is exactly $expectedScore',
+    ({ build, expectedScore }) => {
+      expect(build().score).toBe(expectedScore);
+    },
+  );
 
   it.each(fixtures)('$name: reason is still populated with the expected prefix (preserved)', ({ build, reasonPrefix }) => {
     const d = build();
