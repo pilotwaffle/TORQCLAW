@@ -9,10 +9,22 @@ export function isTerminal(ev: { type?: string }): boolean {
   return typeof ev.type === 'string' && TERMINAL_TYPES.has(ev.type);
 }
 
+/** Resolve the upstream gateway token the adapter presents to the gateway.
+ *  Unset means unset — an empty string, never a hardcoded literal like 'dev'.
+ *  An empty token is accepted only when the gateway itself runs tokenless
+ *  (loopback dev mode); once the gateway has a real token, an unconfigured
+ *  adapter fails auth cleanly rather than sending a guessable default. Pure and
+ *  exported so the invariant is unit-testable without importing the Fastify
+ *  server (which binds a port at import). (TCLAW-0F) */
+export function resolveGatewayToken(env: NodeJS.ProcessEnv = process.env): string {
+  return env.TORQCLAW_GATEWAY_TOKEN || '';
+}
+
 export interface SubmitOptions {
   /** ws://host:port/ws of the gateway. */
   url: string;
-  /** Gateway auth token (TORQCLAW_GATEWAY_TOKEN; '' / 'dev' in loopback dev). */
+  /** Gateway auth token (TORQCLAW_GATEWAY_TOKEN; empty string in loopback dev,
+   *  never a hardcoded literal). */
   token: string;
   /** Resume an existing TorqClaw session; omit to start a fresh one. A channel
    *  maps its own conversation key (Slack thread, REST session header) to this
