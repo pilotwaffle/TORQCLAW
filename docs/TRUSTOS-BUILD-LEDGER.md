@@ -88,3 +88,16 @@ Role mapping note: G1R and G2A run as independent Opus instances; GLM-5.2 (RB) u
 - G2A result (independent Opus 4.8): PASS — merge-ready. Reconstructed old-vs-new logic as a truth table over {number,null,undefined,NaN,string} x {budget undefined,0,1} x interval x cost-change; confirmed semantically identical on every cell; no parallel copy; teeth-check (flip > to >=) broke exactly the boundary test, proving non-vacuous. 2 info notes (NaN heartbeat cosmetics pre-existing/preserved; test-seam widening acceptable) — non-blocking.
 - next ticket: TCLAW-0F (token hygiene) then TCLAW-0E (Python test suite, gates CI v2).
 - blockers: operator merge approval.
+
+### TCLAW-0F — token hygiene
+
+- date: 2026-07-09
+- branch: ticket/tclaw-0f-token-hygiene @ a4a7b52 -> PR (base master). NOT merged — awaiting operator approval.
+- ticket: TCLAW-0F (PRD §9.0.2). Conservation mode (self-implemented); touches auth-token handling so independent Opus G2A mandatory and NOT skipped.
+- what changed (3 files): channel-http adapter's upstream gateway token no longer defaults to the literal 'dev' when TORQCLAW_GATEWAY_TOKEN is unset. gatewayClient.ts adds pure exported resolveGatewayToken(env) returning TORQCLAW_GATEWAY_TOKEN || '' (matches the gateway's own || '' convention); server.ts calls it (production path == tested unit); tests/channel-http.test.ts +4 token tests. Two remaining 'dev' strings in channel-http src are comments documenting the removed behavior.
+- security reasoning (G2A gate): '' is >= 'dev' in safety across all 4 config cases {gateway token set/unset} x {adapter set/unset} — never weaker, strictly safer when the gateway has a real token (old 'dev' could auth against a gateway whose token was literally 'dev'; '' never masquerades as a plausible secret). No server/engine code ever treated 'dev' as valid; both '' and 'dev' only ever worked via the tokenless-gateway-accepts-all dev-mode branch.
+- completeness: channel adapter was the ONLY production upstream-token 'dev' default. Gateway's own GATEWAY_TOKEN was already || '' (out of scope). ops/*.mjs e2e scripts still hardcode client-side || 'dev' — harmless (rely on tokenless dev gateway), logged as a future test-hygiene candidate, out of 0F scope.
+- tests/checks: typecheck 12/12; pnpm test 293/293 (+4); contracts:check 0; build 7/7; e2e-channel exit 0 (adapter sends '' to tokenless dev gateway, full HTTP 200 round-trip). NOTE: first local e2e-channel run failed 'ws not up' — environmental cold-start of the operator's real ~/.torqclaw/servers.json (filesystem+tradingview MCP), NOT a regression; passed on retry once servers warmed; G2A confirmed pass twice on a clean machine.
+- G2A result (independent Opus 4.8): PASS — merge-ready. 4-case security matrix, completeness grep, teeth-check (revert to 'dev' broke 3 of 4 new tests). 1 info note (ops client-side 'dev', non-blocking).
+- next ticket: TCLAW-0E (Python test suite bootstrap — full G1R scope, unlocks CI v2). Last Phase-0 ticket.
+- blockers: operator merge approval.
