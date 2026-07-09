@@ -10,7 +10,12 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 // Import from dist (tsc runs first in the build script): the NodeNext-style
 // `.js` extension imports inside src/ don't resolve under --experimental-strip-types.
-import { GatewayRequestSchema, GatewayEventSchema, ClientCommandSchema } from '../dist/index.js';
+import {
+  GatewayRequestSchema,
+  GatewayEventSchema,
+  ClientCommandSchema,
+  ConnectFrameSchema,
+} from '../dist/index.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const targets = [
@@ -22,6 +27,7 @@ const artifacts: Record<string, z.ZodType> = {
   GatewayRequest: GatewayRequestSchema,
   GatewayEvent: GatewayEventSchema,
   ClientCommand: ClientCommandSchema,
+  ConnectFrame: ConnectFrameSchema,
 };
 
 for (const dir of targets) {

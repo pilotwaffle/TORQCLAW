@@ -1,0 +1,27 @@
+{
+  "id": "11e2d3c4-5b6a-4f7e-8d9c-0a1b2c3d4e5f",
+  "sessionId": "22f3e4d5-6c7b-4a8f-9e0d-1b2c3d4e5f6a",
+  "sourceChannel": "slack",
+  "receivedAt": "2026-07-08T14:32:05.123Z",
+  "payload": {
+    "prompt": "Pull last week's deployment metrics and summarize regressions.",
+    "assembledContext": "Session recalled 2 prior turns about deployment metrics.",
+    "contextSize": 4096,
+    "requiredTools": ["metrics__query", "filesystem__read_file"],
+    "taskType": "DATA_EXTRACTION",
+    "grantedTools": ["metrics__query"]
+  },
+  "constraints": {
+    "latencySensitivity": "HIGH",
+    "maxCost": 1.5,
+    "containsSensitiveData": false,
+    "executionMode": "AUTO"
+  },
+  "enrichment": {
+    "classifierUsed": "LOCAL_LLM",
+    "classifierConfidence": 0.87,
+    "classifierLatencyMs": 42,
+    "estimatedTokens": 1200,
+    "memoryUsed": true
+  }
+}

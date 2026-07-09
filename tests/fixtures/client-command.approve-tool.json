@@ -1,0 +1,5 @@
+{
+  "action": "APPROVE_TOOL",
+  "approvalId": "approval-1234abcd",
+  "decision": "APPROVE"
+}

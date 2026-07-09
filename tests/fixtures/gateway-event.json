@@ -1,0 +1,11 @@
+{
+  "seq": 42,
+  "id": "33a4b5c6-7d8e-4f9a-8b0c-1d2e3f4a5b6c",
+  "requestId": "11e2d3c4-5b6a-4f7e-8d9c-0a1b2c3d4e5f",
+  "sessionId": "22f3e4d5-6c7b-4a8f-9e0d-1b2c3d4e5f6a",
+  "tier": "OLLAMA_LOCAL",
+  "type": "TOOL_CALL",
+  "message": "Invoking metrics__query with the approved read scope.",
+  "metadata": { "toolName": "metrics__query", "attempt": 1 },
+  "timestamp": "2026-07-08T14:32:06.789Z"
+}

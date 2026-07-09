@@ -6,6 +6,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json && node --experimental-strip-types scripts/emit-schemas.ts",
+    "check": "node --experimental-strip-types scripts/check-schemas.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": { "zod": "^4.0.0" }

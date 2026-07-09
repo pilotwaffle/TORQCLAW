@@ -1,0 +1,6 @@
+{
+  "action": "APPROVE_SKILL",
+  "queueId": "queue-9f8e7d6c",
+  "decision": "APPROVE",
+  "editedMarkdown": "# Skill: Rotate API Keys\n\nSteps:\n1. Generate new key\n2. Update secret store\n3. Revoke old key\n"
+}
