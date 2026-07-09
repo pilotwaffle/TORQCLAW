@@ -37,7 +37,7 @@ jobs:
 
       - run: pnpm test
 
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v8.3.2
 
       - run: uv sync
         working-directory: engines/hermes_kernel
