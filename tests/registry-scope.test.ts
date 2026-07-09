@@ -1,5 +1,16 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import { join } from 'node:path';
 import { executeTool, getRegistry, type RegisteredTool } from '../packages/bridge/src/registry.js';
+
+// Platform-native absolute fixture paths. Hardcoding `C:\...` made these tests
+// resolve relative to cwd on Linux CI, flipping in-scope vs out-of-scope — the
+// classifier logic is OS-independent, only the fixtures were not. join() with an
+// absolute anchor keeps "allowed" genuinely inside and "outside" genuinely
+// outside the write allowlist on both Windows and POSIX.
+const ANCHOR = process.platform === 'win32' ? 'C:\\' : '/';
+const ALLOWED_DIR = join(ANCHOR, 'torq-scope-allowed');
+const ALLOWED_PATH = join(ALLOWED_DIR, 'ok.txt');
+const OUTSIDE_PATH = join(ANCHOR, 'torq-scope-outside', 'target.txt');
 
 /** TCLAW-0C regression-proof for the path-scope bug fix at the executeTool
  *  call site (registry.ts ~106-112): scope mode must come from the tool's
