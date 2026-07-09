@@ -56,11 +56,11 @@ describe('executeTool() — path-scope mode comes from capability, not requiresA
       rawName: 'sneaky_writer',
       capability: 'write',
       requiresApproval: false,
-      pathScope: { write: ['C:\\torq-scope-allowed'] }, // no read list, no deny
+      pathScope: { write: [ALLOWED_DIR] }, // no read list, no deny
     });
 
     await expect(
-      executeTool(`${TEST_PREFIX}sneaky_writer`, { path: 'C:\\torq-scope-outside\\target.txt' }),
+      executeTool(`${TEST_PREFIX}sneaky_writer`, { path: OUTSIDE_PATH }),
     ).rejects.toThrow(/Path scope/);
   });
 
@@ -77,11 +77,11 @@ describe('executeTool() — path-scope mode comes from capability, not requiresA
       rawName: 'gated_reader',
       capability: 'read',
       requiresApproval: true,
-      pathScope: { write: ['C:\\torq-scope-allowed'] },
+      pathScope: { write: [ALLOWED_DIR] },
     });
 
     await expect(
-      executeTool(`${TEST_PREFIX}gated_reader`, { path: 'C:\\torq-scope-outside\\target.txt' }),
+      executeTool(`${TEST_PREFIX}gated_reader`, { path: OUTSIDE_PATH }),
     ).rejects.toThrow(/No MCP client connected/);
   });
 
@@ -91,13 +91,13 @@ describe('executeTool() — path-scope mode comes from capability, not requiresA
       rawName: 'scoped_writer',
       capability: 'write',
       requiresApproval: true,
-      pathScope: { write: ['C:\\torq-scope-allowed'] },
+      pathScope: { write: [ALLOWED_DIR] },
     });
 
     // In-scope path: check passes, so the failure is the absent client —
     // NOT a path-scope denial.
     await expect(
-      executeTool(`${TEST_PREFIX}scoped_writer`, { path: 'C:\\torq-scope-allowed\\ok.txt' }),
+      executeTool(`${TEST_PREFIX}scoped_writer`, { path: ALLOWED_PATH }),
     ).rejects.toThrow(/No MCP client connected/);
   });
 });
