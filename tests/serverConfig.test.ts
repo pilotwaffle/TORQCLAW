@@ -65,4 +65,18 @@ describe('loadServerConfigs', () => {
     const [cfg] = loadServerConfigs();
     expect(cfg!.approvalPatterns?.[0]?.test('WRITE_FILE')).toBe(true);
   });
+
+  it('parses a capabilities map and threads it onto the returned config', () => {
+    write({
+      servers: [
+        {
+          id: 'fs',
+          transport: { type: 'stdio', command: 'a' },
+          capabilities: { innocuous_tool: 'write' },
+        },
+      ],
+    });
+    const [cfg] = loadServerConfigs();
+    expect(cfg!.capabilities).toEqual({ innocuous_tool: 'write' });
+  });
 });

@@ -3,6 +3,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 import { type PathScope, checkPath, extractPaths } from './pathScope.js';
+import { type Capability, classifyCapability, isWriteClass, scopeModeFor } from './capability.js';
 
 export interface RegisteredTool {
   /** Namespaced: `${serverId}__${toolName}` */
@@ -13,6 +14,10 @@ export interface RegisteredTool {
   rawName: string;
   /** Policy gate: write-capable tools pause LOCAL_EDGE execution for a human. */
   requiresApproval: boolean;
+  /** TCLAW-0C: behavior-based classification (read/write/exec/send). Drives
+   *  path-scope mode; requiresApproval is derived from it (isWriteClass) but
+   *  can still be widened by approvalPatterns. */
+  capability: Capability;
   /** P5: per-server filesystem scope (deny/read/write) inherited from config. */
   pathScope?: PathScope;
   /** P5: which arg keys hold path-like values for this server's tools. */
@@ -33,6 +38,8 @@ export interface ServerConfig {
   /** Raw-tool-name allowlist. When set, only these tools register (the rest are
    *  dropped) — keeps a large server from overflowing the local context window. */
   tools?: string[];
+  /** TCLAW-0C: per-tool capability override (P1 — beats every other signal). */
+  capabilities?: Record<string, Capability>;
 }
 
 const clients = new Map<string, Client>();
@@ -64,13 +71,15 @@ export async function connectServer(cfg: ServerConfig): Promise<void> {
   const allow = cfg.tools ? new Set(cfg.tools) : null;
   const selected = allow ? tools.filter((t) => allow.has(t.name)) : tools;
   for (const t of selected) {
+    const cap = classifyCapability(t.name, (t as any).annotations, cfg.capabilities?.[t.name]);
     registry.push({
       name: `${cfg.id}__${t.name}`,
       rawName: t.name,
       description: t.description ?? '',
       inputSchema: t.inputSchema as object,
       sourceServerId: cfg.id,
-      requiresApproval: patterns.some((p) => p.test(t.name)),
+      capability: cap,
+      requiresApproval: isWriteClass(cap) || patterns.some((p) => p.test(t.name)),
       pathScope: cfg.paths,
       pathArgKeys: cfg.pathArgKeys,
     });
@@ -104,7 +113,7 @@ export async function executeTool(namespacedName: string, args: unknown): Promis
   // check it; deny always wins. A write-capable tool checks 'write' scope, else
   // 'read'. Throwing here surfaces as a tool error back to the model.
   if (entry.pathScope) {
-    const mode = entry.requiresApproval ? 'write' : 'read';
+    const mode = scopeModeFor(entry.capability);
     for (const p of extractPaths(args, entry.pathArgKeys)) {
       const denial = checkPath(p, entry.pathScope, mode);
       if (denial) throw new Error(`Path scope ${denial}`);
