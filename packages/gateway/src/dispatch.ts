@@ -32,8 +32,9 @@ function humanizeError(raw: string, tier?: ComputeTier): string {
 }
 
 /** Budget precedence: per-request maxCost → env default → unlimited.
- *  Resolved here so the bridge sees one number and the warning fires once. */
-function resolveBudget(req: GatewayRequest): number | undefined {
+ *  Resolved here so the bridge sees one number and the warning fires once.
+ *  Exported for unit tests (TCLAW-0D) — behavior unchanged. */
+export function resolveBudget(req: GatewayRequest): number | undefined {
   if (typeof req.constraints.maxCost === 'number') return req.constraints.maxCost;
   const env = Number(process.env.TORQCLAW_DEFAULT_MAX_COST);
   return Number.isFinite(env) && env > 0 ? env : undefined;

@@ -75,3 +75,16 @@ Role mapping note: G1R and G2A run as independent Opus instances; GLM-5.2 (RB) u
 - G2A result: PASS-WITH-NOTES (merge-approved). Residuals documented: (1) intentional over-gating + annotation remedy is the headline operator note; (2) example annotation lists tools beyond the allowlist (clarified in servers.example.json comment); (3) regression-guard corpus added.
 - next ticket: TCLAW-0D/0E/0F (cost-breaker unit tests, Python test suite, token hygiene) then CI v2. TCLAW-0D/0F low-risk; 0E enables CI v2.
 - blockers: operator merge approval for PR #1.
+
+### TCLAW-0D — cost-breaker unit tests
+
+- date: 2026-07-09
+- branch: ticket/tclaw-0d-cost-breaker-tests @ e3d3a69 -> PR (base master). NOT merged — awaiting operator approval.
+- ticket: TCLAW-0D (PRD §9.0.2). Conservation mode (self-implemented, no builder subagent) — but touches cost-enforcement, so independent Opus G2A was mandatory and NOT skipped.
+- what changed (4 files, minimal seams): dispatch.ts resolveBudget made `export` (one word, no logic change); hermes.ts circuit-breaker decision extracted from the poll loop into a pure exported evaluateSpend(costUsd,budget,state,now,intervalMs) + HeartbeatState (loop calls it verbatim — production path == tested unit, no parallel copy); NEW tests/budget.test.ts (8) + tests/circuit-breaker.test.ts (15).
+- coverage: resolveBudget precedence (maxCost -> env default -> unlimited) incl. maxCost:0 honored as real budget, 0/negative/non-numeric/empty env ignored; breaker trip on strict over-budget, no-trip at/under/unlimited, $0-budget trips on any spend; unreportable spend (null/undefined/NaN/string) skipped with NO fabricated zero and state untouched; heartbeat cadence (once per interval, only on cost change, injected clock — no timer flake); /budget/i regression guard tied to e2e-budget + dispatch BUDGET mapping; CircuitBreakerError shape.
+- behavior-preserving: message strings unchanged (Budget exceeded / Spend so far); e2e-budget exit 0 (BUDGET terminal ERROR fired through refactored loop); both FRONTIER approval e2e + one-shot e2e exit 0.
+- tests/checks: typecheck 12/12; pnpm test 289/289 (+23); contracts:check 0; build 7/7; e2e-budget + e2e-approval-cloud + e2e exit 0.
+- G2A result (independent Opus 4.8): PASS — merge-ready. Reconstructed old-vs-new logic as a truth table over {number,null,undefined,NaN,string} x {budget undefined,0,1} x interval x cost-change; confirmed semantically identical on every cell; no parallel copy; teeth-check (flip > to >=) broke exactly the boundary test, proving non-vacuous. 2 info notes (NaN heartbeat cosmetics pre-existing/preserved; test-seam widening acceptable) — non-blocking.
+- next ticket: TCLAW-0F (token hygiene) then TCLAW-0E (Python test suite, gates CI v2).
+- blockers: operator merge approval.

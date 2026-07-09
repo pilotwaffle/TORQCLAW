@@ -17,6 +17,52 @@ export class CircuitBreakerError extends Error {
   }
 }
 
+/** Rolling heartbeat state for one task's poll loop. */
+export interface HeartbeatState {
+  lastHeartbeatAt: number;
+  lastHeartbeatCost: number;
+}
+
+/** Pure spend-evaluation decision, extracted from the poll loop so it is unit
+ *  testable (TCLAW-0D). The loop calls this verbatim — production path == tested
+ *  unit; there is no parallel copy.
+ *
+ *  Enforcement is from PROVIDER-reported spend only, never a pricing table:
+ *   - costUsd not a number (null/undefined = unreportable): return no signal at
+ *     all. The engine already warned once; we must NOT fabricate a $0 spend, so
+ *     `state` is left untouched and neither a heartbeat nor a trip is produced.
+ *   - a heartbeat is emitted at most once per HEARTBEAT_INTERVAL_MS and only
+ *     when the reported cost actually changed since the last heartbeat.
+ *   - the breaker trips (breachMessage set) when a budget is set and reported
+ *     spend strictly exceeds it.
+ *
+ *  Mutates `state` in place when it emits a heartbeat (mirrors the loop's prior
+ *  inline bookkeeping). Returns the strings the caller should act on. */
+export function evaluateSpend(
+  costUsd: unknown,
+  budget: number | undefined,
+  state: HeartbeatState,
+  now: number,
+  intervalMs: number = HEARTBEAT_INTERVAL_MS,
+): { heartbeat?: string; breachMessage?: string } {
+  // Unreportable spend: no heartbeat, no trip, no fabricated zero.
+  if (typeof costUsd !== 'number') return {};
+
+  const out: { heartbeat?: string; breachMessage?: string } = {};
+
+  if (costUsd !== state.lastHeartbeatCost && now - state.lastHeartbeatAt >= intervalMs) {
+    out.heartbeat = `Spend so far: $${costUsd.toFixed(2)}`;
+    state.lastHeartbeatAt = now;
+    state.lastHeartbeatCost = costUsd;
+  }
+
+  if (budget !== undefined && costUsd > budget) {
+    out.breachMessage = `Budget exceeded: $${costUsd.toFixed(2)} of $${budget.toFixed(2)} limit`;
+  }
+
+  return out;
+}
+
 /** request_id → engine task_id, so a CANCEL_TASK arriving on a different
  *  socket can reach the right engine task. Cleared when the poll loop ends. */
 const engineTaskByRequest = new Map<string, string>();
@@ -50,8 +96,7 @@ export async function executeHermesTask(
   // maxCost is the only user-set budget here; precedence resolution lives in
   // dispatch (constraint → env default → unlimited).
   const budget = req.constraints.maxCost;
-  let lastHeartbeatAt = 0;
-  let lastHeartbeatCost = -1;
+  const heartbeat: HeartbeatState = { lastHeartbeatAt: 0, lastHeartbeatCost: -1 };
 
   let cursor = 0;
   for (;;) {
@@ -76,27 +121,18 @@ export async function executeHermesTask(
     }
 
     // Circuit breaker: enforce from PROVIDER-reported spend, no pricing table.
-    // costUsd null = unenforceable (engine already warned once); skip.
-    const costUsd = status.telemetry?.costUsd;
-    if (typeof costUsd === 'number') {
-      const now = Date.now();
-      if (
-        costUsd !== lastHeartbeatCost &&
-        now - lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS
-      ) {
-        emit('SYSTEM', `Spend so far: $${costUsd.toFixed(2)}`);
-        lastHeartbeatAt = now;
-        lastHeartbeatCost = costUsd;
-      }
-      if (budget !== undefined && costUsd > budget) {
-        await client.callTool({
-          name: 'cancel_task',
-          arguments: { task_id: taskId, reason: 'BUDGET_EXCEEDED' },
-        });
-        throw new CircuitBreakerError(
-          `Budget exceeded: $${costUsd.toFixed(2)} of $${budget.toFixed(2)} limit`,
-        );
-      }
+    // costUsd null = unenforceable (engine already warned once); the pure
+    // evaluateSpend returns no signal in that case (no fabricated $0).
+    const { heartbeat: spendMsg, breachMessage } = evaluateSpend(
+      status.telemetry?.costUsd, budget, heartbeat, Date.now(),
+    );
+    if (spendMsg) emit('SYSTEM', spendMsg);
+    if (breachMessage) {
+      await client.callTool({
+        name: 'cancel_task',
+        arguments: { task_id: taskId, reason: 'BUDGET_EXCEEDED' },
+      });
+      throw new CircuitBreakerError(breachMessage);
     }
 
     // FRONTIER per-tool approval: the engine blocked a gated tool. Throw so
