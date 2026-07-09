@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { submitToGateway } from './gatewayClient.js';
+import { submitToGateway, resolveGatewayToken } from './gatewayClient.js';
 
 /**
  * TORQCLAW HTTP channel adapter.
@@ -22,7 +22,9 @@ import { submitToGateway } from './gatewayClient.js';
 const PORT = Number(process.env.CHANNEL_HTTP_PORT || 18792);
 const HOST = process.env.CHANNEL_HTTP_HOST || '127.0.0.1';
 const GW_URL = process.env.TORQCLAW_GW_URL || 'ws://127.0.0.1:18790/ws';
-const GW_TOKEN = process.env.TORQCLAW_GATEWAY_TOKEN || 'dev';
+// Upstream gateway token — resolved via resolveGatewayToken so the "unset means
+// unset" invariant lives in one tested place (never a hardcoded 'dev'). (TCLAW-0F)
+const GW_TOKEN = resolveGatewayToken();
 const FRONT_TOKEN = process.env.CHANNEL_HTTP_TOKEN || '';
 const TASK_TIMEOUT_MS = Number(process.env.CHANNEL_HTTP_TIMEOUT_MS || 300_000);
 
