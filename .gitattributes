@@ -1,0 +1,3 @@
+packages/contracts/generated/*.json text eol=lf linguist-generated=true
+engines/hermes_kernel/mcp_wrapper/schemas/*.json text eol=lf linguist-generated=true
+tests/fixtures/*.json text eol=lf

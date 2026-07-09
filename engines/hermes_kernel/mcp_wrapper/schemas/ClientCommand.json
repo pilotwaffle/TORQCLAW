@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "SUBMIT_PROMPT"
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32000
+        },
+        "sensitive": {
+          "default": false,
+          "type": "boolean"
+        },
+        "urgent": {
+          "default": false,
+          "type": "boolean"
+        },
+        "attachmentIds": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maxCostUsd": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "executionMode": {
+          "default": "AUTO",
+          "type": "string",
+          "enum": [
+            "AUTO",
+            "LOCAL_ONLY",
+            "CLOUD_OK"
+          ]
+        },
+        "useMemory": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "action",
+        "prompt",
+        "sensitive",
+        "urgent",
+        "attachmentIds",
+        "executionMode",
+        "useMemory"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "APPROVE_SKILL"
+        },
+        "queueId": {
+          "type": "string"
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "APPROVE",
+            "REJECT"
+          ]
+        },
+        "editedMarkdown": {
+          "type": "string",
+          "maxLength": 100000
+        }
+      },
+      "required": [
+        "action",
+        "queueId",
+        "decision"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "GET_SKILL_DRAFT"
+        },
+        "queueId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "queueId"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "APPROVE_TOOL"
+        },
+        "approvalId": {
+          "type": "string"
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "APPROVE",
+            "REJECT"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "approvalId",
+        "decision"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "CANCEL_TASK"
+        },
+        "taskId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "action",
+        "taskId"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "MEMORY"
+        },
+        "op": {
+          "type": "string",
+          "enum": [
+            "SHOW",
+            "FORGET_SESSION"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "op"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

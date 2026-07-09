@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "sessionId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "sourceChannel": {
+      "type": "string"
+    },
+    "receivedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+    },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "prompt": {
+          "type": "string"
+        },
+        "assembledContext": {
+          "type": "string"
+        },
+        "contextSize": {
+          "type": "number"
+        },
+        "requiredTools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "taskType": {
+          "type": "string",
+          "enum": [
+            "DATA_EXTRACTION",
+            "SUMMARIZATION",
+            "ROUTINE_AUTOMATION",
+            "AUTONOMOUS_RESEARCH",
+            "COMPLEX_CODING"
+          ]
+        },
+        "grantedTools": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "prompt",
+        "contextSize",
+        "requiredTools",
+        "taskType",
+        "grantedTools"
+      ],
+      "additionalProperties": false
+    },
+    "constraints": {
+      "type": "object",
+      "properties": {
+        "latencySensitivity": {
+          "type": "string",
+          "enum": [
+            "HIGH",
+            "LOW"
+          ]
+        },
+        "maxCost": {
+          "type": "number"
+        },
+        "containsSensitiveData": {
+          "type": "boolean"
+        },
+        "executionMode": {
+          "default": "AUTO",
+          "type": "string",
+          "enum": [
+            "AUTO",
+            "LOCAL_ONLY",
+            "CLOUD_OK"
+          ]
+        }
+      },
+      "required": [
+        "latencySensitivity",
+        "containsSensitiveData",
+        "executionMode"
+      ],
+      "additionalProperties": false
+    },
+    "enrichment": {
+      "type": "object",
+      "properties": {
+        "classifierUsed": {
+          "type": "string",
+          "enum": [
+            "LOCAL_LLM",
+            "KEYWORD_FALLBACK",
+            "DEFAULT"
+          ]
+        },
+        "classifierConfidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "classifierLatencyMs": {
+          "type": "number"
+        },
+        "estimatedTokens": {
+          "type": "number"
+        },
+        "memoryUsed": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "classifierUsed",
+        "classifierConfidence",
+        "classifierLatencyMs",
+        "estimatedTokens",
+        "memoryUsed"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "sessionId",
+    "sourceChannel",
+    "receivedAt",
+    "payload",
+    "constraints",
+    "enrichment"
+  ],
+  "additionalProperties": false
+}
