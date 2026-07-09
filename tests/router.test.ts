@@ -169,6 +169,135 @@ describe('PREFER_CLOUD (slow local hardware)', () => {
   });
 });
 
+describe('route explanation fields (TCLAW-2A)', () => {
+  type Fixture = {
+    name: string;
+    ruleId: string;
+    overridable: boolean;
+    safetyLock: string | undefined;
+    reasonPrefix: RegExp;
+    build: () => ReturnType<TorqClawRouter['evaluateRequest']>;
+  };
+
+  const fixtures: Fixture[] = [
+    {
+      name: 'RULE 1 privacy',
+      ruleId: 'PRIVACY_OVERRIDE',
+      overridable: false,
+      safetyLock: 'SENSITIVE_DATA',
+      reasonPrefix: /^PRIVACY_OVERRIDE/,
+      build: () => new TorqClawRouter().evaluateRequest(makeRequest({ containsSensitiveData: true })),
+    },
+    {
+      name: 'RULE 1a local-only',
+      ruleId: 'USER_LOCAL_ONLY',
+      overridable: false,
+      safetyLock: 'USER_LOCAL_ONLY',
+      reasonPrefix: /^USER_LOCAL_ONLY/,
+      build: () => new TorqClawRouter().evaluateRequest(makeRequest({ executionMode: 'LOCAL_ONLY' })),
+    },
+    {
+      name: 'RULE 1b local-intent',
+      ruleId: 'LOCAL_INTENT',
+      overridable: false,
+      safetyLock: undefined,
+      reasonPrefix: /^LOCAL_INTENT/,
+      // Verified against the LOCAL_INTENT regex (engine.ts:20-21): the
+      // "improve.{0,30}\b(local|agent|model|...)" branch matches this prompt.
+      build: () => new TorqClawRouter().evaluateRequest(makeRequest({ prompt: 'please improve the local model accuracy' })),
+    },
+    {
+      name: "RULE 1b' local-tool",
+      ruleId: 'LOCAL_TOOL_INTENT',
+      overridable: false,
+      safetyLock: 'LOCAL_TOOL_INTENT',
+      reasonPrefix: /^LOCAL_TOOL_INTENT/,
+      // Verified against the LOCAL_TOOL_INTENT regex (engine.ts:30-31): "local"
+      // within 20 chars of "chart" fires.
+      build: () => new TorqClawRouter().evaluateRequest(makeRequest({ prompt: 'use the local chart tool to check price' })),
+    },
+    {
+      name: 'RULE 1.5 low-confidence',
+      ruleId: 'LOW_CLASSIFIER_CONFIDENCE',
+      overridable: true,
+      safetyLock: undefined,
+      reasonPrefix: /^LOW_CLASSIFIER_CONFIDENCE/,
+      build: () => new TorqClawRouter().evaluateRequest(makeRequest({ classifierConfidence: 0.4 })),
+    },
+    {
+      name: 'RULE 2 tool-overflow',
+      ruleId: 'TOOL_COUNT_OVERFLOW',
+      overridable: true,
+      safetyLock: undefined,
+      reasonPrefix: /^TOOL_COUNT_OVERFLOW/,
+      build: () => new TorqClawRouter().evaluateRequest(makeRequest({ requiredTools: ['a', 'b', 'c', 'd'] })),
+    },
+    {
+      name: 'RULE 3 latency',
+      ruleId: 'LATENCY_CRITICAL',
+      overridable: true,
+      safetyLock: undefined,
+      reasonPrefix: /^LATENCY_CRITICAL/,
+      build: () => new TorqClawRouter(false).evaluateRequest(makeRequest({ latencySensitivity: 'HIGH' })),
+    },
+    {
+      name: 'RULE 4 heuristic',
+      ruleId: 'HEURISTIC_EVAL',
+      overridable: true,
+      safetyLock: undefined,
+      reasonPrefix: /^HEURISTIC_EVAL/,
+      build: () => new TorqClawRouter().evaluateRequest(makeRequest({ taskType: 'ROUTINE_AUTOMATION' })),
+    },
+  ];
+
+  it.each(fixtures)('$name: produces the correct ruleId', ({ build, ruleId }) => {
+    expect(build().ruleId).toBe(ruleId);
+  });
+
+  it.each(fixtures)('$name: humanReason is a non-empty string', ({ build }) => {
+    const d = build();
+    expect(typeof d.humanReason).toBe('string');
+    expect(d.humanReason!.length).toBeGreaterThan(0);
+  });
+
+  it.each(fixtures)('$name: overridable matches spec', ({ build, overridable }) => {
+    expect(build().overridable).toBe(overridable);
+  });
+
+  it.each(fixtures)('$name: safetyLock matches spec', ({ build, safetyLock }) => {
+    expect(build().safetyLock).toBe(safetyLock);
+  });
+
+  it.each(fixtures)('$name: blockedAlternatives has exactly one entry naming the opposite tier', ({ build }) => {
+    const d = build();
+    expect(d.blockedAlternatives).toHaveLength(1);
+    expect(d.blockedAlternatives![0].tier).not.toBe(d.tier);
+    expect(typeof d.blockedAlternatives![0].why).toBe('string');
+    expect(d.blockedAlternatives![0].why.length).toBeGreaterThan(0);
+  });
+
+  it.each(fixtures)('$name: profile stays undefined', ({ build }) => {
+    expect(build().profile).toBeUndefined();
+  });
+
+  it.each(fixtures)('$name: reason is still populated with the expected prefix (preserved)', ({ build, reasonPrefix }) => {
+    const d = build();
+    expect(d.reason.length).toBeGreaterThan(0);
+    expect(d.reason).toMatch(reasonPrefix);
+  });
+
+  it('invariant: safetyLock set implies overridable === false, and every safetyLock rule is {score:0, tier: LOCAL_EDGE}', () => {
+    for (const f of fixtures) {
+      const d = f.build();
+      if (d.safetyLock !== undefined) {
+        expect(d.overridable, f.name).toBe(false);
+        expect(d.score, f.name).toBe(0);
+        expect(d.tier, f.name).toBe(ComputeTier.LOCAL_EDGE);
+      }
+    }
+  });
+});
+
 describe('warm-lease expiry', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
