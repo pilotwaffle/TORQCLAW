@@ -108,3 +108,42 @@ CREATE TABLE IF NOT EXISTS tool_approvals (
     decided_at  DATETIME
 );
 CREATE INDEX IF NOT EXISTS idx_tool_approvals_request ON tool_approvals(request_id);
+
+-- 9. Run receipts (TCLAW-4A): a DETERMINISTIC PROJECTION over tasks/events/
+--    tool_approvals for one task (request_id), materialized after each
+--    terminal dispatch outcome. The event log + tasks table remain the
+--    source of truth; this table is a derived, rebuildable read cache — it
+--    is NEVER the only copy of anything and can be dropped and rebuilt from
+--    events/tasks/tool_approvals at any time (see ops/receipts-rebuild.mjs).
+--    Gateway-DB-only: this is NOT an emitted contract (no schema in
+--    packages/contracts/generated or engines/hermes_kernel/mcp_wrapper/schemas)
+--    and is never sent over the wire.
+CREATE TABLE IF NOT EXISTS run_receipts (
+  id TEXT PRIMARY KEY,                      -- randomUUID, receipt row id (preserved on re-projection)
+  task_id TEXT NOT NULL UNIQUE,             -- = tasks.request_id (upsert key)
+  session_id TEXT NOT NULL,
+  source_channel TEXT,
+  selected_tier TEXT,
+  route_diagnostics_json TEXT,
+  budget_limit REAL,
+  budget_source TEXT,                       -- NULL for 4A (not persisted)
+  cost_usd REAL,
+  cost_enforceable INTEGER,                 -- NULL for 4A (not persisted)
+  elapsed_ms INTEGER,
+  iterations INTEGER,
+  tools_called_json TEXT,
+  cancelled INTEGER,
+  blocked_on TEXT,
+  memory_used INTEGER,
+  context_chars INTEGER,
+  result_state TEXT,                        -- 'completed' | 'failed' | 'blocked' (derived)
+  safe_export_json TEXT,                    -- NULL for 4A (redaction is a later ticket)
+  full_receipt_json TEXT,
+  evidence_start_seq INTEGER,
+  evidence_end_seq INTEGER,
+  projection_version INTEGER NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,   -- materialization time (preserved on conflict)
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP    -- bumped each projection
+);
+CREATE INDEX IF NOT EXISTS idx_run_receipts_session ON run_receipts(session_id);
+CREATE INDEX IF NOT EXISTS idx_events_request ON events(request_id);

@@ -5,6 +5,7 @@ import { makeEmitter, taskStore } from './events.js';
 import { sessions } from './sessions.js';
 import { cancellations } from './cancellations.js';
 import { registerApproval } from './approvals.js';
+import { safeMaterializeReceipt } from './receipts.js';
 import { randomUUID } from 'node:crypto';
 
 const sanitize = (msg: string) => msg.replace(/Bearer\s+\S+/gi, 'Bearer ***').slice(0, 2_000);
@@ -106,6 +107,7 @@ export function emitToolDenied(req: GatewayRequest, toolName: string, diag: Rout
     recovery: ['RETRY', 'COPY_DIAGNOSTIC'],
     prompt: req.payload.prompt,
   });
+  safeMaterializeReceipt(req.id);
 }
 
 /** Fire-and-forget: the WS handler returns immediately; execution reports to
@@ -143,6 +145,7 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
         sideEffectNote: 'Nothing ran — the request never reached the cloud engine.',
       },
     );
+    safeMaterializeReceipt(req.id);
     cancellations.clear(req.id);
     return;
   }
@@ -165,6 +168,11 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
       // P2.5 receipt: a compact, honest summary from REAL telemetry only.
       // toolsUsed is reconstructed console-side from TOOL_CALL events.
       emit('SYSTEM', 'Done', { receipt: buildReceipt(diag.tier, result.telemetry, effectiveReq) });
+      // TCLAW-4A: materialize the persisted run_receipts projection. MUST be
+      // the guarded wrapper — its own try/catch — so a projector throw can
+      // NEVER be caught by the outer catch below, which would flip this
+      // already-completed task into a failure and emit a phantom ERROR.
+      safeMaterializeReceipt(req.id);
     } catch (error: any) {
       // (A) Gated tool with no grant — NOT a failure. This is the terminal
       //     state of a blocked run. Dispatch (sole DB + terminal owner)
@@ -181,6 +189,7 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
           requestId: req.id,
           args: error.args,
         });
+        safeMaterializeReceipt(req.id);
         return; // do NOT fall through to ERROR
       }
 
@@ -213,6 +222,7 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
         metaOut.recovery = ['RETRY', 'COPY_DIAGNOSTIC'];
       }
       emit('ERROR', `Execution failed: ${sanitize(humanizeError(reason, diag.tier))}`, metaOut);
+      safeMaterializeReceipt(req.id);
     } finally {
       cancellations.clear(req.id);
     }
