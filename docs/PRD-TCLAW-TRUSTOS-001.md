@@ -713,7 +713,7 @@ Single Zod source dual-emits three JSON Schemas (`GatewayRequest`, `GatewayEvent
 ### 9.10.3 Requirements
 
 * **Boundary note:** the first two bullets below are ticket **TCLAW-10A**, delivered during Phase 0 so CI v1/v2 (TCLAW-0A) has something to enforce. The rest of this epic — schemaVersion, extended Python validation, inspector UI, changelog — is protocol-evolution work and stays in Epic 10's own slot. See §12 Phase 0 for the full boundary statement.
-* Add `pnpm contracts:check`: rebuild schemas into a temp dir, byte-diff against both checked-in copies; nonzero exit on drift. Run in CI v1 (TCLAW-0A). *(TCLAW-10A)*
+* Add `pnpm contracts:check`: rebuild schemas into a temp dir, semantic (parsed-JSON) diff, with a file-set assertion, against both checked-in copies; nonzero exit on drift. Run in CI v1 (TCLAW-0A). *(TCLAW-10A)*
 * **Emit `ConnectFrame`** alongside the existing three artifacts, then add golden fixtures for all four: `GatewayRequest`, `GatewayEvent`, `ClientCommand`, `ConnectFrame`. *(TCLAW-10A)*
 * Python validation tests against the fixtures (pytest, in the Epic 0 Python CI job) — and extend Python-side validation beyond GatewayRequest to the event frames it produces.
 * Add `schemaVersion` to protocol frames (additive optional first; required after one compatibility window).
