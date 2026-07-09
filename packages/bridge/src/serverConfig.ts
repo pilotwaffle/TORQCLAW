@@ -4,6 +4,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { z } from 'zod';
 import type { ServerConfig } from './registry.js';
 
+const CapabilitySchema = z.enum(['read', 'write', 'exec', 'send']);
+
 /** ~/.torqclaw/servers.json — user-managed MCP server roster.
  *  Validated like every other boundary; a malformed entry names itself
  *  instead of crashing boot. */
@@ -41,6 +43,9 @@ const ServerEntrySchema = z.object({
    *  local 8K context window. Names are the server's own (un-namespaced) tool
    *  names. Omit to register everything. */
   tools: z.array(z.string()).optional(),
+  /** TCLAW-0C: per-tool capability override, keyed by the server's own
+   *  (un-namespaced) tool name. Beats every other classification signal. */
+  capabilities: z.record(z.string(), CapabilitySchema).optional(),
   enabled: z.boolean().default(true),
 });
 
@@ -79,5 +84,6 @@ export function loadServerConfigs(): ServerConfig[] {
       paths: s.paths,
       pathArgKeys: s.pathArgKeys,
       tools: s.tools,
+      capabilities: s.capabilities,
     }));
 }
