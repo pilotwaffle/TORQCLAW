@@ -25,6 +25,14 @@
       "transport": { "type": "stdio", "command": "node", "args": ["/path/to/tradingview-mcp/src/server.js"] },
       "tools": ["quote_get", "symbol_info", "data_get_ohlcv", "chart_set_symbol"],
       "approvalPatterns": ["create", "delete", "set_", "draw_", "alert_"],
+      "_comment_capabilities": "TCLAW-0C: classifyCapability() has NO name-based read path — a tool is only 'read' via this map (P1) or a trustworthy MCP readOnlyHint (P3). Everything else fails closed to write-class and requires approval on LOCAL_EDGE, even honest read-only tools like quote_get. Annotate each real read tool below (keyed by the server's own un-namespaced tool name) to remedy the over-gating. Write tools like chart_set_symbol are deliberately left UNANNOTATED so they fail closed to write, which is correct. NOTE: this map may document read tools beyond the active `tools` allowlist above (e.g. chart_get_state, symbol_search) — that's intentional, describing the server's broader read surface for when the allowlist is expanded; the extra keys are inert until the tool is actually enabled.",
+      "capabilities": {
+        "quote_get": "read",
+        "symbol_info": "read",
+        "chart_get_state": "read",
+        "data_get_ohlcv": "read",
+        "symbol_search": "read"
+      },
       "enabled": false
     }
   ]
