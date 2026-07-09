@@ -16,6 +16,17 @@ import { router } from '@torqclaw/router';
 import { connectBridge, approveSkill, getSkillDraft, cancelHermesTask } from '@torqclaw/bridge';
 import { setCancelCheck } from '@torqclaw/inference';
 import { cancellations } from './cancellations.js';
+import { authorize, checkResumeRole, type Role } from './authz.js';
+import { db } from './storage.js';
+
+// Read helper for authz's task-ownership check. Kept inline here (not in
+// events.ts taskStore) per scope: this ticket may only touch authz.ts,
+// server.ts, sessions.ts. Same db handle pattern sessions.ts already uses.
+const lookupTaskSessionStmt = db.prepare('SELECT session_id FROM tasks WHERE request_id = ?');
+function lookupTaskSession(taskId: string): string | null {
+  const row = lookupTaskSessionStmt.get(taskId) as { session_id: string } | undefined;
+  return row ? row.session_id : null;
+}
 
 // Let the LOCAL_EDGE loop observe cancellations without importing the gateway DB.
 setCancelCheck((requestId) => cancellations.isCancelled(requestId));
@@ -43,6 +54,7 @@ await app.register(websocket);
 app.get('/ws', { websocket: true }, (socket) => {
   let authed = false;
   let sessionId: string | null = null;
+  let role: Role | null = null;
   let unsubscribe: (() => void) | null = null;
 
   const sendErr = (code: string, detail?: unknown) =>
@@ -63,9 +75,22 @@ app.get('/ws', { websocket: true }, (socket) => {
         sendErr('AUTH_FAILED');
         return socket.close(4001, 'auth failed');
       }
-      authed = true;
       const resolved = sessions.resolve(conn.data);
+
+      // A RESUME (sessionId matched an existing row) whose frame.role disagrees
+      // with the stored role is rejected outright — never mint a fresh session
+      // as a fallback, since that would let a client re-cast its own role.
+      // The guard itself lives in authz.ts (checkResumeRole) so the unit tests
+      // cover the actual production path.
+      const roleCheck = checkResumeRole(resolved.resumed, resolved.role, conn.data.role);
+      if (!roleCheck.ok) {
+        sendErr('ROLE_MISMATCH', { sessionId: resolved.sessionId });
+        return socket.close(4003, 'role mismatch');
+      }
+
+      authed = true;
       sessionId = resolved.sessionId;
+      role = resolved.role as Role;
 
       // Socket = subscriber. Execution publishes to the bus regardless of
       // whether anyone is listening.
@@ -92,6 +117,15 @@ app.get('/ws', { websocket: true }, (socket) => {
     if (!cmd.success) return sendErr('SCHEMA_VIOLATION', cmd.error.flatten());
 
     const sid = sessionId!;
+
+    // ── Gate 3: role-based command authorization ──
+    const decision = authorize(role!, cmd.data, { sessionId: sid, lookupTaskSession });
+    if (!decision.ok) {
+      app.log.warn({ role, action: cmd.data.action }, 'authz denied');
+      sendErr('UNAUTHORIZED', { action: cmd.data.action, reason: decision.reason });
+      return;
+    }
+
     switch (cmd.data.action) {
       case 'SUBMIT_PROMPT': {
         const emit = makeEmitter(sid, null, null);

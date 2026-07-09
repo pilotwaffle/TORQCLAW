@@ -22,19 +22,21 @@ function toFtsQuery(prompt: string): string | null {
 export const sessions = {
   /** Resume if the client presented a known sessionId; create otherwise.
    *  Sessions are durable identity — sockets are ephemeral plumbing. */
-  resolve(frame: ConnectFrame): { sessionId: string; resumed: boolean } {
+  resolve(frame: ConnectFrame): { sessionId: string; resumed: boolean; role: string } {
     if (frame.sessionId) {
-      const row = db.prepare('SELECT id FROM sessions WHERE id = ?').get(frame.sessionId);
+      const row = db.prepare('SELECT id, role FROM sessions WHERE id = ?').get(frame.sessionId) as
+        | { id: string; role: string }
+        | undefined;
       if (row) {
         db.prepare('UPDATE sessions SET last_active_at = CURRENT_TIMESTAMP WHERE id = ?')
           .run(frame.sessionId);
-        return { sessionId: frame.sessionId, resumed: true };
+        return { sessionId: frame.sessionId, resumed: true, role: row.role };
       }
     }
     const sessionId = randomUUID();
     db.prepare('INSERT INTO sessions (id, role, client_name) VALUES (?, ?, ?)')
       .run(sessionId, frame.role, frame.clientInfo.name);
-    return { sessionId, resumed: false };
+    return { sessionId, resumed: false, role: frame.role };
   },
 
   /** Replay by monotonic seq cursor — never by timestamp. */
