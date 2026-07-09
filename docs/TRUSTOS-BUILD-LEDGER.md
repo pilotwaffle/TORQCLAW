@@ -116,3 +116,17 @@ Role mapping note: G1R and G2A run as independent Opus instances; GLM-5.2 (RB) u
 - G2A result (independent Opus 4.8): PASS. Ran vendor-absent path itself, before/after home-dir mtime check, network-egress grep, teeth-check (neutered validate_gateway_request broke exactly the 8 negatives, restored clean). 2 non-blocking notes: session tempdir not cleaned (cosmetic, isolation intact); pytest pinned 9.1.1 (>=8 floor).
 - next ticket: Phase 0 COMPLETE after 0E merges. Next is the Visible Trust MVP phase — item 5 in the build order: Route explanation extension (Epic 2, extends RouterDiagnostics additively).
 - blockers: operator merge approval. CI-green on the PR (first CI-v2 run with the Python job) is the milestone to confirm post-push.
+
+### TCLAW-2A — additive RouterDiagnostics route-explanation extension (Phase 1, Epic 2)
+
+- date: 2026-07-09
+- branch: ticket/tclaw-2a-router-diagnostics @ 33b983c (commits 7016ecb feat, 33b983c test follow-up) -> PR (base master). NOT merged — awaiting operator approval. First Phase 1 (Visible Trust MVP) ticket.
+- ticket: Epic 2 §9.2.4, scoped to RouterDiagnostics extension ONLY (UI/profiles/preview/receipt all deferred to later Epic 2 tickets).
+- what changed (3 files): routing.ts extends RouterDiagnostics in place with 6 OPTIONAL fields (ruleId enum, humanReason, blockedAlternatives[], overridable, safetyLock, profile) + RouterRuleIdSchema + BlockedAlternativeSchema; engine.ts populates them per-rule via a RULE_META table, score/reason/tier byte-identical; router.test.ts +60 tests (new field-coverage block + 3 exact-score pins), 19 existing tests UNMODIFIED.
+- G1R rulings enforced: LOCAL_INTENT overridable:false but NO safetyLock (only 3 locks: PRIVACY_OVERRIDE->SENSITIVE_DATA, USER_LOCAL_ONLY->USER_LOCAL_ONLY, LOCAL_TOOL_INTENT->LOCAL_TOOL_INTENT); profile added-but-unset; 19 existing tests unmodified; reason byte-identical; blockedAlternatives limited to the one non-chosen tier (honest). humanReason also fixes, data-side, the console's prior LOCAL_INTENT/LOCAL_TOOL_INTENT mislabel (no console file touched).
+- no-behavior-change invariant (headline) PROVEN THREE WAYS: (1) G1D captured a pre-change score/reason/tier baseline for 10 cases, diffed after = IDENTICAL; (2) 19 existing router tests pass unmodified (129 insertions, 0 deletions); (3) G2A independently ran a 30-scenario parent-vs-current execution comparison incl. adversarial edges (conf 0.5 boundary, ctx 8192/8193, warm-latency rule-3 skip, PREFER_CLOUD+privacy) — all 30 match.
+- cross-language: RouterDiagnostics travels only in GatewayEvent.metadata (z.unknown), NOT emitted/validated — additive fields = ZERO drift; contracts:check green, generated-schema dirs clean, Python 74 pass unaffected.
+- tests/checks: typecheck 12/12; pnpm test 353 (router 79); contracts:check 0; build 7/7 with zero generated-schema diff; uv run pytest 74.
+- G2A result (independent Opus 4.8): PASS. Byte-identity gate satisfied (30-scenario exec comparison); teeth-check confirmed tests guard tier+prefix. 1 informational finding (FRONTIER rule scores unpinned by tests) — G1D closed it immediately with the 33b983c exact-score follow-up rather than defer.
+- next ticket: Epic 2 later sub-features (route preview, why-this-route panel, routing profiles, override stats) OR item 6 in the build order: Receipt projection + receipt page (Epic 4). Recommend confirming Phase 1 sequencing with operator.
+- blockers: operator merge approval. CI-green on PR is the post-push gate.

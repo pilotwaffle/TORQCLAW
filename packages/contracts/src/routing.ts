@@ -54,9 +54,35 @@ export const GatewayRequestSchema = z.object({
 });
 export type GatewayRequest = z.infer<typeof GatewayRequestSchema>;
 
+export const RouterRuleIdSchema = z.enum([
+  'PRIVACY_OVERRIDE',
+  'USER_LOCAL_ONLY',
+  'LOCAL_INTENT',
+  'LOCAL_TOOL_INTENT',
+  'LOW_CLASSIFIER_CONFIDENCE',
+  'TOOL_COUNT_OVERFLOW',
+  'LATENCY_CRITICAL',
+  'HEURISTIC_EVAL',
+]);
+export type RouterRuleId = z.infer<typeof RouterRuleIdSchema>;
+
+export const BlockedAlternativeSchema = z.object({
+  tier: ComputeTierSchema,
+  why: z.string(),
+});
+export type BlockedAlternative = z.infer<typeof BlockedAlternativeSchema>;
+
+// New consumers should key off `ruleId` (a stable enum) rather than parsing
+// the `reason` string's prefix — the prefix is preserved for back-compat only.
 export const RouterDiagnosticsSchema = z.object({
   score: z.number(),
   reason: z.string(),
   tier: ComputeTierSchema,
+  ruleId: RouterRuleIdSchema.optional(),
+  humanReason: z.string().optional(),
+  blockedAlternatives: z.array(BlockedAlternativeSchema).optional(),
+  overridable: z.boolean().optional(),
+  safetyLock: z.string().optional(),
+  profile: z.string().optional(),
 });
 export type RouterDiagnostics = z.infer<typeof RouterDiagnosticsSchema>;
