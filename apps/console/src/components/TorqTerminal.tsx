@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GatewayEvent, ClientCommand } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
-import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff } from './friendly';
+import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction } from './friendly';
+import ReceiptsPanel from './ReceiptsPanel';
 
 const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL ?? 'ws://localhost:18790/ws';
 const GATEWAY_TOKEN = process.env.NEXT_PUBLIC_GATEWAY_TOKEN ?? '';
@@ -68,6 +69,8 @@ export default function TorqTerminal() {
   const [controls, setControls] = useState<Controls>(DEFAULT_CONTROLS);
   const [hintDismissed, setHintDismissed] = useState(false);
   const [decided, setDecided] = useState<Record<string, 'APPROVE' | 'REJECT'>>({});
+  // TCLAW-4B-2: console receipt panel — overlay over the live scroll region.
+  const [receiptsOpen, setReceiptsOpen] = useState(false);
   // Stop-button UX: 'requested' once a cancel is sent (button shows "stopping…"),
   // 'failed' if the send was dropped so the user knows to retry. Cleared when the
   // next task starts.
@@ -223,7 +226,8 @@ export default function TorqTerminal() {
         </span>
       </header>
 
-      <div ref={scrollRef} className="flex-1 space-y-1 overflow-y-auto pr-2" aria-live="polite">
+      <div className="relative flex-1 overflow-hidden">
+      <div ref={scrollRef} className="h-full space-y-1 overflow-y-auto pr-2" aria-live="polite">
         {events.length === 0 && (
           <p className="pt-8 text-center text-neutral-600">
             Nothing yet. Type what you need below — simple tasks run free on this
@@ -267,6 +271,14 @@ export default function TorqTerminal() {
             )}
           </p>
         )}
+      </div>
+      {receiptsOpen && (
+        <ReceiptsPanel
+          events={events}
+          sendCommand={sendCommand}
+          onClose={() => setReceiptsOpen(false)}
+        />
+      )}
       </div>
 
       {hint && !hintDismissed && (
@@ -360,6 +372,10 @@ export default function TorqTerminal() {
           <button type="button" onClick={() => sendCommand({ action: 'MEMORY', op: 'FORGET_SESSION' })} className="text-neutral-500 hover:text-[#E24B4A]">
             forget session
           </button>
+          <span className="text-neutral-700">·</span>
+          <button type="button" onClick={() => setReceiptsOpen((v) => !v)} className="text-neutral-500 hover:text-neutral-300">
+            {receiptsOpen ? 'hide receipts' : 'receipts'}
+          </button>
         </div>
       </form>
     </section>
@@ -402,6 +418,11 @@ function EventRow({
   const isToolApproval = event.type === 'PENDING_APPROVAL' && !!approvalId;
   const isUser = event.type === 'USER_PROMPT';
   const recovery: string[] = Array.isArray(meta.recovery) ? meta.recovery : [];
+
+  // TCLAW-4B-2: 4B panel frames (receipt list/detail responses) are
+  // publishOnly SYSTEM events meant only for ReceiptsPanel — they must never
+  // render a stray inline row/card in the live log.
+  if (event.type === 'SYSTEM' && (meta.receiptView || meta.receiptList)) return null;
 
   // P2.5: a SYSTEM event carrying a receipt renders as a footer card, not a row.
   if (event.type === 'SYSTEM' && meta.receipt) {
@@ -452,7 +473,7 @@ function EventRow({
         </span>
 
         {/* Skill approval — allow / deny / edit-and-approve (P4). */}
-        {event.type === 'PENDING_APPROVAL' && queueId && !approvalId && !decision && (
+        {event.type === 'PENDING_APPROVAL' && queueId && !approvalId && !decision && canRenderAction(event, false) && (
           <SkillApprovalCard
             queueId={queueId}
             skillName={String(meta.skillName ?? 'skill')}
@@ -464,7 +485,7 @@ function EventRow({
         )}
 
         {/* Tool approval — expanded permission card (P2). */}
-        {isToolApproval && approvalId && !decision && (
+        {isToolApproval && approvalId && !decision && canRenderAction(event, false) && (
           <ToolPermissionCard
             toolName={String(meta.toolName ?? meta.tool_name ?? '')}
             args={meta.args}
@@ -480,7 +501,7 @@ function EventRow({
         )}
 
         {/* P3.5 failure recovery: action chips chosen by the failure site. */}
-        {event.type === 'ERROR' && recovery.length > 0 && (
+        {event.type === 'ERROR' && recovery.length > 0 && canRenderAction(event, false) && (
           <div className="ml-14 mt-1 flex flex-wrap items-center gap-2">
             {recovery.includes('RETRY') && meta.prompt && (
               <button
