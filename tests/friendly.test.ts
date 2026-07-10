@@ -23,6 +23,7 @@ import {
   formatCapState,
   formatDailyTotalLabel,
   formatProviderSummaryRow,
+  selectActiveRouteDiag,
   type ReceiptLike,
 } from '../apps/console/src/components/friendly.js';
 
@@ -674,5 +675,87 @@ describe('canRenderAction — the load-bearing safety matrix', () => {
     expect(canRenderAction(errorRecovery, false)).toBe(true);
     expect(canRenderAction(controlEvent, false)).toBe(true);
     expect(canRenderAction(benignSystem, false)).toBe(true);
+  });
+});
+
+describe('selectActiveRouteDiag (TCLAW-2C) — pure selector feeding the live route chip snapshot', () => {
+  function diagEvent(requestId: string, metadata?: Record<string, unknown> | undefined): GatewayEvent {
+    return ev({
+      id: `id-${requestId}-${Math.random()}`,
+      type: 'TIER_SELECTED',
+      requestId,
+      tier: 'OLLAMA_LOCAL',
+      message: 'routed',
+      metadata,
+    });
+  }
+
+  it('1. selects the latest TIER_SELECTED diag for the active requestId', () => {
+    const diagA: RouterDiagnostics = { score: 10, reason: 'x', tier: 'OLLAMA_LOCAL' as any };
+    const events = [diagEvent('A', diagA as unknown as Record<string, unknown>)];
+    expect(selectActiveRouteDiag(events, 'A')).toEqual(diagA);
+  });
+
+  it('2. ignores other requestIds — returns A\'s diag, not B\'s', () => {
+    const diagA: RouterDiagnostics = { score: 10, reason: 'a', tier: 'OLLAMA_LOCAL' as any };
+    const diagB: RouterDiagnostics = { score: 20, reason: 'b', tier: 'API_EXTERNAL' as any };
+    const events = [
+      diagEvent('A', diagA as unknown as Record<string, unknown>),
+      diagEvent('B', diagB as unknown as Record<string, unknown>),
+    ];
+    expect(selectActiveRouteDiag(events, 'A')).toEqual(diagA);
+    expect(selectActiveRouteDiag(events, 'A')).not.toEqual(diagB);
+  });
+
+  it('3. null activeRequestId -> null', () => {
+    const diagA: RouterDiagnostics = { score: 10, reason: 'x', tier: 'OLLAMA_LOCAL' as any };
+    const events = [diagEvent('A', diagA as unknown as Record<string, unknown>)];
+    expect(selectActiveRouteDiag(events, null)).toBeNull();
+  });
+
+  it('4. missing/partial diag is returned honestly (no fabrication); no metadata -> not selected', () => {
+    const partial = { score: 5, reason: 'raw', tier: 'OLLAMA_LOCAL' as any }; // no ruleId/lock
+    const events = [diagEvent('A', partial as unknown as Record<string, unknown>)];
+    expect(selectActiveRouteDiag(events, 'A')).toEqual(partial);
+
+    const noMetaEvents = [diagEvent('A', undefined)];
+    expect(selectActiveRouteDiag(noMetaEvents, 'A')).toBeNull();
+  });
+
+  it('5. eviction-style: selector returns null when the frame is gone (no TIER_SELECTED for A in the window)', () => {
+    // events array WITHOUT any TIER_SELECTED for 'A' — proves the selector
+    // returns null so the write-on-present effect (component-level) will not
+    // overwrite the existing snapshot; it never fabricates a diag.
+    const diagB: RouterDiagnostics = { score: 20, reason: 'b', tier: 'API_EXTERNAL' as any };
+    const events = [diagEvent('B', diagB as unknown as Record<string, unknown>)];
+    expect(selectActiveRouteDiag(events, 'A')).toBeNull();
+  });
+
+  it('6. interleaved A-then-B: keying by id means A\'s route is never returned for anchor B', () => {
+    const diagA: RouterDiagnostics = { score: 1, reason: 'a', tier: 'OLLAMA_LOCAL' as any };
+    const diagB: RouterDiagnostics = { score: 2, reason: 'b', tier: 'API_EXTERNAL' as any };
+    const events = [
+      diagEvent('A', diagA as unknown as Record<string, unknown>),
+      diagEvent('B', diagB as unknown as Record<string, unknown>),
+    ];
+    expect(selectActiveRouteDiag(events, 'A')).toEqual(diagA);
+    expect(selectActiveRouteDiag(events, 'B')).toEqual(diagB);
+  });
+
+  it('7. re-minted task: a new requestId (the re-mint) resolves to its own diag under its own id', () => {
+    const diagA: RouterDiagnostics = { score: 1, reason: 'first task', tier: 'OLLAMA_LOCAL' as any };
+    const diagB: RouterDiagnostics = { score: 2, reason: 're-minted task', tier: 'API_EXTERNAL' as any };
+    const events = [
+      diagEvent('A', diagA as unknown as Record<string, unknown>),
+      diagEvent('B', diagB as unknown as Record<string, unknown>),
+    ];
+    expect(selectActiveRouteDiag(events, 'A')).toEqual(diagA);
+    expect(selectActiveRouteDiag(events, 'B')).toEqual(diagB);
+  });
+
+  it('8. terminal/null-anchor hides the chip: null activeRequestId -> null (activeRequestId is null after RESULT/ERROR)', () => {
+    const diagA: RouterDiagnostics = { score: 1, reason: 'x', tier: 'OLLAMA_LOCAL' as any };
+    const events = [diagEvent('A', diagA as unknown as Record<string, unknown>)];
+    expect(selectActiveRouteDiag(events, null)).toBeNull();
   });
 });
