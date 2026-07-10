@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -21,6 +21,16 @@ const { dispatch } = await import('../packages/gateway/src/dispatch.js');
 const { taskStore } = await import('../packages/gateway/src/events.js');
 const { projectReceipt } = await import('../packages/gateway/src/receipts.js');
 const { makeRequest } = await import('./helpers.js');
+
+// The bridge namespace dispatch.ts itself imports (@torqclaw/bridge resolves to
+// packages/bridge/dist/index.js — the SAME module singleton). Imported via the
+// dist path here because the bare '@torqclaw/bridge' specifier is not resolvable
+// from the tests dir under the vitest config, but the dist file is. Because it
+// is the same singleton, vi.spyOn on these exports is seen at dispatch's call
+// site — this is what lets the breach test below drive dispatch's REAL breach
+// catch (not a hand-rolled recordSpend) and keeps CircuitBreakerError identity
+// consistent so `error instanceof CircuitBreakerError` holds inside dispatch.
+const bridge = await import('../packages/bridge/dist/index.js');
 
 const SESSION_CAP = 'TORQCLAW_SESSION_CAP_USD';
 const DAILY_CAP = 'TORQCLAW_DAILY_CAP_USD';
@@ -242,20 +252,24 @@ describe('TCLAW-1A-core: recordSpend (idempotent, honest attribution)', () => {
 });
 
 describe('TCLAW-1A-attr: breach path preserves cost + label (anti-regression for correction A)', () => {
-  it('LOAD-BEARING: a breach recordSpend carrying breachCostUsd + costSource records the cost NON-NULL with its label, NOT "unavailable" — this test MUST fail if CircuitBreakerError.lastCostSource is not threaded through dispatch.ts', () => {
+  // NOTE (teeth scope): this first test is a UNIT test of recordSpend's
+  // tag->attribution mapping ONLY. It calls recordSpend directly with a
+  // hardcoded costSource, so it does NOT exercise — and cannot fail on a
+  // regression of — dispatch.ts's breach-path threading (the isBudget catch
+  // reading CircuitBreakerError.lastCostSource and passing it to
+  // recordSpendSafe). The DISPATCH-LEVEL teeth for that end-to-end path live
+  // in the next test, which drives a real breach through dispatch().
+  it('recordSpend unit: costSource="exact" on a breach-shaped call maps to attribution="exact", cost NON-NULL (not unavailable), counted in SUM', () => {
     const taskId = randomUUID();
     const sid = randomUUID();
-    // Mirrors dispatch.ts's breach recordSpendSafe call: costUsd from
-    // CircuitBreakerError.lastCostUsd, costSource from the NEW
-    // lastCostSource field (populated at the hermes.ts breach throw from
-    // status.telemetry.costSource). If lastCostSource were dropped anywhere
-    // in that chain, this call would arrive here with costSource undefined
-    // and get mapped to 'unavailable' (cost_usd NULL) — silently regressing
-    // correction A, which exists specifically to preserve the breach cost.
+    // Shape mirrors what dispatch's breach recordSpendSafe passes: costUsd from
+    // CircuitBreakerError.lastCostUsd, costSource from lastCostSource. This only
+    // proves recordSpend's own mapping — the wiring that FEEDS these values is
+    // asserted by the dispatch-level test below.
     recordSpend({
       taskId, sessionId: sid,
-      costUsd: 9.99, // CircuitBreakerError.lastCostUsd
-      costSource: 'exact', // CircuitBreakerError.lastCostSource
+      costUsd: 9.99,
+      costSource: 'exact',
     });
     const row = getLedgerRow(taskId);
     expect(row.cost_usd).toBeCloseTo(9.99);
@@ -267,13 +281,108 @@ describe('TCLAW-1A-attr: breach path preserves cost + label (anti-regression for
     expect(sessionTotal(sid)).toBeCloseTo(9.99);
   });
 
-  it('a breach with an account_delta-sourced cost is labeled account_delta, not unavailable', () => {
+  it('recordSpend unit: costSource="account_delta" maps to attribution="account_delta", not unavailable', () => {
     const taskId = randomUUID();
     const sid = randomUUID();
     recordSpend({ taskId, sessionId: sid, costUsd: 5.5, costSource: 'account_delta' });
     const row = getLedgerRow(taskId);
     expect(row.cost_usd).toBeCloseTo(5.5);
     expect(row.attribution).toBe('account_delta');
+  });
+
+  // ── THE LOAD-BEARING DISPATCH-LEVEL TEETH ─────────────────────────────────
+  // This drives a REAL budget breach through dispatch(): a stubbed bridge
+  // throws a real CircuitBreakerError (carrying lastCostUsd + lastCostSource,
+  // exactly as hermes.ts's breach throw does), dispatch's isBudget catch runs
+  // against the real temp DB, and we assert the spend_ledger row for the
+  // breached task is cost_usd NON-NULL with the label from lastCostSource.
+  //
+  // TEETH: if dispatch.ts's breach recordSpendSafe stops passing
+  // costSource (i.e. threads costSource: undefined), the row becomes
+  // attribution='unavailable' / cost_usd NULL and THIS TEST FAILS — closing
+  // the gap the direct-recordSpend unit test above could not cover. Proven by
+  // sabotaging dispatch.ts and observing the red (see the ticket's teeth-check).
+  //
+  // The spy targets the SAME bridge module singleton dispatch imports (see the
+  // top-of-file `bridge` import note), so both isHermesAvailable() and
+  // executeHermesTask() are overridden at dispatch's own call site, and the
+  // thrown CircuitBreakerError keeps the identity dispatch's `instanceof` needs.
+  it('LOAD-BEARING (dispatch-level): a real budget breach through dispatch() records a NON-NULL spend_ledger row labeled from CircuitBreakerError.lastCostSource — NOT unavailable/NULL', async () => {
+    const sid = makeSession();
+    const reqId = randomUUID();
+
+    // Force the FRONTIER path into the async IIFE (past the FRONTIER-unavailable
+    // early-out) and make the engine poll "breach": executeHermesTask throws a
+    // real CircuitBreakerError with a reported cost + its provenance tag, just
+    // like the live mid-run breaker does at hermes.ts's breach throw.
+    const availSpy = vi.spyOn(bridge, 'isHermesAvailable').mockReturnValue(true);
+    const execSpy = vi
+      .spyOn(bridge, 'executeHermesTask')
+      .mockRejectedValue(
+        new bridge.CircuitBreakerError('Budget exceeded: $9.99 of $1.00 limit', 9.99, 'exact'),
+      );
+    try {
+      const req = { ...makeRequest({ taskType: 'AUTONOMOUS_RESEARCH' }), id: reqId, sessionId: sid };
+      // No cap set (SESSION/DAILY cap envs are cleared in beforeEach) so the cap
+      // GATE does not fire — the ONLY terminal is the mid-run BUDGET breach.
+      dispatch(req as any, { score: 10, reason: 'test', tier: 'API_EXTERNAL' as any });
+
+      // dispatch's execution is a fire-and-forget async IIFE — poll for the
+      // ledger row the breach catch writes.
+      let row: any;
+      for (let i = 0; i < 100; i++) {
+        row = getLedgerRow(reqId);
+        if (row) break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      // The task ended as a BUDGET breach (proves the isBudget catch ran, not
+      // some other failure path).
+      expect(getTask(reqId).error).toMatch(/^BUDGET:/);
+
+      // THE ASSERTION WITH TEETH: the breach cost is preserved NON-NULL with
+      // the label threaded from lastCostSource. If dispatch stops threading
+      // costSource, this row is attribution='unavailable' / cost_usd NULL and
+      // every line below fails.
+      expect(row).toBeTruthy();
+      expect(row.cost_usd).not.toBeNull();
+      expect(row.cost_usd).toBeCloseTo(9.99);
+      expect(row.attribution).toBe('exact');
+      expect(row.attribution).not.toBe('unavailable');
+      // And the preserved breach cost counts toward the cap SUM (correction A).
+      expect(sessionTotal(sid)).toBeCloseTo(9.99);
+    } finally {
+      execSpy.mockRestore();
+      availSpy.mockRestore();
+    }
+  });
+
+  it('dispatch-level: a breach whose lastCostSource is "account_delta" is labeled account_delta end-to-end (still non-null, still counted)', async () => {
+    const sid = makeSession();
+    const reqId = randomUUID();
+    const availSpy = vi.spyOn(bridge, 'isHermesAvailable').mockReturnValue(true);
+    const execSpy = vi
+      .spyOn(bridge, 'executeHermesTask')
+      .mockRejectedValue(
+        new bridge.CircuitBreakerError('Budget exceeded: $5.50 of $1.00 limit', 5.5, 'account_delta'),
+      );
+    try {
+      const req = { ...makeRequest({ taskType: 'AUTONOMOUS_RESEARCH' }), id: reqId, sessionId: sid };
+      dispatch(req as any, { score: 10, reason: 'test', tier: 'API_EXTERNAL' as any });
+      let row: any;
+      for (let i = 0; i < 100; i++) {
+        row = getLedgerRow(reqId);
+        if (row) break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(row).toBeTruthy();
+      expect(row.cost_usd).toBeCloseTo(5.5);
+      expect(row.attribution).toBe('account_delta');
+      expect(sessionTotal(sid)).toBeCloseTo(5.5);
+    } finally {
+      execSpy.mockRestore();
+      availSpy.mockRestore();
+    }
   });
 
   it('CircuitBreakerError carries lastCostSource alongside lastCostUsd (bridge-side wiring)', async () => {
