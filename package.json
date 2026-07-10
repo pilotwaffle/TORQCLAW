@@ -21,7 +21,10 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/server-filesystem": "^2026.1.14",
+    "@testing-library/jest-dom": "^6",
+    "@testing-library/react": "^16",
     "better-sqlite3": "^12",
+    "jsdom": "^25",
     "turbo": "^2.0.0",
     "typescript": "^5.5.0",
     "vitest": "^2",
