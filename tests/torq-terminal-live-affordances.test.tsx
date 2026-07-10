@@ -186,9 +186,14 @@ describe('TorqTerminal live affordances (TCLAW-QA-2 — mounts the REAL TorqTerm
       const denyBtn = screen.getByText('Deny');
       fireEvent.click(denyBtn);
 
-      // Deny wires onDecide(queueId,'REJECT') with no text (:741); :226 only
-      // attaches editedMarkdown on APPROVE. Exact toHaveBeenCalledWith proves
-      // the edited text is NOT leaked into the REJECT payload.
+      // G2A-verified attribution: the PRIMARY guard is the Deny button itself,
+      // which wires onDecide(queueId,'REJECT') passing NO text argument (:741) —
+      // so editedMarkdown reaches decideSkill as undefined regardless. The
+      // decideSkill branch (:226, editedMarkdown!==undefined && decision===
+      // 'APPROVE') is a SECONDARY, defense-in-depth filter; sabotaging :226
+      // alone does not flip this test — only breaking the button-level guard
+      // does. Exact toHaveBeenCalledWith pins the observable end-to-end
+      // contract: edited text is never leaked into the REJECT payload.
       expect(stream.sendCommand).toHaveBeenCalledWith({
         action: 'APPROVE_SKILL',
         queueId: 'queue-1',
@@ -264,6 +269,12 @@ describe('TorqTerminal live affordances (TCLAW-QA-2 — mounts the REAL TorqTerm
       const localBtn = screen.getByText('run on this machine');
       fireEvent.click(localBtn);
 
+      // G2A-verified attribution: on a fresh mount (controls.budget === ''),
+      // resendLocal (:181-183) sets budget:'free', and it is buildSubmit's
+      // budget==='free' branch (:45) that pins executionMode:'LOCAL_ONLY' —
+      // the explicit mode:'LOCAL_ONLY' override in resendLocal only carries
+      // independent weight when a non-empty budget is already set. This test
+      // asserts the observable LOCAL_ONLY output on the fresh-mount path.
       expect(stream.sendCommand).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'SUBMIT_PROMPT', prompt: 'do it again', executionMode: 'LOCAL_ONLY' }),
       );
