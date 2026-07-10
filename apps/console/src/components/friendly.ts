@@ -269,6 +269,77 @@ export function formatRouteDiagnostics(
   return rows;
 }
 
+/** The route lock/override verdict — the honest THREE-state taxonomy from
+ *  engine.ts RULE_META. A hard safetyLock (privacy/local guarantee) is
+ *  categorically different from a rule that is merely non-overridable
+ *  (LOCAL_INTENT), which is different again from an overridable router
+ *  preference. Rendering these three distinctly is the point of this panel;
+ *  collapsing them would either overstate LOCAL_INTENT as a safety guarantee
+ *  or demote a real privacy lock to "not overridable". */
+export function formatLockState(
+  diag: RouterDiagnostics | null | undefined,
+): { label: string; value: string } | null {
+  if (!diag) return null;
+  // (a) HARD safety lock — 3 rules carry a safetyLock string.
+  if (diag.safetyLock) {
+    return { label: 'lock state', value: `Locked — safety rule: ${diag.safetyLock}` };
+  }
+  // (b) FIRM, no safety lock — non-overridable WITHOUT a safetyLock (LOCAL_INTENT).
+  //     Affirmative wording (G1R RC-2): NO "(not a safety lock)" — that leaks
+  //     internals and reads as hedging. State what it IS.
+  if (diag.overridable === false) {
+    return { label: 'lock state', value: 'Fixed for this task' };
+  }
+  // (c) OVERRIDABLE router preference — the 4 heuristic rules. Label only; the
+  //     override ACTION is out of scope for 2B.
+  if (diag.overridable === true) {
+    return { label: 'lock state', value: 'Router preference — can be overridden' };
+  }
+  // (d) both undefined -> omit (never fabricate overridable:false).
+  return null;
+}
+
+/** Every blocked alternative, using the wire-tested wording. Do NOT cap at 1 —
+ *  "exactly one today" is engine happenstance, not a contract; a future rule
+ *  that blocks two tiers must not be silently truncated. */
+export function formatBlockedAlternatives(
+  diag: RouterDiagnostics | null | undefined,
+): Array<{ label: string; value: string }> {
+  if (!diag?.blockedAlternatives?.length) return [];
+  return diag.blockedAlternatives.map((alt) => ({
+    label: 'considered but not chosen',
+    value: `would have used ${alt.tier}, but: ${alt.why}`,
+  }));
+}
+
+/** Routing profile — NOT populated by 2A today (no writer). field() omits it
+ *  when absent, so the row simply does not appear. NEVER render "default"/"not
+ *  set"/"none" — that would imply a profile system exists when it does not. */
+export function formatProfile(
+  diag: RouterDiagnostics | null | undefined,
+): { label: string; value: string } | null {
+  return field('routing profile', diag?.profile);
+}
+
+/** Headline route rows: the human rule text (same chain as
+ *  formatRouteDiagnostics — humanReason ?? RULE_LABELS[ruleId] ?? reason,
+ *  never blank), the coded ruleId, score, and chosen tier. null diag -> the
+ *  same honest "no routing record" empty state. ruleId absent -> omit that row
+ *  (via field()), never synthesize a ruleId. */
+export function formatRouteExplanation(
+  diag: RouterDiagnostics | null | undefined,
+): Array<{ label: string; value: string }> {
+  if (!diag) return [{ label: 'route', value: 'no routing record' }];
+  const ruleText = diag.humanReason ?? (diag.ruleId ? RULE_LABELS[diag.ruleId] : undefined) ?? diag.reason;
+  const rows: Array<{ label: string; value: string }> = [];
+  rows.push({ label: 'why', value: ruleText });
+  const ruleIdRow = field('rule id', diag.ruleId);
+  if (ruleIdRow) rows.push(ruleIdRow);
+  rows.push({ label: 'score', value: String(diag.score) });
+  rows.push({ label: 'route', value: diag.tier }); // tier; the panel maps via tierLabel if desired
+  return rows;
+}
+
 /** Plain data row a replay-only event renders — NO callbacks, NO dispatch
  *  surface of any kind. This is the type-level half of the structural
  *  boundary: even if a future edit tried to add a handler field here, the

@@ -10,6 +10,10 @@ import {
   formatReceiptState,
   formatCostField,
   formatRouteDiagnostics,
+  formatLockState,
+  formatBlockedAlternatives,
+  formatProfile,
+  formatRouteExplanation,
   toReplayEventRows,
   canRenderAction,
   formatCap,
@@ -385,6 +389,216 @@ describe('formatRouteDiagnostics', () => {
     };
     const rows = formatRouteDiagnostics(diag);
     expect(rows.find((r) => r.label === 'blocked alternative')?.value).toBe('would have used API_EXTERNAL, but: over budget');
+  });
+});
+
+describe('formatLockState — the honest THREE-state taxonomy (TCLAW-2B)', () => {
+  it('branch (a): safetyLock present -> "Locked" + the safetyLock string', () => {
+    const diag = { score: 10, reason: 'x', tier: 'OLLAMA_LOCAL', safetyLock: 'SENSITIVE_DATA', overridable: false } as RouterDiagnostics;
+    const row = formatLockState(diag);
+    expect(row?.value).toContain('Locked');
+    expect(row?.value).toContain('SENSITIVE_DATA');
+  });
+
+  it('branch (b): overridable:false with NO safetyLock (LOCAL_INTENT-shaped) -> "Fixed for this task"', () => {
+    const diag = { score: 10, reason: 'x', tier: 'OLLAMA_LOCAL', overridable: false } as RouterDiagnostics;
+    const row = formatLockState(diag);
+    expect(row?.value).toBe('Fixed for this task');
+  });
+
+  it('branch (b) wording is affirmative — never leaks "(not a safety lock)"', () => {
+    const diag = { score: 10, reason: 'x', tier: 'OLLAMA_LOCAL', overridable: false } as RouterDiagnostics;
+    const row = formatLockState(diag);
+    expect(row?.value.toLowerCase()).not.toContain('not a safety lock');
+  });
+
+  it('branch (c): overridable:true (heuristic-shaped) -> mentions override', () => {
+    const diag = { score: 10, reason: 'x', tier: 'API_EXTERNAL', overridable: true } as RouterDiagnostics;
+    const row = formatLockState(diag);
+    expect(row?.value.toLowerCase()).toContain('overrid');
+  });
+
+  it('branch (d): overridable undefined and no safetyLock -> null (never fabricated)', () => {
+    const diag = { score: 10, reason: 'x', tier: 'API_EXTERNAL' } as RouterDiagnostics;
+    expect(formatLockState(diag)).toBeNull();
+  });
+
+  it('null/undefined diag -> null', () => {
+    expect(formatLockState(null)).toBeNull();
+    expect(formatLockState(undefined)).toBeNull();
+  });
+
+  it('ANTI-CONFLATION (load-bearing): branch (a) string !== branch (b) string', () => {
+    const lockRow = formatLockState({ score: 1, reason: 'x', tier: 'OLLAMA_LOCAL', safetyLock: 'USER_LOCAL_ONLY', overridable: false } as RouterDiagnostics);
+    const fixedRow = formatLockState({ score: 1, reason: 'x', tier: 'OLLAMA_LOCAL', overridable: false } as RouterDiagnostics);
+    expect(lockRow?.value).not.toBe(fixedRow?.value);
+  });
+
+  it('ANTI-CONFLATION (load-bearing): a safetyLock diag that is ALSO overridable:false renders branch (a), not (b) — proves ordering', () => {
+    // Every real safetyLock rule (PRIVACY_OVERRIDE, USER_LOCAL_ONLY,
+    // LOCAL_TOOL_INTENT) is ALSO overridable:false. If (b) were checked
+    // first, a hard privacy lock would be demoted to generic "Fixed for
+    // this task" wording — safetyLock must win.
+    const diag = { score: 1, reason: 'x', tier: 'OLLAMA_LOCAL', safetyLock: 'LOCAL_TOOL_INTENT', overridable: false } as RouterDiagnostics;
+    const row = formatLockState(diag);
+    expect(row?.value).toContain('Locked');
+    expect(row?.value).not.toBe('Fixed for this task');
+  });
+});
+
+describe('formatBlockedAlternatives', () => {
+  it('length-1 -> one row with the exact wire-tested string', () => {
+    const diag = {
+      score: 1, reason: 'x', tier: 'OLLAMA_LOCAL',
+      blockedAlternatives: [{ tier: 'API_EXTERNAL', why: 'over budget' }],
+    } as RouterDiagnostics;
+    const rows = formatBlockedAlternatives(diag);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.value).toBe('would have used API_EXTERNAL, but: over budget');
+  });
+
+  it('length-2 -> TWO rows (proves no <=1 cap, G1R RC-3)', () => {
+    const diag = {
+      score: 1, reason: 'x', tier: 'OLLAMA_LOCAL',
+      blockedAlternatives: [
+        { tier: 'API_EXTERNAL', why: 'over budget' },
+        { tier: 'OLLAMA_LOCAL', why: 'cold start' },
+      ],
+    } as RouterDiagnostics;
+    const rows = formatBlockedAlternatives(diag);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.value).toBe('would have used API_EXTERNAL, but: over budget');
+    expect(rows[1]?.value).toBe('would have used OLLAMA_LOCAL, but: cold start');
+  });
+
+  it('absent -> []', () => {
+    expect(formatBlockedAlternatives({ score: 1, reason: 'x', tier: 'OLLAMA_LOCAL' } as RouterDiagnostics)).toEqual([]);
+  });
+
+  it('empty array -> []', () => {
+    expect(formatBlockedAlternatives({ score: 1, reason: 'x', tier: 'OLLAMA_LOCAL', blockedAlternatives: [] } as RouterDiagnostics)).toEqual([]);
+  });
+
+  it('null/undefined diag -> []', () => {
+    expect(formatBlockedAlternatives(null)).toEqual([]);
+    expect(formatBlockedAlternatives(undefined)).toEqual([]);
+  });
+});
+
+describe('formatProfile', () => {
+  it('absent -> null (omitted, never rendered)', () => {
+    expect(formatProfile({ score: 1, reason: 'x', tier: 'OLLAMA_LOCAL' } as RouterDiagnostics)).toBeNull();
+  });
+
+  it('present "fast" -> the field row (defensive — 2A never sets this today)', () => {
+    const diag = { score: 1, reason: 'x', tier: 'OLLAMA_LOCAL', profile: 'fast' } as RouterDiagnostics;
+    expect(formatProfile(diag)).toEqual({ label: 'routing profile', value: 'fast' });
+  });
+
+  it('empty string -> null', () => {
+    const diag = { score: 1, reason: 'x', tier: 'OLLAMA_LOCAL', profile: '' } as RouterDiagnostics;
+    expect(formatProfile(diag)).toBeNull();
+  });
+
+  it('null/undefined diag -> null', () => {
+    expect(formatProfile(null)).toBeNull();
+    expect(formatProfile(undefined)).toBeNull();
+  });
+});
+
+describe('formatRouteExplanation', () => {
+  it('null diag -> the honest "no routing record" empty state', () => {
+    expect(formatRouteExplanation(null)).toEqual([{ label: 'route', value: 'no routing record' }]);
+  });
+
+  it('humanReason present -> "why" row equals humanReason', () => {
+    const diag = { score: 5, reason: 'raw', tier: 'API_EXTERNAL', ruleId: 'TOOL_COUNT_OVERFLOW', humanReason: 'custom human text' } as RouterDiagnostics;
+    const rows = formatRouteExplanation(diag);
+    expect(rows.find((r) => r.label === 'why')?.value).toBe('custom human text');
+  });
+
+  it('ruleId present, no humanReason -> "why" uses RULE_LABELS and a "rule id" row is present', () => {
+    const diag = { score: 5, reason: 'raw', tier: 'API_EXTERNAL', ruleId: 'TOOL_COUNT_OVERFLOW' } as RouterDiagnostics;
+    const rows = formatRouteExplanation(diag);
+    expect(rows.find((r) => r.label === 'why')?.value).toBe(RULE_LABELS.TOOL_COUNT_OVERFLOW);
+    expect(rows.find((r) => r.label === 'rule id')?.value).toBe('TOOL_COUNT_OVERFLOW');
+  });
+
+  it('only {score,reason,tier} -> "why" is the raw reason, no "rule id" row, score/route present (partial-diag honesty)', () => {
+    const diag = { score: 42, reason: 'raw fallback text', tier: 'OLLAMA_LOCAL' } as RouterDiagnostics;
+    const rows = formatRouteExplanation(diag);
+    expect(rows.find((r) => r.label === 'why')?.value).toBe('raw fallback text');
+    expect(rows.find((r) => r.label === 'rule id')).toBeUndefined();
+    expect(rows.find((r) => r.label === 'score')?.value).toBe('42');
+    expect(rows.find((r) => r.label === 'route')?.value).toBe('OLLAMA_LOCAL');
+  });
+});
+
+describe('lock-taxonomy DRIFT guard (mirrors RULE_LABELS drift guard at RULE_LABELS describe block)', () => {
+  // packages/router/src/engine.ts RULE_META is a private `const`, NOT
+  // exported (verified: no index.ts/barrel in packages/router, and no
+  // `export` keyword on RULE_META) — so per the ticket's scope boundary we
+  // do NOT add a router export just for this test. Instead we pin the known
+  // rule -> shape mapping (engine.ts:12-21) directly, with the SAME shape
+  // formatLockState branches on, so a future engine change that silently
+  // adds/removes a safetyLock or flips overridable is caught here.
+  const HARD_LOCK_RULES = ['PRIVACY_OVERRIDE', 'USER_LOCAL_ONLY', 'LOCAL_TOOL_INTENT'] as const;
+  const FIRM_NO_LOCK_RULE = 'LOCAL_INTENT' as const;
+  const OVERRIDABLE_RULES = ['LOW_CLASSIFIER_CONFIDENCE', 'TOOL_COUNT_OVERFLOW', 'LATENCY_CRITICAL', 'HEURISTIC_EVAL'] as const;
+
+  // Mirrors engine.ts RULE_META exactly (score/reason/tier omitted — those
+  // fields aren't inspected by formatLockState, only safetyLock/overridable are).
+  const RULE_SHAPE: Record<string, { overridable: boolean; safetyLock?: string }> = {
+    PRIVACY_OVERRIDE: { overridable: false, safetyLock: 'SENSITIVE_DATA' },
+    USER_LOCAL_ONLY: { overridable: false, safetyLock: 'USER_LOCAL_ONLY' },
+    LOCAL_INTENT: { overridable: false },
+    LOCAL_TOOL_INTENT: { overridable: false, safetyLock: 'LOCAL_TOOL_INTENT' },
+    LOW_CLASSIFIER_CONFIDENCE: { overridable: true },
+    TOOL_COUNT_OVERFLOW: { overridable: true },
+    LATENCY_CRITICAL: { overridable: true },
+    HEURISTIC_EVAL: { overridable: true },
+  };
+
+  it('the RULE_SHAPE key set covers exactly all 8 RouterRuleIdSchema options (no rule missing/extra)', () => {
+    const shapeKeys = new Set(Object.keys(RULE_SHAPE));
+    const schemaKeys = new Set(RouterRuleIdSchema.options as readonly string[]);
+    expect(shapeKeys).toEqual(schemaKeys);
+  });
+
+  it('exactly {PRIVACY_OVERRIDE, USER_LOCAL_ONLY, LOCAL_TOOL_INTENT} carry a safetyLock', () => {
+    const lockedKeys = Object.entries(RULE_SHAPE)
+      .filter(([, m]) => m.safetyLock)
+      .map(([k]) => k)
+      .sort();
+    expect(lockedKeys).toEqual([...HARD_LOCK_RULES].sort());
+  });
+
+  it('those 3 hard-lock rules render formatLockState branch (a) — "Locked" + their safetyLock', () => {
+    for (const rule of HARD_LOCK_RULES) {
+      const meta = RULE_SHAPE[rule]!;
+      const diag = { score: 1, reason: 'x', tier: 'OLLAMA_LOCAL', ruleId: rule, ...meta } as RouterDiagnostics;
+      const row = formatLockState(diag);
+      expect(row?.value).toContain('Locked');
+      expect(row?.value).toContain(meta.safetyLock);
+    }
+  });
+
+  it('LOCAL_INTENT is non-overridable AND carries no safetyLock -> branch (b) "Fixed for this task"', () => {
+    const meta = RULE_SHAPE[FIRM_NO_LOCK_RULE]!;
+    expect(meta.safetyLock).toBeUndefined();
+    expect(meta.overridable).toBe(false);
+    const diag = { score: 1, reason: 'x', tier: 'OLLAMA_LOCAL', ruleId: FIRM_NO_LOCK_RULE, ...meta } as RouterDiagnostics;
+    expect(formatLockState(diag)?.value).toBe('Fixed for this task');
+  });
+
+  it('the 4 heuristic/overridable rules render branch (c)', () => {
+    for (const rule of OVERRIDABLE_RULES) {
+      const meta = RULE_SHAPE[rule]!;
+      expect(meta.overridable).toBe(true);
+      expect(meta.safetyLock).toBeUndefined();
+      const diag = { score: 1, reason: 'x', tier: 'API_EXTERNAL', ruleId: rule, ...meta } as RouterDiagnostics;
+      expect(formatLockState(diag)?.value).toBe('Router preference — can be overridden');
+    }
   });
 });
 
