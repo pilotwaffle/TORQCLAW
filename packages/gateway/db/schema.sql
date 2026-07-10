@@ -164,8 +164,8 @@ CREATE TABLE IF NOT EXISTS spend_ledger (
   source_channel TEXT,                  -- req.sourceChannel, null for direct
   provider TEXT,                        -- provider/model tag, null if unknown/local
   cost_usd REAL,                        -- provider-reported; NULL when unavailable (never fabricate 0)
-  attribution TEXT NOT NULL,            -- 'reported' | 'unavailable' (1A-core 2-way; TEXT so 1A-attr's
-                                         -- exact/account_delta 3-way split needs no schema change)
+  attribution TEXT NOT NULL,            -- 'exact' | 'account_delta' | 'unavailable' (3-way, 1A-attr; TEXT so
+                                         -- the split needed no schema change over 1A-core's original 2-way)
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_spend_ledger_session ON spend_ledger(session_id);

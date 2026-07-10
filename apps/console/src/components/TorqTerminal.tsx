@@ -5,6 +5,7 @@ import type { GatewayEvent, ClientCommand } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
 import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction } from './friendly';
 import ReceiptsPanel from './ReceiptsPanel';
+import CostPanel from './CostPanel';
 
 const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL ?? 'ws://localhost:18790/ws';
 const GATEWAY_TOKEN = process.env.NEXT_PUBLIC_GATEWAY_TOKEN ?? '';
@@ -71,6 +72,8 @@ export default function TorqTerminal() {
   const [decided, setDecided] = useState<Record<string, 'APPROVE' | 'REJECT'>>({});
   // TCLAW-4B-2: console receipt panel — overlay over the live scroll region.
   const [receiptsOpen, setReceiptsOpen] = useState(false);
+  // TCLAW-1B: Cost Control Center panel — same overlay pattern, read-only.
+  const [costOpen, setCostOpen] = useState(false);
   // Stop-button UX: 'requested' once a cancel is sent (button shows "stopping…"),
   // 'failed' if the send was dropped so the user knows to retry. Cleared when the
   // next task starts.
@@ -279,6 +282,9 @@ export default function TorqTerminal() {
           onClose={() => setReceiptsOpen(false)}
         />
       )}
+      {costOpen && (
+        <CostPanel events={events} sendCommand={sendCommand} onClose={() => setCostOpen(false)} />
+      )}
       </div>
 
       {hint && !hintDismissed && (
@@ -376,6 +382,10 @@ export default function TorqTerminal() {
           <button type="button" onClick={() => setReceiptsOpen((v) => !v)} className="text-neutral-500 hover:text-neutral-300">
             {receiptsOpen ? 'hide receipts' : 'receipts'}
           </button>
+          <span className="text-neutral-700">·</span>
+          <button type="button" onClick={() => setCostOpen((v) => !v)} className="text-neutral-500 hover:text-neutral-300">
+            {costOpen ? 'hide cost' : 'cost'}
+          </button>
         </div>
       </form>
     </section>
@@ -422,7 +432,7 @@ function EventRow({
   // TCLAW-4B-2: 4B panel frames (receipt list/detail responses) are
   // publishOnly SYSTEM events meant only for ReceiptsPanel — they must never
   // render a stray inline row/card in the live log.
-  if (event.type === 'SYSTEM' && (meta.receiptView || meta.receiptList)) return null;
+  if (event.type === 'SYSTEM' && (meta.receiptView || meta.receiptList || meta.costSummary)) return null;
 
   // P2.5: a SYSTEM event carrying a receipt renders as a footer card, not a row.
   if (event.type === 'SYSTEM' && meta.receipt) {
