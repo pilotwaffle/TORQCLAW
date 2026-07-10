@@ -340,6 +340,29 @@ export function formatRouteExplanation(
   return rows;
 }
 
+// ── TCLAW-2C: live current-task route chip ──────────────────────────────
+
+/** TCLAW-2C: the current task's route diagnostics for the live chip. Returns
+ *  the metadata (as RouterDiagnostics) of the newest TIER_SELECTED whose
+ *  requestId === activeRequestId, or null when activeRequestId is null OR no
+ *  matching TIER_SELECTED is present in the current events window (e.g. it was
+ *  evicted from the ring). PURE: no React, no side effects. This feeds the
+ *  requestId-keyed snapshot write (write-on-present) — it is NOT the render
+ *  source (the render reads the useState snapshot so it survives eviction). */
+export function selectActiveRouteDiag(
+  events: GatewayEvent[],
+  activeRequestId: string | null,
+): RouterDiagnostics | null {
+  if (!activeRequestId) return null;
+  let diag: RouterDiagnostics | null = null;
+  for (const ev of events) {
+    if (ev.type === 'TIER_SELECTED' && ev.requestId === activeRequestId && ev.metadata) {
+      diag = ev.metadata as RouterDiagnostics; // last-wins for this id
+    }
+  }
+  return diag;
+}
+
 /** Plain data row a replay-only event renders — NO callbacks, NO dispatch
  *  surface of any kind. This is the type-level half of the structural
  *  boundary: even if a future edit tried to add a handler field here, the

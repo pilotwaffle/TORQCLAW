@@ -1,9 +1,9 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { GatewayEvent, ClientCommand } from '@torqclaw/contracts';
+import type { GatewayEvent, ClientCommand, RouterDiagnostics } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
-import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction } from './friendly';
+import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, selectActiveRouteDiag } from './friendly';
 import ReceiptsPanel from './ReceiptsPanel';
 import CostPanel from './CostPanel';
 
@@ -111,6 +111,32 @@ export default function TorqTerminal() {
     }
     return id;
   }, [events]);
+
+  // TCLAW-2C: the live route diag for the CURRENT task, snapshotted by
+  // requestId so it survives ring eviction of its own TIER_SELECTED frame
+  // during a long task. selectActiveRouteDiag is the pure selection; the
+  // useState snapshot is the RENDER SOURCE (never the selector over events).
+  const liveRouteDiag = useMemo(
+    () => selectActiveRouteDiag(events, activeRequestId),
+    [events, activeRequestId],
+  );
+  const [routeSnapshot, setRouteSnapshot] = useState<Record<string, RouterDiagnostics>>({});
+  useEffect(() => {
+    // WRITE-ON-PRESENT (mirror ReceiptsPanel :129): only write when we have a
+    // diag for the current anchor; NEVER clear on absent (so an evicted frame
+    // doesn't blank a still-in-flight task). Keyed by requestId so a new task
+    // never clobbers the current slot.
+    if (activeRequestId && liveRouteDiag) {
+      setRouteSnapshot((prev) => (prev[activeRequestId] ? prev : { ...prev, [activeRequestId]: liveRouteDiag }));
+    }
+  }, [activeRequestId, liveRouteDiag]);
+
+  // TCLAW-2C: render the chip ONLY from the snapshot indexed by the CURRENT
+  // live anchor. activeRequestId==null -> no chip (task terminal / none). This
+  // is the invariant that prevents a stale route resurfacing for a different
+  // task: never read a remembered id, never read busy, never read the selector
+  // output directly.
+  const chipDiag: RouterDiagnostics | null = activeRequestId ? (routeSnapshot[activeRequestId] ?? null) : null;
 
   const busy = useMemo(() => {
     const last = events[events.length - 1];
@@ -271,6 +297,24 @@ export default function TorqTerminal() {
               <span className="text-[10px] text-amber-400">
                 couldn’t send stop — connection may be reconnecting; try again
               </span>
+            )}
+          </p>
+        )}
+        {/* TCLAW-2C: live current-task route chip.
+            Gated on activeRequestId (NOT busy): busy excludes PENDING_APPROVAL, but a
+            task paused for approval is still the current task — the chip stays visible
+            during the approval pause intentionally, and swaps to the re-minted task's
+            route (new requestId) on APPROVE. */}
+        {chipDiag && (
+          <p className="flex items-center gap-2 px-2 pb-1 text-[11px] text-neutral-600"
+             title={formatRouteExplanation(chipDiag)[0]?.value}>
+            <span className="text-neutral-500">↳</span>
+            {tierLabel(chipDiag.tier) && <span>{tierLabel(chipDiag.tier)!.text}</span>}
+            {formatLockState(chipDiag) && (
+              <>
+                <span className="text-neutral-700">·</span>
+                <span>{formatLockState(chipDiag)!.value}</span>
+              </>
             )}
           </p>
         )}
