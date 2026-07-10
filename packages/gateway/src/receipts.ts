@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { db } from './storage.js';
+import { publishOnly } from './events.js';
+import { sessions } from './sessions.js';
 
 /**
  * TCLAW-4A: run receipt projection.
@@ -431,9 +433,129 @@ const selectReceiptByTaskId = db.prepare(`SELECT * FROM run_receipts WHERE task_
 
 /** GET_RECEIPT backing query: the full row (including session_id, which the
  *  caller MUST use for the ownership check before doing anything else with
- *  the row — see server.ts GET_RECEIPT handler). Returns null if no receipt
+ *  the row — see handleGetReceipt below). Returns null if no receipt
  *  exists for this task_id (task_id is UNIQUE). SELECT-only. */
 export function getReceipt(taskId: string): ReceiptRow | null {
   const row = selectReceiptByTaskId.get(taskId) as ReceiptRow | undefined;
   return row ?? null;
+}
+
+// ── TCLAW-4B: command handler bodies (the REAL production handlers) ─────────
+//
+// server.ts's /ws command switch delegates LIST_RECEIPTS and GET_RECEIPT here
+// verbatim — the switch calls these functions, there is NO parallel copy of
+// this logic anywhere. They live in this module rather than inline in
+// server.ts so tests can drive the exact production handler path headlessly:
+// server.ts has import-time side effects (bridge connect + app.listen) that
+// make it unimportable from a unit test.
+//
+// CRITICAL read-only invariant: these handlers do ZERO writes — no taskStore,
+// no registerApproval/decideApproval, no dispatch, no emit-that-persists.
+// They only SELECT (listReceipts / getReceipt / sessions.getEventsForRequest /
+// the taskPrompt lookup) and publishOnly (which never INSERTs). Nothing in
+// this path can dispatch APPROVE_TOOL/APPROVE_SKILL or mutate
+// tool_approvals/tasks/events — replayed events are returned as inert
+// metadata only. tests/receipts-read.test.ts proves row counts and states are
+// byte-identical before/after driving these handlers.
+
+// Oversize guard for GET_RECEIPT's includeEvents replay. 512KB is comfortably
+// inside typical WS frame/message-size limits (Fastify/ws defaults are
+// multi-MB, but consoles/proxies in front of a browser client are commonly
+// tuned much tighter — 512KB keeps a single receipt-view frame small enough
+// to never be the thing that trips an intermediary's limit) while still
+// comfortably fitting the evidence span of a typical task (a handful to a
+// few hundred events). All-or-nothing: we never truncate the array, only
+// omit it entirely with a visible marker.
+export const MAX_REPLAY_BYTES = 512 * 1024;
+
+/** taskPrompt is read at GET_RECEIPT query time (not persisted onto the
+ *  receipt row) so the read path never depends on the projection carrying
+ *  prompt text. request_json.payload.prompt mirrors the shape enrichCommand
+ *  builds (see GatewayRequest.payload.prompt). Reuses the existing selectTask
+ *  prepared statement (SELECT-only). */
+function lookupTaskPrompt(taskId: string): string | null {
+  const task = selectTask.get(taskId) as TaskRow | undefined;
+  if (!task) return null;
+  try {
+    const parsed = JSON.parse(task.request_json);
+    return typeof parsed?.payload?.prompt === 'string' ? parsed.payload.prompt : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The LIST_RECEIPTS handler body. Session-scoped by construction — the
+ *  command carries no sessionId param, and server.ts always passes the
+ *  CONNECTION's own sid, never a client-supplied value, so a caller can
+ *  never list another session's receipts. */
+export function handleListReceipts(sessionId: string, limit: number): void {
+  const receipts = listReceipts(sessionId, limit);
+  publishOnly(sessionId, {
+    message: 'Receipts listed',
+    metadata: { receiptList: true, receipts },
+  });
+}
+
+/** The GET_RECEIPT handler body. */
+export function handleGetReceipt(
+  sessionId: string,
+  cmd: { taskId: string; includeEvents: boolean },
+): void {
+  const row = getReceipt(cmd.taskId);
+
+  // OWNERSHIP CHECK — the critical guard. A foreign taskId (row exists but
+  // belongs to another session) MUST produce the exact same response as an
+  // absent taskId: no existence oracle. If we replied differently for
+  // "not found" vs "not yours", a client could probe arbitrary UUIDs and
+  // learn which tasks exist on the server even without ever being able to
+  // read their contents.
+  if (!row || row.session_id !== sessionId) {
+    publishOnly(sessionId, {
+      message: 'No receipt for this task',
+      metadata: { receiptView: true, taskId: cmd.taskId, receipt: null },
+    });
+    return;
+  }
+
+  // Only reachable once ownership is proven.
+  let receipt: unknown = null;
+  try {
+    receipt = JSON.parse(row.full_receipt_json);
+  } catch {
+    receipt = null;
+  }
+
+  const taskPrompt = lookupTaskPrompt(cmd.taskId);
+
+  const metadata: Record<string, unknown> = {
+    receiptView: true,
+    taskId: cmd.taskId,
+    receipt,
+    projectionVersion: row.projection_version,
+    taskPrompt, // OWN key — never merged into the receipt object itself
+  };
+
+  if (cmd.includeEvents && row.evidence_start_seq != null && row.evidence_end_seq != null) {
+    // Ownership was proven above — the ONLY precondition under which
+    // getEventsForRequest (which has no session scoping of its own) may run.
+    const candidateEvents = sessions.getEventsForRequest(
+      cmd.taskId, row.evidence_start_seq, row.evidence_end_seq,
+    );
+    const byteLength = Buffer.byteLength(JSON.stringify(candidateEvents), 'utf8');
+    if (byteLength > MAX_REPLAY_BYTES) {
+      // OVERSIZE GUARD: all-or-marker, never a partial/truncated array —
+      // a silently-truncated evidence array would be a subtle data lie.
+      metadata.events = null;
+      metadata.eventsOmitted = {
+        reason: 'too_large',
+        eventCount: candidateEvents.length,
+        evidenceStartSeq: row.evidence_start_seq,
+        evidenceEndSeq: row.evidence_end_seq,
+      };
+    } else {
+      metadata.events = candidateEvents;
+    }
+  }
+
+  publishOnly(sessionId, { message: 'Receipt', metadata });
 }

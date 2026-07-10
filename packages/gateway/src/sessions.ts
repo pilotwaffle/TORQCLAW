@@ -135,7 +135,8 @@ export const sessions = {
    * INVARIANT: this helper has NO session-scoping of its own — request_id
    * alone does not prove the caller owns the task. It must ONLY ever be
    * reached AFTER the caller has independently verified session ownership of
-   * the task (server.ts's GET_RECEIPT handler does this via the receipt row's
+   * the task (receipts.ts handleGetReceipt — the real GET_RECEIPT handler
+   * body delegated to by server.ts — does this via the receipt row's
    * session_id before calling here). Do not call this from anywhere that
    * skips that check.
    */

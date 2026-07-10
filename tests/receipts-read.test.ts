@@ -9,9 +9,19 @@ import { randomUUID } from 'node:crypto';
 // pattern of tests/receipt-projection.test.ts / tests/sessions-memory.test.ts.
 process.env.TORQCLAW_DATA_DIR = mkdtempSync(join(tmpdir(), 'torq-receipts-read-'));
 const { db } = await import('../packages/gateway/src/storage.js');
-const { materializeReceipt, listReceipts, getReceipt } = await import('../packages/gateway/src/receipts.js');
+const {
+  materializeReceipt, listReceipts, getReceipt,
+  handleListReceipts, handleGetReceipt, MAX_REPLAY_BYTES, PROJECTION_VERSION,
+} = await import('../packages/gateway/src/receipts.js');
 const { sessions } = await import('../packages/gateway/src/sessions.js');
 const { publishOnly, sessionBus } = await import('../packages/gateway/src/events.js');
+
+// NOTE on what "the real handler" means here: server.ts's /ws command switch
+// delegates LIST_RECEIPTS/GET_RECEIPT verbatim to handleListReceipts /
+// handleGetReceipt in receipts.ts (no parallel copy — see the switch cases).
+// server.ts itself has import-time side effects (bridge connect + app.listen)
+// so it cannot be imported headlessly; driving the exported handler functions
+// IS driving the production handler bodies.
 
 // ---- fixture helpers (mirrors tests/receipt-projection.test.ts) -----------
 
@@ -102,31 +112,36 @@ function insertApproval(requestId: string, toolName: string, status: string): vo
   ).run(randomUUID(), requestId, toolName, JSON.stringify({}), status);
 }
 
-function rowCounts(): { tasks: number; events: number; tool_approvals: number } {
+function rowCounts(): { tasks: number; events: number; tool_approvals: number; run_receipts: number } {
   const tasks = (db.prepare(`SELECT COUNT(*) AS n FROM tasks`).get() as { n: number }).n;
   const events = (db.prepare(`SELECT COUNT(*) AS n FROM events`).get() as { n: number }).n;
   const tool_approvals = (db.prepare(`SELECT COUNT(*) AS n FROM tool_approvals`).get() as { n: number }).n;
-  return { tasks, events, tool_approvals };
+  const run_receipts = (db.prepare(`SELECT COUNT(*) AS n FROM run_receipts`).get() as { n: number }).n;
+  return { tasks, events, tool_approvals, run_receipts };
 }
 
-function snapshotStates(): { taskStates: string[]; approvalStates: string[] } {
+/** Byte-level snapshot of all mutable state the read surface could possibly
+ *  touch: per-row states PLUS a full serialized dump of run_receipts — so
+ *  even a sneaky UPDATE (same row count) inside the handler body fails the
+ *  before/after equality. */
+function snapshotStates(): { taskStates: string[]; approvalStates: string[]; receiptsDump: string } {
   const taskStates = (db.prepare(`SELECT state FROM tasks ORDER BY request_id`).all() as { state: string }[]).map((r) => r.state);
   const approvalStates = (db.prepare(`SELECT status FROM tool_approvals ORDER BY approval_id`).all() as { status: string }[]).map((r) => r.status);
-  return { taskStates, approvalStates };
+  const receiptsDump = JSON.stringify(db.prepare(`SELECT * FROM run_receipts ORDER BY task_id`).all());
+  return { taskStates, approvalStates, receiptsDump };
 }
 
-/**
- * Mirrors server.ts's GET_RECEIPT ownership decision exactly (row null OR
- * row.session_id !== sid -> the SAME "no receipt" response). Encodes the
- * decision as a pure function so the no-existence-oracle invariant is
- * testable without standing up a live WebSocket server.
- */
-function ownershipDecision(taskId: string, requesterSid: string): { receipt: null } | { receipt: unknown } {
-  const row = getReceipt(taskId);
-  if (!row || row.session_id !== requesterSid) {
-    return { receipt: null };
+/** Capture every frame the REAL handler publishes to the session's bus while
+ *  fn runs — exactly what a connected ws client would receive. */
+function captureFrames(sessionId: string, fn: () => void): any[] {
+  const frames: any[] = [];
+  const unsubscribe = sessionBus.subscribe(sessionId, (ev) => frames.push(ev));
+  try {
+    fn();
+  } finally {
+    unsubscribe();
   }
-  return { receipt: JSON.parse(row.full_receipt_json) };
+  return frames;
 }
 
 // ---------------------------------------------------------------------------
@@ -168,22 +183,35 @@ describe('TCLAW-4B receipt read surface', () => {
     expect(failedSummary.resultState).toBe('failed');
   });
 
-  it('2+3. getReceipt owned -> row; foreign session AND absent taskId -> indistinguishable receipt:null', () => {
+  it('2+3. REAL handler: owned -> receipt frame; foreign session AND absent taskId -> indistinguishable receipt:null frames', () => {
     const owner = makeSession();
     const other = makeSession();
     const taskId = makeTask({ sessionId: owner, requestJson: baseRequestJson({ sourceChannel: 'slack' }) });
     materializeReceipt(taskId);
 
-    const ownedDecision = ownershipDecision(taskId, owner);
-    expect('receipt' in ownedDecision && ownedDecision.receipt).not.toBeNull();
+    // Owned: the real handler publishes the receipt.
+    const ownedFrames = captureFrames(owner, () => handleGetReceipt(owner, { taskId, includeEvents: false }));
+    expect(ownedFrames.length).toBe(1);
+    expect(ownedFrames[0].message).toBe('Receipt');
+    expect((ownedFrames[0].metadata as any).receipt).not.toBeNull();
+    expect((ownedFrames[0].metadata as any).receipt.taskId).toBe(taskId);
 
-    const foreignDecision = ownershipDecision(taskId, other);
-    const absentDecision = ownershipDecision(randomUUID(), other);
+    // Foreign (row exists, other session) vs absent (no row at all).
+    const foreignFrames = captureFrames(other, () => handleGetReceipt(other, { taskId, includeEvents: false }));
+    const absentId = randomUUID();
+    const absentFrames = captureFrames(other, () => handleGetReceipt(other, { taskId: absentId, includeEvents: false }));
 
-    expect(foreignDecision).toEqual({ receipt: null });
-    expect(absentDecision).toEqual({ receipt: null });
-    // Byte-identical shape — no existence oracle.
-    expect(JSON.stringify(foreignDecision)).toBe(JSON.stringify(absentDecision));
+    expect(foreignFrames.length).toBe(1);
+    expect(absentFrames.length).toBe(1);
+    const f = foreignFrames[0];
+    const a = absentFrames[0];
+    expect(f.metadata.receipt).toBeNull();
+    expect(a.metadata.receipt).toBeNull();
+    // No existence oracle: byte-identical message + metadata once the echoed
+    // taskId (which the prober itself chose) is normalized out.
+    const normalize = (frame: any) =>
+      JSON.stringify({ message: frame.message, metadata: { ...frame.metadata, taskId: 'X' } });
+    expect(normalize(f)).toBe(normalize(a));
   });
 
   it('4. includeEvents size-safe -> getEventsForRequest returns seq-ascending events within [start,end]', () => {
@@ -209,7 +237,7 @@ describe('TCLAW-4B receipt read surface', () => {
     }
   });
 
-  it('5. includeEvents OVERSIZE -> events=null + eventsOmitted marker (reason too_large, seq range), NO partial array', () => {
+  it('5. REAL handler OVERSIZE: includeEvents over MAX_REPLAY_BYTES -> events=null + eventsOmitted marker, NO partial array', () => {
     const sid = makeSession();
     const taskId = makeTask({ sessionId: sid, requestJson: baseRequestJson() });
 
@@ -222,30 +250,19 @@ describe('TCLAW-4B receipt read surface', () => {
       if (firstSeq === null) firstSeq = s;
       lastSeq = s;
     }
+    materializeReceipt(taskId); // evidence range = [firstSeq, lastSeq]
 
+    // Sanity: the fixture really is oversize against the PRODUCTION constant.
     const events = sessions.getEventsForRequest(taskId, firstSeq!, lastSeq);
-    const serialized = JSON.stringify(events);
-    const byteLength = Buffer.byteLength(serialized, 'utf8');
-    const MAX_REPLAY_BYTES = 512 * 1024;
-    expect(byteLength).toBeGreaterThan(MAX_REPLAY_BYTES); // sanity: fixture is actually oversize
+    expect(Buffer.byteLength(JSON.stringify(events), 'utf8')).toBeGreaterThan(MAX_REPLAY_BYTES);
 
-    // Replicate the exact server.ts oversize-guard branch.
-    let metaEvents: unknown;
-    let eventsOmitted: unknown;
-    if (byteLength > MAX_REPLAY_BYTES) {
-      metaEvents = null;
-      eventsOmitted = {
-        reason: 'too_large',
-        eventCount: events.length,
-        evidenceStartSeq: firstSeq,
-        evidenceEndSeq: lastSeq,
-      };
-    } else {
-      metaEvents = events;
-    }
-
-    expect(metaEvents).toBeNull();
-    expect(eventsOmitted).toEqual({
+    // Drive the REAL handler; its own guard must omit the array entirely.
+    const frames = captureFrames(sid, () => handleGetReceipt(sid, { taskId, includeEvents: true }));
+    expect(frames.length).toBe(1);
+    const meta = frames[0].metadata;
+    expect(meta.receiptView).toBe(true);
+    expect(meta.events).toBeNull(); // all-or-marker: null, never a truncated array
+    expect(meta.eventsOmitted).toEqual({
       reason: 'too_large',
       eventCount: 400,
       evidenceStartSeq: firstSeq,
@@ -253,7 +270,7 @@ describe('TCLAW-4B receipt read surface', () => {
     });
   });
 
-  it('6. read-only/inert: a replayed PENDING_APPROVAL event is plain data; row counts UNCHANGED before vs after GET_RECEIPT+includeEvents', () => {
+  it('6. REAL handler read-only/inert: replayed PENDING_APPROVAL is plain data; rows UNCHANGED after GET_RECEIPT+includeEvents', () => {
     const sid = makeSession();
     const taskId = makeTask({
       sessionId: sid,
@@ -272,14 +289,15 @@ describe('TCLAW-4B receipt read surface', () => {
     const before = rowCounts();
     const beforeStates = snapshotStates();
 
-    // Simulate the full GET_RECEIPT+includeEvents read path.
-    const row = getReceipt(taskId)!;
-    expect(row.session_id).toBe(sid);
-    const events = sessions.getEventsForRequest(taskId, row.evidence_start_seq!, row.evidence_end_seq!);
-    const pendingApprovalEvent = events.find((e) => e.type === 'PENDING_APPROVAL')!;
-    expect(pendingApprovalEvent).toBeTruthy();
-    expect((pendingApprovalEvent.metadata as any).approvalId).toBe('approval-xyz');
-    publishOnly(sid, { message: 'Receipt', metadata: { receiptView: true, taskId, receipt: JSON.parse(row.full_receipt_json), events } });
+    // Drive the REAL production handler body (the same function server.ts's
+    // switch calls) — this is the path a live GET_RECEIPT command takes.
+    const frames = captureFrames(sid, () => handleGetReceipt(sid, { taskId, includeEvents: true }));
+    expect(frames.length).toBe(1);
+    const meta = frames[0].metadata;
+    expect(meta.receiptView).toBe(true);
+    const replayed = (meta.events as any[]).find((e) => e.type === 'PENDING_APPROVAL')!;
+    expect(replayed).toBeTruthy();
+    expect(replayed.metadata.approvalId).toBe('approval-xyz');
 
     const after = rowCounts();
     const afterStates = snapshotStates();
@@ -310,7 +328,7 @@ describe('TCLAW-4B receipt read surface', () => {
     expect('seq' in received ? received.seq : undefined).toBeUndefined();
   });
 
-  it('8. no mutation: after LIST_RECEIPTS and GET_RECEIPT, tasks/events/tool_approvals counts and states are byte-identical', () => {
+  it('8. REAL handlers no mutation: LIST_RECEIPTS + GET_RECEIPT leave tasks/events/tool_approvals/run_receipts byte-identical', () => {
     const sid = makeSession();
     const taskId = makeTask({
       sessionId: sid,
@@ -325,14 +343,17 @@ describe('TCLAW-4B receipt read surface', () => {
     const before = rowCounts();
     const beforeStates = snapshotStates();
 
-    // LIST_RECEIPTS.
-    const list = listReceipts(sid, 20);
-    expect(list.length).toBeGreaterThan(0);
-    publishOnly(sid, { message: 'Receipts listed', metadata: { receiptList: true, receipts: list } });
+    // Drive the REAL production handler bodies (same functions server.ts's
+    // switch calls). A write introduced ANYWHERE in these handler bodies —
+    // not just in publishOnly/getReceipt — fails the equality below.
+    const listFrames = captureFrames(sid, () => handleListReceipts(sid, 20));
+    expect(listFrames.length).toBe(1);
+    expect(listFrames[0].metadata.receiptList).toBe(true);
+    expect((listFrames[0].metadata.receipts as any[]).length).toBeGreaterThan(0);
 
-    // GET_RECEIPT.
-    const row = getReceipt(taskId)!;
-    publishOnly(sid, { message: 'Receipt', metadata: { receiptView: true, taskId, receipt: JSON.parse(row.full_receipt_json) } });
+    const getFrames = captureFrames(sid, () => handleGetReceipt(sid, { taskId, includeEvents: true }));
+    expect(getFrames.length).toBe(1);
+    expect(getFrames[0].metadata.receiptView).toBe(true);
 
     const after = rowCounts();
     const afterStates = snapshotStates();
@@ -366,5 +387,51 @@ describe('TCLAW-4B receipt read surface', () => {
     expect(full.elapsedMs).toBeNull();
     expect(full.iterations).toBeNull();
     expect(full.error).toBe('Execution failed: boom');
+  });
+
+  it('10. REAL handler frames: full response shape — receiptList summary, receiptView + receipt + own-key taskPrompt + projectionVersion + seq-ascending events; frames are seq-less', () => {
+    const sid = makeSession();
+    const taskId = makeTask({
+      sessionId: sid,
+      requestJson: baseRequestJson({ sourceChannel: 'slack' }),
+      telemetry: { costUsd: 0.02, inferenceLatencyMs: 300, iterations: 1 },
+    });
+    const s1 = emitEvent(sid, taskId, 'ROUTING', 'classified');
+    const s2 = emitEvent(sid, taskId, 'TIER_SELECTED', 'local', { tier: 'OLLAMA_LOCAL' });
+    const s3 = emitEvent(sid, taskId, 'RESULT', 'done');
+    materializeReceipt(taskId);
+
+    // LIST_RECEIPTS via the real handler.
+    const listFrames = captureFrames(sid, () => handleListReceipts(sid, 20));
+    expect(listFrames.length).toBe(1);
+    expect(listFrames[0].type).toBe('SYSTEM');
+    expect(listFrames[0].message).toBe('Receipts listed');
+    expect(listFrames[0].metadata.receiptList).toBe(true);
+    const summaries = listFrames[0].metadata.receipts as any[];
+    const mine = summaries.find((r) => r.taskId === taskId)!;
+    expect(mine).toBeTruthy();
+    expect(mine.costUsd).toBe(0.02);
+    expect(mine.full_receipt_json).toBeUndefined(); // summary only, over the real handler too
+    expect('seq' in listFrames[0] ? listFrames[0].seq : undefined).toBeUndefined(); // transient frame
+
+    // GET_RECEIPT(includeEvents) via the real handler.
+    const getFrames = captureFrames(sid, () => handleGetReceipt(sid, { taskId, includeEvents: true }));
+    expect(getFrames.length).toBe(1);
+    const frame = getFrames[0];
+    expect(frame.type).toBe('SYSTEM');
+    expect(frame.message).toBe('Receipt');
+    const meta = frame.metadata;
+    expect(meta.receiptView).toBe(true);
+    expect(meta.taskId).toBe(taskId);
+    expect(meta.receipt.taskId).toBe(taskId);
+    expect(meta.receipt.costUsd).toBe(0.02);
+    expect(meta.projectionVersion).toBe(PROJECTION_VERSION);
+    // taskPrompt rides under its OWN metadata key, never merged into receipt.
+    expect(meta.taskPrompt).toBe('do the thing');
+    expect(meta.receipt.taskPrompt).toBeUndefined();
+    // Events: seq-ascending, exactly the evidence range.
+    expect((meta.events as any[]).map((e) => e.seq)).toEqual([s1, s2, s3]);
+    expect(meta.eventsOmitted).toBeUndefined();
+    expect('seq' in frame ? frame.seq : undefined).toBeUndefined(); // transient frame
   });
 });
