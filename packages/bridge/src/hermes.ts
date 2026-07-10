@@ -9,11 +9,19 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Thrown when reported spend crosses the task budget. Only dispatch's single
  *  catch path turns this into the terminal ERROR event (invariant 7) — the
- *  bridge never emits RESULT/ERROR itself. */
+ *  bridge never emits RESULT/ERROR itself.
+ *
+ *  G1R correction A: carries the last-known provider-reported costUsd (the
+ *  same number evaluateSpend just tripped on) so a BREACHED task's spend
+ *  reaches taskStore.fail's telemetry and the spend ledger instead of
+ *  recording zero. Optional/backward-compatible — undefined when no cost was
+ *  ever reported (never fabricate a number that wasn't there). */
 export class CircuitBreakerError extends Error {
-  constructor(message: string) {
+  readonly lastCostUsd?: number;
+  constructor(message: string, lastCostUsd?: number) {
     super(message);
     this.name = 'CircuitBreakerError';
+    this.lastCostUsd = lastCostUsd;
   }
 }
 
@@ -132,7 +140,10 @@ export async function executeHermesTask(
         name: 'cancel_task',
         arguments: { task_id: taskId, reason: 'BUDGET_EXCEEDED' },
       });
-      throw new CircuitBreakerError(breachMessage);
+      throw new CircuitBreakerError(
+        breachMessage,
+        typeof status.telemetry?.costUsd === 'number' ? status.telemetry.costUsd : undefined,
+      );
     }
 
     // FRONTIER per-tool approval: the engine blocked a gated tool. Throw so

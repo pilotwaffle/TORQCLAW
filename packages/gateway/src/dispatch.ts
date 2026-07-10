@@ -6,6 +6,15 @@ import { sessions } from './sessions.js';
 import { cancellations } from './cancellations.js';
 import { registerApproval } from './approvals.js';
 import { safeMaterializeReceipt } from './receipts.js';
+import {
+  resolveBudgetWithSource,
+  resolveSessionCap,
+  resolveDailyCap,
+  sessionTotal,
+  dailyTotal,
+  evaluateCaps,
+  recordSpendSafe,
+} from './spend.js';
 import { randomUUID } from 'node:crypto';
 
 const sanitize = (msg: string) => msg.replace(/Bearer\s+\S+/gi, 'Bearer ***').slice(0, 2_000);
@@ -34,11 +43,11 @@ function humanizeError(raw: string, tier?: ComputeTier): string {
 
 /** Budget precedence: per-request maxCost → env default → unlimited.
  *  Resolved here so the bridge sees one number and the warning fires once.
- *  Exported for unit tests (TCLAW-0D) — behavior unchanged. */
+ *  Exported for unit tests (TCLAW-0D) — behavior unchanged.
+ *  TCLAW-1A-core: thin wrapper over resolveBudgetWithSource (spend.ts) so
+ *  budget.test.ts's precedence pins stay green untouched. */
 export function resolveBudget(req: GatewayRequest): number | undefined {
-  if (typeof req.constraints.maxCost === 'number') return req.constraints.maxCost;
-  const env = Number(process.env.TORQCLAW_DEFAULT_MAX_COST);
-  return Number.isFinite(env) && env > 0 ? env : undefined;
+  return resolveBudgetWithSource(req).budget;
 }
 
 /** P2.5: build a task receipt from REAL telemetry only — every field is sourced
@@ -120,7 +129,10 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
 
   // Apply resolved budget so the bridge enforces it; warn once when a FRONTIER
   // task runs unlimited (real money, no breaker).
-  const budget = resolveBudget(req);
+  // TCLAW-1A-core: also capture `source` (per_task/env_default/unlimited) so
+  // it can be threaded onto the persisted telemetry for the receipt projector
+  // (receipts.ts budget_source), replacing the previously-hardcoded null.
+  const { budget, source: budgetSource } = resolveBudgetWithSource(req);
   const effectiveReq: GatewayRequest =
     budget === undefined
       ? req
@@ -130,6 +142,52 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
   }
 
   taskStore.create(effectiveReq, diag); // persist BEFORE executing
+
+  // TCLAW-1A-core CAP GATE — THE HARD INVARIANT: enforcement happens BEFORE
+  // spend. FRONTIER-only (LOCAL_EDGE is never evaluated, never blocked —
+  // caps are strictly orthogonal to routing). Runs immediately after
+  // taskStore.create (so a refused task still gets a persisted, auditable
+  // row + receipt) and BEFORE the FRONTIER-unavailable check / async IIFE
+  // below, so a refused task never reaches executeHermesTask — zero partial
+  // spend, no provider call made. Session/daily caps are ENV-only
+  // (resolveSessionCap/resolveDailyCap read TORQCLAW_SESSION_CAP_USD /
+  // TORQCLAW_DAILY_CAP_USD) — there is deliberately no client-settable cap
+  // path here (G1R correction B).
+  if (diag.tier === ComputeTier.FRONTIER) {
+    const breach = evaluateCaps(
+      sessionTotal(req.sessionId),
+      dailyTotal(),
+      resolveSessionCap(),
+      resolveDailyCap(),
+    );
+    if (breach) {
+      const resetNote = breach.cap === 'daily' ? ', resets at 00:00 UTC' : '';
+      const reason =
+        `CAP_EXCEEDED: ${breach.cap} cap $${breach.total.toFixed(2)} of $${breach.limit.toFixed(2)} ` +
+        `(env ${breach.envVar}${resetNote})`;
+      taskStore.fail(req.id, reason);
+      emit(
+        'ERROR',
+        `Cloud spend cap reached: the ${breach.cap} cap is $${breach.total.toFixed(2)} of ` +
+          `$${breach.limit.toFixed(2)} (env ${breach.envVar})${resetNote}. ` +
+          `Totals may be conservative under concurrency. ` +
+          `Resend with "This machine only" to run for free, right now, on this device.`,
+        {
+          kind: 'CAP_EXCEEDED',
+          cap: breach.cap,
+          total: breach.total,
+          limit: breach.limit,
+          envVar: breach.envVar,
+          recovery: ['RETRY_LOCAL', 'COPY_DIAGNOSTIC'],
+          prompt: req.payload.prompt,
+          sideEffectNote: 'Nothing ran — the request never reached the cloud engine.',
+        },
+      );
+      safeMaterializeReceipt(req.id);
+      cancellations.clear(req.id);
+      return; // no provider call was made => $0 partial spend, no ledger row
+    }
+  }
 
   // Graceful frontier degradation: don't throw a bare error if the engine
   // never connected — tell the user plainly and offer a local re-run.
@@ -157,7 +215,12 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
           ? await executeLocalEdge(effectiveReq, emit)
           : await executeHermesTask(effectiveReq, emit);
 
-      taskStore.complete(req.id, result.text, result.telemetry);
+      // TCLAW-1A-core: thread budgetSource onto the persisted telemetry so
+      // the receipt projector (receipts.ts) can read a real budget_source
+      // instead of the previously-hardcoded null. Real telemetry is spread
+      // first so this never overwrites an actual collected field.
+      const telemetryWithSource = { ...(result.telemetry ?? {}), budgetSource };
+      taskStore.complete(req.id, result.text, telemetryWithSource);
       // Cancelled tasks (and budget-broken ones) must not poison memory.
       if (!result.telemetry?.cancelled) {
         sessions.storeEpisode(
@@ -173,6 +236,18 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
       // NEVER be caught by the outer catch below, which would flip this
       // already-completed task into a failure and emit a phantom ERROR.
       safeMaterializeReceipt(req.id);
+      // TCLAW-1A-core: record spend at the SUCCESS terminal, FRONTIER-only —
+      // LOCAL_EDGE never touches the ledger (free, never charged, never
+      // clutters the cap total). Guarded (own try/catch): a ledger-write
+      // throw must never break the already-completed terminal path.
+      if (diag.tier === ComputeTier.FRONTIER) {
+        recordSpendSafe({
+          taskId: req.id,
+          sessionId: req.sessionId,
+          sourceChannel: req.sourceChannel,
+          costUsd: typeof result.telemetry?.costUsd === 'number' ? result.telemetry.costUsd : undefined,
+        });
+      }
     } catch (error: any) {
       // (A) Gated tool with no grant — NOT a failure. This is the terminal
       //     state of a blocked run. Dispatch (sole DB + terminal owner)
@@ -195,7 +270,33 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
 
       const isBudget = error instanceof CircuitBreakerError;
       const reason = isBudget ? `BUDGET: ${error.message}` : String(error?.message ?? error);
-      taskStore.fail(req.id, reason);
+      // G1R correction A (part 1+2): a BREACHED task must not persist zero
+      // telemetry. CircuitBreakerError carries the last-known provider-
+      // reported costUsd (hermes.ts) — thread it through taskStore.fail's
+      // new optional telemetry param so the breach cost is never silently
+      // lost. Non-budget failures with no cost signal pass no telemetry
+      // (unchanged behavior — nothing to record).
+      const breachCostUsd = isBudget ? (error as CircuitBreakerError).lastCostUsd : undefined;
+      taskStore.fail(
+        req.id, reason,
+        isBudget ? { budgetSource, costUsd: breachCostUsd } : undefined,
+      );
+      // TCLAW-1A-core: record the breach's spend in the ledger, FRONTIER-only.
+      // A budget breach only ever occurs on a FRONTIER task (the breaker is
+      // hermes-only), but the tier check mirrors the SUCCESS terminal's
+      // discipline exactly. Non-breach failures with no cost signal are
+      // intentionally NOT recorded here — a FRONTIER task that failed before
+      // any spend was reported has no cost to log (never fabricate 0);
+      // recording only fires when there is a genuine cost signal (the
+      // breach's lastCostUsd).
+      if (isBudget && diag.tier === ComputeTier.FRONTIER) {
+        recordSpendSafe({
+          taskId: req.id,
+          sessionId: req.sessionId,
+          sourceChannel: req.sourceChannel,
+          costUsd: breachCostUsd,
+        });
+      }
       // P3.5 recovery chips, chosen by failure site:
       //   budget  -> RETRY with a raised-budget prefill (suggestedBudget)
       //   generic -> RETRY + COPY_DIAGNOSTIC

@@ -214,8 +214,9 @@ describe('TCLAW-4A run receipt projection', () => {
     expect(bareCalls.length).toBe(0);
 
     const guardedCalls = src.match(/safeMaterializeReceipt\(/g) ?? [];
-    // 5 call sites: SUCCESS, BLOCKED, FAILED, FRONTIER_UNAVAILABLE, emitToolDenied.
-    expect(guardedCalls.length).toBe(5);
+    // 6 call sites: SUCCESS, BLOCKED, FAILED, CAP_EXCEEDED (TCLAW-1A-core),
+    // FRONTIER_UNAVAILABLE, emitToolDenied.
+    expect(guardedCalls.length).toBe(6);
   });
 
   it('(d) no-fabrication: failed task with NULL telemetry -> cost/iterations/elapsed NULL', () => {
@@ -256,7 +257,7 @@ describe('TCLAW-4A run receipt projection', () => {
     expect(row.route_diagnostics_json).toBeNull();
   });
 
-  it('(d) budget_source / cost_enforceable / safe_export_json are ALWAYS null for 4A', () => {
+  it('(d) safe_export_json is ALWAYS null (redaction is a later ticket)', () => {
     const sid = makeSession();
     const taskId = makeTask({
       sessionId: sid,
@@ -264,9 +265,62 @@ describe('TCLAW-4A run receipt projection', () => {
       telemetry: { costUsd: 1.23, inferenceLatencyMs: 400, iterations: 4 },
     });
     const row = projectReceipt(taskId)!;
-    expect(row.budget_source).toBeNull();
-    expect(row.cost_enforceable).toBeNull();
     expect(row.safe_export_json).toBeNull();
+  });
+
+  it('(d) TCLAW-1A-core: budget_source/cost_enforceable are null when telemetry carries no budgetSource key (pre-1A task)', () => {
+    const sid = makeSession();
+    const taskId = makeTask({
+      sessionId: sid,
+      tier: 'OLLAMA_LOCAL',
+      requestJson: baseRequestJson(),
+      telemetry: { costUsd: 1.23, inferenceLatencyMs: 400, iterations: 4 }, // no budgetSource key
+    });
+    const row = projectReceipt(taskId)!;
+    expect(row.budget_source).toBeNull();
+    // costUsd IS a number here, so cost_enforceable is derived as 1 regardless
+    // of budgetSource presence — the two columns are independent signals.
+    expect(row.cost_enforceable).toBe(1);
+  });
+
+  it('(d) TCLAW-1A-core: budget_source reflects the persisted source (per_task/env_default/unlimited)', () => {
+    const sid = makeSession();
+    const taskId = makeTask({
+      sessionId: sid,
+      tier: 'API_EXTERNAL',
+      requestJson: baseRequestJson(),
+      telemetry: { costUsd: 0.5, inferenceLatencyMs: 400, iterations: 2, budgetSource: 'per_task' },
+    });
+    const row = projectReceipt(taskId)!;
+    expect(row.budget_source).toBe('per_task');
+    expect(row.cost_enforceable).toBe(1);
+  });
+
+  it('(d) TCLAW-1A-core: cost_enforceable=0 when a FRONTIER task ran but costUsd was null (provider unavailable)', () => {
+    const sid = makeSession();
+    const taskId = makeTask({
+      sessionId: sid,
+      tier: 'API_EXTERNAL',
+      requestJson: baseRequestJson(),
+      telemetry: { costUsd: null, inferenceLatencyMs: 400, iterations: 2, budgetSource: 'env_default' },
+    });
+    const row = projectReceipt(taskId)!;
+    expect(row.cost_enforceable).toBe(0);
+  });
+
+  it('(d) TCLAW-1A-core: cost_enforceable=NULL when there was no cloud attempt at all (no telemetry)', () => {
+    const sid = makeSession();
+    const taskId = makeTask({
+      sessionId: sid,
+      tier: 'OLLAMA_LOCAL',
+      state: 'failed',
+      requestJson: baseRequestJson(),
+      telemetry: null,
+      error: 'boom',
+    });
+    const row = projectReceipt(taskId)!;
+    expect(row.cost_enforceable).toBeNull();
+    expect(row.budget_source).toBeNull();
   });
 
   it('(e) result_state derivation: blocked fixture -> result_state=blocked, blocked_on set', () => {
