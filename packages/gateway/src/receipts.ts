@@ -13,8 +13,13 @@ import { db } from './storage.js';
  * re-projecting it must reproduce byte-identical content (see
  * tests/receipt-projection.test.ts).
  *
- * Gateway-DB-only: this is NOT an emitted contract and is never sent over
- * the wire (no schema in packages/contracts).
+ * Gateway-DB-only: this is NOT an emitted contract in the schema-drift-gated
+ * sense (no dedicated JSON Schema in packages/contracts). TCLAW-4B exposes it
+ * read-only via the LIST_RECEIPTS/GET_RECEIPT ClientCommands, which carry
+ * receipt content back to the client as untyped SYSTEM-event metadata (an
+ * inert `unknown` payload per GatewayEventSchema) — it is no longer accurate
+ * to say a run_receipts row is "never sent over the wire", only that it is
+ * still not a typed emitted contract of its own.
  */
 export const PROJECTION_VERSION = 1;
 
@@ -354,4 +359,81 @@ export function rebuildAll(opts?: { onlyStale?: boolean }): number {
   ).map((r) => r.request_id);
   for (const id of ids) materializeReceipt(id);
   return ids.length;
+}
+
+// ── TCLAW-4B: read-only surface (SELECT-only, zero writes) ─────────────────
+
+/** Summary shape returned by LIST_RECEIPTS. Deliberately excludes
+ *  full_receipt_json (and route_diagnostics_json / tools_called_json, which
+ *  are detail, not summary) — the list view must never carry the full
+ *  receipt payload for every row in a session. */
+export interface ReceiptSummary {
+  taskId: string;
+  sourceChannel: string | null;
+  selectedTier: string | null;
+  costUsd: number | null;
+  elapsedMs: number | null;
+  resultState: string | null;
+  cancelled: number | null;
+  blockedOn: string | null;
+  evidenceStartSeq: number | null;
+  evidenceEndSeq: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface ReceiptSummaryRow {
+  task_id: string;
+  source_channel: string | null;
+  selected_tier: string | null;
+  cost_usd: number | null;
+  elapsed_ms: number | null;
+  result_state: string | null;
+  cancelled: number | null;
+  blocked_on: string | null;
+  evidence_start_seq: number | null;
+  evidence_end_seq: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+const selectSessionReceipts = db.prepare(`
+  SELECT task_id, source_channel, selected_tier, cost_usd, elapsed_ms, result_state,
+         cancelled, blocked_on, evidence_start_seq, evidence_end_seq, created_at, updated_at
+  FROM run_receipts
+  WHERE session_id = ?
+  ORDER BY created_at DESC
+  LIMIT ?
+`);
+
+/** LIST_RECEIPTS backing query: SELECT-only, summary columns, this session
+ *  only. NEVER selects full_receipt_json. NULLs are passed through as-is
+ *  (no-fabrication discipline mirrors projectReceipt). */
+export function listReceipts(sessionId: string, limit: number): ReceiptSummary[] {
+  const rows = selectSessionReceipts.all(sessionId, limit) as ReceiptSummaryRow[];
+  return rows.map((r) => ({
+    taskId: r.task_id,
+    sourceChannel: r.source_channel,
+    selectedTier: r.selected_tier,
+    costUsd: r.cost_usd,
+    elapsedMs: r.elapsed_ms,
+    resultState: r.result_state,
+    cancelled: r.cancelled,
+    blockedOn: r.blocked_on,
+    evidenceStartSeq: r.evidence_start_seq,
+    evidenceEndSeq: r.evidence_end_seq,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  }));
+}
+
+const selectReceiptByTaskId = db.prepare(`SELECT * FROM run_receipts WHERE task_id = ?`);
+
+/** GET_RECEIPT backing query: the full row (including session_id, which the
+ *  caller MUST use for the ownership check before doing anything else with
+ *  the row — see server.ts GET_RECEIPT handler). Returns null if no receipt
+ *  exists for this task_id (task_id is UNIQUE). SELECT-only. */
+export function getReceipt(taskId: string): ReceiptRow | null {
+  const row = selectReceiptByTaskId.get(taskId) as ReceiptRow | undefined;
+  return row ?? null;
 }

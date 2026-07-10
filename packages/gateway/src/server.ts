@@ -11,13 +11,14 @@ import { sessions } from './sessions.js';
 import { enrichCommand } from './enrich.js';
 import { dispatch, mintGrantedRequest, emitToolDenied } from './dispatch.js';
 import { decideApproval } from './approvals.js';
-import { makeEmitter, sessionBus, persistAndPublish } from './events.js';
+import { makeEmitter, sessionBus, persistAndPublish, publishOnly } from './events.js';
 import { router } from '@torqclaw/router';
 import { connectBridge, approveSkill, getSkillDraft, cancelHermesTask } from '@torqclaw/bridge';
 import { setCancelCheck } from '@torqclaw/inference';
 import { cancellations } from './cancellations.js';
 import { authorize, checkResumeRole, type Role } from './authz.js';
 import { db } from './storage.js';
+import { listReceipts, getReceipt } from './receipts.js';
 
 // Read helper for authz's task-ownership check. Kept inline here (not in
 // events.ts taskStore) per scope: this ticket may only touch authz.ts,
@@ -27,6 +28,32 @@ function lookupTaskSession(taskId: string): string | null {
   const row = lookupTaskSessionStmt.get(taskId) as { session_id: string } | undefined;
   return row ? row.session_id : null;
 }
+
+// TCLAW-4B: taskPrompt is read at GET_RECEIPT query time (not persisted onto
+// the receipt row) so the read path never depends on receipts.ts carrying
+// prompt text. request_json.payload.prompt mirrors the shape enrichCommand
+// builds (see GatewayRequest.payload.prompt).
+const lookupTaskPromptStmt = db.prepare('SELECT request_json FROM tasks WHERE request_id = ?');
+function lookupTaskPrompt(taskId: string): string | null {
+  const row = lookupTaskPromptStmt.get(taskId) as { request_json: string } | undefined;
+  if (!row) return null;
+  try {
+    const parsed = JSON.parse(row.request_json);
+    return typeof parsed?.payload?.prompt === 'string' ? parsed.payload.prompt : null;
+  } catch {
+    return null;
+  }
+}
+
+// TCLAW-4B: oversize guard for GET_RECEIPT's includeEvents replay. 512KB is
+// comfortably inside typical WS frame/message-size limits (Fastify/ws default
+// perMessageDeflate + frame budgets are usually multi-MB, but consoles/proxies
+// in front of a browser client are commonly tuned much tighter — 512KB keeps
+// a single receipt-view frame small enough to never be the thing that trips
+// an intermediary's limit) while still comfortably fitting the evidence span
+// of a typical task (a handful to a few hundred events). All-or-nothing: we
+// never truncate the array, only omit it entirely with a visible marker.
+const MAX_REPLAY_BYTES = 512 * 1024;
 
 // Let the LOCAL_EDGE loop observe cancellations without importing the gateway DB.
 setCancelCheck((requestId) => cancellations.isCancelled(requestId));
@@ -224,6 +251,81 @@ app.get('/ws', { websocket: true }, (socket) => {
         } catch (err: any) {
           emitCancel('SYSTEM', `Cancel relay failed: ${String(err?.message ?? err)}`);
         }
+        break;
+      }
+      case 'LIST_RECEIPTS': {
+        // Read-only: SELECT + publishOnly. No writes, no dispatch. Session-
+        // scoped by construction — the command carries no sessionId param, and
+        // listReceipts is called with the CONNECTION's own sid, never a
+        // client-supplied value, so a caller can never list another session's
+        // receipts.
+        const receipts = listReceipts(sid, cmd.data.limit);
+        publishOnly(sid, {
+          message: 'Receipts listed',
+          metadata: { receiptList: true, receipts },
+        });
+        break;
+      }
+      case 'GET_RECEIPT': {
+        // Read-only: SELECT + publishOnly only, all the way through. Nothing
+        // in this handler can dispatch APPROVE_TOOL/APPROVE_SKILL or mutate
+        // tool_approvals/tasks/events — there is no write call reachable here.
+        const row = getReceipt(cmd.data.taskId);
+
+        // OWNERSHIP CHECK — the critical guard. A foreign taskId (row exists
+        // but belongs to another session) MUST produce the exact same
+        // response as an absent taskId: no existence oracle. If we replied
+        // differently for "not found" vs "not yours", a client could probe
+        // arbitrary UUIDs and learn which tasks exist on the server even
+        // without ever being able to read their contents.
+        if (!row || row.session_id !== sid) {
+          publishOnly(sid, {
+            message: 'No receipt for this task',
+            metadata: { receiptView: true, taskId: cmd.data.taskId, receipt: null },
+          });
+          break;
+        }
+
+        // Only reachable once ownership is proven.
+        let receipt: unknown = null;
+        try {
+          receipt = JSON.parse(row.full_receipt_json);
+        } catch {
+          receipt = null;
+        }
+
+        const taskPrompt = lookupTaskPrompt(cmd.data.taskId);
+
+        const metadata: Record<string, unknown> = {
+          receiptView: true,
+          taskId: cmd.data.taskId,
+          receipt,
+          projectionVersion: row.projection_version,
+          taskPrompt, // OWN key — never merged into the receipt object itself
+        };
+
+        if (cmd.data.includeEvents && row.evidence_start_seq != null && row.evidence_end_seq != null) {
+          const candidateEvents = sessions.getEventsForRequest(
+            cmd.data.taskId, row.evidence_start_seq, row.evidence_end_seq,
+          );
+          const serialized = JSON.stringify(candidateEvents);
+          const byteLength = Buffer.byteLength(serialized, 'utf8');
+          if (byteLength > MAX_REPLAY_BYTES) {
+            // OVERSIZE GUARD: all-or-marker, never a partial/truncated array —
+            // a silently-truncated evidence array would be a subtle data lie.
+            metadata.events = null;
+            metadata.eventsOmitted = {
+              reason: 'too_large',
+              eventCount: candidateEvents.length,
+              evidenceStartSeq: row.evidence_start_seq,
+              evidenceEndSeq: row.evidence_end_seq,
+            };
+          } else {
+            metadata.events = candidateEvents;
+          }
+        }
+
+        publishOnly(sid, { message: 'Receipt', metadata });
         break;
       }
     }
