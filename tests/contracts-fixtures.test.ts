@@ -66,6 +66,10 @@ describe('golden fixtures validate against @torqclaw/contracts schemas', () => {
     assertParses(ClientCommandSchema, 'client-command.get-cost-summary.json');
   });
 
+  it('client-command.preview-route.json parses as ClientCommand', () => {
+    assertParses(ClientCommandSchema, 'client-command.preview-route.json');
+  });
+
   it('gateway-request.json parses as GatewayRequest', () => {
     assertParses(GatewayRequestSchema, 'gateway-request.json');
   });
@@ -76,5 +80,54 @@ describe('golden fixtures validate against @torqclaw/contracts schemas', () => {
 
   it('connect-frame.json parses as ConnectFrame', () => {
     assertParses(ConnectFrameSchema, 'connect-frame.json');
+  });
+});
+
+describe('PREVIEW_ROUTE (TCLAW-2D-1) — schema-level contract behavior', () => {
+  it('valid minimal PREVIEW_ROUTE parses with defaults materialized', () => {
+    const result = ClientCommandSchema.safeParse({
+      action: 'PREVIEW_ROUTE',
+      previewOf: 'draft-1',
+      prompt: 'summarize this text',
+    });
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toEqual({
+      action: 'PREVIEW_ROUTE',
+      previewOf: 'draft-1',
+      prompt: 'summarize this text',
+      sensitive: false,
+      urgent: false,
+      executionMode: 'AUTO',
+      useMemory: true,
+    });
+  });
+
+  it('missing previewOf is rejected', () => {
+    const result = ClientCommandSchema.safeParse({
+      action: 'PREVIEW_ROUTE',
+      prompt: 'summarize this text',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('missing prompt is rejected', () => {
+    const result = ClientCommandSchema.safeParse({
+      action: 'PREVIEW_ROUTE',
+      previewOf: 'draft-1',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('extra sessionId is silently stripped (mirrors LIST_RECEIPTS/GET_COST_SUMMARY convention — no sessionId field exists on this action, client cannot smuggle one in)', () => {
+    const result = ClientCommandSchema.safeParse({
+      action: 'PREVIEW_ROUTE',
+      previewOf: 'draft-1',
+      prompt: 'summarize this text',
+      sessionId: 'should-be-dropped',
+    });
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect('sessionId' in result.data).toBe(false);
   });
 });

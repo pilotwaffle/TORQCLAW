@@ -67,6 +67,11 @@ export function checkResumeRole(
  *              session-scoped in shape, cost telemetry (including the
  *              cross-session daily total) is operator-only by design, so this
  *              gets an explicit channel deny below, not just default-deny.)
+ *              (TCLAW-2D-1: PREVIEW_ROUTE can trigger unmetered local
+ *              inference (classifier call, GPU occupancy) and produces no
+ *              task, no receipt, and no audit trail — it is not
+ *              channel-grantable until real rate limiting exists. Explicit
+ *              deny so the decision is legible and pinned by a test.)
  *   node     — every action denied.
  */
 export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): AuthzDecision {
@@ -90,6 +95,7 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     case 'LIST_RECEIPTS':
     case 'GET_RECEIPT':
     case 'GET_COST_SUMMARY':
+    case 'PREVIEW_ROUTE':
       return DENY_NOT_PERMITTED;
     default:
       // Default deny for any future/unmapped action on a non-operator role.

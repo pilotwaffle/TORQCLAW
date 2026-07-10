@@ -20,6 +20,7 @@ import { authorize, checkResumeRole, type Role } from './authz.js';
 import { db } from './storage.js';
 import { handleListReceipts, handleGetReceipt } from './receipts.js';
 import { handleGetCostSummary } from './spend.js';
+import { handlePreviewRoute } from './preview.js';
 
 // Read helper for authz's task-ownership check. Kept inline here (not in
 // events.ts taskStore) per scope: this ticket may only touch authz.ts,
@@ -256,6 +257,14 @@ app.get('/ws', { websocket: true }, (socket) => {
         // CONNECTION's own sid, never a client value. Caps are env-only — this
         // path can never raise/edit a cap.
         handleGetCostSummary(sid, cmd.data.recentLimit);
+        break;
+      }
+      case 'PREVIEW_ROUTE': {
+        // Read-only route preview: real enrich + real evaluateRequest,
+        // publishOnly response, ZERO writes. Handler body in preview.ts so
+        // tests drive the exact production path headlessly. Session-scoped by
+        // construction: no sessionId param; the CONNECTION's own sid is passed.
+        await handlePreviewRoute(sid, cmd.data);
         break;
       }
     }

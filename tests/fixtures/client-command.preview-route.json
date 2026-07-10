@@ -1,0 +1,9 @@
+{
+  "action": "PREVIEW_ROUTE",
+  "previewOf": "draft-1",
+  "prompt": "summarize this text",
+  "sensitive": false,
+  "urgent": false,
+  "executionMode": "AUTO",
+  "useMemory": true
+}

@@ -71,6 +71,26 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     action: z.literal('GET_COST_SUMMARY'),
     recentLimit: z.number().int().min(1).max(100).default(20),
   }),
+  z.object({
+    // TCLAW-2D-1: read-only route preview ("simulate this route"). Runs the
+    // REAL enrichment (classifier + memory-derived contextSize + predictTools)
+    // and the REAL router.evaluateRequest at compose time, WITHOUT dispatching:
+    // no task, no persisted event, no TIER_SELECTED, no receipt, no spend.
+    // Mirrors SUBMIT_PROMPT's judgment fields exactly (field-parity keeps a
+    // future shared composer field-mapper honest); deliberately NO sessionId
+    // (session-scoped by the connection's own sid) and NO attachmentIds
+    // (enrichment never reads them). previewOf is a client nonce echoed back
+    // verbatim so the UI can bind responses to draft instances (stale/edit-back
+    // safety) — it is never persisted.
+    action: z.literal('PREVIEW_ROUTE'),
+    previewOf: z.string().min(1).max(128),
+    prompt: z.string().min(1).max(32_000),
+    sensitive: z.boolean().default(false),
+    urgent: z.boolean().default(false),
+    maxCostUsd: z.number().min(0).max(100).optional(),
+    executionMode: z.enum(['AUTO', 'LOCAL_ONLY', 'CLOUD_OK']).default('AUTO'),
+    useMemory: z.boolean().default(true),
+  }),
 ]);
 export type ClientCommand = z.infer<typeof ClientCommandSchema>;
 

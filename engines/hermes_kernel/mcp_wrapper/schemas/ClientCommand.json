@@ -232,6 +232,61 @@
         "recentLimit"
       ],
       "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "PREVIEW_ROUTE"
+        },
+        "previewOf": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32000
+        },
+        "sensitive": {
+          "default": false,
+          "type": "boolean"
+        },
+        "urgent": {
+          "default": false,
+          "type": "boolean"
+        },
+        "maxCostUsd": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "executionMode": {
+          "default": "AUTO",
+          "type": "string",
+          "enum": [
+            "AUTO",
+            "LOCAL_ONLY",
+            "CLOUD_OK"
+          ]
+        },
+        "useMemory": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "action",
+        "previewOf",
+        "prompt",
+        "sensitive",
+        "urgent",
+        "executionMode",
+        "useMemory"
+      ],
+      "additionalProperties": false
     }
   ]
 }
