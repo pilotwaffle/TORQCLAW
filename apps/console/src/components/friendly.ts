@@ -363,6 +363,30 @@ export function selectActiveRouteDiag(
   return diag;
 }
 
+// ── TCLAW-2D-2: route preview ──────────────────────────────────────────
+
+/** TCLAW-2D-2: the newest route-preview frame matching the latest-SENT nonce.
+ *  Matches ONLY metadata.routePreview === true && metadata.previewOf === nonce
+ *  (never the prompt text — preview.ts marks prompt "display echo only, NOT
+ *  the staleness key"): a late frame for an older nonce is ignored even if the
+ *  draft text was edited back to identical (edit-back race). Returns the
+ *  dropped variant as-is (the caller branches on metadata.dropped). nonce null
+ *  -> null. PURE: no React, no side effects. */
+export function selectLatestRoutePreview(
+  events: GatewayEvent[],
+  nonce: string | null,
+): GatewayEvent | null {
+  if (!nonce) return null;
+  let found: GatewayEvent | null = null;
+  for (const ev of events) {
+    const meta = (ev.metadata ?? {}) as Record<string, unknown>;
+    if (ev.type === 'SYSTEM' && meta.routePreview === true && meta.previewOf === nonce) {
+      found = ev; // last-wins for this nonce
+    }
+  }
+  return found;
+}
+
 /** Plain data row a replay-only event renders — NO callbacks, NO dispatch
  *  surface of any kind. This is the type-level half of the structural
  *  boundary: even if a future edit tried to add a handler field here, the

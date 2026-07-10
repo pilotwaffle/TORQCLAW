@@ -24,6 +24,7 @@ import {
   formatDailyTotalLabel,
   formatProviderSummaryRow,
   selectActiveRouteDiag,
+  selectLatestRoutePreview,
   type ReceiptLike,
 } from '../apps/console/src/components/friendly.js';
 
@@ -757,5 +758,56 @@ describe('selectActiveRouteDiag (TCLAW-2C) — pure selector feeding the live ro
     const diagA: RouterDiagnostics = { score: 1, reason: 'x', tier: 'OLLAMA_LOCAL' as any };
     const events = [diagEvent('A', diagA as unknown as Record<string, unknown>)];
     expect(selectActiveRouteDiag(events, null)).toBeNull();
+  });
+});
+
+describe('selectLatestRoutePreview (TCLAW-2D-2) — pure selector feeding the route preview panel snapshot', () => {
+  function previewEvent(nonce: string, overrides: Record<string, unknown> = {}): GatewayEvent {
+    return ev({
+      id: `id-preview-${nonce}-${Math.random()}`,
+      type: 'SYSTEM',
+      requestId: null,
+      tier: null,
+      message: 'Route preview',
+      metadata: { routePreview: true, previewOf: nonce, diagnostics: { score: 1, reason: 'x', tier: 'OLLAMA_LOCAL' }, ...overrides },
+    });
+  }
+
+  it('1. matches by nonce, last-wins across two matching frames', () => {
+    const first = previewEvent('n1', { diagnostics: { score: 1, reason: 'first', tier: 'OLLAMA_LOCAL' } });
+    const second = previewEvent('n1', { diagnostics: { score: 2, reason: 'second', tier: 'API_EXTERNAL' } });
+    const events = [first, second];
+    expect(selectLatestRoutePreview(events, 'n1')).toEqual(second);
+  });
+
+  it('2. ignores non-matching nonces', () => {
+    const events = [previewEvent('n1'), previewEvent('n2')];
+    expect(selectLatestRoutePreview(events, 'n1')).toEqual(events[0]);
+    expect(selectLatestRoutePreview(events, 'n1')).not.toEqual(events[1]);
+  });
+
+  it('3. ignores SYSTEM frames without routePreview (e.g. receipt/cost-summary frames)', () => {
+    const receiptFrame = ev({ type: 'SYSTEM', message: 'r', metadata: { receiptView: true } });
+    const events = [receiptFrame, previewEvent('n1')];
+    expect(selectLatestRoutePreview(events, 'n1')).toEqual(events[1]);
+    // a receipt-shaped frame is never matched even if some previewOf-shaped key were present
+    expect(selectLatestRoutePreview([receiptFrame], 'n1')).toBeNull();
+  });
+
+  it('4. returns the dropped variant as-is for a matching nonce', () => {
+    const dropped = previewEvent('n1', { dropped: 'in_flight' });
+    delete (dropped.metadata as any).diagnostics;
+    const events = [dropped];
+    expect(selectLatestRoutePreview(events, 'n1')).toEqual(dropped);
+  });
+
+  it('5. null nonce -> null', () => {
+    const events = [previewEvent('n1')];
+    expect(selectLatestRoutePreview(events, null)).toBeNull();
+  });
+
+  it('6. no match -> null', () => {
+    const events = [previewEvent('n1')];
+    expect(selectLatestRoutePreview(events, 'no-such-nonce')).toBeNull();
   });
 });

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GatewayEvent, ClientCommand, RouterDiagnostics } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
-import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, selectActiveRouteDiag } from './friendly';
+import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview } from './friendly';
 import ReceiptsPanel from './ReceiptsPanel';
 import CostPanel from './CostPanel';
 
@@ -39,8 +39,14 @@ function loadControls(): Controls {
   }
 }
 
-/** Translate the budget/mode controls into the SUBMIT_PROMPT fields. */
-function buildSubmit(prompt: string, c: Controls): Extract<ClientCommand, { action: 'SUBMIT_PROMPT' }> {
+/** TCLAW-2D-2: the judgment fields shared verbatim by SUBMIT_PROMPT and
+ *  PREVIEW_ROUTE (field-parity per commands.ts — preview and submit must
+ *  never drift). */
+function buildJudgment(prompt: string, c: Controls): {
+  prompt: string; sensitive: boolean; urgent: boolean;
+  executionMode: ExecutionMode; useMemory: boolean;
+  maxCostUsd?: number;
+} {
   // "Free (local only)" forces LOCAL_ONLY; otherwise mode is the user's pick.
   const mode: ExecutionMode = c.budget === 'free' ? 'LOCAL_ONLY' : c.mode;
   let maxCostUsd: number | undefined;
@@ -51,15 +57,18 @@ function buildSubmit(prompt: string, c: Controls): Extract<ClientCommand, { acti
     maxCostUsd = Number(c.budget);
   }
   return {
-    action: 'SUBMIT_PROMPT',
     prompt,
     sensitive: c.privateMode,
     urgent: c.fast,
-    attachmentIds: [],
     executionMode: mode,
     useMemory: c.useMemory,
     ...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
   };
+}
+
+/** Translate the budget/mode controls into the SUBMIT_PROMPT fields. */
+function buildSubmit(prompt: string, c: Controls): Extract<ClientCommand, { action: 'SUBMIT_PROMPT' }> {
+  return { action: 'SUBMIT_PROMPT', ...buildJudgment(prompt, c), attachmentIds: [] };
 }
 
 export default function TorqTerminal() {
@@ -78,6 +87,16 @@ export default function TorqTerminal() {
   // 'failed' if the send was dropped so the user knows to retry. Cleared when the
   // next task starts.
   const [stopState, setStopState] = useState<'idle' | 'requested' | 'failed'>('idle');
+
+  // TCLAW-2D-2: route preview. previewNonce = latest-SENT nonce (the ONLY
+  // staleness key). previewState is the RENDER SOURCE (useState snapshot,
+  // write-on-present — ring-eviction safe, mirrors the 2C chip discipline).
+  const [previewNonce, setPreviewNonce] = useState<string | null>(null);
+  const [previewState, setPreviewState] = useState<
+    | { kind: 'pending' } | { kind: 'result'; meta: Record<string, any> }
+    | { kind: 'dropped' } | { kind: 'timeout' } | { kind: 'sendFailed' } | null
+  >(null);
+  const previewTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // P4: full skill-draft markdown fetched via GET_SKILL_DRAFT, keyed by queueId.
   const draftsByQueue = useMemo(() => {
@@ -138,8 +157,22 @@ export default function TorqTerminal() {
   // output directly.
   const chipDiag: RouterDiagnostics | null = activeRequestId ? (routeSnapshot[activeRequestId] ?? null) : null;
 
+  // TCLAW-2D-2 (RC-1): route-preview frames are transient SYSTEM frames that
+  // must not flip the working/stop indicator. Compute busy over the last
+  // NON-preview event; if none remains (fresh console whose first action is a
+  // preview), busy is false. Deliberately scoped to routePreview ONLY — the
+  // same latent flip exists for receiptList/receiptView/costSummary/memory
+  // frames (pre-existing) and is tracked as TCLAW-UIFIX-1 (shared
+  // isTransientSystemFrame predicate); do not broaden here.
   const busy = useMemo(() => {
-    const last = events[events.length - 1];
+    let last: GatewayEvent | undefined;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      if (!e) continue;
+      if (e.type === 'SYSTEM' && (e.metadata as any)?.routePreview) continue;
+      last = e;
+      break;
+    }
     return !!last && !['RESULT', 'ERROR', 'CONNECTED', 'PENDING_APPROVAL'].includes(last.type);
   }, [events]);
 
@@ -237,6 +270,63 @@ export default function TorqTerminal() {
 
   const set = <K extends keyof Controls>(k: K, v: Controls[K]) =>
     setControls((c) => ({ ...c, [k]: v }));
+
+  // TCLAW-2D-2: snapshot the latest matching preview frame (write-on-present
+  // — mirrors the 2C chip discipline). Clears the timeout timer once a real
+  // frame lands (result or dropped), whichever comes first.
+  const latestPreview = useMemo(
+    () => selectLatestRoutePreview(events, previewNonce),
+    [events, previewNonce],
+  );
+  useEffect(() => {
+    if (!latestPreview) return;
+    const meta = (latestPreview.metadata ?? {}) as Record<string, any>;
+    if (previewTimer.current) { clearTimeout(previewTimer.current); previewTimer.current = null; }
+    setPreviewState(meta.dropped ? { kind: 'dropped' } : { kind: 'result', meta });
+  }, [latestPreview]);
+
+  // Clear the timeout timer on unmount.
+  useEffect(() => {
+    return () => {
+      if (previewTimer.current) clearTimeout(previewTimer.current);
+    };
+  }, []);
+
+  // TCLAW-2D-2 staleness clear (G1R S3): a preview result describes a SPECIFIC
+  // draft + control set at the moment "simulate route" was clicked. If the
+  // input or any control changes afterward, the shown preview no longer
+  // describes what would be submitted — clear it rather than let it go stale.
+  // Guarded by comparing against the PREVIOUS render's actual values (not a
+  // run counter) so it never fires on mount, and never fires spuriously when
+  // the post-mount sessionStorage controls load happens to produce a new
+  // object reference with the SAME field values (JSON-compares equal).
+  const prevStaleInputs = useRef<{ input: string; controls: string } | null>(null);
+  useEffect(() => {
+    const snapshot = { input, controls: JSON.stringify(controls) };
+    const prev = prevStaleInputs.current;
+    prevStaleInputs.current = snapshot;
+    if (prev === null) return; // first run ever — nothing to compare, never clears
+    if (prev.input === snapshot.input && prev.controls === snapshot.controls) return; // no real change
+    if (previewTimer.current) { clearTimeout(previewTimer.current); previewTimer.current = null; }
+    setPreviewState(null);
+    setPreviewNonce(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [input, controls]);
+
+  const simulateRoute = () => {
+    const prompt = input.trim();
+    if (!prompt) return; // belt-and-braces with the disabled attr
+    const nonce = crypto.randomUUID(); // fresh PER CLICK — edit-back-race safety
+    const sent = sendCommand({ action: 'PREVIEW_ROUTE', ...buildJudgment(prompt, controls), previewOf: nonce });
+    if (previewTimer.current) clearTimeout(previewTimer.current);
+    if (!sent) { setPreviewNonce(nonce); setPreviewState({ kind: 'sendFailed' }); return; } // never arms the timer
+    setPreviewNonce(nonce);
+    setPreviewState({ kind: 'pending' });
+    previewTimer.current = setTimeout(
+      () => setPreviewState((s) => (s?.kind === 'pending' ? { kind: 'timeout' } : s)),
+      5000,
+    );
+  };
 
   return (
     <section className="flex h-screen flex-col bg-[#0a0a0a] p-4 font-mono text-sm text-neutral-300">
@@ -363,6 +453,68 @@ export default function TorqTerminal() {
           />
         </div>
 
+        {/* TCLAW-2D-2: route preview panel. Renders per previewState — ZERO
+            interactive elements (no buttons/links/onClick anywhere below):
+            this is display-only, never a dispatch surface, never the
+            executed-task path. The caveat line is EXACT and appears in every
+            state that shows any preview content. */}
+        {previewState && (
+          <div className="mt-3 rounded border border-neutral-800 bg-neutral-900/40 px-3 py-2 text-[11px] text-neutral-500">
+            {previewState.kind === 'pending' && <p>previewing…</p>}
+            {previewState.kind === 'result' && (() => {
+              const diag = previewState.meta.diagnostics as RouterDiagnostics | null | undefined;
+              const tier = diag ? tierLabel(diag.tier) : null;
+              const lock = formatLockState(diag);
+              const blocked = formatBlockedAlternatives(diag);
+              const profile = formatProfile(diag);
+              const explanation = formatRouteExplanation(diag);
+              const enrichment = previewState.meta.enrichment as Record<string, any> | undefined;
+              const classifierUsed = enrichment?.classifierUsed;
+              const fidelityNote =
+                classifierUsed === 'KEYWORD_FALLBACK' ? 'classified by keyword fallback — lower confidence'
+                : classifierUsed === 'DEFAULT' ? 'default classification (classifier unavailable)'
+                : null; // never fabricate doubt for LOCAL_LLM or any other value (G1R S2)
+              return (
+                <>
+                  <p className="text-neutral-300">
+                    Would route: {tier ? tier.text : 'unknown'}
+                  </p>
+                  {explanation.map((row, i) => (
+                    <p key={`exp-${i}`}>{row.label}: {row.value}</p>
+                  ))}
+                  {lock && (
+                    <p>
+                      {lock.value}
+                      {diag?.overridable === true && ' — use the mode control below to change where this would run'}
+                    </p>
+                  )}
+                  {blocked.map((row, i) => (
+                    <p key={`blocked-${i}`}>{row.value}</p>
+                  ))}
+                  {profile && <p>{profile.label}: {profile.value}</p>}
+                  {typeof previewState.meta.taskType === 'string' && (
+                    <p>task type: {previewState.meta.taskType}</p>
+                  )}
+                  {typeof previewState.meta.contextSize === 'number' && (
+                    <p>context size: {previewState.meta.contextSize}</p>
+                  )}
+                  {fidelityNote && <p className="text-amber-400">{fidelityNote}</p>}
+                </>
+              );
+            })()}
+            {previewState.kind === 'dropped' && (
+              <p>Another preview is still running — try again in a moment.</p>
+            )}
+            {previewState.kind === 'timeout' && <p>No preview available — try again.</p>}
+            {previewState.kind === 'sendFailed' && (
+              <p>couldn’t send preview — connection may be reconnecting; try again</p>
+            )}
+            <p className="mt-1 text-neutral-600">
+              Preview only. Enrichment and route may change when you submit.
+            </p>
+          </div>
+        )}
+
         {/* Run controls: budget, where it runs, speed, privacy. */}
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[10px] uppercase tracking-widest text-neutral-500">
           <label className="flex items-center gap-1.5" title="Cap what a cloud task may spend">
@@ -430,6 +582,10 @@ export default function TorqTerminal() {
           <button type="button" onClick={() => setCostOpen((v) => !v)} className="text-neutral-500 hover:text-neutral-300">
             {costOpen ? 'hide cost' : 'cost'}
           </button>
+          <span className="text-neutral-700">·</span>
+          <button type="button" onClick={simulateRoute} disabled={!input.trim()} className="text-neutral-500 hover:text-neutral-300 disabled:opacity-40">
+            simulate route
+          </button>
         </div>
       </form>
     </section>
@@ -476,7 +632,7 @@ function EventRow({
   // TCLAW-4B-2: 4B panel frames (receipt list/detail responses) are
   // publishOnly SYSTEM events meant only for ReceiptsPanel — they must never
   // render a stray inline row/card in the live log.
-  if (event.type === 'SYSTEM' && (meta.receiptView || meta.receiptList || meta.costSummary)) return null;
+  if (event.type === 'SYSTEM' && (meta.receiptView || meta.receiptList || meta.costSummary || meta.routePreview)) return null;
 
   // P2.5: a SYSTEM event carrying a receipt renders as a footer card, not a row.
   if (event.type === 'SYSTEM' && meta.receipt) {
