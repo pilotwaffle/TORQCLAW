@@ -109,24 +109,35 @@ describe('ReceiptsPanel', () => {
     fireEvent.click(screen.getByText('Replay'));
 
     // Positive presence (anti-vacuous): the dangerous rows actually rendered
-    // as historical/inert text in the replay tree.
-    expect(screen.getByText(/historical — replay only, no retry/)).toBeInTheDocument();
+    // as historical/inert text in the replay tree — so the "no button"
+    // assertions below cannot pass merely because nothing rendered.
+    const historicalError = screen.getByText(/historical — replay only, no retry/);
+    expect(historicalError).toBeInTheDocument();
     expect(screen.getAllByText(/\(historical/).length).toBeGreaterThanOrEqual(1);
 
-    // Negative teeth: no actionable button anywhere (name-regex check).
-    expect(
-      screen.queryByRole('button', { name: /approve|allow|deny|reject|retry|resend|run/i }),
-    ).not.toBeInTheDocument();
+    // STRUCTURAL TEETH (G2A finding #1 fix): the replay SUBTREE — the
+    // container that actually holds the replayed rows — must contain ZERO
+    // buttons. This is the real invariant (ReplayEventRow has no dispatch
+    // surface, ReceiptsPanel.tsx:343-361) and is UN-BYPASSABLE: it does not
+    // depend on button labels (a dangerous button named "proceed" would still
+    // be counted) and cannot be defeated by click-ordering / unmount-on-nav
+    // (the earlier click-every-button loop was — a navigating button unmounted
+    // the replay tree before the loop reached a dangerous row). We locate the
+    // replay container as the nearest ancestor of the replayed rows that is
+    // scoped to the replay content (not the tab bar above it): the shared
+    // ancestor of the historical-error row and the "(historical" approval
+    // rows. Asserting zero buttons there proves no replayed PENDING_APPROVAL
+    // (APPROVE_TOOL/APPROVE_SKILL) or ERROR (SUBMIT_PROMPT/retry) row can ever
+    // dispatch, regardless of label.
+    const replayContainer = historicalError.closest('div.space-y-1') as HTMLElement | null;
+    expect(replayContainer).not.toBeNull();
+    expect(within(replayContainer!).queryAllByRole('button')).toHaveLength(0);
 
-    // Click EVERY button rendered in the whole panel (list row, tabs, close,
-    // etc.) and assert the dispatched action-set is a SUBSET of the
-    // read-only allowlist. This proves no replayed row can dispatch
-    // APPROVE_TOOL/APPROVE_SKILL/SUBMIT_PROMPT even if a future button
-    // slipped the name-regex above.
-    const buttons = screen.getAllByRole('button');
-    expect(buttons.length).toBeGreaterThan(0);
-    for (const b of buttons) fireEvent.click(b);
-
+    // Secondary (whole-panel) guard: clicking every button the panel exposes
+    // (close, tabs, list row) only ever dispatches read-only reads. This is a
+    // subset check on the NON-replay affordances; the replay subtree's inertness
+    // is guaranteed structurally by the zero-button assertion above.
+    for (const b of screen.getAllByRole('button')) fireEvent.click(b);
     const actions = sc.mock.calls.map((c) => (c[0] as any).action);
     expect(actions.length).toBeGreaterThan(0);
     for (const a of actions) expect(READ_ONLY_ALLOWLIST.has(a)).toBe(true);
