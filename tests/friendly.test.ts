@@ -524,13 +524,13 @@ describe('formatRouteExplanation', () => {
     expect(rows.find((r) => r.label === 'rule id')?.value).toBe('TOOL_COUNT_OVERFLOW');
   });
 
-  it('only {score,reason,tier} -> "why" is the raw reason, no "rule id" row, score/route present (partial-diag honesty)', () => {
+  it('only {score,reason,tier} -> "why" is the raw reason, no "rule id" row, score/tier present (partial-diag honesty)', () => {
     const diag = { score: 42, reason: 'raw fallback text', tier: 'OLLAMA_LOCAL' } as RouterDiagnostics;
     const rows = formatRouteExplanation(diag);
     expect(rows.find((r) => r.label === 'why')?.value).toBe('raw fallback text');
     expect(rows.find((r) => r.label === 'rule id')).toBeUndefined();
     expect(rows.find((r) => r.label === 'score')?.value).toBe('42');
-    expect(rows.find((r) => r.label === 'route')?.value).toBe('OLLAMA_LOCAL');
+    expect(rows.find((r) => r.label === 'tier')?.value).toBe('OLLAMA_LOCAL');
   });
 });
 

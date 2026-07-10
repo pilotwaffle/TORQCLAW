@@ -336,7 +336,7 @@ export function formatRouteExplanation(
   const ruleIdRow = field('rule id', diag.ruleId);
   if (ruleIdRow) rows.push(ruleIdRow);
   rows.push({ label: 'score', value: String(diag.score) });
-  rows.push({ label: 'route', value: diag.tier }); // tier; the panel maps via tierLabel if desired
+  rows.push({ label: 'tier', value: diag.tier });
   return rows;
 }
 
