@@ -25,7 +25,10 @@ import {
   field,
   formatCostField,
   formatReceiptState,
-  formatRouteDiagnostics,
+  formatRouteExplanation,
+  formatLockState,
+  formatBlockedAlternatives,
+  formatProfile,
   toReplayEventRows,
   type ReplayEventRowData,
   type ReceiptLike,
@@ -214,7 +217,19 @@ function ReceiptDetail({ openReceipt }: { openReceipt: OpenReceipt }) {
   const receipt = openReceipt.receipt as ReceiptLike;
   const state = formatReceiptState(receipt);
   const costRows = formatCostField(receipt);
-  const routeRows = formatRouteDiagnostics(receipt.routeDiagnostics);
+  // Enriched "Route diagnostics" composition (TCLAW-2B): the honest
+  // three-state lock taxonomy (formatLockState), ALL blocked alternatives
+  // (no cap), and the routing profile (omitted when absent — 2A never
+  // populates it) are composed alongside the rule/score/tier headline.
+  // formatRouteDiagnostics (friendly.ts) is intentionally left exported with
+  // its existing tests green as a regression guard, even though this panel
+  // now composes the richer per-concern helpers directly.
+  const routeRows = [
+    ...formatRouteExplanation(receipt.routeDiagnostics),
+    formatLockState(receipt.routeDiagnostics),
+    ...formatBlockedAlternatives(receipt.routeDiagnostics),
+    formatProfile(receipt.routeDiagnostics),
+  ].filter((r): r is { label: string; value: string } => r !== null);
 
   const identityRows = [
     field('task id', receipt.taskId),

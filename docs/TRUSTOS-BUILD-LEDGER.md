@@ -216,3 +216,22 @@ Role mapping note: G1R and G2A run as independent Opus instances; GLM-5.2 (RB) u
 - files changed: 16 (+960/-10). New: CostPanel.tsx, spend-cost-summary.test.ts, client-command.get-cost-summary.json.
 - next ticket: remaining Epic 2 sub-features (route preview panel, why-this-route panel, routing profiles, override stats) OR other PRD priority items. Phase 1 spend-cap feature (1A-core + 1A-attr + 1B) COMPLETE pending merge.
 - blockers: operator merge approval. CI-green on PR is the post-push gate.
+
+### TCLAW-2B — "Why this route?" receipt route-transparency panel (Phase 1, Epic 2; consumes 2A RouterDiagnostics)
+
+- date: 2026-07-10
+- branch: ticket/tclaw-2b-route-panel @ 407bef3 -> PR #12 (base master). NOT merged — awaiting operator approval. Pure UI consumer of merged TCLAW-2A RouterDiagnostics extension.
+- ticket: Epic 2 §9.2.4, second sub-feature (route explanation extension to receipts). Enriches read-only receipt Detail "Route diagnostics" section. No backend/contract/router/schema change; no new command; no override action; no route behavior change.
+- what changed (3 files, +302/-2): ReceiptsPanel.tsx enriched ReceiptDetail routeRows composition with honest three-state lock taxonomy + all blockedAlternatives rendering (no ≤1 cap) + omitted profile field; NEW friendly.ts +4 pure helpers (formatLockState, formatBlockedAlternatives, formatProfile, formatRouteExplanation) + formatRouteDiagnostics regression guard exported; tests/friendly.test.ts +26 (three-state branches, TWO anti-conflation tests, length-2 blockedAlternatives, profile omission, partial-diag honesty, lock-taxonomy drift guard vs RULE_SHAPE mirror).
+- lock taxonomy (core deliverable): honest THREE-state from engine.ts RULE_META — (a) hard safety lock [safetyLock present: PRIVACY_OVERRIDE/USER_LOCAL_ONLY/LOCAL_TOOL_INTENT] "Locked — safety rule: X"; (b) firm no-lock [LOCAL_INTENT overridable:false, no safetyLock] "Fixed for this task" (affirmative, no "not a safety lock"); (c) overridable [4 heuristic rules] "Router preference — can be overridden". Branch (a) checked BEFORE (b) so a hard privacy lock is never demoted.
+- blockedAlternatives: renders ALL elements (no ≤1 cap), exact wire-tested "would have used {tier}, but: {why}".
+- profile: omitted via field() (2A never populates it), never "default"/"not set"/"none".
+- missing/partial diagnostics honest: null → "no routing record"; {score,reason,tier}-only → raw reason, no fabricated ruleId.
+- deferred: live current-task chip (TorqTerminal.tsx untouched) — optional/cut-line, requires requestId-anchored snapshot wiring; core deliverable green without it.
+- G1R (Opus 4.7) ruling: APPROVE-WITH-CHANGES — 4 required folded (three-state taxonomy; LOCAL_INTENT affirmative wording; render all blockedAlternatives no cap; profile omit not default/not-set). Enrichment-primary + optional live chip deferred, overlay deferred.
+- G2A (Opus 4.8) result: PASS-WITH-NOTES. Zero blocker/major findings, 3 nits (nit: formatRouteExplanation labels tier row 'route' + slightly misleading tierLabel comment; read-only boundary confirmed clean; regression guard intact). Teeth verified by live code mutation — branch-order swap, string-collapse, and hard-lock-set removal each turn named tests red. Limitation: drift guard mirrors engine.ts RULE_META locally (RULE_META not exported, scope forbids adding export) so it won't auto-catch a silent engine-side safetyLock edit, but RouterRuleIdSchema key-set assertion catches enum drift and limitation documented in test comment — acceptable tradeoff.
+- tests/checks: typecheck 12/12; pnpm test 531; contracts:check exit 0; build 7/7; uv pytest 75.
+- CI run 29108298503 GREEN (all stages + 6 e2e scripts).
+- files changed: 3 (+302/-2). Modified: ReceiptsPanel.tsx, friendly.ts, tests/friendly.test.ts.
+- next ticket: remaining Epic 2 sub-features (route preview panel, routing profiles, override stats) OR other PRD priority items. Phase 1 route-transparency surface (2A router-data + 2B panel) COMPLETE pending merge.
+- blockers: operator merge approval. CI-green on PR is the post-push gate.
