@@ -13,20 +13,44 @@ from mcp_wrapper import hermes_runner
 def test_get_spend_usd_stub_no_env_defaults_zero(monkeypatch):
     monkeypatch.delenv("HERMES_STUB_COST_USD", raising=False)
     monkeypatch.delenv("HERMES_STUB_COST_UNAVAILABLE", raising=False)
-    assert hermes_runner.get_spend_usd(None, "t1") == 0.0
+    assert hermes_runner.get_spend_usd(None, "t1") == (0.0, "exact")
 
 
 def test_get_spend_usd_stub_cost_env(monkeypatch):
     monkeypatch.delenv("HERMES_STUB_COST_UNAVAILABLE", raising=False)
     monkeypatch.setenv("HERMES_STUB_COST_USD", "1.25")
-    assert hermes_runner.get_spend_usd(None, "t1") == 1.25
+    assert hermes_runner.get_spend_usd(None, "t1") == (1.25, "exact")
 
 
 def test_get_spend_usd_stub_unavailable_wins_over_cost(monkeypatch):
     """UNAVAILABLE takes precedence even when COST_USD is ALSO set."""
     monkeypatch.setenv("HERMES_STUB_COST_USD", "1.25")
     monkeypatch.setenv("HERMES_STUB_COST_UNAVAILABLE", "1")
-    assert hermes_runner.get_spend_usd(None, "t1") is None
+    assert hermes_runner.get_spend_usd(None, "t1") == (None, "unavailable")
+
+
+def test_get_spend_usd_unpacked_cost_is_none_preserves_unavailable_warning_check(monkeypatch):
+    """TCLAW-1A-attr regression guard: server.py's stub-mode warning
+    (`cost, _src = get_spend_usd(...); if cost is None:`) and the live-poll
+    injection both rely on unpacking the pair before comparing the cost half
+    to None. A caller that forgets to unpack gets `(None, "unavailable") is
+    None` -> False, silently swallowing the "Spend reporting unavailable"
+    operator warning. Prove the unpacked cost half is exactly what the `is
+    None` check needs, for both the unavailable and available cases."""
+    monkeypatch.setenv("HERMES_STUB_COST_UNAVAILABLE", "1")
+    cost, src = hermes_runner.get_spend_usd(None, "t1")
+    assert cost is None
+    assert src == "unavailable"
+    # The un-unpacked tuple must NOT itself compare equal to None (this is
+    # exactly the bug this test guards against).
+    assert hermes_runner.get_spend_usd(None, "t1") is not None
+
+    monkeypatch.delenv("HERMES_STUB_COST_UNAVAILABLE", raising=False)
+    monkeypatch.setenv("HERMES_STUB_COST_USD", "3.5")
+    cost2, src2 = hermes_runner.get_spend_usd(None, "t1")
+    assert cost2 == 3.5
+    assert cost2 is not None
+    assert src2 == "exact"
 
 
 # ---------------------------------------------------------------------------
@@ -44,35 +68,35 @@ class _AgentRaisesOnMicros:
 
 def test_get_spend_usd_agent_credits_micros():
     agent = _AgentWithMicros()
-    assert hermes_runner.get_spend_usd(agent, "t2") == 2.0
+    assert hermes_runner.get_spend_usd(agent, "t2") == (2.0, "exact")
 
 
 def test_get_spend_usd_agent_raises_falls_through_to_usage_delta(monkeypatch):
     agent = _AgentRaisesOnMicros()
     monkeypatch.setattr(hermes_runner, "_snapshot_account_usage_usd", lambda **kw: 5.0)
     hermes_runner._USAGE_BASELINE["t3"] = 2.0
-    assert hermes_runner.get_spend_usd(agent, "t3") == 3.0
+    assert hermes_runner.get_spend_usd(agent, "t3") == (3.0, "account_delta")
 
 
 def test_get_spend_usd_usage_delta_clips_at_zero(monkeypatch):
     agent = _AgentRaisesOnMicros()
     monkeypatch.setattr(hermes_runner, "_snapshot_account_usage_usd", lambda **kw: 1.0)
     hermes_runner._USAGE_BASELINE["t4"] = 10.0
-    assert hermes_runner.get_spend_usd(agent, "t4") == 0.0
+    assert hermes_runner.get_spend_usd(agent, "t4") == (0.0, "account_delta")
 
 
 def test_get_spend_usd_usage_delta_none_when_current_none(monkeypatch):
     agent = _AgentRaisesOnMicros()
     monkeypatch.setattr(hermes_runner, "_snapshot_account_usage_usd", lambda **kw: None)
     hermes_runner._USAGE_BASELINE["t5"] = 1.0
-    assert hermes_runner.get_spend_usd(agent, "t5") is None
+    assert hermes_runner.get_spend_usd(agent, "t5") == (None, "unavailable")
 
 
 def test_get_spend_usd_usage_delta_none_when_baseline_missing(monkeypatch):
     agent = _AgentRaisesOnMicros()
     monkeypatch.setattr(hermes_runner, "_snapshot_account_usage_usd", lambda **kw: 5.0)
     hermes_runner._USAGE_BASELINE.pop("t6", None)
-    assert hermes_runner.get_spend_usd(agent, "t6") is None
+    assert hermes_runner.get_spend_usd(agent, "t6") == (None, "unavailable")
 
 
 # ---------------------------------------------------------------------------

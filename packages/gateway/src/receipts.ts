@@ -167,6 +167,11 @@ export function projectReceipt(taskId: string): ReceiptRow | null {
   const routeDiagnosticsJson: string | null = tierSelectedRow?.metadata ?? null;
 
   const costUsd: number | null = typeof telemetry?.costUsd === 'number' ? telemetry.costUsd : null;
+  // TCLAW-1A-attr: surface the 3-way provenance tag on the receipt (via
+  // full_receipt_json only — no new column/schema change). NULL when absent
+  // (older tasks predating this ticket, or telemetry with no costSource).
+  const costSource: string | null =
+    typeof telemetry?.costSource === 'string' ? telemetry.costSource : null;
   const elapsedMs: number | null =
     typeof telemetry?.inferenceLatencyMs === 'number' ? telemetry.inferenceLatencyMs : null;
   const iterations: number | null =
@@ -236,6 +241,7 @@ export function projectReceipt(taskId: string): ReceiptRow | null {
     routeDiagnostics: routeDiagnosticsJson ? JSON.parse(routeDiagnosticsJson) : null,
     budgetLimit,
     costUsd,
+    costSource,
     elapsedMs,
     iterations,
     cancelled: cancelled === 1,

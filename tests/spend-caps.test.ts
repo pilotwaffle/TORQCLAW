@@ -164,27 +164,48 @@ describe('TCLAW-1A-core: sessionTotal / dailyTotal (SUM semantics)', () => {
 });
 
 describe('TCLAW-1A-core: recordSpend (idempotent, honest attribution)', () => {
-  it('(11) reported cost => attribution="reported"', () => {
+  it('(11) costSource="exact" => attribution="exact", cost kept', () => {
     const taskId = randomUUID();
     const sid = randomUUID();
-    recordSpend({ taskId, sessionId: sid, costUsd: 1.23 });
+    recordSpend({ taskId, sessionId: sid, costUsd: 1.23, costSource: 'exact' });
     const row = getLedgerRow(taskId);
     expect(row.cost_usd).toBeCloseTo(1.23);
-    expect(row.attribution).toBe('reported');
+    expect(row.attribution).toBe('exact');
   });
-  it('(13) missing/non-number cost => cost_usd NULL, attribution="unavailable", never a fabricated 0', () => {
+  it('TCLAW-1A-attr: costSource="account_delta" => attribution="account_delta", number STILL counted in sessionTotal', () => {
+    const taskId = randomUUID();
+    const sid = randomUUID();
+    recordSpend({ taskId, sessionId: sid, costUsd: 4.5, costSource: 'account_delta' });
+    const row = getLedgerRow(taskId);
+    expect(row.cost_usd).toBeCloseTo(4.5);
+    expect(row.attribution).toBe('account_delta');
+    // Enforcement math unchanged: an account_delta row counts in the SUM
+    // exactly like any other numeric row — the tag only labels precision.
+    expect(sessionTotal(sid)).toBeCloseTo(4.5);
+  });
+  it('(13) missing/non-number cost, or no costSource => cost_usd NULL, attribution="unavailable", never a fabricated 0', () => {
     const taskId = randomUUID();
     const sid = randomUUID();
     recordSpend({ taskId, sessionId: sid, costUsd: undefined });
     const row = getLedgerRow(taskId);
     expect(row.cost_usd).toBeNull();
     expect(row.attribution).toBe('unavailable');
+    expect(sessionTotal(sid)).toBe(0); // never counted as $0-that-is-really-something
+  });
+  it('TCLAW-1A-attr: a real number with NO costSource is treated as unavailable (correctness-honest fallback), excluded from SUM', () => {
+    const taskId = randomUUID();
+    const sid = randomUUID();
+    recordSpend({ taskId, sessionId: sid, costUsd: 42.0 }); // no costSource passed
+    const row = getLedgerRow(taskId);
+    expect(row.cost_usd).toBeNull();
+    expect(row.attribution).toBe('unavailable');
+    expect(sessionTotal(sid)).toBe(0);
   });
   it('(16) double recordSpend on the same task_id inserts exactly ONE row (ON CONFLICT DO NOTHING)', () => {
     const taskId = randomUUID();
     const sid = randomUUID();
-    recordSpend({ taskId, sessionId: sid, costUsd: 1.0 });
-    recordSpend({ taskId, sessionId: sid, costUsd: 999.0 }); // must NOT overwrite/duplicate
+    recordSpend({ taskId, sessionId: sid, costUsd: 1.0, costSource: 'exact' });
+    recordSpend({ taskId, sessionId: sid, costUsd: 999.0, costSource: 'exact' }); // must NOT overwrite/duplicate
     expect(ledgerCount(taskId)).toBe(1);
     expect(getLedgerRow(taskId).cost_usd).toBeCloseTo(1.0); // first write wins, no double-count
   });
@@ -194,11 +215,79 @@ describe('TCLAW-1A-core: recordSpend (idempotent, honest attribution)', () => {
     // thrown error by temporarily dropping spend_ledger.
     db.exec('DROP TABLE spend_ledger');
     try {
-      expect(() => recordSpendSafe({ taskId: randomUUID(), sessionId: randomUUID(), costUsd: 1 })).not.toThrow();
+      expect(() => recordSpendSafe({ taskId: randomUUID(), sessionId: randomUUID(), costUsd: 1, costSource: 'exact' })).not.toThrow();
     } finally {
       const schemaPath = fileURLToPath(new URL('../packages/gateway/db/schema.sql', import.meta.url));
       db.exec(readFileSync(schemaPath, 'utf8'));
     }
+  });
+  it('legacy attribution="reported" seed row (pre-1A-attr) still sums correctly — enforcement is value-agnostic', () => {
+    const sid = randomUUID();
+    seedSpend({ sessionId: sid, costUsd: 6.0, attribution: 'reported' });
+    expect(sessionTotal(sid)).toBeCloseTo(6.0);
+  });
+  it('cap enforcement math unchanged: an exact row and an account_delta row both count toward the SUM/cap', () => {
+    const taskId1 = randomUUID();
+    const taskId2 = randomUUID();
+    const sid = randomUUID();
+    recordSpend({ taskId: taskId1, sessionId: sid, costUsd: 1.0, costSource: 'exact' });
+    recordSpend({ taskId: taskId2, sessionId: sid, costUsd: 2.0, costSource: 'account_delta' });
+    expect(sessionTotal(sid)).toBeCloseTo(3.0);
+    // A cap set to exactly the combined total breaches, proving both rows
+    // fed the same raw SUM the cap gate checks (no netting/filtering).
+    expect(evaluateCaps(sessionTotal(sid), 0, 3.0, undefined)).toEqual({
+      cap: 'session', total: 3.0, limit: 3.0, envVar: SESSION_CAP_ENV_VAR,
+    });
+  });
+});
+
+describe('TCLAW-1A-attr: breach path preserves cost + label (anti-regression for correction A)', () => {
+  it('LOAD-BEARING: a breach recordSpend carrying breachCostUsd + costSource records the cost NON-NULL with its label, NOT "unavailable" — this test MUST fail if CircuitBreakerError.lastCostSource is not threaded through dispatch.ts', () => {
+    const taskId = randomUUID();
+    const sid = randomUUID();
+    // Mirrors dispatch.ts's breach recordSpendSafe call: costUsd from
+    // CircuitBreakerError.lastCostUsd, costSource from the NEW
+    // lastCostSource field (populated at the hermes.ts breach throw from
+    // status.telemetry.costSource). If lastCostSource were dropped anywhere
+    // in that chain, this call would arrive here with costSource undefined
+    // and get mapped to 'unavailable' (cost_usd NULL) — silently regressing
+    // correction A, which exists specifically to preserve the breach cost.
+    recordSpend({
+      taskId, sessionId: sid,
+      costUsd: 9.99, // CircuitBreakerError.lastCostUsd
+      costSource: 'exact', // CircuitBreakerError.lastCostSource
+    });
+    const row = getLedgerRow(taskId);
+    expect(row.cost_usd).toBeCloseTo(9.99);
+    expect(row.cost_usd).not.toBeNull();
+    expect(row.attribution).toBe('exact');
+    expect(row.attribution).not.toBe('unavailable');
+    // The breach cost must count toward enforcement, exactly like a normal
+    // SUCCESS row — a breach must not let its own cost escape the cap SUM.
+    expect(sessionTotal(sid)).toBeCloseTo(9.99);
+  });
+
+  it('a breach with an account_delta-sourced cost is labeled account_delta, not unavailable', () => {
+    const taskId = randomUUID();
+    const sid = randomUUID();
+    recordSpend({ taskId, sessionId: sid, costUsd: 5.5, costSource: 'account_delta' });
+    const row = getLedgerRow(taskId);
+    expect(row.cost_usd).toBeCloseTo(5.5);
+    expect(row.attribution).toBe('account_delta');
+  });
+
+  it('CircuitBreakerError carries lastCostSource alongside lastCostUsd (bridge-side wiring)', async () => {
+    const { CircuitBreakerError } = await import('../packages/bridge/src/hermes.js');
+    const e = new CircuitBreakerError('Budget exceeded: $9.99 of $1.00 limit', 9.99, 'exact');
+    expect(e.lastCostUsd).toBe(9.99);
+    expect(e.lastCostSource).toBe('exact');
+  });
+
+  it('CircuitBreakerError.lastCostSource is undefined (not fabricated) when no source was ever reported', async () => {
+    const { CircuitBreakerError } = await import('../packages/bridge/src/hermes.js');
+    const e = new CircuitBreakerError('Budget exceeded: $0.00 of $0.00 limit');
+    expect(e.lastCostUsd).toBeUndefined();
+    expect(e.lastCostSource).toBeUndefined();
   });
 });
 
@@ -310,8 +399,9 @@ describe('TCLAW-1A-core: cap GATE via dispatch() — FRONTIER-only, before spend
     dispatch(req1 as any, { score: 10, reason: 'test', tier: 'API_EXTERNAL' as any });
     expect(getTask(req1.id).error === null || !/^CAP_EXCEEDED/.test(getTask(req1.id).error)).toBe(true);
 
-    // Simulate that task's own spend landing in the ledger (as recordSpend would).
-    recordSpend({ taskId: req1.id, sessionId: sid, costUsd: 0.75 }); // total now 2.25 >= 2.00
+    // Simulate that task's own spend landing in the ledger (as recordSpend would
+    // from a real SUCCESS terminal, which always carries a costSource).
+    recordSpend({ taskId: req1.id, sessionId: sid, costUsd: 0.75, costSource: 'exact' }); // total now 2.25 >= 2.00
 
     const req2 = { ...makeRequest({ taskType: 'AUTONOMOUS_RESEARCH' }), id: randomUUID(), sessionId: sid };
     dispatch(req2 as any, { score: 10, reason: 'test', tier: 'API_EXTERNAL' as any });
