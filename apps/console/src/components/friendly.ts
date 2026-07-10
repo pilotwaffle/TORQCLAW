@@ -1,7 +1,7 @@
 // Translation layer: raw pipeline vocabulary -> end-user language.
 // Raw values stay available via tooltips; users should never need to
 // decode enum names or router diagnostics.
-import type { GatewayEvent } from '@torqclaw/contracts';
+import type { GatewayEvent, RouterRuleId, RouterDiagnostics } from '@torqclaw/contracts';
 
 export const TASK_LABELS: Record<string, string> = {
   DATA_EXTRACTION: 'Extracting data',
@@ -128,4 +128,163 @@ export function lineDiff(a: string, b: string): Array<{ t: '+' | '-' | ' '; line
   while (i < n) out.push({ t: '-', line: A[i++] ?? '' });
   while (j < m) out.push({ t: '+', line: B[j++] ?? '' });
   return out;
+}
+
+// ── TCLAW-4B-2: receipt-panel pure helpers ──────────────────────────────
+// All 7 below are pure (no React, no DOM, no side effects) and unit-tested
+// in tests/friendly.test.ts. They return DATA (strings/objects), never JSX.
+
+/** A minimal shape for whatever the receipt panel considers "the full
+ *  receipt" — matches the GET_RECEIPT full_receipt_json fields the panel
+ *  actually reads (see packages/gateway/src/receipts.ts:207-228). Kept as
+ *  `any`-tolerant fields (all optional/nullable) since the panel receives
+ *  this as untyped SYSTEM-event metadata over the wire, not a typed contract. */
+export interface ReceiptLike {
+  taskId?: string;
+  sessionId?: string;
+  sourceChannel?: string | null;
+  selectedTier?: string | null;
+  routerReason?: string | null;
+  state?: string | null;
+  resultState?: string | null;
+  routeDiagnostics?: RouterDiagnostics | null;
+  budgetLimit?: number | null;
+  costUsd?: number | null;
+  elapsedMs?: number | null;
+  iterations?: number | null;
+  cancelled?: boolean | number | null;
+  blockedOn?: string | null;
+  memoryUsed?: boolean | null;
+  contextChars?: number | null;
+  toolsCalled?: string[];
+  approvals?: Array<{ status: string; toolName: string; decidedAt: string | null }>;
+  evidence?: { startSeq: number | null; endSeq: number | null };
+  error?: string | null;
+}
+
+/** 1. field(label, value) — null/undefined/'' omit the field entirely; a
+ *  real 0 or false is rendered (absence must never be confused with a
+ *  fabricated falsy value). */
+export function field(label: string, value: unknown): { label: string; value: string } | null {
+  if (value === null || value === undefined || value === '') return null;
+  return { label, value: String(value) };
+}
+
+/** 2. RULE_LABELS — all 8 RouterRuleIdSchema values. Wording is reused from
+ *  friendlyMessage's TIER_SELECTED reason-prefix branches so a live event
+ *  and its later receipt replay describe the routing decision identically. */
+export const RULE_LABELS: Record<RouterRuleId, string> = {
+  PRIVACY_OVERRIDE: 'Marked private — stayed on this machine',
+  USER_LOCAL_ONLY: 'This machine only — as requested',
+  LOCAL_INTENT: 'Recognized as a local-machine task',
+  LOCAL_TOOL_INTENT: 'Needed a tool available only on this machine',
+  LOW_CLASSIFIER_CONFIDENCE: 'Tricky to size up — used the cloud model to be safe',
+  TOOL_COUNT_OVERFLOW: 'Needed several tools — used the cloud model',
+  LATENCY_CRITICAL: 'Local model was waking up — used the cloud for a fast answer',
+  HEURISTIC_EVAL: 'Routed by complexity score',
+};
+
+/** 3. formatReceiptState — a friendly label for the receipt's terminal
+ *  state. null state -> "unknown"; resultState==='blocked' takes priority;
+ *  cancelled/blockedOn are surfaced as extra badges alongside the label. */
+export function formatReceiptState(receipt: ReceiptLike | null): {
+  label: string;
+  cancelled?: boolean;
+  blockedOn?: string;
+} {
+  if (!receipt || receipt.resultState == null) return { label: 'unknown' };
+  const { resultState, cancelled, blockedOn } = receipt;
+  const base =
+    resultState === 'blocked' ? 'Blocked'
+    : resultState === 'completed' ? 'Completed'
+    : resultState === 'failed' ? 'Failed'
+    : resultState === 'cancelled' ? 'Cancelled'
+    : resultState;
+  const out: { label: string; cancelled?: boolean; blockedOn?: string } = { label: base };
+  if (cancelled === true || cancelled === 1) out.cancelled = true;
+  if (typeof blockedOn === 'string' && blockedOn) out.blockedOn = blockedOn;
+  return out;
+}
+
+/** 4. formatCostField — returns the field rows the panel renders for cost.
+ *  costUsd is a real number -> "$X.XX"; null -> "not recorded" (NEVER
+ *  "$0.00" — absence of telemetry must never read as a free run).
+ *  budget_source/cost_enforceable are always null in v1 -> "not recorded". */
+export function formatCostField(
+  receipt: ReceiptLike | null,
+): Array<{ label: string; value: string }> {
+  const rows: Array<{ label: string; value: string }> = [];
+  const cost = receipt?.costUsd;
+  rows.push({
+    label: 'cost',
+    value: typeof cost === 'number' ? `$${cost.toFixed(2)}` : 'not recorded',
+  });
+  if (typeof receipt?.budgetLimit === 'number') {
+    rows.push({ label: 'budget', value: `budget $${receipt.budgetLimit}` });
+  }
+  // budget_source / cost_enforceable are never persisted in v1 (always null
+  // — see receipts.ts:203-205) so these are unconditionally "not recorded".
+  rows.push({ label: 'budget source', value: 'not recorded' });
+  rows.push({ label: 'cost enforceable', value: 'not recorded' });
+  return rows;
+}
+
+/** 5. formatRouteDiagnostics — turns a RouterDiagnostics (or null) into the
+ *  rows the panel renders. rule text prefers humanReason, then RULE_LABELS
+ *  by ruleId, then the raw reason string — never a blank rule row. */
+export function formatRouteDiagnostics(
+  diag: RouterDiagnostics | null | undefined,
+): Array<{ label: string; value: string }> {
+  if (!diag) return [{ label: 'route', value: 'no routing record' }];
+  const rows: Array<{ label: string; value: string }> = [];
+  const rule = diag.humanReason ?? (diag.ruleId ? RULE_LABELS[diag.ruleId] : undefined) ?? diag.reason;
+  rows.push({ label: 'rule', value: rule });
+  rows.push({ label: 'score', value: String(diag.score) });
+  rows.push({ label: 'tier', value: diag.tier });
+  if (diag.blockedAlternatives && diag.blockedAlternatives.length > 0) {
+    for (const alt of diag.blockedAlternatives) {
+      rows.push({ label: 'blocked alternative', value: `would have used ${alt.tier}, but: ${alt.why}` });
+    }
+  }
+  if (diag.safetyLock) rows.push({ label: 'safety lock', value: diag.safetyLock });
+  if (diag.overridable !== undefined) rows.push({ label: 'overridable', value: String(diag.overridable) });
+  return rows;
+}
+
+/** Plain data row a replay-only event renders — NO callbacks, NO dispatch
+ *  surface of any kind. This is the type-level half of the structural
+ *  boundary: even if a future edit tried to add a handler field here, the
+ *  ReplayEventRow consumer (see ReceiptsPanel.tsx) still only destructures
+ *  these fields, and nothing here is ever a function. */
+export interface ReplayEventRowData {
+  key: string;
+  type: GatewayEvent['type'];
+  message: string;
+  tier: { text: string; hint: string } | null;
+  timestamp: string;
+  raw: GatewayEvent;
+}
+
+/** 6. toReplayEventRows — GatewayEvent[] -> plain data rows, in seq order,
+ *  for the read-only replay view. Pure transform: returns DATA, never
+ *  JSX-with-callbacks, and carries no readOnly flag to thread through since
+ *  there is nothing dispatchable in the output at all. */
+export function toReplayEventRows(events: GatewayEvent[]): ReplayEventRowData[] {
+  const sorted = [...events].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+  return sorted.map((ev) => ({
+    key: ev.id,
+    type: ev.type,
+    message: friendlyMessage(ev),
+    tier: tierLabel(ev.tier),
+    timestamp: ev.timestamp,
+    raw: ev,
+  }));
+}
+
+/** 7. canRenderAction — the live-path affordance guard. Reserved for
+ *  per-event-type gating later; today it is simply !readOnly. The replay
+ *  safety guarantee does NOT depend on this alone — it depends on
+ *  ReplayEventRow having no callback in lexical scope (see ReceiptsPanel.tsx). */
+export function canRenderAction(_event: GatewayEvent, readOnly: boolean): boolean {
+  return !readOnly;
 }
