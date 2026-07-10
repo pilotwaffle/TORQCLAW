@@ -125,6 +125,27 @@ export const sessions = {
     const info = db.prepare('DELETE FROM task_episodes WHERE session_id = ?').run(sessionId);
     return Number(info.changes);
   },
+
+  /**
+   * TCLAW-4B: fetch one task's evidence events by seq range, for GET_RECEIPT's
+   * includeEvents option. Uses idx_events_request (request_id). Mapped via the
+   * same rowToEvent used by the reconnect backlog (getEventLogSince) so the
+   * shape returned here is identical to what a live client would have seen.
+   *
+   * INVARIANT: this helper has NO session-scoping of its own — request_id
+   * alone does not prove the caller owns the task. It must ONLY ever be
+   * reached AFTER the caller has independently verified session ownership of
+   * the task (receipts.ts handleGetReceipt — the real GET_RECEIPT handler
+   * body delegated to by server.ts — does this via the receipt row's
+   * session_id before calling here). Do not call this from anywhere that
+   * skips that check.
+   */
+  getEventsForRequest(requestId: string, startSeq: number, endSeq: number): GatewayEvent[] {
+    const rows = db
+      .prepare('SELECT * FROM events WHERE request_id = ? AND seq BETWEEN ? AND ? ORDER BY seq ASC')
+      .all(requestId, startSeq, endSeq);
+    return (rows as any[]).map(rowToEvent);
+  },
 };
 
 function rowToEvent(r: any): GatewayEvent {

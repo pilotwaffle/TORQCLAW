@@ -18,6 +18,7 @@ import { setCancelCheck } from '@torqclaw/inference';
 import { cancellations } from './cancellations.js';
 import { authorize, checkResumeRole, type Role } from './authz.js';
 import { db } from './storage.js';
+import { handleListReceipts, handleGetReceipt } from './receipts.js';
 
 // Read helper for authz's task-ownership check. Kept inline here (not in
 // events.ts taskStore) per scope: this ticket may only touch authz.ts,
@@ -224,6 +225,27 @@ app.get('/ws', { websocket: true }, (socket) => {
         } catch (err: any) {
           emitCancel('SYSTEM', `Cancel relay failed: ${String(err?.message ?? err)}`);
         }
+        break;
+      }
+      case 'LIST_RECEIPTS': {
+        // Read-only: SELECT + publishOnly, zero writes. The full handler body
+        // lives in receipts.ts (handleListReceipts) so tests can drive the
+        // exact production path headlessly — this switch delegates verbatim,
+        // no parallel copy. Session-scoped by construction: the command
+        // carries no sessionId param and we always pass the CONNECTION's own
+        // sid, never a client-supplied value.
+        handleListReceipts(sid, cmd.data.limit);
+        break;
+      }
+      case 'GET_RECEIPT': {
+        // Read-only: SELECT + publishOnly, zero writes. The full handler body
+        // — ownership check (no existence oracle), taskPrompt lookup,
+        // includeEvents oversize guard — lives in receipts.ts
+        // (handleGetReceipt); this switch delegates verbatim, no parallel copy.
+        handleGetReceipt(sid, {
+          taskId: cmd.data.taskId,
+          includeEvents: cmd.data.includeEvents,
+        });
         break;
       }
     }

@@ -43,6 +43,42 @@ export function persistAndPublish(event: Omit<GatewayEvent, 'seq'>): GatewayEven
   return withSeq;
 }
 
+/**
+ * TCLAW-4B: the ONLY non-persisted emission path. Validates against
+ * GatewayEventSchema (the gateway obeys its own contract even for transient
+ * frames) then publishes DIRECTLY to sessionBus — no INSERT into events, no
+ * seq assignment. Publishes only to the given session's own subscribers
+ * (i.e. the commanding connection's session), never broadcast.
+ *
+ * Used solely for receipt-read responses (LIST_RECEIPTS/GET_RECEIPT) so that
+ * derived/rehydrated data — which already lives durably in run_receipts and
+ * the source event log — never gets a second, redundant home in the events
+ * table, and never re-enters the reconnect backlog (getEventLogSince).
+ *
+ * The built event OMITS seq entirely (GatewayEventSchema.seq is .optional()).
+ * This is deliberate, not incidental: the console's cursor guard
+ * (useGatewayStream) only advances its resume cursor when an incoming event
+ * carries a non-null seq, so a seq-less event can never rewind or corrupt a
+ * client's reconnect position.
+ */
+export function publishOnly(
+  sessionId: string,
+  event: { message: string; metadata?: unknown },
+): void {
+  const built: Omit<GatewayEvent, 'seq'> = {
+    id: randomUUID(),
+    requestId: null,
+    sessionId,
+    tier: null,
+    type: 'SYSTEM',
+    message: event.message,
+    metadata: event.metadata,
+    timestamp: new Date().toISOString(),
+  };
+  const validated = GatewayEventSchema.parse(built); // gateway obeys its own contract
+  sessionBus.publish(sessionId, validated as GatewayEvent);
+}
+
 export type Emitter = (type: GatewayEventType, message: string, metadata?: unknown) => void;
 
 export function makeEmitter(

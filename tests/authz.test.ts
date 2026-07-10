@@ -33,6 +33,12 @@ const approveSkill: ClientCommand = { action: 'APPROVE_SKILL', queueId: 'q1', de
 const getSkillDraft: ClientCommand = { action: 'GET_SKILL_DRAFT', queueId: 'q1' };
 const cancelKnown: ClientCommand = { action: 'CANCEL_TASK', taskId: 'known-task' };
 const cancelUnknown: ClientCommand = { action: 'CANCEL_TASK', taskId: 'unknown-task' };
+const listReceipts: ClientCommand = { action: 'LIST_RECEIPTS', limit: 20 };
+const getReceipt: ClientCommand = {
+  action: 'GET_RECEIPT',
+  taskId: '7c1a9e2b-4d3f-4a8c-9b2e-6f5d4c3b2a1f',
+  includeEvents: false,
+};
 
 const future = { action: 'SOME_FUTURE_ACTION' } as any as ClientCommand;
 
@@ -45,6 +51,8 @@ describe('authorize() — role-based command authorization', () => {
       ['APPROVE_SKILL', approveSkill],
       ['GET_SKILL_DRAFT', getSkillDraft],
       ['MEMORY FORGET_SESSION', memoryForget],
+      ['LIST_RECEIPTS', listReceipts],
+      ['GET_RECEIPT', getReceipt],
     ])('%s -> deny', (_name, cmd) => {
       const d = authorize('channel', cmd, ctx);
       expect(d.ok).toBe(false);
@@ -89,6 +97,8 @@ describe('authorize() — role-based command authorization', () => {
       ['MEMORY SHOW', memoryShow],
       ['MEMORY FORGET_SESSION', memoryForget],
       ['CANCEL_TASK known task', cancelKnown],
+      ['LIST_RECEIPTS', listReceipts],
+      ['GET_RECEIPT', getReceipt],
     ])('%s -> allow', (_name, cmd) => {
       expect(authorize('operator', cmd, ctx)).toEqual({ ok: true });
     });
@@ -115,6 +125,8 @@ describe('authorize() — role-based command authorization', () => {
       ['CANCEL_TASK known task', cancelKnown],
       ['CANCEL_TASK unknown task', cancelUnknown],
       ['unmapped/future action', future],
+      ['LIST_RECEIPTS', listReceipts],
+      ['GET_RECEIPT', getReceipt],
     ])('%s -> deny', (_name, cmd) => {
       const d = authorize('node', cmd, ctx);
       expect(d.ok).toBe(false);

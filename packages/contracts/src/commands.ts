@@ -48,6 +48,21 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     action: z.literal('MEMORY'),
     op: z.enum(['SHOW', 'FORGET_SESSION']),
   }),
+  z.object({
+    // TCLAW-4B: list this session's run receipts (summary columns only).
+    // Session-scoped by the connection's own sid on the server side — there is
+    // deliberately NO sessionId param here, which closes foreign-session reads
+    // by construction (a client cannot even ask for another session's list).
+    action: z.literal('LIST_RECEIPTS'),
+    limit: z.number().int().min(1).max(100).default(20),
+  }),
+  z.object({
+    // TCLAW-4B: fetch one receipt (+ optionally its evidence events) by task.
+    // taskId = gateway request_id, same field type as CANCEL_TASK.taskId.
+    action: z.literal('GET_RECEIPT'),
+    taskId: z.uuid(),
+    includeEvents: z.boolean().default(false),
+  }),
 ]);
 export type ClientCommand = z.infer<typeof ClientCommandSchema>;
 

@@ -116,8 +116,9 @@ CREATE INDEX IF NOT EXISTS idx_tool_approvals_request ON tool_approvals(request_
 --    is NEVER the only copy of anything and can be dropped and rebuilt from
 --    events/tasks/tool_approvals at any time (see ops/receipts-rebuild.mjs).
 --    Gateway-DB-only: this is NOT an emitted contract (no schema in
---    packages/contracts/generated or engines/hermes_kernel/mcp_wrapper/schemas)
---    and is never sent over the wire.
+--    packages/contracts/generated or engines/hermes_kernel/mcp_wrapper/schemas).
+--    TCLAW-4B: read-only via LIST_RECEIPTS/GET_RECEIPT as untyped SYSTEM-event
+--    metadata; still not a typed emitted contract of its own.
 CREATE TABLE IF NOT EXISTS run_receipts (
   id TEXT PRIMARY KEY,                      -- randomUUID, receipt row id (preserved on re-projection)
   task_id TEXT NOT NULL UNIQUE,             -- = tasks.request_id (upsert key)
