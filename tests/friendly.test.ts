@@ -12,6 +12,13 @@ import {
   formatRouteDiagnostics,
   toReplayEventRows,
   canRenderAction,
+  formatCap,
+  formatRemaining,
+  formatAttribution,
+  formatLedgerCost,
+  formatCapState,
+  formatDailyTotalLabel,
+  formatProviderSummaryRow,
   type ReceiptLike,
 } from '../apps/console/src/components/friendly.js';
 
@@ -181,10 +188,173 @@ describe('formatCostField', () => {
     const rows = formatCostField({ costUsd: 0.1 } as ReceiptLike);
     expect(rows.find((r) => r.label === 'budget')).toBeUndefined();
   });
-  it('enforcement fields are always "not recorded" (null in v1)', () => {
+  it('enforcement fields render "not recorded" when absent (null)', () => {
     const rows = formatCostField({ costUsd: 0.1 } as ReceiptLike);
     expect(rows.find((r) => r.label === 'budget source')?.value).toBe('not recorded');
     expect(rows.find((r) => r.label === 'cost enforceable')?.value).toBe('not recorded');
+  });
+
+  // TCLAW-1B (G1R RC-4): budget_source/cost_enforceable are now REAL
+  // persisted values (1A-core projects them onto the receipt) — honest
+  // mappings, not a hardcoded "not recorded".
+  it('budgetSource per_task/env_default/unlimited map to honest labels', () => {
+    expect(
+      formatCostField({ costUsd: 0.1, budgetSource: 'per_task' } as ReceiptLike)
+        .find((r) => r.label === 'budget source')?.value,
+    ).toBe('per-task budget');
+    expect(
+      formatCostField({ costUsd: 0.1, budgetSource: 'env_default' } as ReceiptLike)
+        .find((r) => r.label === 'budget source')?.value,
+    ).toBe('default budget (env)');
+    expect(
+      formatCostField({ costUsd: 0.1, budgetSource: 'unlimited' } as ReceiptLike)
+        .find((r) => r.label === 'budget source')?.value,
+    ).toBe('uncapped (warned)');
+  });
+  it('budgetSource null -> "not recorded"', () => {
+    expect(
+      formatCostField({ costUsd: 0.1, budgetSource: null } as ReceiptLike)
+        .find((r) => r.label === 'budget source')?.value,
+    ).toBe('not recorded');
+  });
+  it('costEnforceable 1/0 map to honest labels; null -> "not recorded"', () => {
+    expect(
+      formatCostField({ costUsd: 0.1, costEnforceable: 1 } as ReceiptLike)
+        .find((r) => r.label === 'cost enforceable')?.value,
+    ).toBe('enforced (provider reported)');
+    expect(
+      formatCostField({ costUsd: 0.1, costEnforceable: 0 } as ReceiptLike)
+        .find((r) => r.label === 'cost enforceable')?.value,
+    ).toBe('unenforceable — iteration cap only');
+    expect(
+      formatCostField({ costUsd: 0.1, costEnforceable: null } as ReceiptLike)
+        .find((r) => r.label === 'cost enforceable')?.value,
+    ).toBe('not recorded');
+  });
+});
+
+// ── TCLAW-1B: Cost Control Center pure-helper tests ─────────────────────
+
+describe('formatCap', () => {
+  it('undefined -> "No cap (unlimited)"', () => {
+    expect(formatCap(undefined)).toBe('No cap (unlimited)');
+  });
+  it('null -> "No cap (unlimited)"', () => {
+    expect(formatCap(null)).toBe('No cap (unlimited)');
+  });
+  it('a positive number -> "$X.XX"', () => {
+    expect(formatCap(5)).toBe('$5.00');
+    expect(formatCap(0.25)).toBe('$0.25');
+  });
+  it('NEVER emits "$0" for undefined/null', () => {
+    expect(formatCap(undefined)).not.toMatch(/\$0/);
+    expect(formatCap(null)).not.toMatch(/\$0/);
+  });
+});
+
+describe('formatRemaining', () => {
+  it('finite cap/total -> cap-total formatted', () => {
+    expect(formatRemaining(10, 4)).toBe('$6.00 remaining');
+  });
+  it('cap null/undefined -> "Unlimited"', () => {
+    expect(formatRemaining(null, 5)).toBe('Unlimited');
+    expect(formatRemaining(undefined, 5)).toBe('Unlimited');
+  });
+  it('total null/undefined (cap present) -> "n/a"', () => {
+    expect(formatRemaining(10, null)).toBe('n/a');
+    expect(formatRemaining(10, undefined)).toBe('n/a');
+  });
+  it('total >= cap clamps to "$0.00 remaining — cap reached", NEVER negative', () => {
+    expect(formatRemaining(5, 5)).toBe('$0.00 remaining — cap reached');
+    expect(formatRemaining(5, 9)).toBe('$0.00 remaining — cap reached');
+    expect(formatRemaining(5, 9)).not.toMatch(/-\$/);
+  });
+});
+
+describe('formatAttribution', () => {
+  it('"exact" -> not estimated, label "recorded"', () => {
+    const out = formatAttribution('exact');
+    expect(out.estimated).toBe(false);
+    expect(out.label).toBe('recorded');
+  });
+  it('"account_delta" -> estimated true, label mentions estimated/account-level/conservative, tooltip present', () => {
+    const out = formatAttribution('account_delta');
+    expect(out.estimated).toBe(true);
+    expect(out.label).toMatch(/estimated/i);
+    expect(out.label).toMatch(/account-level/i);
+    expect(out.label).toMatch(/conservative/i);
+    expect(out.tooltip).toBeTruthy();
+  });
+  it('"unavailable" -> "not recorded", not estimated', () => {
+    const out = formatAttribution('unavailable');
+    expect(out.estimated).toBe(false);
+    expect(out.label).toBe('not recorded');
+  });
+  it('unknown attribution value -> "not recorded", not estimated', () => {
+    const out = formatAttribution('something_else');
+    expect(out.estimated).toBe(false);
+    expect(out.label).toBe('not recorded');
+  });
+  it('exact vs account_delta produce DISTINCT labels', () => {
+    expect(formatAttribution('exact').label).not.toBe(formatAttribution('account_delta').label);
+  });
+});
+
+describe('formatLedgerCost', () => {
+  it('attribution "unavailable" -> "not recorded" even if a stray number is present', () => {
+    expect(formatLedgerCost(5, 'unavailable')).toBe('not recorded');
+  });
+  it('costUsd null -> "not recorded" (NEVER "$0.00")', () => {
+    expect(formatLedgerCost(null, 'exact')).toBe('not recorded');
+    expect(formatLedgerCost(null, 'exact')).not.toBe('$0.00');
+  });
+  it('exact number -> "$X.XX"', () => {
+    expect(formatLedgerCost(1.5, 'exact')).toBe('$1.50');
+    expect(formatLedgerCost(2, 'account_delta')).toBe('$2.00');
+  });
+});
+
+describe('formatCapState', () => {
+  it('null -> "within budget"', () => {
+    expect(formatCapState(null)).toBe('within budget');
+  });
+  it('session breach names "session" + limit + envVar', () => {
+    const out = formatCapState({ cap: 'session', total: 5, limit: 5, envVar: 'TORQCLAW_SESSION_CAP_USD' });
+    expect(out).toMatch(/session/);
+    expect(out).toMatch(/\$5\.00/);
+    expect(out).toMatch(/TORQCLAW_SESSION_CAP_USD/);
+  });
+  it('daily breach names "daily"', () => {
+    const out = formatCapState({ cap: 'daily', total: 10, limit: 10, envVar: 'TORQCLAW_DAILY_CAP_USD' });
+    expect(out).toMatch(/daily/);
+    expect(out).toMatch(/TORQCLAW_DAILY_CAP_USD/);
+  });
+});
+
+describe('formatProviderSummaryRow', () => {
+  it('recorded uses recordedUsd only', () => {
+    const out = formatProviderSummaryRow({ provider: 'openai', recordedUsd: 3.5, unrecordedCount: 0, totalCount: 2 });
+    expect(out.recorded).toBe('$3.50');
+  });
+  it('unrecordedCount > 0 -> caveat "(N unrecorded)"', () => {
+    const out = formatProviderSummaryRow({ provider: 'openai', recordedUsd: 1, unrecordedCount: 2, totalCount: 3 });
+    expect(out.caveat).toBe('(2 unrecorded)');
+  });
+  it('unrecordedCount 0 -> caveat null', () => {
+    const out = formatProviderSummaryRow({ provider: 'openai', recordedUsd: 1, unrecordedCount: 0, totalCount: 1 });
+    expect(out.caveat).toBeNull();
+  });
+  it('provider null -> "unknown/local"', () => {
+    const out = formatProviderSummaryRow({ provider: null, recordedUsd: 0, unrecordedCount: 0, totalCount: 0 });
+    expect(out.provider).toBe('unknown/local');
+  });
+});
+
+describe('formatDailyTotalLabel', () => {
+  it('includes "all sessions" and "UTC day"', () => {
+    const label = formatDailyTotalLabel();
+    expect(label).toMatch(/all sessions/i);
+    expect(label).toMatch(/UTC day/i);
   });
 });
 

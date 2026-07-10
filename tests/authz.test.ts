@@ -39,6 +39,7 @@ const getReceipt: ClientCommand = {
   taskId: '7c1a9e2b-4d3f-4a8c-9b2e-6f5d4c3b2a1f',
   includeEvents: false,
 };
+const getCostSummary: ClientCommand = { action: 'GET_COST_SUMMARY', recentLimit: 20 };
 
 const future = { action: 'SOME_FUTURE_ACTION' } as any as ClientCommand;
 
@@ -53,6 +54,7 @@ describe('authorize() — role-based command authorization', () => {
       ['MEMORY FORGET_SESSION', memoryForget],
       ['LIST_RECEIPTS', listReceipts],
       ['GET_RECEIPT', getReceipt],
+      ['GET_COST_SUMMARY', getCostSummary],
     ])('%s -> deny', (_name, cmd) => {
       const d = authorize('channel', cmd, ctx);
       expect(d.ok).toBe(false);
@@ -99,6 +101,7 @@ describe('authorize() — role-based command authorization', () => {
       ['CANCEL_TASK known task', cancelKnown],
       ['LIST_RECEIPTS', listReceipts],
       ['GET_RECEIPT', getReceipt],
+      ['GET_COST_SUMMARY', getCostSummary],
     ])('%s -> allow', (_name, cmd) => {
       expect(authorize('operator', cmd, ctx)).toEqual({ ok: true });
     });
@@ -127,6 +130,7 @@ describe('authorize() — role-based command authorization', () => {
       ['unmapped/future action', future],
       ['LIST_RECEIPTS', listReceipts],
       ['GET_RECEIPT', getReceipt],
+      ['GET_COST_SUMMARY', getCostSummary],
     ])('%s -> deny', (_name, cmd) => {
       const d = authorize('node', cmd, ctx);
       expect(d.ok).toBe(false);

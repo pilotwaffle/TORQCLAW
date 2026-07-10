@@ -149,7 +149,9 @@ export interface ReceiptLike {
   resultState?: string | null;
   routeDiagnostics?: RouterDiagnostics | null;
   budgetLimit?: number | null;
+  budgetSource?: string | null;
   costUsd?: number | null;
+  costEnforceable?: number | null;
   elapsedMs?: number | null;
   iterations?: number | null;
   cancelled?: boolean | number | null;
@@ -209,7 +211,8 @@ export function formatReceiptState(receipt: ReceiptLike | null): {
 /** 4. formatCostField — returns the field rows the panel renders for cost.
  *  costUsd is a real number -> "$X.XX"; null -> "not recorded" (NEVER
  *  "$0.00" — absence of telemetry must never read as a free run).
- *  budget_source/cost_enforceable are always null in v1 -> "not recorded". */
+ *  budget_source/cost_enforceable are REAL persisted values now (TCLAW-1A-core
+ *  projects them onto the receipt) -> honest mappings; NULL -> "not recorded". */
 export function formatCostField(
   receipt: ReceiptLike | null,
 ): Array<{ label: string; value: string }> {
@@ -222,10 +225,25 @@ export function formatCostField(
   if (typeof receipt?.budgetLimit === 'number') {
     rows.push({ label: 'budget', value: `budget $${receipt.budgetLimit}` });
   }
-  // budget_source / cost_enforceable are never persisted in v1 (always null
-  // — see receipts.ts:203-205) so these are unconditionally "not recorded".
-  rows.push({ label: 'budget source', value: 'not recorded' });
-  rows.push({ label: 'cost enforceable', value: 'not recorded' });
+  // budget_source: real persisted value now (1A-core). NULL -> "not recorded".
+  const bs = receipt?.budgetSource;
+  rows.push({
+    label: 'budget source',
+    value:
+      bs === 'per_task' ? 'per-task budget'
+      : bs === 'env_default' ? 'default budget (env)'
+      : bs === 'unlimited' ? 'uncapped (warned)'
+      : 'not recorded',
+  });
+  // cost_enforceable: 1 enforced / 0 unenforceable / NULL n/a.
+  const ce = receipt?.costEnforceable;
+  rows.push({
+    label: 'cost enforceable',
+    value:
+      ce === 1 ? 'enforced (provider reported)'
+      : ce === 0 ? 'unenforceable — iteration cap only'
+      : 'not recorded',
+  });
   return rows;
 }
 
@@ -287,4 +305,98 @@ export function toReplayEventRows(events: GatewayEvent[]): ReplayEventRowData[] 
  *  ReplayEventRow having no callback in lexical scope (see ReceiptsPanel.tsx). */
 export function canRenderAction(_event: GatewayEvent, readOnly: boolean): boolean {
   return !readOnly;
+}
+
+// ── TCLAW-1B: Cost Control Center pure helpers ──────────────────────────
+// All pure (no React, no DOM, no side effects), unit-tested in
+// tests/friendly.test.ts. Return DATA (strings/objects), never JSX. Every
+// helper honors the no-fabrication contract: a NULL/undefined cap or cost
+// NEVER renders as "$0"/"$0.00" — only a real, persisted 0 renders as such.
+
+/** formatCap — a cap value for display. NEVER "$0" for undefined/null (an
+ *  absent cap is UNLIMITED, not a zero-dollar cap). */
+export function formatCap(cap: number | null | undefined): string {
+  if (cap === null || cap === undefined) return 'No cap (unlimited)';
+  return `$${cap.toFixed(2)}`;
+}
+
+/** formatRemaining — headroom left under a cap. cap null/undefined ->
+ *  "Unlimited"; total null/undefined -> "n/a" (nothing to subtract from);
+ *  otherwise clamps at $0.00 — NEVER negative (a breach reads as "cap
+ *  reached", not as a negative number). */
+export function formatRemaining(
+  cap: number | null | undefined,
+  total: number | null | undefined,
+): string {
+  if (cap === null || cap === undefined) return 'Unlimited';
+  if (total === null || total === undefined) return 'n/a';
+  const remaining = cap - total;
+  if (remaining <= 0) return '$0.00 remaining — cap reached';
+  return `$${remaining.toFixed(2)} remaining`;
+}
+
+/** formatAttribution — the 3-way ledger provenance tag as a display label +
+ *  optional tooltip + an `estimated` flag the caller can use to render a
+ *  badge. 'account_delta' is ALWAYS labeled estimated/account-level/
+ *  conservative — it is never shown as an exact per-task charge (invariant 6),
+ *  though it is still counted in every total (this helper does not filter
+ *  anything — it only formats a label). */
+export function formatAttribution(
+  attribution: string,
+): { label: string; tooltip?: string; estimated: boolean } {
+  if (attribution === 'exact') return { label: 'recorded', estimated: false };
+  if (attribution === 'account_delta') {
+    return {
+      label: 'estimated · account-level · conservative',
+      estimated: true,
+      tooltip:
+        'Account-wide usage delta, not a per-task charge — counted conservatively so caps trigger sooner, never later. May over-count under concurrency.',
+    };
+  }
+  return { label: 'not recorded', estimated: false };
+}
+
+/** formatLedgerCost — one recent-ledger row's cost string. attribution
+ *  'unavailable' OR a null costUsd -> "not recorded" (NEVER "$0.00", even if
+ *  a stray number were somehow present); otherwise "$X.XX". The caller
+ *  appends the estimated badge (via formatAttribution) for account_delta
+ *  rows separately — this helper only formats the dollar figure. */
+export function formatLedgerCost(costUsd: number | null, attribution: string): string {
+  if (attribution === 'unavailable' || costUsd === null) return 'not recorded';
+  return `$${costUsd.toFixed(2)}`;
+}
+
+/** formatCapState — the backend's CapBreach decision as one display string.
+ *  null -> "within budget"; otherwise names WHICH cap breached plus the real
+ *  total/limit/envVar the backend computed — invents no threshold of its
+ *  own. */
+export function formatCapState(
+  breach: { cap: 'session' | 'daily'; total: number; limit: number; envVar: string } | null,
+): string {
+  if (!breach) return 'within budget';
+  return `${breach.cap} cap reached — $${breach.total.toFixed(2)} of $${breach.limit.toFixed(2)} (${breach.envVar})`;
+}
+
+/** formatDailyTotalLabel — the daily total is a CROSS-SESSION, UTC-day
+ *  aggregate (invariant 7) — never "this session today". A constant/helper
+ *  so it is unit-testable and every render site uses identical wording. */
+export function formatDailyTotalLabel(): string {
+  return 'all sessions (UTC day)';
+}
+
+/** formatProviderSummaryRow — one per-provider spend summary row. provider
+ *  null -> "unknown/local"; recorded uses ONLY recordedUsd (already excludes
+ *  NULL-cost rows server-side); a non-zero unrecordedCount surfaces as an
+ *  honest caveat instead of silently folding into the dollar figure. */
+export function formatProviderSummaryRow(row: {
+  provider: string | null;
+  recordedUsd: number;
+  unrecordedCount: number;
+  totalCount: number;
+}): { provider: string; recorded: string; caveat: string | null } {
+  return {
+    provider: row.provider ?? 'unknown/local',
+    recorded: `$${row.recordedUsd.toFixed(2)}`,
+    caveat: row.unrecordedCount > 0 ? `(${row.unrecordedCount} unrecorded)` : null,
+  };
 }

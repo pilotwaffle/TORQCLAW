@@ -19,6 +19,7 @@ import { cancellations } from './cancellations.js';
 import { authorize, checkResumeRole, type Role } from './authz.js';
 import { db } from './storage.js';
 import { handleListReceipts, handleGetReceipt } from './receipts.js';
+import { handleGetCostSummary } from './spend.js';
 
 // Read helper for authz's task-ownership check. Kept inline here (not in
 // events.ts taskStore) per scope: this ticket may only touch authz.ts,
@@ -246,6 +247,15 @@ app.get('/ws', { websocket: true }, (socket) => {
           taskId: cmd.data.taskId,
           includeEvents: cmd.data.includeEvents,
         });
+        break;
+      }
+      case 'GET_COST_SUMMARY': {
+        // Read-only: SELECT + publishOnly, zero writes. Handler body in spend.ts
+        // (handleGetCostSummary) so tests drive the production path headlessly.
+        // Session-scoped by construction: no sessionId param, we pass the
+        // CONNECTION's own sid, never a client value. Caps are env-only — this
+        // path can never raise/edit a cap.
+        handleGetCostSummary(sid, cmd.data.recentLimit);
         break;
       }
     }

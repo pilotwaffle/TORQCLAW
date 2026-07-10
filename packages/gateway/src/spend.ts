@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { db } from './storage.js';
+import { publishOnly } from './events.js';
 import { ComputeTier, type GatewayRequest } from '@torqclaw/contracts';
 
 /**
@@ -207,3 +208,106 @@ export function recordSpendSafe(input: RecordSpendInput): void {
  *  importing @torqclaw/contracts directly (keeps dispatch.ts's import list
  *  unchanged in shape). */
 export { ComputeTier };
+
+// ── TCLAW-1B: Cost Control Center read surface (SELECT-only, zero writes) ───
+//
+// CRITICAL read-only invariant, mirrors receipts.ts's own read-surface note:
+// handleGetCostSummary below does ZERO writes — no taskStore, no INSERT, no
+// dispatch, no persistAndPublish/makeEmitter. It only SELECTs (the four
+// prepared statements here, plus the existing sessionTotal/dailyTotal) and
+// publishOnly's (which never INSERTs into events, never assigns seq). Caps
+// stay env-only — nothing here can raise/edit a session/daily cap.
+
+const selectRecentLedger = db.prepare(
+  `SELECT task_id, cost_usd, attribution, provider, source_channel, created_at
+   FROM spend_ledger WHERE session_id = ? ORDER BY created_at DESC LIMIT ?`,
+);
+
+// G1R RC-3: attribution counts are SESSION-SCOPED to match sessionTotal.
+const selectAttributionCounts = db.prepare(
+  `SELECT attribution, COUNT(*) AS n FROM spend_ledger
+   WHERE session_id = ? GROUP BY attribution`,
+);
+
+// G1R INCLUDE: cloud task count — session-scoped FRONTIER receipts.
+const selectCloudTaskCount = db.prepare(
+  `SELECT COUNT(*) AS n FROM run_receipts
+   WHERE session_id = ? AND selected_tier = 'API_EXTERNAL'`,
+);
+
+// G1R INCLUDE: per-provider summary. dollar SUM excludes NULL-cost rows
+// (COALESCE→0 over a NULL-only group would read as $0 — instead report
+// recorded-$ and a separate unrecorded COUNT so the caveat is honest).
+const selectProviderSummary = db.prepare(
+  `SELECT provider,
+          COALESCE(SUM(cost_usd), 0) AS recorded_usd,
+          SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS unrecorded_count,
+          COUNT(*) AS total_count
+   FROM spend_ledger WHERE session_id = ? GROUP BY provider`,
+);
+
+export interface RecentLedgerRow {
+  taskId: string;
+  costUsd: number | null;      // NULL passed through untouched
+  attribution: string;         // 'exact' | 'account_delta' | 'unavailable'
+  provider: string | null;
+  sourceChannel: string | null;
+  createdAt: string;
+}
+
+/** The GET_COST_SUMMARY handler body. Mirrors handleListReceipts's discipline
+ *  exactly: SELECT + publishOnly only. Session-scoped by construction — the
+ *  command carries no sessionId param, and server.ts always passes the
+ *  CONNECTION's own sid, never a client-supplied value. */
+export function handleGetCostSummary(sessionId: string, recentLimit: number): void {
+  const sessionCap = resolveSessionCap();      // number | undefined
+  const dailyCap = resolveDailyCap();
+  const sTotal = sessionTotal(sessionId);
+  const dTotal = dailyTotal();                 // GLOBAL, UTC day
+  const breach = evaluateCaps(sTotal, dTotal, sessionCap, dailyCap); // CapBreach | null
+
+  // remaining computed ONLY when a cap exists; undefined otherwise (client
+  // renders "Unlimited"). Never treat undefined cap as 0.
+  const sessionRemaining = sessionCap !== undefined ? sessionCap - sTotal : undefined;
+  const dailyRemaining = dailyCap !== undefined ? dailyCap - dTotal : undefined;
+
+  const recentLedger = (selectRecentLedger.all(sessionId, recentLimit) as Array<{
+    task_id: string; cost_usd: number | null; attribution: string;
+    provider: string | null; source_channel: string | null; created_at: string;
+  }>).map((r) => ({
+    taskId: r.task_id, costUsd: r.cost_usd, attribution: r.attribution,
+    provider: r.provider, sourceChannel: r.source_channel, createdAt: r.created_at,
+  }));
+
+  const attributionCounts = (selectAttributionCounts.all(sessionId) as Array<{ attribution: string; n: number }>)
+    .reduce<Record<string, number>>((acc, row) => { acc[row.attribution] = row.n; return acc; }, {});
+
+  const cloudTaskCount = (selectCloudTaskCount.get(sessionId) as { n: number }).n;
+
+  const providerSummary = (selectProviderSummary.all(sessionId) as Array<{
+    provider: string | null; recorded_usd: number; unrecorded_count: number; total_count: number;
+  }>).map((r) => ({
+    provider: r.provider, recordedUsd: r.recorded_usd,
+    unrecordedCount: r.unrecorded_count, totalCount: r.total_count,
+  }));
+
+  publishOnly(sessionId, {
+    message: 'Cost summary',
+    metadata: {
+      costSummary: true,
+      sessionCap: sessionCap ?? null,   // null = unlimited (client maps to "Unlimited")
+      dailyCap: dailyCap ?? null,
+      sessionCapEnvVar: SESSION_CAP_ENV_VAR,
+      dailyCapEnvVar: DAILY_CAP_ENV_VAR,
+      sessionTotal: sTotal,
+      dailyTotal: dTotal,               // labeled "all sessions (UTC day)" client-side
+      sessionRemaining: sessionRemaining ?? null,
+      dailyRemaining: dailyRemaining ?? null,
+      breach,                           // CapBreach | null — names WHICH cap
+      attributionCounts,                // { exact?, account_delta?, unavailable? } session-scoped
+      cloudTaskCount,
+      providerSummary,
+      recentLedger,
+    },
+  });
+}

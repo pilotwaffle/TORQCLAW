@@ -54,12 +54,19 @@ export function checkResumeRole(
  *              (lookupTaskSession returns a sessionId === ctx.sessionId);
  *              unknown/not-found task denies.
  *              Everything else (APPROVE_TOOL, APPROVE_SKILL, GET_SKILL_DRAFT,
- *              LIST_RECEIPTS, GET_RECEIPT, any future/unmapped action) — deny.
+ *              LIST_RECEIPTS, GET_RECEIPT, GET_COST_SUMMARY, any
+ *              future/unmapped action) — deny.
  *              (TCLAW-4B: receipts are an operator-only surface for now — the
  *              per-session read scoping in listReceipts/getReceipt would make
  *              a channel grant safe in principle, but there is no product
  *              need yet, so both stay on the default-deny path below rather
  *              than earning an explicit allow branch.)
+ *              (TCLAW-1B: GET_COST_SUMMARY is operator-only for the same
+ *              reason PLUS a stronger one — dailyTotal is a cross-session,
+ *              GLOBAL aggregate. Even though the summary itself is
+ *              session-scoped in shape, cost telemetry (including the
+ *              cross-session daily total) is operator-only by design, so this
+ *              gets an explicit channel deny below, not just default-deny.)
  *   node     — every action denied.
  */
 export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): AuthzDecision {
@@ -82,6 +89,7 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     case 'GET_SKILL_DRAFT':
     case 'LIST_RECEIPTS':
     case 'GET_RECEIPT':
+    case 'GET_COST_SUMMARY':
       return DENY_NOT_PERMITTED;
     default:
       // Default deny for any future/unmapped action on a non-operator role.

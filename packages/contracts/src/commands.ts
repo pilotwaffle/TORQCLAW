@@ -63,6 +63,14 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     taskId: z.uuid(),
     includeEvents: z.boolean().default(false),
   }),
+  z.object({
+    // TCLAW-1B: read-only Cost Control Center summary for this session.
+    // Session-scoped by construction (NO sessionId param — server passes the
+    // connection's own sid), exactly like LIST_RECEIPTS. recentLedger is a
+    // preview window only; authoritative totals come from the backend SUMs.
+    action: z.literal('GET_COST_SUMMARY'),
+    recentLimit: z.number().int().min(1).max(100).default(20),
+  }),
 ]);
 export type ClientCommand = z.infer<typeof ClientCommandSchema>;
 
