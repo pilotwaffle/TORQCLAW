@@ -15,13 +15,22 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  *  same number evaluateSpend just tripped on) so a BREACHED task's spend
  *  reaches taskStore.fail's telemetry and the spend ledger instead of
  *  recording zero. Optional/backward-compatible — undefined when no cost was
- *  ever reported (never fabricate a number that wasn't there). */
+ *  ever reported (never fabricate a number that wasn't there).
+ *
+ *  TCLAW-1A-attr (G1R OQ3-b): also carries lastCostSource, the costSource tag
+ *  ('exact'|'account_delta'|'unavailable') paired with lastCostUsd at the
+ *  moment of breach. Without this, a breached task's real cost would arrive
+ *  at recordSpend with no costSource and get mapped to 'unavailable' (NULL,
+ *  excluded from the cap SUM) — regressing correction A, which deliberately
+ *  preserved the number. Mirrors lastCostUsd: optional, never fabricated. */
 export class CircuitBreakerError extends Error {
   readonly lastCostUsd?: number;
-  constructor(message: string, lastCostUsd?: number) {
+  readonly lastCostSource?: string;
+  constructor(message: string, lastCostUsd?: number, lastCostSource?: string) {
     super(message);
     this.name = 'CircuitBreakerError';
     this.lastCostUsd = lastCostUsd;
+    this.lastCostSource = lastCostSource;
   }
 }
 
@@ -143,6 +152,7 @@ export async function executeHermesTask(
       throw new CircuitBreakerError(
         breachMessage,
         typeof status.telemetry?.costUsd === 'number' ? status.telemetry.costUsd : undefined,
+        typeof status.telemetry?.costSource === 'string' ? status.telemetry.costSource : undefined,
       );
     }
 

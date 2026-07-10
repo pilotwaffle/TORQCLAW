@@ -92,29 +92,38 @@ def _snapshot_account_usage_usd(*, force: bool = False) -> float | None:
     return value
 
 
-def get_spend_usd(agent, task_id: str) -> float | None:
-    """USD spent so far on this task. Source chain (verified vs vendored src):
+def get_spend_usd(agent, task_id: str) -> tuple[float | None, str]:
+    """USD spent so far on this task, paired with its provenance tag. Returns
+    (cost, costSource) — costSource is ALWAYS a non-null string, even when
+    cost is None, so the pair can never desync from what it describes.
+
+    Source chain (verified vs vendored src) and its costSource mapping:
       1. agent.get_credits_spent_micros()/1e6 — Nous portal; micros ARE USD.
+         Per-task, trustworthy.                              -> "exact"
       2. delta of account_usage total (OpenRouter/Anthropic) since task start.
+         Account-wide, not per-task — conservative under concurrency.
+                                                               -> "account_delta"
       3. None — caller MUST surface that the budget is unenforceable, never 0.
-    Stub mode returns HERMES_STUB_COST_USD if set, else 0.0 (stub IS free)."""
+                                                               -> "unavailable"
+    Stub mode returns HERMES_STUB_COST_USD if set, else 0.0 (stub IS free;
+    tagged "exact" since the stub simulates the credits/exact path)."""
     if agent is None:  # stub mode
         if os.environ.get("HERMES_STUB_COST_UNAVAILABLE") == "1":
-            return None
-        return float(os.environ.get("HERMES_STUB_COST_USD", "0.0"))
+            return None, "unavailable"
+        return float(os.environ.get("HERMES_STUB_COST_USD", "0.0")), "exact"
 
     try:
         micros = agent.get_credits_spent_micros()
     except Exception:
         micros = None
     if micros is not None:
-        return float(micros) / 1_000_000.0
+        return float(micros) / 1_000_000.0, "exact"
 
     current = _snapshot_account_usage_usd()
     baseline = _USAGE_BASELINE.get(task_id)
     if current is not None and baseline is not None:
-        return max(0.0, current - baseline)
-    return None
+        return max(0.0, current - baseline), "account_delta"
+    return None, "unavailable"
 
 
 # FRONTIER toolset allowlist by task type. Hermes runs its OWN tools on the
@@ -283,10 +292,12 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
         # surface blockedOn so run_hermes_loop emits the terminal PENDING_APPROVAL
         # instead of completing with a (likely fabricated-around-the-block) answer.
         blocked = approval_hook.was_blocked(task_id)
+        cost, cost_source = get_spend_usd(agent, task_id)
         telemetry = {
             "engineUsed": f"hermes:{pconf['model'] or 'default'}",
             "messageCount": len(result.get("messages", [])),
-            "costUsd": get_spend_usd(agent, task_id),
+            "costUsd": cost,
+            "costSource": cost_source,
         }
         if blocked:
             telemetry["blockedOn"] = blocked["toolName"]

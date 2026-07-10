@@ -83,7 +83,7 @@ async def run_hermes_loop(task_id: str, payload: dict) -> None:
 
         from .hermes_runner import get_spend_usd
 
-        cost = get_spend_usd(None, task_id)  # stub: HERMES_STUB_COST_* flags
+        cost, _src = get_spend_usd(None, task_id)  # stub: HERMES_STUB_COST_* flags
         if cost is None:
             task_store.emit(
                 task_id, "SYSTEM",
@@ -125,7 +125,10 @@ async def get_task_status(task_id: str, since: int = 0) -> dict:
     if status.get("state") == "running":
         agent = RUNNING.get(task_id)
         # agent is None in stub mode → get_spend_usd reads HERMES_STUB_* flags.
-        status.setdefault("telemetry", {})["costUsd"] = get_spend_usd(agent, task_id)
+        cost, src = get_spend_usd(agent, task_id)
+        tele = status.setdefault("telemetry", {})
+        tele["costUsd"] = cost
+        tele["costSource"] = src
     return status
 
 

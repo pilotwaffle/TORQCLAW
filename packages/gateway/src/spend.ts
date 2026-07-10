@@ -133,6 +133,11 @@ export interface RecordSpendInput {
   sourceChannel?: string | null;
   provider?: string | null;
   costUsd?: number;
+  /** TCLAW-1A-attr: provenance tag for costUsd — 'exact' (per-task credits),
+   *  'account_delta' (account-wide usage delta, conservative under
+   *  concurrency), or 'unavailable'/absent (no trustworthy number). Drives
+   *  the 3-way ledger attribution below; does NOT change cap/SUM math. */
+  costSource?: string;
 }
 
 const insertSpend = db.prepare(
@@ -145,16 +150,37 @@ const insertSpend = db.prepare(
  *  (skip for LOCAL_EDGE) is the CALL SITE's responsibility — this function
  *  always writes when called.
  *
- *  - costUsd a number => attribution='reported'.
- *  - costUsd absent/non-number => attribution='unavailable', cost_usd NULL —
- *    NEVER a fabricated 0 (mirrors evaluateSpend's no-fabrication rule).
+ *  TCLAW-1A-attr: attribution is now a 3-way LABEL taken from the costSource
+ *  tag (NOT a number-vs-null derivation):
+ *  - costSource === 'exact'         => attribution='exact' (per-task credits,
+ *    trustworthy); the reported number is kept and counted in every SUM.
+ *  - costSource === 'account_delta' => attribution='account_delta'
+ *    (account-wide usage delta, conservative under concurrent tasks); the
+ *    reported number is STILL kept and STILL counted in every SUM — this tag
+ *    only LABELS the row as imprecise, it never nets/dedups/filters it out of
+ *    cap enforcement (PRD Risk 6 — over-count must block sooner, not later).
+ *  - costSource undefined/'unavailable'/anything else => attribution=
+ *    'unavailable', cost_usd forced NULL — NEVER a fabricated 0 (mirrors
+ *    evaluateSpend's no-fabrication rule). A number arriving with no
+ *    costSource is treated as unavailable on purpose: we can't claim a
+ *    precision we didn't capture. The only real-number callers after this
+ *    ticket (SUCCESS telemetry spread, and the BREACH path via
+ *    CircuitBreakerError.lastCostSource) both carry a costSource, so this
+ *    fallback should not fire for genuine spend in practice.
  *  - Idempotent: ON CONFLICT(task_id) DO NOTHING — a double-fired terminal
  *    path (mirrors safeMaterializeReceipt's own discipline) can never
  *    double-count the same task.
  *  - Guarded: wrapped in its own try/catch by the CALLER contract below
  *    (recordSpendSafe) — a ledger write must never break the terminal path. */
 export function recordSpend(input: RecordSpendInput): void {
-  const costUsd = typeof input.costUsd === 'number' ? input.costUsd : null;
+  const src = input.costSource;
+  const attribution =
+    src === 'exact' ? 'exact'
+    : src === 'account_delta' ? 'account_delta'
+    : 'unavailable';
+  const costUsd =
+    attribution === 'unavailable' ? null
+    : (typeof input.costUsd === 'number' ? input.costUsd : null);
   insertSpend.run({
     id: randomUUID(),
     task_id: input.taskId,
@@ -162,7 +188,7 @@ export function recordSpend(input: RecordSpendInput): void {
     source_channel: input.sourceChannel ?? null,
     provider: input.provider ?? null,
     cost_usd: costUsd,
-    attribution: costUsd === null ? 'unavailable' : 'reported',
+    attribution,
   });
 }
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -21,6 +21,16 @@ const { dispatch } = await import('../packages/gateway/src/dispatch.js');
 const { taskStore } = await import('../packages/gateway/src/events.js');
 const { projectReceipt } = await import('../packages/gateway/src/receipts.js');
 const { makeRequest } = await import('./helpers.js');
+
+// The bridge namespace dispatch.ts itself imports (@torqclaw/bridge resolves to
+// packages/bridge/dist/index.js — the SAME module singleton). Imported via the
+// dist path here because the bare '@torqclaw/bridge' specifier is not resolvable
+// from the tests dir under the vitest config, but the dist file is. Because it
+// is the same singleton, vi.spyOn on these exports is seen at dispatch's call
+// site — this is what lets the breach test below drive dispatch's REAL breach
+// catch (not a hand-rolled recordSpend) and keeps CircuitBreakerError identity
+// consistent so `error instanceof CircuitBreakerError` holds inside dispatch.
+const bridge = await import('../packages/bridge/dist/index.js');
 
 const SESSION_CAP = 'TORQCLAW_SESSION_CAP_USD';
 const DAILY_CAP = 'TORQCLAW_DAILY_CAP_USD';
@@ -164,27 +174,48 @@ describe('TCLAW-1A-core: sessionTotal / dailyTotal (SUM semantics)', () => {
 });
 
 describe('TCLAW-1A-core: recordSpend (idempotent, honest attribution)', () => {
-  it('(11) reported cost => attribution="reported"', () => {
+  it('(11) costSource="exact" => attribution="exact", cost kept', () => {
     const taskId = randomUUID();
     const sid = randomUUID();
-    recordSpend({ taskId, sessionId: sid, costUsd: 1.23 });
+    recordSpend({ taskId, sessionId: sid, costUsd: 1.23, costSource: 'exact' });
     const row = getLedgerRow(taskId);
     expect(row.cost_usd).toBeCloseTo(1.23);
-    expect(row.attribution).toBe('reported');
+    expect(row.attribution).toBe('exact');
   });
-  it('(13) missing/non-number cost => cost_usd NULL, attribution="unavailable", never a fabricated 0', () => {
+  it('TCLAW-1A-attr: costSource="account_delta" => attribution="account_delta", number STILL counted in sessionTotal', () => {
+    const taskId = randomUUID();
+    const sid = randomUUID();
+    recordSpend({ taskId, sessionId: sid, costUsd: 4.5, costSource: 'account_delta' });
+    const row = getLedgerRow(taskId);
+    expect(row.cost_usd).toBeCloseTo(4.5);
+    expect(row.attribution).toBe('account_delta');
+    // Enforcement math unchanged: an account_delta row counts in the SUM
+    // exactly like any other numeric row — the tag only labels precision.
+    expect(sessionTotal(sid)).toBeCloseTo(4.5);
+  });
+  it('(13) missing/non-number cost, or no costSource => cost_usd NULL, attribution="unavailable", never a fabricated 0', () => {
     const taskId = randomUUID();
     const sid = randomUUID();
     recordSpend({ taskId, sessionId: sid, costUsd: undefined });
     const row = getLedgerRow(taskId);
     expect(row.cost_usd).toBeNull();
     expect(row.attribution).toBe('unavailable');
+    expect(sessionTotal(sid)).toBe(0); // never counted as $0-that-is-really-something
+  });
+  it('TCLAW-1A-attr: a real number with NO costSource is treated as unavailable (correctness-honest fallback), excluded from SUM', () => {
+    const taskId = randomUUID();
+    const sid = randomUUID();
+    recordSpend({ taskId, sessionId: sid, costUsd: 42.0 }); // no costSource passed
+    const row = getLedgerRow(taskId);
+    expect(row.cost_usd).toBeNull();
+    expect(row.attribution).toBe('unavailable');
+    expect(sessionTotal(sid)).toBe(0);
   });
   it('(16) double recordSpend on the same task_id inserts exactly ONE row (ON CONFLICT DO NOTHING)', () => {
     const taskId = randomUUID();
     const sid = randomUUID();
-    recordSpend({ taskId, sessionId: sid, costUsd: 1.0 });
-    recordSpend({ taskId, sessionId: sid, costUsd: 999.0 }); // must NOT overwrite/duplicate
+    recordSpend({ taskId, sessionId: sid, costUsd: 1.0, costSource: 'exact' });
+    recordSpend({ taskId, sessionId: sid, costUsd: 999.0, costSource: 'exact' }); // must NOT overwrite/duplicate
     expect(ledgerCount(taskId)).toBe(1);
     expect(getLedgerRow(taskId).cost_usd).toBeCloseTo(1.0); // first write wins, no double-count
   });
@@ -194,11 +225,178 @@ describe('TCLAW-1A-core: recordSpend (idempotent, honest attribution)', () => {
     // thrown error by temporarily dropping spend_ledger.
     db.exec('DROP TABLE spend_ledger');
     try {
-      expect(() => recordSpendSafe({ taskId: randomUUID(), sessionId: randomUUID(), costUsd: 1 })).not.toThrow();
+      expect(() => recordSpendSafe({ taskId: randomUUID(), sessionId: randomUUID(), costUsd: 1, costSource: 'exact' })).not.toThrow();
     } finally {
       const schemaPath = fileURLToPath(new URL('../packages/gateway/db/schema.sql', import.meta.url));
       db.exec(readFileSync(schemaPath, 'utf8'));
     }
+  });
+  it('legacy attribution="reported" seed row (pre-1A-attr) still sums correctly — enforcement is value-agnostic', () => {
+    const sid = randomUUID();
+    seedSpend({ sessionId: sid, costUsd: 6.0, attribution: 'reported' });
+    expect(sessionTotal(sid)).toBeCloseTo(6.0);
+  });
+  it('cap enforcement math unchanged: an exact row and an account_delta row both count toward the SUM/cap', () => {
+    const taskId1 = randomUUID();
+    const taskId2 = randomUUID();
+    const sid = randomUUID();
+    recordSpend({ taskId: taskId1, sessionId: sid, costUsd: 1.0, costSource: 'exact' });
+    recordSpend({ taskId: taskId2, sessionId: sid, costUsd: 2.0, costSource: 'account_delta' });
+    expect(sessionTotal(sid)).toBeCloseTo(3.0);
+    // A cap set to exactly the combined total breaches, proving both rows
+    // fed the same raw SUM the cap gate checks (no netting/filtering).
+    expect(evaluateCaps(sessionTotal(sid), 0, 3.0, undefined)).toEqual({
+      cap: 'session', total: 3.0, limit: 3.0, envVar: SESSION_CAP_ENV_VAR,
+    });
+  });
+});
+
+describe('TCLAW-1A-attr: breach path preserves cost + label (anti-regression for correction A)', () => {
+  // NOTE (teeth scope): this first test is a UNIT test of recordSpend's
+  // tag->attribution mapping ONLY. It calls recordSpend directly with a
+  // hardcoded costSource, so it does NOT exercise — and cannot fail on a
+  // regression of — dispatch.ts's breach-path threading (the isBudget catch
+  // reading CircuitBreakerError.lastCostSource and passing it to
+  // recordSpendSafe). The DISPATCH-LEVEL teeth for that end-to-end path live
+  // in the next test, which drives a real breach through dispatch().
+  it('recordSpend unit: costSource="exact" on a breach-shaped call maps to attribution="exact", cost NON-NULL (not unavailable), counted in SUM', () => {
+    const taskId = randomUUID();
+    const sid = randomUUID();
+    // Shape mirrors what dispatch's breach recordSpendSafe passes: costUsd from
+    // CircuitBreakerError.lastCostUsd, costSource from lastCostSource. This only
+    // proves recordSpend's own mapping — the wiring that FEEDS these values is
+    // asserted by the dispatch-level test below.
+    recordSpend({
+      taskId, sessionId: sid,
+      costUsd: 9.99,
+      costSource: 'exact',
+    });
+    const row = getLedgerRow(taskId);
+    expect(row.cost_usd).toBeCloseTo(9.99);
+    expect(row.cost_usd).not.toBeNull();
+    expect(row.attribution).toBe('exact');
+    expect(row.attribution).not.toBe('unavailable');
+    // The breach cost must count toward enforcement, exactly like a normal
+    // SUCCESS row — a breach must not let its own cost escape the cap SUM.
+    expect(sessionTotal(sid)).toBeCloseTo(9.99);
+  });
+
+  it('recordSpend unit: costSource="account_delta" maps to attribution="account_delta", not unavailable', () => {
+    const taskId = randomUUID();
+    const sid = randomUUID();
+    recordSpend({ taskId, sessionId: sid, costUsd: 5.5, costSource: 'account_delta' });
+    const row = getLedgerRow(taskId);
+    expect(row.cost_usd).toBeCloseTo(5.5);
+    expect(row.attribution).toBe('account_delta');
+  });
+
+  // ── THE LOAD-BEARING DISPATCH-LEVEL TEETH ─────────────────────────────────
+  // This drives a REAL budget breach through dispatch(): a stubbed bridge
+  // throws a real CircuitBreakerError (carrying lastCostUsd + lastCostSource,
+  // exactly as hermes.ts's breach throw does), dispatch's isBudget catch runs
+  // against the real temp DB, and we assert the spend_ledger row for the
+  // breached task is cost_usd NON-NULL with the label from lastCostSource.
+  //
+  // TEETH: if dispatch.ts's breach recordSpendSafe stops passing
+  // costSource (i.e. threads costSource: undefined), the row becomes
+  // attribution='unavailable' / cost_usd NULL and THIS TEST FAILS — closing
+  // the gap the direct-recordSpend unit test above could not cover. Proven by
+  // sabotaging dispatch.ts and observing the red (see the ticket's teeth-check).
+  //
+  // The spy targets the SAME bridge module singleton dispatch imports (see the
+  // top-of-file `bridge` import note), so both isHermesAvailable() and
+  // executeHermesTask() are overridden at dispatch's own call site, and the
+  // thrown CircuitBreakerError keeps the identity dispatch's `instanceof` needs.
+  it('LOAD-BEARING (dispatch-level): a real budget breach through dispatch() records a NON-NULL spend_ledger row labeled from CircuitBreakerError.lastCostSource — NOT unavailable/NULL', async () => {
+    const sid = makeSession();
+    const reqId = randomUUID();
+
+    // Force the FRONTIER path into the async IIFE (past the FRONTIER-unavailable
+    // early-out) and make the engine poll "breach": executeHermesTask throws a
+    // real CircuitBreakerError with a reported cost + its provenance tag, just
+    // like the live mid-run breaker does at hermes.ts's breach throw.
+    const availSpy = vi.spyOn(bridge, 'isHermesAvailable').mockReturnValue(true);
+    const execSpy = vi
+      .spyOn(bridge, 'executeHermesTask')
+      .mockRejectedValue(
+        new bridge.CircuitBreakerError('Budget exceeded: $9.99 of $1.00 limit', 9.99, 'exact'),
+      );
+    try {
+      const req = { ...makeRequest({ taskType: 'AUTONOMOUS_RESEARCH' }), id: reqId, sessionId: sid };
+      // No cap set (SESSION/DAILY cap envs are cleared in beforeEach) so the cap
+      // GATE does not fire — the ONLY terminal is the mid-run BUDGET breach.
+      dispatch(req as any, { score: 10, reason: 'test', tier: 'API_EXTERNAL' as any });
+
+      // dispatch's execution is a fire-and-forget async IIFE — poll for the
+      // ledger row the breach catch writes.
+      let row: any;
+      for (let i = 0; i < 100; i++) {
+        row = getLedgerRow(reqId);
+        if (row) break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      // The task ended as a BUDGET breach (proves the isBudget catch ran, not
+      // some other failure path).
+      expect(getTask(reqId).error).toMatch(/^BUDGET:/);
+
+      // THE ASSERTION WITH TEETH: the breach cost is preserved NON-NULL with
+      // the label threaded from lastCostSource. If dispatch stops threading
+      // costSource, this row is attribution='unavailable' / cost_usd NULL and
+      // every line below fails.
+      expect(row).toBeTruthy();
+      expect(row.cost_usd).not.toBeNull();
+      expect(row.cost_usd).toBeCloseTo(9.99);
+      expect(row.attribution).toBe('exact');
+      expect(row.attribution).not.toBe('unavailable');
+      // And the preserved breach cost counts toward the cap SUM (correction A).
+      expect(sessionTotal(sid)).toBeCloseTo(9.99);
+    } finally {
+      execSpy.mockRestore();
+      availSpy.mockRestore();
+    }
+  });
+
+  it('dispatch-level: a breach whose lastCostSource is "account_delta" is labeled account_delta end-to-end (still non-null, still counted)', async () => {
+    const sid = makeSession();
+    const reqId = randomUUID();
+    const availSpy = vi.spyOn(bridge, 'isHermesAvailable').mockReturnValue(true);
+    const execSpy = vi
+      .spyOn(bridge, 'executeHermesTask')
+      .mockRejectedValue(
+        new bridge.CircuitBreakerError('Budget exceeded: $5.50 of $1.00 limit', 5.5, 'account_delta'),
+      );
+    try {
+      const req = { ...makeRequest({ taskType: 'AUTONOMOUS_RESEARCH' }), id: reqId, sessionId: sid };
+      dispatch(req as any, { score: 10, reason: 'test', tier: 'API_EXTERNAL' as any });
+      let row: any;
+      for (let i = 0; i < 100; i++) {
+        row = getLedgerRow(reqId);
+        if (row) break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(row).toBeTruthy();
+      expect(row.cost_usd).toBeCloseTo(5.5);
+      expect(row.attribution).toBe('account_delta');
+      expect(sessionTotal(sid)).toBeCloseTo(5.5);
+    } finally {
+      execSpy.mockRestore();
+      availSpy.mockRestore();
+    }
+  });
+
+  it('CircuitBreakerError carries lastCostSource alongside lastCostUsd (bridge-side wiring)', async () => {
+    const { CircuitBreakerError } = await import('../packages/bridge/src/hermes.js');
+    const e = new CircuitBreakerError('Budget exceeded: $9.99 of $1.00 limit', 9.99, 'exact');
+    expect(e.lastCostUsd).toBe(9.99);
+    expect(e.lastCostSource).toBe('exact');
+  });
+
+  it('CircuitBreakerError.lastCostSource is undefined (not fabricated) when no source was ever reported', async () => {
+    const { CircuitBreakerError } = await import('../packages/bridge/src/hermes.js');
+    const e = new CircuitBreakerError('Budget exceeded: $0.00 of $0.00 limit');
+    expect(e.lastCostUsd).toBeUndefined();
+    expect(e.lastCostSource).toBeUndefined();
   });
 });
 
@@ -310,8 +508,9 @@ describe('TCLAW-1A-core: cap GATE via dispatch() — FRONTIER-only, before spend
     dispatch(req1 as any, { score: 10, reason: 'test', tier: 'API_EXTERNAL' as any });
     expect(getTask(req1.id).error === null || !/^CAP_EXCEEDED/.test(getTask(req1.id).error)).toBe(true);
 
-    // Simulate that task's own spend landing in the ledger (as recordSpend would).
-    recordSpend({ taskId: req1.id, sessionId: sid, costUsd: 0.75 }); // total now 2.25 >= 2.00
+    // Simulate that task's own spend landing in the ledger (as recordSpend would
+    // from a real SUCCESS terminal, which always carries a costSource).
+    recordSpend({ taskId: req1.id, sessionId: sid, costUsd: 0.75, costSource: 'exact' }); // total now 2.25 >= 2.00
 
     const req2 = { ...makeRequest({ taskType: 'AUTONOMOUS_RESEARCH' }), id: randomUUID(), sessionId: sid };
     dispatch(req2 as any, { score: 10, reason: 'test', tier: 'API_EXTERNAL' as any });

@@ -241,11 +241,20 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
       // clutters the cap total). Guarded (own try/catch): a ledger-write
       // throw must never break the already-completed terminal path.
       if (diag.tier === ComputeTier.FRONTIER) {
+        // costSource only ever exists on the Hermes (FRONTIER) telemetry
+        // shape (Record<string, unknown>) — ExecutionResult's LOCAL_EDGE
+        // telemetry type has no such field (LOCAL_EDGE is never charged, so
+        // it never has a cost provenance to report). This branch is itself
+        // gated on tier === FRONTIER, so result.telemetry here is always the
+        // Hermes shape at runtime; the cast only widens the *type* so the
+        // read typechecks against the ExecutionResult|HermesResult union.
+        const telemetry = result.telemetry as Record<string, unknown> | undefined;
         recordSpendSafe({
           taskId: req.id,
           sessionId: req.sessionId,
           sourceChannel: req.sourceChannel,
-          costUsd: typeof result.telemetry?.costUsd === 'number' ? result.telemetry.costUsd : undefined,
+          costUsd: typeof telemetry?.costUsd === 'number' ? telemetry.costUsd : undefined,
+          costSource: typeof telemetry?.costSource === 'string' ? telemetry.costSource : undefined,
         });
       }
     } catch (error: any) {
@@ -277,9 +286,16 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
       // lost. Non-budget failures with no cost signal pass no telemetry
       // (unchanged behavior — nothing to record).
       const breachCostUsd = isBudget ? (error as CircuitBreakerError).lastCostUsd : undefined;
+      // TCLAW-1A-attr: the breach cost's provenance tag, threaded alongside
+      // breachCostUsd. Without this, a breach row would reach recordSpend
+      // with a real number but no costSource and get mapped to 'unavailable'
+      // (cost_usd NULL) — silently regressing correction A, which exists
+      // specifically to preserve this number. A breach with a real cost must
+      // record that cost WITH its label, never become unavailable/NULL.
+      const breachCostSource = isBudget ? (error as CircuitBreakerError).lastCostSource : undefined;
       taskStore.fail(
         req.id, reason,
-        isBudget ? { budgetSource, costUsd: breachCostUsd } : undefined,
+        isBudget ? { budgetSource, costUsd: breachCostUsd, costSource: breachCostSource } : undefined,
       );
       // TCLAW-1A-core: record the breach's spend in the ledger, FRONTIER-only.
       // A budget breach only ever occurs on a FRONTIER task (the breaker is
@@ -295,6 +311,7 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
           sessionId: req.sessionId,
           sourceChannel: req.sourceChannel,
           costUsd: breachCostUsd,
+          costSource: breachCostSource,
         });
       }
       // P3.5 recovery chips, chosen by failure site:
