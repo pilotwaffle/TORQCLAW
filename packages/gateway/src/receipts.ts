@@ -197,11 +197,32 @@ export function projectReceipt(taskId: string): ReceiptRow | null {
     decidedAt: a.decided_at,
   }));
 
-  // budget_source, cost_enforceable, safe_export_json: ALWAYS null for 4A —
-  // source data (budget provenance / enforceability) is not persisted yet,
-  // and redaction (safe export) is a later ticket.
-  const budgetSource: string | null = null;
-  const costEnforceable: number | null = null;
+  // TCLAW-1A-core: budget_source + cost_enforceable derived from real,
+  // persisted data — replaces the 4A-era hardcoded nulls. Never fabricated:
+  // absent when there is nothing real to report (older tasks predating this
+  // change, or a task with no cloud attempt).
+  //
+  // budget_source: dispatch.ts threads resolveBudgetWithSource's `source`
+  // ('per_task'|'env_default'|'unlimited') onto telemetry at both the
+  // SUCCESS (taskStore.complete) and FAIL/BREACH (taskStore.fail) terminals.
+  // NULL when absent (older tasks written before this change carry no
+  // budgetSource key on their telemetry).
+  const budgetSource: string | null =
+    typeof telemetry?.budgetSource === 'string' ? telemetry.budgetSource : null;
+
+  // cost_enforceable (three-state, honest, mirrors evaluateSpend's own
+  // unenforceable-signal rule in packages/bridge/src/hermes.ts):
+  //   1    -> typeof telemetry.costUsd === 'number' (provider reported;
+  //           the breaker/cap could enforce against it).
+  //   0    -> a FRONTIER task ran (tier === FRONTIER, real telemetry exists)
+  //           but costUsd was explicitly null/undefined — unenforceable.
+  //   NULL -> no cloud attempt at all (LOCAL_EDGE, or FRONTIER_UNAVAILABLE /
+  //           CAP_EXCEEDED early-outs where telemetry was never collected) —
+  //           nothing to enforce, never fabricated as 0.
+  const isFrontier = task.tier === 'API_EXTERNAL';
+  const costEnforceable: number | null =
+    costUsd !== null ? 1 : isFrontier && telemetry !== null ? 0 : null;
+
   const safeExportJson: string | null = null;
 
   const fullReceipt = {

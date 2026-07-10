@@ -148,3 +148,25 @@ CREATE TABLE IF NOT EXISTS run_receipts (
 );
 CREATE INDEX IF NOT EXISTS idx_run_receipts_session ON run_receipts(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_request ON events(request_id);
+
+-- 10. Spend ledger (TCLAW-1A-core, Epic 1 Cost Control Center §9.1): one row
+--    per FRONTIER terminal task carrying provider-reported spend, so
+--    session/daily caps can be enforced by SUM() BEFORE dispatch. This table
+--    is gateway-DB-only -- NOT an emitted contract (no schema in
+--    packages/contracts). It is a rebuildable cache of tasks.telemetry_json
+--    (see ops/spend-rebuild.mjs if/when added), not a sole source of truth.
+--    task_id UNIQUE + ON CONFLICT DO NOTHING makes recordSpend idempotent, so
+--    a retried terminal-emission path can never double-count the same task.
+CREATE TABLE IF NOT EXISTS spend_ledger (
+  id TEXT PRIMARY KEY,                  -- randomUUID per entry
+  task_id TEXT NOT NULL UNIQUE,         -- = tasks.request_id (idempotent key)
+  session_id TEXT NOT NULL,
+  source_channel TEXT,                  -- req.sourceChannel, null for direct
+  provider TEXT,                        -- provider/model tag, null if unknown/local
+  cost_usd REAL,                        -- provider-reported; NULL when unavailable (never fabricate 0)
+  attribution TEXT NOT NULL,            -- 'reported' | 'unavailable' (1A-core 2-way; TEXT so 1A-attr's
+                                         -- exact/account_delta 3-way split needs no schema change)
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_spend_ledger_session ON spend_ledger(session_id);
+CREATE INDEX IF NOT EXISTS idx_spend_ledger_created ON spend_ledger(created_at);

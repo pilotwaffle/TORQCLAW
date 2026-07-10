@@ -108,10 +108,17 @@ export const taskStore = {
        WHERE request_id=?`,
     ).run(result, telemetry === undefined ? null : JSON.stringify(telemetry), requestId);
   },
-  fail(requestId: string, error: string): void {
+  /** G1R correction A: a failed/breached task must not persist zero
+   *  telemetry. `telemetry` is optional and backward-compatible — omitting it
+   *  (the DENIED / FRONTIER_UNAVAILABLE call sites) writes NULL exactly as
+   *  before. The budget-breach path passes the last-known telemetry
+   *  (including costUsd from CircuitBreakerError.lastCostUsd) so the ledger
+   *  and the receipt projector can see the breach's real cost instead of a
+   *  silent gap. */
+  fail(requestId: string, error: string, telemetry?: unknown): void {
     db.prepare(
-      `UPDATE tasks SET state='failed', error=?, finished_at=CURRENT_TIMESTAMP
+      `UPDATE tasks SET state='failed', error=?, telemetry_json=?, finished_at=CURRENT_TIMESTAMP
        WHERE request_id=?`,
-    ).run(error, requestId);
+    ).run(error, telemetry === undefined ? null : JSON.stringify(telemetry), requestId);
   },
 };
