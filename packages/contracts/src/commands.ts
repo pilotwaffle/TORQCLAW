@@ -91,6 +91,22 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     executionMode: z.enum(['AUTO', 'LOCAL_ONLY', 'CLOUD_OK']).default('AUTO'),
     useMemory: z.boolean().default(true),
   }),
+  z.object({
+    // TCLAW-5A-1: list this session's tool-approval history — summary columns
+    // ONLY (approvalId/requestId/toolName/status/createdAt/decidedAt); there is
+    // deliberately NO args payload per row (proposed args are display/audit-only
+    // and can be large — the drill-down is the existing GET_RECEIPT, whose
+    // replayed PENDING_APPROVAL event carries them, oversize-guarded).
+    // Session-scoped by construction: NO sessionId param — the server always
+    // passes the connection's own sid, exactly like LIST_RECEIPTS. This is a
+    // pure read surface: it can never decide, expire, or re-dispatch an
+    // approval (the ONLY decide path remains APPROVE_TOOL). status values are
+    // the raw persisted three states — there is no 'expired' (no TTL exists)
+    // and no actor (no actor column exists); absent facts are never fabricated.
+    action: z.literal('LIST_APPROVALS'),
+    limit: z.number().int().min(1).max(100).default(20),
+    status: z.enum(['pending', 'approved', 'rejected']).optional(),
+  }),
 ]);
 export type ClientCommand = z.infer<typeof ClientCommandSchema>;
 

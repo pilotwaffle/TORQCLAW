@@ -3,3 +3,4 @@ export * from './toolFilter.js';
 export * from './hermes.js';
 export * from "./serverConfig.js";
 export * from './pathScope.js';
+export * from './capability.js';
