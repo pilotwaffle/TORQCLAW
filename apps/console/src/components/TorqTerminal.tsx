@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GatewayEvent, ClientCommand, RouterDiagnostics } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
-import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview } from './friendly';
+import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame } from './friendly';
 import ReceiptsPanel from './ReceiptsPanel';
 import CostPanel from './CostPanel';
 
@@ -157,19 +157,22 @@ export default function TorqTerminal() {
   // output directly.
   const chipDiag: RouterDiagnostics | null = activeRequestId ? (routeSnapshot[activeRequestId] ?? null) : null;
 
-  // TCLAW-2D-2 (RC-1): route-preview frames are transient SYSTEM frames that
-  // must not flip the working/stop indicator. Compute busy over the last
-  // NON-preview event; if none remains (fresh console whose first action is a
-  // preview), busy is false. Deliberately scoped to routePreview ONLY — the
-  // same latent flip exists for receiptList/receiptView/costSummary/memory
-  // frames (pre-existing) and is tracked as TCLAW-UIFIX-1 (shared
-  // isTransientSystemFrame predicate); do not broaden here.
+  // TCLAW-UIFIX-1 (generalizing 2D-2's RC-1): ALL SYSTEM frames are
+  // busy-neutral — busy-truth rides on non-SYSTEM task events only (see
+  // isBusyNeutralEvent's invariant in friendly.ts). Compute busy over the
+  // last non-SYSTEM event: mid-task that is a non-terminal (TOOL_CALL/
+  // TIER_SELECTED/ROUTING → busy stays true); at idle it is RESULT/ERROR/
+  // CONNECTED/PENDING_APPROVAL (→ false). If nothing remains (a window of
+  // only SYSTEM frames), busy is false. This fixes the spurious working/stop
+  // state after every completed task (the SYSTEM 'Done' receipt frame is the
+  // last event of every completion), after receipts/cost/memory use, and for
+  // the markerless skill/approval confirmation frames.
   const busy = useMemo(() => {
     let last: GatewayEvent | undefined;
     for (let i = events.length - 1; i >= 0; i--) {
       const e = events[i];
       if (!e) continue;
-      if (e.type === 'SYSTEM' && (e.metadata as any)?.routePreview) continue;
+      if (isBusyNeutralEvent(e)) continue;
       last = e;
       break;
     }
@@ -629,10 +632,13 @@ function EventRow({
   const isUser = event.type === 'USER_PROMPT';
   const recovery: string[] = Array.isArray(meta.recovery) ? meta.recovery : [];
 
-  // TCLAW-4B-2: 4B panel frames (receipt list/detail responses) are
-  // publishOnly SYSTEM events meant only for ReceiptsPanel — they must never
-  // render a stray inline row/card in the live log.
-  if (event.type === 'SYSTEM' && (meta.receiptView || meta.receiptList || meta.costSummary || meta.routePreview)) return null;
+  // TCLAW-4B-2 / TCLAW-UIFIX-1: 4B panel frames (receipt list/detail/cost
+  // summary/route preview responses) are publishOnly SYSTEM events meant
+  // only for their respective panels — they must never render a stray inline
+  // row/card in the live log. isPanelSystemFrame's coverage is byte-identical
+  // to the inline check this replaces (see friendly.ts); it deliberately
+  // excludes memory frames and the Done receipt frame, which stay visible.
+  if (isPanelSystemFrame(event)) return null;
 
   // P2.5: a SYSTEM event carrying a receipt renders as a footer card, not a row.
   if (event.type === 'SYSTEM' && meta.receipt) {
