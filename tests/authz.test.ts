@@ -40,6 +40,7 @@ const getReceipt: ClientCommand = {
   includeEvents: false,
 };
 const getCostSummary: ClientCommand = { action: 'GET_COST_SUMMARY', recentLimit: 20 };
+const listApprovals: ClientCommand = { action: 'LIST_APPROVALS', limit: 20 };
 const previewRoute: ClientCommand = {
   action: 'PREVIEW_ROUTE',
   previewOf: 'x',
@@ -65,6 +66,7 @@ describe('authorize() — role-based command authorization', () => {
       ['GET_RECEIPT', getReceipt],
       ['GET_COST_SUMMARY', getCostSummary],
       ['PREVIEW_ROUTE', previewRoute],
+      ['LIST_APPROVALS', listApprovals],
     ])('%s -> deny', (_name, cmd) => {
       const d = authorize('channel', cmd, ctx);
       expect(d.ok).toBe(false);
@@ -113,6 +115,7 @@ describe('authorize() — role-based command authorization', () => {
       ['GET_RECEIPT', getReceipt],
       ['GET_COST_SUMMARY', getCostSummary],
       ['PREVIEW_ROUTE', previewRoute],
+      ['LIST_APPROVALS', listApprovals],
     ])('%s -> allow', (_name, cmd) => {
       expect(authorize('operator', cmd, ctx)).toEqual({ ok: true });
     });
@@ -143,6 +146,7 @@ describe('authorize() — role-based command authorization', () => {
       ['GET_RECEIPT', getReceipt],
       ['GET_COST_SUMMARY', getCostSummary],
       ['PREVIEW_ROUTE', previewRoute],
+      ['LIST_APPROVALS', listApprovals],
     ])('%s -> deny', (_name, cmd) => {
       const d = authorize('node', cmd, ctx);
       expect(d.ok).toBe(false);
