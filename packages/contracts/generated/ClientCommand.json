@@ -287,6 +287,34 @@
         "useMemory"
       ],
       "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "LIST_APPROVALS"
+        },
+        "limit": {
+          "default": 20,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "approved",
+            "rejected"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "limit"
+      ],
+      "additionalProperties": false
     }
   ]
 }
