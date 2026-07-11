@@ -387,6 +387,36 @@ export function selectLatestRoutePreview(
   return found;
 }
 
+// ── TCLAW-UIFIX-1: SYSTEM-frame predicates for busy/suppression ─────────
+
+/** The publishOnly panel-response markers. Consumed ONLY by the EventRow
+ *  suppression guard — coverage byte-identical to the inline check it
+ *  replaces. CONVENTION: every new publishOnly panel response must add its
+ *  marker here, or it will render as a stray (visible, benign) log row.
+ *  Deliberately EXCLUDES memory frames and the Done receipt frame: those are
+ *  persisted, user-facing output that must stay visible in the log (and in
+ *  reconnect backlog replay). */
+export function isPanelSystemFrame(ev: GatewayEvent): boolean {
+  if (ev.type !== 'SYSTEM') return false;
+  const m = (ev.metadata ?? {}) as Record<string, unknown>;
+  return !!(m.routePreview || m.receiptList || m.receiptView || m.costSummary);
+}
+
+/** TCLAW-UIFIX-1 INVARIANT (G1R-verified against every SYSTEM producer):
+ *  busy-truth rides on non-SYSTEM events only. SYSTEM frames may display
+ *  information (progress notes, confirmations, receipts, memory output) but
+ *  never by themselves indicate active work — terminal events are emitted
+ *  solely by dispatch.ts (RESULT/ERROR/PENDING_APPROVAL; CONNECTED from the
+ *  connect path), and every mid-task SYSTEM note is preceded by a
+ *  non-terminal task event that carries the busy-truth. Includes PERSISTED
+ *  SYSTEM frames (memory, the Done receipt) — busy-neutral is about type,
+ *  not persistence. A future SYSTEM frame that "should" flip busy on its own
+ *  would violate this invariant: put the busy-truth on a non-SYSTEM event
+ *  instead. Consumed ONLY by the busy scan. */
+export function isBusyNeutralEvent(ev: GatewayEvent): boolean {
+  return ev.type === 'SYSTEM';
+}
+
 /** Plain data row a replay-only event renders — NO callbacks, NO dispatch
  *  surface of any kind. This is the type-level half of the structural
  *  boundary: even if a future edit tried to add a handler field here, the

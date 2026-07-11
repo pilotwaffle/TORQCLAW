@@ -25,6 +25,8 @@ import {
   formatProviderSummaryRow,
   selectActiveRouteDiag,
   selectLatestRoutePreview,
+  isPanelSystemFrame,
+  isBusyNeutralEvent,
   type ReceiptLike,
 } from '../apps/console/src/components/friendly.js';
 
@@ -809,5 +811,104 @@ describe('selectLatestRoutePreview (TCLAW-2D-2) — pure selector feeding the ro
   it('6. no match -> null', () => {
     const events = [previewEvent('n1')];
     expect(selectLatestRoutePreview(events, 'no-such-nonce')).toBeNull();
+  });
+});
+
+describe('isPanelSystemFrame / isBusyNeutralEvent (TCLAW-UIFIX-1) — subset-relationship predicates', () => {
+  // Fixture builders mirroring the real emission shapes (see TorqTerminal.tsx
+  // and packages/gateway/src/{preview,receipts,spend,server}.ts).
+  function previewFrame(): GatewayEvent {
+    return ev({ type: 'SYSTEM', message: 'Route preview', metadata: { routePreview: true, previewOf: 'n1' } });
+  }
+  function receiptListFrame(): GatewayEvent {
+    return ev({ type: 'SYSTEM', message: 'Receipts', metadata: { receiptList: true, items: [] } });
+  }
+  function receiptViewFrame(): GatewayEvent {
+    return ev({ type: 'SYSTEM', message: 'Receipt', metadata: { receiptView: true, receipt: null } });
+  }
+  function costSummaryFrame(): GatewayEvent {
+    return ev({ type: 'SYSTEM', message: 'Cost summary', metadata: { costSummary: true } });
+  }
+  function memoryShowFrame(): GatewayEvent {
+    return ev({ type: 'SYSTEM', message: 'Memory: 2 episode(s) this session', metadata: { memory: 'SHOW', episodes: [] } });
+  }
+  function memoryForgetFrame(): GatewayEvent {
+    return ev({ type: 'SYSTEM', message: 'Memory: forgot this session', metadata: { memory: 'FORGET_SESSION', forgotten: 2 } });
+  }
+  function doneReceiptFrame(): GatewayEvent {
+    return ev({ type: 'SYSTEM', message: 'Done', metadata: { receipt: { taskId: 't1', tier: 'API_EXTERNAL', costUsd: 0.01 } } });
+  }
+  function markerlessSystemFrame(): GatewayEvent {
+    return ev({ type: 'SYSTEM', message: 'Skill q1: APPROVE' });
+  }
+  function arbitrarySystemFrame(): GatewayEvent {
+    return ev({ type: 'SYSTEM', message: 'x', metadata: { someUnknownKey: true } });
+  }
+
+  const nonSystemTypes: GatewayEvent['type'][] = [
+    'RESULT', 'ERROR', 'CONNECTED', 'PENDING_APPROVAL', 'USER_PROMPT', 'ROUTING', 'TIER_SELECTED', 'TOOL_CALL',
+  ];
+
+  describe('isPanelSystemFrame', () => {
+    it('true for each of the 4 publishOnly panel markers', () => {
+      expect(isPanelSystemFrame(previewFrame())).toBe(true);
+      expect(isPanelSystemFrame(receiptListFrame())).toBe(true);
+      expect(isPanelSystemFrame(receiptViewFrame())).toBe(true);
+      expect(isPanelSystemFrame(costSummaryFrame())).toBe(true);
+    });
+
+    it('false for memory, Done-receipt, markerless SYSTEM, and non-SYSTEM types', () => {
+      expect(isPanelSystemFrame(memoryShowFrame())).toBe(false);
+      expect(isPanelSystemFrame(memoryForgetFrame())).toBe(false);
+      expect(isPanelSystemFrame(doneReceiptFrame())).toBe(false);
+      expect(isPanelSystemFrame(markerlessSystemFrame())).toBe(false);
+      expect(isPanelSystemFrame(arbitrarySystemFrame())).toBe(false);
+      for (const type of nonSystemTypes) {
+        expect(isPanelSystemFrame(ev({ type }))).toBe(false);
+      }
+    });
+  });
+
+  describe('isBusyNeutralEvent', () => {
+    it('true for EVERY SYSTEM fixture (all 4 panel markers, memory, Done-receipt, markerless, arbitrary-unknown-metadata)', () => {
+      expect(isBusyNeutralEvent(previewFrame())).toBe(true);
+      expect(isBusyNeutralEvent(receiptListFrame())).toBe(true);
+      expect(isBusyNeutralEvent(receiptViewFrame())).toBe(true);
+      expect(isBusyNeutralEvent(costSummaryFrame())).toBe(true);
+      expect(isBusyNeutralEvent(memoryShowFrame())).toBe(true);
+      expect(isBusyNeutralEvent(memoryForgetFrame())).toBe(true);
+      expect(isBusyNeutralEvent(doneReceiptFrame())).toBe(true);
+      expect(isBusyNeutralEvent(markerlessSystemFrame())).toBe(true);
+      expect(isBusyNeutralEvent(arbitrarySystemFrame())).toBe(true);
+    });
+
+    it('false for all other event types', () => {
+      for (const type of nonSystemTypes) {
+        expect(isBusyNeutralEvent(ev({ type }))).toBe(false);
+      }
+    });
+  });
+
+  describe('subset pin (RC-4): isPanelSystemFrame(ev) === true ⟹ isBusyNeutralEvent(ev) === true, never the reverse', () => {
+    it('holds across every fixture covering all frame types above', () => {
+      const fixtures = [
+        previewFrame(), receiptListFrame(), receiptViewFrame(), costSummaryFrame(),
+        memoryShowFrame(), memoryForgetFrame(), doneReceiptFrame(), markerlessSystemFrame(),
+        arbitrarySystemFrame(),
+        ...nonSystemTypes.map((type) => ev({ type })),
+      ];
+      for (const fixture of fixtures) {
+        if (isPanelSystemFrame(fixture)) {
+          expect(isBusyNeutralEvent(fixture)).toBe(true);
+        }
+      }
+    });
+
+    it('NEGATIVES: memory-SHOW and Done-receipt are busy-neutral AND NOT panel frames (the subset is proper, not equal)', () => {
+      expect(isBusyNeutralEvent(memoryShowFrame())).toBe(true);
+      expect(isPanelSystemFrame(memoryShowFrame())).toBe(false);
+      expect(isBusyNeutralEvent(doneReceiptFrame())).toBe(true);
+      expect(isPanelSystemFrame(doneReceiptFrame())).toBe(false);
+    });
   });
 });
