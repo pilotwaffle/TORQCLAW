@@ -113,6 +113,13 @@ function costSummaryFrame(): GatewayEvent {
 function previewFrame(): GatewayEvent {
   return ev({ type: 'SYSTEM', message: 'Route preview', metadata: { routePreview: true, previewOf: 'n1' } });
 }
+/** TCLAW-5A-2: LIST_APPROVALS response frame — the one-line addition to this
+ *  file's tables per the builder spec's test matrix S1 (predicate-level pins
+ *  already exist at friendly.test.ts:861/882/897; these are the integration
+ *  complements at the TorqTerminal render level, not duplicates). */
+function approvalListFrame(): GatewayEvent {
+  return ev({ type: 'SYSTEM', message: 'Approvals listed', metadata: { approvalList: true, approvals: [] } });
+}
 /** server.ts:152-155 skill confirm — no metadata at all. */
 function markerlessSystem(): GatewayEvent {
   return ev({ type: 'SYSTEM', message: 'Skill q1: APPROVE' });
@@ -198,7 +205,7 @@ describe('TorqTerminal busy/suppression (TCLAW-UIFIX-1)', () => {
     expect(screen.getByText('stop')).toBeInTheDocument();
   });
 
-  it('8a. panel frames render no inline row: receiptList/receiptView/costSummary', () => {
+  it('8a. panel frames render no inline row: receiptList/receiptView/costSummary/approvalList', () => {
     stream.events = [resultFrame('A'), receiptListFrame()];
     const { unmount: u1 } = render(<TorqTerminal />);
     expect(screen.queryByText('Receipts')).not.toBeInTheDocument();
@@ -212,8 +219,14 @@ describe('TorqTerminal busy/suppression (TCLAW-UIFIX-1)', () => {
     cleanup();
 
     stream.events = [resultFrame('A'), costSummaryFrame()];
-    render(<TorqTerminal />);
+    const { unmount: u3 } = render(<TorqTerminal />);
     expect(screen.queryByText('Cost summary')).not.toBeInTheDocument();
+    u3();
+    cleanup();
+
+    stream.events = [resultFrame('A'), approvalListFrame()];
+    render(<TorqTerminal />);
+    expect(screen.queryByText('Approvals listed')).not.toBeInTheDocument();
   });
 
   it('8b. Done-receipt renders the ReceiptCard (rendered content present)', () => {
@@ -239,6 +252,7 @@ describe('TorqTerminal busy/suppression (TCLAW-UIFIX-1)', () => {
       ['receiptViewFrame', () => receiptViewFrame(null)],
       ['costSummaryFrame', costSummaryFrame],
       ['previewFrame', previewFrame],
+      ['approvalListFrame', approvalListFrame],
       ['markerlessSystem', markerlessSystem],
       ['arbitrarySystem', arbitrarySystem],
     ];
@@ -262,6 +276,13 @@ describe('TorqTerminal busy/suppression (TCLAW-UIFIX-1)', () => {
 
   it('mid-task memory case: [tierSelected, toolCall, memoryShow] -> busy TRUE (the scan lands on TOOL_CALL)', () => {
     stream.events = [tierSelected('A'), toolCall('A'), memoryShow()];
+    render(<TorqTerminal />);
+
+    expect(screen.getByText('working…')).toBeInTheDocument();
+  });
+
+  it('mid-task approvalList case: [tierSelected, toolCall, approvalListFrame] -> busy TRUE (the scan lands on TOOL_CALL)', () => {
+    stream.events = [tierSelected('A'), toolCall('A'), approvalListFrame()];
     render(<TorqTerminal />);
 
     expect(screen.getByText('working…')).toBeInTheDocument();

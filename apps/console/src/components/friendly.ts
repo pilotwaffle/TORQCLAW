@@ -548,3 +548,229 @@ export function formatProviderSummaryRow(row: {
     caveat: row.unrecordedCount > 0 ? `(${row.unrecordedCount} unrecorded)` : null,
   };
 }
+
+// ── TCLAW-5A-2: Approval history panel + Card v2 pure helpers ──────────
+// All pure (no React, no DOM, no side effects), unit-tested in
+// tests/friendly.test.ts. Return DATA, never JSX. See TCLAW-5A-2 builder
+// spec + annexes for the honesty-fork rationale behind each guard below.
+
+/** The session-scoped tool-approval-history row shape returned by
+ *  LIST_APPROVALS (packages/gateway/src/approvals.ts ApprovalSummary) —
+ *  distinct from ReceiptLike.approvals (a different, receipt-scoped shape). */
+export interface ApprovalSummaryLike {
+  approvalId: string;
+  requestId: string;
+  toolName: string;
+  status: string;
+  createdAt: string;
+  decidedAt: string | null;
+}
+
+/** selectLatestApprovalList — last-wins backward scan over events for the
+ *  newest valid approvalList frame (mirrors selectLatestRoutePreview's
+ *  forward-scan-with-last-wins shape, but no nonce exists for this frame —
+ *  see invariant 9/RC-3: soundness here depends on every LIST_APPROVALS
+ *  request this console emits being parameter-identical, not on frame
+ *  correlation). A frame with the marker but a malformed (non-array)
+ *  `approvals` field is SKIPPED, not treated as a match — an older valid
+ *  frame further back in the scan is still returned. PURE: no React, no
+ *  side effects. */
+export function selectLatestApprovalList(
+  events: GatewayEvent[],
+): ApprovalSummaryLike[] | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i]!;
+    if (ev.type !== 'SYSTEM') continue;
+    const meta = (ev.metadata ?? {}) as Record<string, unknown>;
+    if (meta.approvalList === true && Array.isArray(meta.approvals)) {
+      return meta.approvals as ApprovalSummaryLike[];
+    }
+  }
+  return null;
+}
+
+/** formatApprovalStatus — exact-match display mapping. Any value outside the
+ *  three known statuses renders VERBATIM in neutral styling — never
+ *  default-mapped to "denied"/"pending", never crash on a non-string. This is
+ *  presentation-only: the raw value is untouched in the data (available via
+ *  the row's title tooltip at the render layer). */
+export function formatApprovalStatus(raw: unknown): { text: string; tone: 'pending' | 'approved' | 'denied' | 'unknown' } {
+  if (raw === 'pending') return { text: 'pending', tone: 'pending' };
+  if (raw === 'approved') return { text: 'approved', tone: 'approved' };
+  if (raw === 'rejected') return { text: 'denied', tone: 'denied' };
+  // Unknown/non-string raw value -> verbatim passthrough, never crash.
+  return { text: String(raw), tone: 'unknown' };
+}
+
+/** One target path entry as rendered on the gate card: full path always
+ *  carried (for the title tooltip); displayText is middle-truncated at 64
+ *  chars (tail-preserved — filenames matter) when the raw path is longer. */
+export interface GateTargetDisplay {
+  full: string;
+  displayText: string;
+}
+
+function truncateTarget(path: string): GateTargetDisplay {
+  if (path.length <= 64) return { full: path, displayText: path };
+  return { full: path, displayText: `${path.slice(0, 32)}…${path.slice(-31)}` };
+}
+
+/** The plain-data render model for the Card v2 gate block. null means
+ *  "render no gate section at all" — the caller (ToolPermissionCard) must
+ *  branch on this null to distinguish HONESTY FORK 1 (absent gate key) from
+ *  HONESTY FORK 2 (malformed gate) from a genuine variant. See
+ *  formatGateFacts below for exactly when each is produced. */
+export interface GateFactsDisplay {
+  /** 'hit' = registry capability hit (write-class-capability or
+   *  approval-pattern rule); 'miss' = gate present but no capability/rule;
+   *  'frontier' = engine-approval-hook rule (never a capability). */
+  variant: 'hit' | 'miss' | 'frontier';
+  /** Capability class row text — ONLY present for 'hit' (verbatim registry
+   *  value, e.g. 'write'/'exec'/'send'/'read'). 'miss' uses the literal
+   *  "write-class (unclassified)" string as its OWN row content below
+   *  (classRow), not this field, to keep the two conceptually distinct at
+   *  the type level (a hit's class is a real fact; a miss's copy is a fixed
+   *  literal, never "capability" data). */
+  classRow: { text: string; title?: string } | null;
+  /** "why gated" row — a friendly re-spacing of the rule id, raw id in
+   *  title. Present for 'hit' and 'frontier'; null for 'miss'. */
+  whyGated: { text: string; title: string } | null;
+  /** sourceServerId row — present only for 'hit' when the field exists. */
+  server: string | null;
+  /** Targets are ALWAYS present on any gate-present card (all 3 variants). */
+  targets: {
+    items: GateTargetDisplay[];
+    /** true when raw targets was non-array/absent (garbage) -> displayed as
+     *  "none detected" identically to a genuine empty array; RC-2 guard. */
+    isArray: boolean;
+  };
+  /** Caption text under the gate block. Keyed on targetsSource ===
+   *  'path-heuristic' -> the fixed heuristic sentence; ANY other raw value
+   *  (RC-6) -> `targets source: <raw>` — never the heuristic sentence for an
+   *  unrecognized source. */
+  targetsCaption: string;
+}
+
+/** formatGateFacts — the single honesty-fork gate for Card v2.
+ *
+ *  Caller contract (HONESTY FORK 1): the caller must check
+ *  `!('gate' in meta)` BEFORE calling this function and render nothing in
+ *  that case — an absent gate key means the registry was never consulted
+ *  for this (pre-5A-1) event, which is categorically different from this
+ *  function returning null.
+ *
+ *  HONESTY FORK 2 (G1R RC-1): this function's OWN first responsibility is to
+ *  treat a non-object gate (null, or any primitive — a defensive guard
+ *  against garbage on the wire) as ABSENT, i.e. return null here too. This
+ *  must NEVER throw (a bare `gate.something` on null crashes and blanks the
+ *  live decision card) and must NEVER fabricate the miss copy on garbage.
+ *
+ *  HONESTY FORK 3: detection order matters and is intentionally NOT a
+ *  `!capability` check alone:
+ *    1. rule === 'engine-approval-hook' -> 'frontier' (wins even if a
+ *       capability field is ALSO present on an adversarial dual-signal
+ *       gate — frontier is never a registry miss, and the registry is never
+ *       attributed a frontier block).
+ *    2. capability present (any string, including 'read') -> 'hit'.
+ *    3. else -> 'miss' (gate present, no capability, no frontier rule). */
+export function formatGateFacts(gate: unknown): GateFactsDisplay | null {
+  if (typeof gate !== 'object' || gate === null) return null; // RC-1: absent, never miss.
+  const g = gate as Record<string, unknown>;
+
+  const rawTargets = g.targets;
+  const isArray = Array.isArray(rawTargets);
+  const items: GateTargetDisplay[] = isArray
+    ? (rawTargets as unknown[]).filter((t): t is string => typeof t === 'string').map(truncateTarget)
+    : [];
+
+  const targetsSource = g.targetsSource;
+  const targetsCaption =
+    targetsSource === 'path-heuristic'
+      ? '"may touch" is a path heuristic over the proposed arguments — not verified.'
+      : `targets source: ${String(targetsSource)}`;
+
+  const targets = { items, isArray };
+
+  // FORK 3, step 1: frontier wins even on a dual-signal adversarial gate.
+  if (g.rule === 'engine-approval-hook') {
+    return {
+      variant: 'frontier',
+      classRow: null, // never "write-class (unclassified)" here — not a registry statement.
+      whyGated: { text: 'engine approval hook (frontier tier)', title: 'rule: engine-approval-hook' },
+      server: null,
+      targets,
+      targetsCaption,
+    };
+  }
+
+  // FORK 3, step 2: a genuine registry hit — capability present (even 'read').
+  if (typeof g.capability === 'string') {
+    const rule = g.rule;
+    const whyText =
+      rule === 'write-class-capability' ? 'write-class capability'
+      : rule === 'approval-pattern' ? 'matched an approval pattern'
+      : typeof rule === 'string' ? rule // unknown future rule id -> raw, no invented translation
+      : 'unknown';
+    return {
+      variant: 'hit',
+      classRow: { text: g.capability, title: typeof rule === 'string' ? `rule: ${rule}` : undefined },
+      whyGated: { text: whyText, title: typeof rule === 'string' ? `rule: ${rule}` : 'rule: unknown' },
+      server: typeof g.sourceServerId === 'string' ? g.sourceServerId : null,
+      targets,
+      targetsCaption,
+    };
+  }
+
+  // FORK 3, step 3: registry miss — gate present, no capability, no frontier rule.
+  return {
+    variant: 'miss',
+    classRow: { text: 'write-class (unclassified)', title: 'no registry entry for this tool' },
+    whyGated: null,
+    server: null,
+    targets,
+    targetsCaption,
+  };
+}
+
+/** formatApprovalTimestamp — SQLite `YYYY-MM-DD HH:MM:SS` strings rendered
+ *  VERBATIM with a literal " UTC" suffix ONLY on exact shape match; any other
+ *  shape renders verbatim with NO suffix (never assert UTC about a shape that
+ *  was not verified). NEVER `new Date(...)` on these — that parses as LOCAL
+ *  time (no T/Z), a silent timezone lie. */
+export function formatApprovalTimestamp(raw: string): string {
+  return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw) ? `${raw} UTC` : raw;
+}
+
+/** Plain-data row shape for the approval-history panel — mirrors
+ *  ReplayEventRowData's structural-inertness contract EXACTLY: zero
+ *  function-typed fields, so even a future edit cannot add a callback here
+ *  without changing the type (and the type is what ApprovalHistoryRow
+ *  destructures). */
+export interface ApprovalHistoryRowData {
+  key: string;
+  toolName: string;
+  status: { text: string; tone: 'pending' | 'approved' | 'denied' | 'unknown'; raw: string };
+  requestedAt: string;
+  decidedAt: string | null;
+  requestId: string;
+}
+
+/** toApprovalHistoryRows — ApprovalSummaryLike[] -> plain data rows, in
+ *  backend order (NO client re-sort — the backend's ORDER BY is a fact).
+ *  Missing/non-string toolName -> "(unknown)" (existing house convention,
+ *  mirrors TorqTerminal ToolPermissionCard's `toolName || '(unknown)'`),
+ *  never invents a name or crashes on a malformed row. */
+export function toApprovalHistoryRows(approvals: ApprovalSummaryLike[]): ApprovalHistoryRowData[] {
+  return approvals.map((a, i) => {
+    const rawStatus = a?.status;
+    const toolName = typeof a?.toolName === 'string' && a.toolName ? a.toolName : '(unknown)';
+    return {
+      key: typeof a?.approvalId === 'string' ? a.approvalId : `row-${i}`,
+      toolName,
+      status: { ...formatApprovalStatus(rawStatus), raw: String(rawStatus) },
+      requestedAt: formatApprovalTimestamp(String(a?.createdAt)),
+      decidedAt: a?.decidedAt === null || a?.decidedAt === undefined ? null : formatApprovalTimestamp(String(a.decidedAt)),
+      requestId: typeof a?.requestId === 'string' ? a.requestId : '',
+    };
+  });
+}

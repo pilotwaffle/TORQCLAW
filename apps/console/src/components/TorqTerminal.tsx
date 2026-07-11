@@ -3,9 +3,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GatewayEvent, ClientCommand, RouterDiagnostics } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
-import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame } from './friendly';
+import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, formatGateFacts } from './friendly';
 import ReceiptsPanel from './ReceiptsPanel';
 import CostPanel from './CostPanel';
+import ApprovalHistoryPanel from './ApprovalHistoryPanel';
 
 const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL ?? 'ws://localhost:18790/ws';
 const GATEWAY_TOKEN = process.env.NEXT_PUBLIC_GATEWAY_TOKEN ?? '';
@@ -83,6 +84,10 @@ export default function TorqTerminal() {
   const [receiptsOpen, setReceiptsOpen] = useState(false);
   // TCLAW-1B: Cost Control Center panel — same overlay pattern, read-only.
   const [costOpen, setCostOpen] = useState(false);
+  // TCLAW-5A-2: approval history panel — third independent overlay sibling,
+  // same pattern. No mutual-exclusion with receipts/cost (G1R SC-3): all
+  // three may be open simultaneously, no coordination logic between them.
+  const [approvalsOpen, setApprovalsOpen] = useState(false);
   // Stop-button UX: 'requested' once a cancel is sent (button shows "stopping…"),
   // 'failed' if the send was dropped so the user knows to retry. Cleared when the
   // next task starts.
@@ -422,6 +427,14 @@ export default function TorqTerminal() {
       {costOpen && (
         <CostPanel events={events} sendCommand={sendCommand} onClose={() => setCostOpen(false)} />
       )}
+      {approvalsOpen && (
+        <ApprovalHistoryPanel
+          events={events}
+          sendCommand={sendCommand}
+          onClose={() => setApprovalsOpen(false)}
+          decidedCount={Object.keys(decided).length}
+        />
+      )}
       </div>
 
       {hint && !hintDismissed && (
@@ -586,6 +599,10 @@ export default function TorqTerminal() {
             {costOpen ? 'hide cost' : 'cost'}
           </button>
           <span className="text-neutral-700">·</span>
+          <button type="button" onClick={() => setApprovalsOpen((v) => !v)} className="text-neutral-500 hover:text-neutral-300">
+            {approvalsOpen ? 'hide approvals' : 'approvals'}
+          </button>
+          <span className="text-neutral-700">·</span>
           <button type="button" onClick={simulateRoute} disabled={!input.trim()} className="text-neutral-500 hover:text-neutral-300 disabled:opacity-40">
             simulate route
           </button>
@@ -705,6 +722,7 @@ function EventRow({
           <ToolPermissionCard
             toolName={String(meta.toolName ?? meta.tool_name ?? '')}
             args={meta.args}
+            gate={meta.gate}
             onAllow={() => onDecideTool(approvalId, 'APPROVE')}
             onDeny={() => onDecideTool(approvalId, 'REJECT')}
           />
@@ -911,14 +929,28 @@ function SkillApprovalCard({
 }
 
 function ToolPermissionCard({
-  toolName, args, onAllow, onDeny,
+  toolName, args, gate, onAllow, onDeny,
 }: {
   toolName: string;
   args: unknown;
+  gate?: unknown;
   onAllow: () => void;
   onDeny: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [targetsExpanded, setTargetsExpanded] = useState(false);
+
+  // TCLAW-5A-2 HONESTY FORK 1 (absent gate !== registry miss): the caller
+  // passes meta.gate straight through, so `gate === undefined` means the
+  // `gate` KEY was absent on the wire (pre-5A-1 backlog frame) — the
+  // registry was never consulted for this event, and the card renders
+  // byte-identically to the pre-5A-2 card (no gate section, never
+  // "unclassified"). formatGateFacts owns HONESTY FORK 2 (null/primitive
+  // gate is ALSO treated as absent, never miss — see its doc comment) so a
+  // single `gate === undefined` check here would be insufficient on its own;
+  // routing every non-undefined value through formatGateFacts is what makes
+  // gate:null safe.
+  const gateFacts = gate === undefined ? null : formatGateFacts(gate);
 
   // Friendly verb: take the segment after the last "__", underscores -> spaces.
   // Use lastIndexOf (not a \w+ regex) so hyphenated/dotted MCP names survive.
@@ -950,6 +982,66 @@ function ToolPermissionCard({
           <dd className="text-neutral-400">One-time — applies to a single re-run</dd>
         </div>
       </dl>
+      {/* TCLAW-5A-2 Card v2 gate block — additional dt/dd rows in a SECOND dl
+          (G1R Q3 rec: smallest diff, inherits inertness). Renders NOTHING
+          when gateFacts is null (HONESTY FORKS 1+2 — absent or malformed
+          gate). All gate-present variants share the "may touch" targets row
+          + heuristic caption (invariant 8). */}
+      {gateFacts && (
+        <dl className="mt-2 space-y-1 text-[11px]">
+          {gateFacts.classRow && (
+            <div className="flex gap-2">
+              <dt className="w-24 shrink-0 uppercase tracking-widest text-neutral-500">class</dt>
+              <dd className="text-neutral-400" title={gateFacts.classRow.title}>{gateFacts.classRow.text}</dd>
+            </div>
+          )}
+          {gateFacts.whyGated && (
+            <div className="flex gap-2">
+              <dt className="w-24 shrink-0 uppercase tracking-widest text-neutral-500">why gated</dt>
+              <dd className="text-neutral-400" title={gateFacts.whyGated.title}>{gateFacts.whyGated.text}</dd>
+            </div>
+          )}
+          {gateFacts.server && (
+            <div className="flex gap-2">
+              <dt className="w-24 shrink-0 uppercase tracking-widest text-neutral-500">server</dt>
+              <dd className="font-mono text-neutral-400">{gateFacts.server}</dd>
+            </div>
+          )}
+          <div className="flex gap-2">
+            <dt className="w-24 shrink-0 uppercase tracking-widest text-neutral-500">may touch</dt>
+            <dd className="min-w-0 text-neutral-400">
+              {gateFacts.targets.items.length === 0 ? (
+                <span>none detected</span>
+              ) : (
+                <>
+                  {(targetsExpanded ? gateFacts.targets.items : gateFacts.targets.items.slice(0, 4)).map((t, i) => (
+                    <span key={i} className="mr-2 inline-block break-all font-mono" title={t.full}>
+                      {t.displayText}
+                    </span>
+                  ))}
+                  {gateFacts.targets.items.length > 4 && (
+                    <button
+                      type="button"
+                      onClick={() => setTargetsExpanded((v) => !v)}
+                      className="ml-1 text-[10px] text-neutral-500 hover:text-neutral-300"
+                    >
+                      {targetsExpanded ? 'show less' : `show all (${gateFacts.targets.items.length})`}
+                    </button>
+                  )}
+                  {targetsExpanded && gateFacts.targets.items.length > 4 && (
+                    <div className="mt-1 max-h-40 overflow-auto rounded bg-black/30 p-1 font-mono">
+                      {gateFacts.targets.items.map((t, i) => (
+                        <div key={i} className="break-all" title={t.full}>{t.full}</div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </dd>
+          </div>
+          <p className="text-[10px] text-neutral-600">{gateFacts.targetsCaption}</p>
+        </dl>
+      )}
       <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded bg-black/40 p-2 text-[11px] text-neutral-400">
         {shown}
       </pre>

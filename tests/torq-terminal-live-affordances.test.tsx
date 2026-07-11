@@ -5,7 +5,7 @@
 // tests/receipts-panel.test.tsx (test 2, the structural zero-button
 // assertion) — do not duplicate that half here.
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import type { GatewayEvent } from '@torqclaw/contracts';
 
@@ -352,6 +352,210 @@ describe('TorqTerminal live affordances (TCLAW-QA-2 — mounts the REAL TorqTerm
       // constructible through the live UI (busy requires events that also
       // set the activeRequestId anchor), so there is no way to reach `stop()`
       // with activeRequestId null via a real click path.
+    });
+  });
+
+  describe('F. Approval Card v2 gate facts', () => {
+    function toolApproval(gate: unknown, overrides: Record<string, unknown> = {}): GatewayEvent {
+      const metadata: Record<string, unknown> = {
+        approvalId: 'appr-1',
+        toolName: 'filesystem__write_file',
+        args: { path: '/x' },
+        ...overrides,
+      };
+      if (gate !== undefined) metadata.gate = gate;
+      return ev({ type: 'PENDING_APPROVAL', requestId: 'r1', metadata });
+    }
+
+    it('F1. gate ABSENT (pre-5A-1 backlog compat) -> card renders, no "unclassified", no heuristic caption', () => {
+      stream.events = [toolApproval(undefined)];
+      render(<TorqTerminal />);
+
+      expect(screen.getByText('Allow once')).toBeInTheDocument(); // anti-vacuous
+      expect(screen.queryByText(/unclassified/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/path heuristic/)).not.toBeInTheDocument();
+      expect(screen.queryByText('may touch')).not.toBeInTheDocument();
+    });
+
+    it('F1b. gate:null -> card renders (no crash), no gate section', () => {
+      stream.events = [toolApproval(null)];
+      expect(() => render(<TorqTerminal />)).not.toThrow();
+
+      expect(screen.getByText('Allow once')).toBeInTheDocument();
+      expect(screen.queryByText(/unclassified/)).not.toBeInTheDocument();
+      expect(screen.queryByText('may touch')).not.toBeInTheDocument();
+    });
+
+    it('F2. hit write-class (write/fs//tmp/x) -> all rows + caption; "unclassified" absent', () => {
+      stream.events = [toolApproval({
+        targets: ['/tmp/x'], targetsSource: 'path-heuristic',
+        capability: 'write', sourceServerId: 'fs', rule: 'write-class-capability',
+      })];
+      render(<TorqTerminal />);
+
+      expect(screen.getByText('Allow once')).toBeInTheDocument();
+      expect(screen.getByText('write')).toBeInTheDocument();
+      expect(screen.getByText('write-class capability')).toBeInTheDocument();
+      expect(screen.getByText('fs')).toBeInTheDocument();
+      expect(screen.getByText('/tmp/x')).toBeInTheDocument();
+      expect(screen.getByText('"may touch" is a path heuristic over the proposed arguments — not verified.')).toBeInTheDocument();
+      expect(screen.queryByText(/unclassified/)).not.toBeInTheDocument();
+    });
+
+    it('F3. hit approval-pattern with capability:read -> "read" shown (genuine hit), pattern line', () => {
+      stream.events = [toolApproval({
+        targets: [], targetsSource: 'path-heuristic',
+        capability: 'read', sourceServerId: 'fs', rule: 'approval-pattern',
+      })];
+      render(<TorqTerminal />);
+
+      expect(screen.getByText('Allow once')).toBeInTheDocument();
+      expect(screen.getByText('read')).toBeInTheDocument();
+      expect(screen.getByText('matched an approval pattern')).toBeInTheDocument();
+    });
+
+    it('F4. miss -> EXACT "write-class (unclassified)"; "read" absent; no server/rule rows', () => {
+      stream.events = [toolApproval({ targets: ['/tmp/x'], targetsSource: 'path-heuristic' })];
+      render(<TorqTerminal />);
+
+      expect(screen.getByText('Allow once')).toBeInTheDocument();
+      expect(screen.getByText('write-class (unclassified)')).toBeInTheDocument();
+      expect(screen.queryByText('read')).not.toBeInTheDocument();
+      expect(screen.queryByText('matched an approval pattern')).not.toBeInTheDocument();
+      expect(screen.queryByText('write-class capability')).not.toBeInTheDocument();
+      expect(screen.queryByText('engine approval hook (frontier tier)')).not.toBeInTheDocument();
+    });
+
+    it('F5. frontier -> engine line, NO capability word, "unclassified" ABSENT (the miss/frontier disambiguation tooth)', () => {
+      stream.events = [toolApproval({
+        targets: ['/tmp/x'], targetsSource: 'path-heuristic', rule: 'engine-approval-hook',
+      })];
+      render(<TorqTerminal />);
+
+      expect(screen.getByText('Allow once')).toBeInTheDocument();
+      expect(screen.getByText('engine approval hook (frontier tier)')).toBeInTheDocument();
+      expect(screen.queryByText(/unclassified/)).not.toBeInTheDocument();
+      expect(screen.queryByText('write')).not.toBeInTheDocument();
+      expect(screen.queryByText('read')).not.toBeInTheDocument();
+      expect(screen.queryByText('exec')).not.toBeInTheDocument();
+      expect(screen.queryByText('send')).not.toBeInTheDocument();
+    });
+
+    it('F6. targets heuristic caption pin; [] -> "none detected"; targets:"nope" -> "none detected" no crash (RC-2); targetsSource:"other" -> raw caption, heuristic sentence absent (RC-6)', () => {
+      stream.events = [toolApproval({ targets: [], targetsSource: 'path-heuristic' })];
+      const { unmount } = render(<TorqTerminal />);
+      expect(screen.getByText('Allow once')).toBeInTheDocument();
+      expect(screen.getByText('none detected')).toBeInTheDocument();
+      unmount();
+      cleanup();
+      stream.sendCommand.mockClear();
+
+      stream.events = [toolApproval({ targets: 'nope', targetsSource: 'path-heuristic' })];
+      expect(() => render(<TorqTerminal />)).not.toThrow();
+      expect(screen.getByText('none detected')).toBeInTheDocument();
+      cleanup();
+      stream.sendCommand.mockClear();
+
+      stream.events = [toolApproval({ targets: [], targetsSource: 'other-source' })];
+      render(<TorqTerminal />);
+      expect(screen.getByText('targets source: other-source')).toBeInTheDocument();
+      expect(screen.queryByText(/path heuristic/)).not.toBeInTheDocument();
+    });
+
+    it('F8. exactly-4 targets -> exactly 2 buttons (Allow once, Deny), no expander', () => {
+      stream.events = [toolApproval({
+        targets: ['/a', '/b', '/c', '/d'], targetsSource: 'path-heuristic',
+        capability: 'write', sourceServerId: 'fs', rule: 'write-class-capability',
+      })];
+      render(<TorqTerminal />);
+
+      const card = screen.getByText('Allow once').closest('div.rounded')!;
+      const buttons = within(card).getAllByRole('button');
+      expect(buttons).toHaveLength(2);
+      expect(screen.queryByText(/show all/)).not.toBeInTheDocument();
+    });
+
+    it('F8b. exactly-5 targets -> exactly 3 buttons; clicking "show all (5)" dispatches NOTHING and reveals all paths', () => {
+      stream.events = [toolApproval({
+        targets: ['/a', '/b', '/c', '/d', '/e'], targetsSource: 'path-heuristic',
+        capability: 'write', sourceServerId: 'fs', rule: 'write-class-capability',
+      })];
+      render(<TorqTerminal />);
+
+      const card = screen.getByText('Allow once').closest('div.rounded')!;
+      const buttons = within(card).getAllByRole('button');
+      expect(buttons).toHaveLength(3);
+
+      const beforeCalls = stream.sendCommand.mock.calls.length;
+      fireEvent.click(screen.getByText('show all (5)'));
+      expect(stream.sendCommand.mock.calls.length).toBe(beforeCalls); // dispatches nothing
+
+      // All paths now revealed — the inline truncated list (still 4 shown by
+      // slice semantics is superseded once expanded) plus the full-path
+      // expanded block both render '/e'; assert at least one, not exactly one.
+      expect(screen.getAllByText('/e').length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('F9. Allow with gate present -> exact APPROVE_TOOL arg, not.toHaveProperty gate/targets, calledTimes(1), dedup badge', () => {
+      stream.events = [toolApproval({
+        targets: ['/tmp/x'], targetsSource: 'path-heuristic',
+        capability: 'write', sourceServerId: 'fs', rule: 'write-class-capability',
+      })];
+      render(<TorqTerminal />);
+
+      fireEvent.click(screen.getByText('Allow once'));
+
+      const arg = stream.sendCommand.mock.calls[0][0];
+      expect(arg).toEqual({ action: 'APPROVE_TOOL', approvalId: 'appr-1', decision: 'APPROVE' });
+      expect(arg).not.toHaveProperty('gate');
+      expect(arg).not.toHaveProperty('targets');
+      expect(stream.sendCommand).toHaveBeenCalledTimes(1);
+      expect(screen.getByText('✓ allowed once')).toBeInTheDocument();
+    });
+
+    it('F10. post-decision remnant shows no "may touch"/"write-class"/capability words', () => {
+      stream.events = [toolApproval({
+        targets: ['/tmp/x'], targetsSource: 'path-heuristic',
+        capability: 'write', sourceServerId: 'fs', rule: 'write-class-capability',
+      })];
+      render(<TorqTerminal />);
+
+      fireEvent.click(screen.getByText('Allow once'));
+
+      expect(screen.getByText('✓ allowed once')).toBeInTheDocument();
+      expect(screen.queryByText('may touch')).not.toBeInTheDocument();
+      expect(screen.queryByText(/write-class/)).not.toBeInTheDocument();
+      expect(screen.queryByText('write')).not.toBeInTheDocument();
+    });
+
+    it('F11. overflow smoke: 300-char toolName + long targets present in DOM', () => {
+      const longName = 'server__' + 'x'.repeat(292);
+      const longPath = '/very/long/path/' + 'y'.repeat(100) + '/file.txt';
+      stream.events = [toolApproval(
+        { targets: [longPath], targetsSource: 'path-heuristic', capability: 'write', sourceServerId: 'fs', rule: 'write-class-capability' },
+        { toolName: longName },
+      )];
+      render(<TorqTerminal />);
+
+      expect(screen.getByText('Allow once')).toBeInTheDocument();
+      expect(screen.getByText(longName)).toBeInTheDocument();
+      // the target path is middle-truncated in visible text but the full path
+      // must survive in the title attribute (no silent drop).
+      const truncated = screen.getByTitle(longPath);
+      expect(truncated).toBeInTheDocument();
+    });
+  });
+
+  describe('Triple-stack smoke (SC-3): approvals open while receipts open, both mounted, no coordination', () => {
+    it('receipts panel and approvals panel can both be open simultaneously', () => {
+      stream.events = [];
+      render(<TorqTerminal />);
+
+      fireEvent.click(screen.getByText('receipts'));
+      fireEvent.click(screen.getByText('approvals'));
+
+      expect(screen.getByText('Receipts')).toBeInTheDocument();
+      expect(screen.getByText('Approval History')).toBeInTheDocument();
     });
   });
 });
