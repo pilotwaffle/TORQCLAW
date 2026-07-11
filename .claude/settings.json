@@ -1,0 +1,24 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "E:\\Python\\Scripts\\graphify.EXE hook-guard search"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "E:\\Python\\Scripts\\graphify.EXE hook-guard read"
+          }
+        ]
+      }
+    ]
+  }
+}

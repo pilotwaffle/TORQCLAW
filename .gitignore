@@ -13,3 +13,6 @@ __pycache__/
 
 # dev-up captured logs (temp)
 ops/_devup*.log
+
+# graphify knowledge graph output (380MB+, regenerable)
+graphify-out/
