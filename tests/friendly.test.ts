@@ -27,7 +27,13 @@ import {
   selectLatestRoutePreview,
   isPanelSystemFrame,
   isBusyNeutralEvent,
+  selectLatestApprovalList,
+  formatApprovalStatus,
+  formatGateFacts,
+  formatApprovalTimestamp,
+  toApprovalHistoryRows,
   type ReceiptLike,
+  type ApprovalSummaryLike,
 } from '../apps/console/src/components/friendly.js';
 
 function ev(partial: Partial<GatewayEvent>): GatewayEvent {
@@ -915,5 +921,211 @@ describe('isPanelSystemFrame / isBusyNeutralEvent (TCLAW-UIFIX-1) — subset-rel
       expect(isBusyNeutralEvent(doneReceiptFrame())).toBe(true);
       expect(isPanelSystemFrame(doneReceiptFrame())).toBe(false);
     });
+  });
+});
+
+// ── TCLAW-5A-2: H1-H4 pure-helper unit tests (BUILD-ORDER FIRST — the crux) ──
+
+function approvalListFrame(approvals: unknown, seq?: number): GatewayEvent {
+  return ev({ type: 'SYSTEM', message: 'Approvals listed', metadata: { approvalList: true, approvals }, ...(seq !== undefined ? { seq } : {}) });
+}
+
+function approvalRow(overrides: Partial<ApprovalSummaryLike> = {}): ApprovalSummaryLike {
+  return {
+    approvalId: 'appr-1',
+    requestId: 'req-1',
+    toolName: 'filesystem__write_file',
+    status: 'pending',
+    createdAt: '2026-01-01 00:00:00',
+    decidedAt: null,
+    ...overrides,
+  };
+}
+
+describe('H1: selectLatestApprovalList', () => {
+  it('newest-valid-wins across multiple frames', () => {
+    const frameA = approvalListFrame([approvalRow({ approvalId: 'a' })]);
+    const frameB = approvalListFrame([approvalRow({ approvalId: 'b' })]);
+    const result = selectLatestApprovalList([frameA, frameB]);
+    expect(result).toEqual([approvalRow({ approvalId: 'b' })]);
+  });
+
+  it('Array.isArray rejection: malformed frame is SKIPPED, older good frame still returned', () => {
+    const good = approvalListFrame([approvalRow({ approvalId: 'good' })]);
+    const malformed = ev({ type: 'SYSTEM', metadata: { approvalList: true, approvals: 'nope' } });
+    const result = selectLatestApprovalList([good, malformed]);
+    expect(result).toEqual([approvalRow({ approvalId: 'good' })]);
+  });
+
+  it('none present -> null', () => {
+    expect(selectLatestApprovalList([ev({ type: 'SYSTEM', metadata: {} })])).toBeNull();
+    expect(selectLatestApprovalList([])).toBeNull();
+  });
+
+  it('non-SYSTEM type carrying the marker is ignored', () => {
+    const fake = ev({ type: 'RESULT', metadata: { approvalList: true, approvals: [approvalRow()] } });
+    expect(selectLatestApprovalList([fake])).toBeNull();
+  });
+});
+
+describe('H2: formatApprovalStatus', () => {
+  it('rejected -> denied', () => {
+    expect(formatApprovalStatus('rejected')).toEqual({ text: 'denied', tone: 'denied' });
+  });
+  it('pending -> pending', () => {
+    expect(formatApprovalStatus('pending')).toEqual({ text: 'pending', tone: 'pending' });
+  });
+  it('approved -> approved', () => {
+    expect(formatApprovalStatus('approved')).toEqual({ text: 'approved', tone: 'approved' });
+  });
+  it('unknown string -> raw passthrough, never defaulted', () => {
+    expect(formatApprovalStatus('expired')).toEqual({ text: 'expired', tone: 'unknown' });
+  });
+  it('non-string -> defensive String() coercion, no crash', () => {
+    expect(formatApprovalStatus(42)).toEqual({ text: '42', tone: 'unknown' });
+    expect(formatApprovalStatus(null)).toEqual({ text: 'null', tone: 'unknown' });
+    expect(formatApprovalStatus(undefined)).toEqual({ text: 'undefined', tone: 'unknown' });
+  });
+});
+
+describe('H3: formatGateFacts — the Card v2 honesty-fork crux', () => {
+  it('undefined -> null (caller renders nothing)', () => {
+    expect(formatGateFacts(undefined)).toBeNull();
+  });
+
+  it('RC-1: gate null -> null, never miss, never throws', () => {
+    expect(() => formatGateFacts(null)).not.toThrow();
+    expect(formatGateFacts(null)).toBeNull();
+  });
+
+  it('RC-1: gate as a primitive string -> null, never miss', () => {
+    expect(formatGateFacts('x')).toBeNull();
+  });
+
+  it('RC-1: gate as a primitive number -> null, never miss', () => {
+    expect(formatGateFacts(42)).toBeNull();
+  });
+
+  it('miss signature (targets/targetsSource only, no capability, no rule) -> exact unclassified row', () => {
+    const out = formatGateFacts({ targets: ['/tmp/x'], targetsSource: 'path-heuristic' });
+    expect(out).not.toBeNull();
+    expect(out!.variant).toBe('miss');
+    expect(out!.classRow).toEqual({ text: 'write-class (unclassified)', title: 'no registry entry for this tool' });
+    expect(out!.whyGated).toBeNull();
+    expect(out!.server).toBeNull();
+  });
+
+  it('engine-approval-hook -> frontier: engine rows, NO capability, NO unclassified, even with a dual-signal adversarial gate', () => {
+    const out = formatGateFacts({
+      targets: [], targetsSource: 'path-heuristic',
+      rule: 'engine-approval-hook',
+      capability: 'write', sourceServerId: 'fs', // adversarial: capability ALSO present
+    });
+    expect(out).not.toBeNull();
+    expect(out!.variant).toBe('frontier');
+    expect(out!.classRow).toBeNull();
+    expect(out!.whyGated).toEqual({ text: 'engine approval hook (frontier tier)', title: 'rule: engine-approval-hook' });
+    expect(out!.server).toBeNull();
+    expect(JSON.stringify(out!.whyGated)).not.toMatch(/unclassified/);
+  });
+
+  it('hit variant B: write-class-capability -> capability verbatim (incl. "read"), server row, why-gated line', () => {
+    const out = formatGateFacts({
+      targets: ['/tmp/x'], targetsSource: 'path-heuristic',
+      capability: 'read', sourceServerId: 'fs', rule: 'write-class-capability',
+    });
+    expect(out!.variant).toBe('hit');
+    expect(out!.classRow!.text).toBe('read');
+    expect(out!.whyGated).toEqual({ text: 'write-class capability', title: 'rule: write-class-capability' });
+    expect(out!.server).toBe('fs');
+  });
+
+  it('hit variant C: approval-pattern -> "matched an approval pattern"', () => {
+    const out = formatGateFacts({
+      targets: [], targetsSource: 'path-heuristic',
+      capability: 'exec', sourceServerId: 'shell', rule: 'approval-pattern',
+    });
+    expect(out!.variant).toBe('hit');
+    expect(out!.whyGated).toEqual({ text: 'matched an approval pattern', title: 'rule: approval-pattern' });
+  });
+
+  it('hit with an unknown future rule id -> raw rule id, no invented translation', () => {
+    const out = formatGateFacts({
+      targets: [], targetsSource: 'path-heuristic',
+      capability: 'send', rule: 'some-future-rule',
+    });
+    expect(out!.whyGated!.text).toBe('some-future-rule');
+  });
+
+  it('targets label row: RC-2 non-array targets -> defensive empty items, isArray:false, no crash', () => {
+    const out = formatGateFacts({ targets: 'nope', targetsSource: 'path-heuristic' });
+    expect(() => formatGateFacts({ targets: 'nope', targetsSource: 'path-heuristic' })).not.toThrow();
+    expect(out!.targets.isArray).toBe(false);
+    expect(out!.targets.items).toEqual([]);
+  });
+
+  it('targets: [] -> isArray true, empty items (caller renders "none detected")', () => {
+    const out = formatGateFacts({ targets: [], targetsSource: 'path-heuristic' });
+    expect(out!.targets.isArray).toBe(true);
+    expect(out!.targets.items).toEqual([]);
+  });
+
+  it('RC-6: unknown targetsSource -> "targets source: <raw>", never the heuristic sentence', () => {
+    const out = formatGateFacts({ targets: [], targetsSource: 'some-other-source' });
+    expect(out!.targetsCaption).toBe('targets source: some-other-source');
+    expect(out!.targetsCaption).not.toMatch(/path heuristic/);
+  });
+
+  it('long target path (>64 chars) middle-truncates, tail preserved, full path retained', () => {
+    const long = '/very/long/path/' + 'x'.repeat(80) + '/file.txt';
+    const out = formatGateFacts({ targets: [long], targetsSource: 'path-heuristic' });
+    const item = out!.targets.items[0]!;
+    expect(item.full).toBe(long);
+    expect(item.displayText.length).toBeLessThan(long.length);
+    expect(item.displayText.endsWith(long.slice(-31))).toBe(true);
+  });
+});
+
+describe('H4: ApprovalHistoryRowData mapper (toApprovalHistoryRows)', () => {
+  it('mapper output has zero function-typed values (no dispatch surface)', () => {
+    const rows = toApprovalHistoryRows([approvalRow(), approvalRow({ status: 'rejected', decidedAt: '2026-01-01 00:05:00' })]);
+    for (const row of rows) {
+      for (const v of Object.values(row)) {
+        expect(typeof v).not.toBe('function');
+      }
+      // nested status object too
+      for (const v of Object.values(row.status)) {
+        expect(typeof v).not.toBe('function');
+      }
+    }
+  });
+
+  it('missing/non-string toolName -> "(unknown)", no crash', () => {
+    const rows = toApprovalHistoryRows([approvalRow({ toolName: undefined as unknown as string })]);
+    expect(rows[0]!.toolName).toBe('(unknown)');
+  });
+
+  it('status mapping flows through formatApprovalStatus, raw preserved', () => {
+    const rows = toApprovalHistoryRows([approvalRow({ status: 'rejected' })]);
+    expect(rows[0]!.status).toEqual({ text: 'denied', tone: 'denied', raw: 'rejected' });
+  });
+
+  it('decidedAt null stays null (no placeholder); non-null gets formatted', () => {
+    const rows = toApprovalHistoryRows([
+      approvalRow({ decidedAt: null }),
+      approvalRow({ approvalId: 'a2', decidedAt: '2026-01-01 00:05:00' }),
+    ]);
+    expect(rows[0]!.decidedAt).toBeNull();
+    expect(rows[1]!.decidedAt).toBe('2026-01-01 00:05:00 UTC');
+  });
+});
+
+describe('formatApprovalTimestamp', () => {
+  it('SQLite shape -> verbatim + " UTC"', () => {
+    expect(formatApprovalTimestamp('2026-01-01 00:00:00')).toBe('2026-01-01 00:00:00 UTC');
+  });
+  it('non-matching shape -> verbatim, no suffix', () => {
+    expect(formatApprovalTimestamp('2026-01-01T00:00:00.000Z')).toBe('2026-01-01T00:00:00.000Z');
+    expect(formatApprovalTimestamp('garbage')).toBe('garbage');
   });
 });
