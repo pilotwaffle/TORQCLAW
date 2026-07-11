@@ -14,5 +14,8 @@ __pycache__/
 # dev-up captured logs (temp)
 ops/_devup*.log
 
-# graphify knowledge graph output (380MB+, regenerable)
+# Graphify generated graphs (rebuild via pnpm graphify:build)
+graphify-product/
+graphify-vendor/
+# Legacy single graph (vendor-dominated, 380MB+, regenerable); not the product default
 graphify-out/
