@@ -13,3 +13,9 @@ __pycache__/
 
 # dev-up captured logs (temp)
 ops/_devup*.log
+
+# Graphify generated graphs (rebuild via pnpm graphify:build)
+graphify-product/
+graphify-vendor/
+# Legacy single graph (vendor-dominated); do not treat as product default
+# graphify-out/ may still exist locally — prefer graphify-product/

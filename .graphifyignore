@@ -1,0 +1,18 @@
+# TorqClaw Graphify corpus policy
+# Product graph scans the monorepo root with this ignore file.
+# Vendor Hermes lives in a separate graph (graphify-vendor/), never here.
+
+# Vendored upstream engine source (use graphify-vendor for investigations)
+engines/hermes_kernel/vendor/
+
+# Dependencies and generated output
+**/node_modules/
+**/dist/
+**/.next/
+**/__pycache__/
+**/*.pyc
+
+# Graphify-generated data (all profiles)
+graphify-out/
+graphify-product/
+graphify-vendor/
