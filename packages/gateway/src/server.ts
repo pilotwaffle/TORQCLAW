@@ -10,7 +10,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { sessions } from './sessions.js';
 import { enrichCommand } from './enrich.js';
 import { dispatch, mintGrantedRequest, emitToolDenied } from './dispatch.js';
-import { decideApproval, handleListApprovals } from './approvals.js';
+import { decideApproval } from './approvals.js';
 import { makeEmitter, sessionBus, persistAndPublish } from './events.js';
 import { router } from '@torqclaw/router';
 import { connectBridge, approveSkill, getSkillDraft, cancelHermesTask } from '@torqclaw/bridge';
@@ -257,16 +257,6 @@ app.get('/ws', { websocket: true }, (socket) => {
         // CONNECTION's own sid, never a client value. Caps are env-only — this
         // path can never raise/edit a cap.
         handleGetCostSummary(sid, cmd.data.recentLimit);
-        break;
-      }
-      case 'LIST_APPROVALS': {
-        // Read-only: SELECT + publishOnly, zero writes. Handler body in
-        // approvals.ts (handleListApprovals) so tests drive the production
-        // path headlessly. Session-scoped by construction: no sessionId
-        // param, we pass the CONNECTION's own sid, never a client value.
-        // This path can never decide an approval — decideApproval is
-        // reachable ONLY via APPROVE_TOOL.
-        handleListApprovals(sid, cmd.data.limit, cmd.data.status);
         break;
       }
       case 'PREVIEW_ROUTE': {

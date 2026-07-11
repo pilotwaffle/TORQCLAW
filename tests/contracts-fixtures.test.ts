@@ -70,10 +70,6 @@ describe('golden fixtures validate against @torqclaw/contracts schemas', () => {
     assertParses(ClientCommandSchema, 'client-command.preview-route.json');
   });
 
-  it('client-command.list-approvals.json parses as ClientCommand', () => {
-    assertParses(ClientCommandSchema, 'client-command.list-approvals.json');
-  });
-
   it('gateway-request.json parses as GatewayRequest', () => {
     assertParses(GatewayRequestSchema, 'gateway-request.json');
   });
