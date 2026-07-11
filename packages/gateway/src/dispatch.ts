@@ -1,14 +1,6 @@
 import { ComputeTier, type GatewayRequest, type RouterDiagnostics } from '@torqclaw/contracts';
 import { executeLocalEdge, ToolApprovalRequired } from '@torqclaw/inference';
-import {
-  executeHermesTask,
-  CircuitBreakerError,
-  isHermesAvailable,
-  getRegistry,
-  extractPaths,
-  isWriteClass,
-  type RegisteredTool,
-} from '@torqclaw/bridge';
+import { executeHermesTask, CircuitBreakerError, isHermesAvailable } from '@torqclaw/bridge';
 import { makeEmitter, taskStore } from './events.js';
 import { sessions } from './sessions.js';
 import { cancellations } from './cancellations.js';
@@ -110,39 +102,6 @@ export function mintGrantedRequest(requestJson: string, toolName: string): Gatew
     },
     // constraints + sessionId + prompt copied verbatim by the spread above.
   };
-}
-
-/** TCLAW-5A-1 (G1R RC-1/RC-2): mechanical gate facts for the approval card,
- *  sourced from the SAME boot-time RegisteredTool entry that raised the block
- *  — never a second classifyCapability call, never a re-derivation at emit
- *  time. Honesty rules: a field is present ONLY when mechanically
- *  determinable. A registry miss carries NO capability and NO rule (the UI
- *  renders "write-class (unclassified)" — never 'read', never a risk score).
- *  FRONTIER blocks come from the engine's pre_tool_call hook (hermes.ts) —
- *  the gateway registry did NOT raise that block and the engine has no
- *  capability classes, so registry facts are never attributed to it (a
- *  same-named gateway entry would be a DIFFERENT tool). targets is a path
- *  heuristic over the PROPOSED args (display-only, never replayed) and is
- *  labeled as such via targetsSource. */
-export function buildGateFacts(
-  tier: ComputeTier,
-  entry: RegisteredTool | undefined,
-  args: unknown,
-): Record<string, unknown> {
-  const facts: Record<string, unknown> = {
-    targets: extractPaths(args, entry?.pathArgKeys),
-    targetsSource: 'path-heuristic',
-  };
-  if (tier === ComputeTier.FRONTIER) {
-    facts.rule = 'engine-approval-hook';
-    return facts;
-  }
-  if (entry) {
-    facts.capability = entry.capability;
-    facts.sourceServerId = entry.sourceServerId;
-    facts.rule = isWriteClass(entry.capability) ? 'write-class-capability' : 'approval-pattern';
-  }
-  return facts;
 }
 
 /** REJECT (P2): the operator denied the tool. Per the review refinement and
@@ -308,20 +267,11 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
       if (error instanceof ToolApprovalRequired) {
         const approvalId = registerApproval(req.id, error.toolName, error.args);
         taskStore.complete(req.id, '', { blockedOn: error.toolName });
-        // TCLAW-5A-1: gate facts ride the SAME terminal frame the card renders.
-        // LOCAL_EDGE lookup is by the exact namespaced name ollama.ts gated on,
-        // so this reads the SAME registry entry that raised the block (G1R
-        // RC-1).
-        const entry =
-          diag.tier === ComputeTier.LOCAL_EDGE
-            ? getRegistry().find((t) => t.name === error.toolName)
-            : undefined;
         emit('PENDING_APPROVAL', `Tool ${error.toolName} requires approval`, {
           approvalId,
           toolName: error.toolName,
           requestId: req.id,
           args: error.args,
-          gate: buildGateFacts(diag.tier, entry, error.args),
         });
         safeMaterializeReceipt(req.id);
         return; // do NOT fall through to ERROR

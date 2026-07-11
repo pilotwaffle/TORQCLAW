@@ -72,11 +72,6 @@ export function checkResumeRole(
  *              task, no receipt, and no audit trail — it is not
  *              channel-grantable until real rate limiting exists. Explicit
  *              deny so the decision is legible and pinned by a test.)
- *              (TCLAW-5A-1: LIST_APPROVALS is operator-only — the live
- *              approval card (APPROVE_TOOL) is operator-only, so its history
- *              must be too; approval telemetry reveals gated tool names and
- *              decision timing across the session. Explicit deny so the
- *              decision is legible and pinned by a test.)
  *   node     — every action denied.
  */
 export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): AuthzDecision {
@@ -101,7 +96,6 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     case 'GET_RECEIPT':
     case 'GET_COST_SUMMARY':
     case 'PREVIEW_ROUTE':
-    case 'LIST_APPROVALS':
       return DENY_NOT_PERMITTED;
     default:
       // Default deny for any future/unmapped action on a non-operator role.

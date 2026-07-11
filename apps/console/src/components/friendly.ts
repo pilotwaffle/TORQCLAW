@@ -399,7 +399,7 @@ export function selectLatestRoutePreview(
 export function isPanelSystemFrame(ev: GatewayEvent): boolean {
   if (ev.type !== 'SYSTEM') return false;
   const m = (ev.metadata ?? {}) as Record<string, unknown>;
-  return !!(m.routePreview || m.receiptList || m.receiptView || m.costSummary || m.approvalList);
+  return !!(m.routePreview || m.receiptList || m.receiptView || m.costSummary);
 }
 
 /** TCLAW-UIFIX-1 INVARIANT (G1R-verified against every SYSTEM producer):

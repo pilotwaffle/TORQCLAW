@@ -15,9 +15,6 @@
     "model:setup": "ollama create torq-local -f ops/Modelfile",
     "stats": "node ops/stats.mjs",
     "contracts:check": "pnpm --filter @torqclaw/contracts check",
-    "graphify:build": "python scripts/build_graphify_graphs.py",
-    "graphify:check": "python scripts/check_graphify_fitness.py",
-    "graphify:smoke": "python scripts/test_graphify_smoke.py",
     "bench": "node --env-file=.env ops/bench.mjs",
     "bench:quick": "node --env-file=.env ops/bench.mjs --quick --no-score",
     "test": "vitest run"

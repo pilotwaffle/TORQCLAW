@@ -829,9 +829,6 @@ describe('isPanelSystemFrame / isBusyNeutralEvent (TCLAW-UIFIX-1) — subset-rel
   function costSummaryFrame(): GatewayEvent {
     return ev({ type: 'SYSTEM', message: 'Cost summary', metadata: { costSummary: true } });
   }
-  function approvalListFrame(): GatewayEvent {
-    return ev({ type: 'SYSTEM', message: 'Approvals listed', metadata: { approvalList: true, approvals: [] } });
-  }
   function memoryShowFrame(): GatewayEvent {
     return ev({ type: 'SYSTEM', message: 'Memory: 2 episode(s) this session', metadata: { memory: 'SHOW', episodes: [] } });
   }
@@ -853,12 +850,11 @@ describe('isPanelSystemFrame / isBusyNeutralEvent (TCLAW-UIFIX-1) — subset-rel
   ];
 
   describe('isPanelSystemFrame', () => {
-    it('true for each of the 5 publishOnly panel markers', () => {
+    it('true for each of the 4 publishOnly panel markers', () => {
       expect(isPanelSystemFrame(previewFrame())).toBe(true);
       expect(isPanelSystemFrame(receiptListFrame())).toBe(true);
       expect(isPanelSystemFrame(receiptViewFrame())).toBe(true);
       expect(isPanelSystemFrame(costSummaryFrame())).toBe(true);
-      expect(isPanelSystemFrame(approvalListFrame())).toBe(true);
     });
 
     it('false for memory, Done-receipt, markerless SYSTEM, and non-SYSTEM types', () => {
@@ -874,12 +870,11 @@ describe('isPanelSystemFrame / isBusyNeutralEvent (TCLAW-UIFIX-1) — subset-rel
   });
 
   describe('isBusyNeutralEvent', () => {
-    it('true for EVERY SYSTEM fixture (all 5 panel markers, memory, Done-receipt, markerless, arbitrary-unknown-metadata)', () => {
+    it('true for EVERY SYSTEM fixture (all 4 panel markers, memory, Done-receipt, markerless, arbitrary-unknown-metadata)', () => {
       expect(isBusyNeutralEvent(previewFrame())).toBe(true);
       expect(isBusyNeutralEvent(receiptListFrame())).toBe(true);
       expect(isBusyNeutralEvent(receiptViewFrame())).toBe(true);
       expect(isBusyNeutralEvent(costSummaryFrame())).toBe(true);
-      expect(isBusyNeutralEvent(approvalListFrame())).toBe(true);
       expect(isBusyNeutralEvent(memoryShowFrame())).toBe(true);
       expect(isBusyNeutralEvent(memoryForgetFrame())).toBe(true);
       expect(isBusyNeutralEvent(doneReceiptFrame())).toBe(true);
@@ -897,7 +892,7 @@ describe('isPanelSystemFrame / isBusyNeutralEvent (TCLAW-UIFIX-1) — subset-rel
   describe('subset pin (RC-4): isPanelSystemFrame(ev) === true ⟹ isBusyNeutralEvent(ev) === true, never the reverse', () => {
     it('holds across every fixture covering all frame types above', () => {
       const fixtures = [
-        previewFrame(), receiptListFrame(), receiptViewFrame(), costSummaryFrame(), approvalListFrame(),
+        previewFrame(), receiptListFrame(), receiptViewFrame(), costSummaryFrame(),
         memoryShowFrame(), memoryForgetFrame(), doneReceiptFrame(), markerlessSystemFrame(),
         arbitrarySystemFrame(),
         ...nonSystemTypes.map((type) => ev({ type })),
