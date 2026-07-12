@@ -228,6 +228,13 @@ export function projectReceipt(taskId: string): ReceiptRow | null {
   const costEnforceable: number | null =
     costUsd !== null ? 1 : isFrontier && telemetry !== null ? 0 : null;
 
+  // TCLAW-5B-1: deliberately NULL — export is computed ON DEMAND by
+  // GET_SAFE_EXPORT (packages/gateway/src/export.ts) every time it's
+  // requested, so the newest redactor version always runs, never a version
+  // frozen at projection time. This column is reserved for a
+  // redactor-versioned cache if profiling ever demands one; nothing in this
+  // ticket's design writes to it (see export.ts's handler-comment discipline
+  // — zero writes, safe_export_json is never touched by GET_SAFE_EXPORT).
   const safeExportJson: string | null = null;
 
   const fullReceipt = {

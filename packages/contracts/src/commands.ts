@@ -107,6 +107,21 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     limit: z.number().int().min(1).max(100).default(20),
     status: z.enum(['pending', 'approved', 'rejected']).optional(),
   }),
+  z.object({
+    // TCLAW-5B-1: server-redacted diagnostic export for ONE receipt. The ONLY
+    // path that emits redacted material — redaction runs in the gateway
+    // (packages/gateway/src/export.ts), never assembled client-side. taskId =
+    // gateway request_id, same field type as GET_RECEIPT/CANCEL_TASK.
+    // Deliberately NO sessionId param (a client can never even ask for
+    // another session's export; ownership is re-checked server-side against
+    // the owning session regardless). Deliberately NO includeEvents — event
+    // replay is categorically omitted from this export, not merely
+    // size-guarded like GET_RECEIPT's. Deliberately NO format param — this
+    // command always returns one canonical JSON artifact; a Markdown
+    // projection (if any) is a pure client-side rendering of that JSON only.
+    action: z.literal('GET_SAFE_EXPORT'),
+    taskId: z.uuid(),
+  }),
 ]);
 export type ClientCommand = z.infer<typeof ClientCommandSchema>;
 

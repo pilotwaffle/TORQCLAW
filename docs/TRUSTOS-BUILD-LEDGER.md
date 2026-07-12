@@ -376,3 +376,11 @@ Role mapping note: G1R and G2A run as independent Opus instances; GLM-5.2 (RB) u
 - tests/checks (Builder-run ×2, G1D independently re-verified, G2A re-verified post-restore): typecheck 12/12; vitest 712 (652 pre-existing unmodified + 60 new, 28 files); contracts:check OK both dirs untouched; build 7/7; uv pytest 75/75 from engines/hermes_kernel (zero engine impact; repo-root invocation retains the known pre-existing collection quirk). CI: post-push gate on the future PR.
 - next ticket: TCLAW-5B (safe diagnostic export, server-side redaction) or 5A/Phase-1 closeout — ONLY after operator approval. TCLAW-FIX-G remains filed. TCLAW-GRAPHIFY-CLEANUP remains operator-lane.
 - blockers: operator approval for push + PR; then merge gate; CI-green on PR is the post-push gate.
+
+### TCLAW-FIX-H — Sanitize tasks.error at the persistence boundary (FILED — follow-up obligation, not scheduled)
+
+- filed: 2026-07-11, origin: TCLAW-5B scoping (leak-surface inventory) + G1R RC-3 (independently confirmed in code).
+- problem: dispatch.ts builds the failure reason unsanitized (`reason = String(error?.message ?? error)`) and persists it via taskStore.fail; sanitize() (Bearer-only regex + 2000-char cap) is applied ONLY to the emitted ERROR event message, never to the persisted value. A Bearer token (or key-bearing URL/provider host) in a provider error sits in tasks.error AND full_receipt_json.error in the DB at rest today.
+- scope when scheduled: apply a scrub at the fail()/persistence boundary (and consider re-projecting affected receipts); coordinate the pattern set with packages/gateway/src/export.ts SECRET_SHAPES so at-rest and egress redaction cannot drift apart.
+- interim mitigation: TCLAW-5B-1's GET_SAFE_EXPORT scrubs `error` on egress, so the SAFE export is unaffected; the exposure is at-rest (DB file, backups) and in the full in-console receipt view (operator-only, same trust domain).
+- status: FILED. Not scheduled — Phase-1 closeout (TCLAW-5B-2) first per operator direction.

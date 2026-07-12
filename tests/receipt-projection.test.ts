@@ -257,7 +257,7 @@ describe('TCLAW-4A run receipt projection', () => {
     expect(row.route_diagnostics_json).toBeNull();
   });
 
-  it('(d) safe_export_json is ALWAYS null (redaction is a later ticket)', () => {
+  it('(d) safe_export_json is ALWAYS null (TCLAW-5B-1: deliberately NULL forever -- GET_SAFE_EXPORT computes the redacted export on demand, never persisted here)', () => {
     const sid = makeSession();
     const taskId = makeTask({
       sessionId: sid,

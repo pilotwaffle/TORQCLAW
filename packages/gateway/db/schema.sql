@@ -138,7 +138,10 @@ CREATE TABLE IF NOT EXISTS run_receipts (
   memory_used INTEGER,
   context_chars INTEGER,
   result_state TEXT,                        -- 'completed' | 'failed' | 'blocked' (derived)
-  safe_export_json TEXT,                    -- NULL for 4A (redaction is a later ticket)
+  safe_export_json TEXT,                    -- deliberately NULL -- export is computed on demand by
+                                             -- GET_SAFE_EXPORT (packages/gateway/src/export.ts) so
+                                             -- the newest redactor always runs; reserved for a
+                                             -- redactor-versioned cache if profiling ever demands one
   full_receipt_json TEXT,
   evidence_start_seq INTEGER,
   evidence_end_seq INTEGER,

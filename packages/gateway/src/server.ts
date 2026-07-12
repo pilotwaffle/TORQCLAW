@@ -21,6 +21,7 @@ import { db } from './storage.js';
 import { handleListReceipts, handleGetReceipt } from './receipts.js';
 import { handleGetCostSummary } from './spend.js';
 import { handlePreviewRoute } from './preview.js';
+import { handleGetSafeExport } from './export.js';
 
 // Read helper for authz's task-ownership check. Kept inline here (not in
 // events.ts taskStore) per scope: this ticket may only touch authz.ts,
@@ -275,6 +276,17 @@ app.get('/ws', { websocket: true }, (socket) => {
         // tests drive the exact production path headlessly. Session-scoped by
         // construction: no sessionId param; the CONNECTION's own sid is passed.
         await handlePreviewRoute(sid, cmd.data);
+        break;
+      }
+      case 'GET_SAFE_EXPORT': {
+        // Read-only: SELECT (receipt + LIVE tool_approvals) + publishOnly,
+        // ZERO writes — safe_export_json is never touched by this path. The
+        // full handler body — ownership check (no existence oracle),
+        // allowlist projection, pattern scrub, fail-closed wrapper — lives in
+        // export.ts (handleGetSafeExport); this switch delegates verbatim, no
+        // parallel copy. This is the ONLY path that emits redacted material —
+        // redaction runs in the gateway, never the client.
+        handleGetSafeExport(sid, cmd.data.taskId);
         break;
       }
     }
