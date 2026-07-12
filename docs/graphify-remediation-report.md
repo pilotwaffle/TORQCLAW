@@ -8,7 +8,7 @@
 
 ```text
 Depends on pilotwaffle/Torq-graphify#1 (feature/project-graph-profiles).
-Audited upstream head: c6e89a2b79ed506544a8420c7e877eb5781db4bd
+Audited upstream head: d48c5c6dfd69fdde1e04aa8ddd9b092a598e3b53 (review-repair head; supersedes c6e89a2)
 Do not merge until PR #1 is merged and this integration is retested against
 its final merge SHA.
 ```
@@ -25,7 +25,7 @@ Product architecture conclusions must be derived from the product-scoped
 graph; vendored implementation details may enter only through an explicit
 vendor investigation.
 
-## Measured results (worktree validation, upstream @ c6e89a2)
+## Measured results (worktree validation, upstream @ d48c5c6)
 
 | Metric | product | vendor |
 |---|---|---|
@@ -65,12 +65,13 @@ before the vendor build in a fresh clone/worktree.
    build-wired. `graphify affected` still works as neighbor traversal; the
    smoke test accepts `directed: false` with an explicit note. Upstream
    follow-up: wire `profile.directed` into the update/build path.
-2. **`update` writes output relative to the scan root, and profile `exclude`
-   / `include` are not scan-wired for update builds.** Product corpus
-   exclusion is therefore enforced by `.graphifyignore` (read on every
-   scan), and the vendor build passes an absolute `GRAPHIFY_OUT` so the graph
-   lands at the repo root instead of inside `engines/**`. Upstream follow-up:
-   wire profile `exclude`/`out` into update-path builds.
+2. **`update` writes output relative to the scan root**, so the vendor
+   build passes an absolute `GRAPHIFY_OUT` to land the graph at the repo
+   root instead of inside `engines/**`. (RESOLVED upstream @ d48c5c6:
+   profile `exclude` patterns now apply on every rebuild path — retested
+   here with a temporary vendor fixture that update did not introduce.
+   `.graphifyignore` is retained as defense-in-depth. `include` remains
+   unwired; `out` anchoring remains a follow-up.)
 3. **Interpreter sidecar.** `update` does not write `.graphify_python`;
    fitness reports it as a note (never verdict-affecting). Skill flows
    re-resolve the interpreter on demand.
