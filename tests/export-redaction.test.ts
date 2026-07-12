@@ -322,6 +322,7 @@ describe('TCLAW-5B-1 SECRET_SHAPES + scrubText corpus', () => {
       String.raw`\\HOST\share\f`,
       '/home/u/f',
       '/Users/u/f',
+      '/root/u/f',
       '~/x',
     ];
     for (const c of cases) {
@@ -754,6 +755,28 @@ describe('TCLAW-5B-1 handleGetSafeExport — the real production handler', () =>
     const row = getReceipt(taskId)!;
     const safeExport = buildSafeExport(row, [], REDACTOR_VERSION);
     expect(JSON.stringify(safeExport.redactionReport)).not.toContain(secret);
+  });
+
+  it('E19c: fieldsOmitted is pinned to the exact omission contract — dropping a label fails here, not silently', () => {
+    // G2A LOW-1: the report's fieldsOmitted list is a STATIC TRUTHFUL declaration
+    // of what this export never carries (export.ts FIELDS_OMITTED). The omission
+    // BEHAVIOR is enforced by E2/E3/E4 (value-absence); this pin enforces the
+    // REPORT's honesty about it — removing an entry from the declaration would
+    // make the report under-claim what is omitted without any behavior change,
+    // which is exactly the silent drift the "static truthful list" rule forbids.
+    const sid = makeSession();
+    const taskId = makeTask({ sessionId: sid, state: 'completed', requestJson: baseRequestJson() });
+    materializeReceipt(taskId);
+    const row = getReceipt(taskId)!;
+    const safeExport = buildSafeExport(row, [], REDACTOR_VERSION);
+    expect([...safeExport.redactionReport.fieldsOmitted].sort()).toEqual([
+      'approvalArgs',
+      'assembledContext',
+      'events',
+      'results',
+      'taskPrompt',
+      'toolCallArgs',
+    ]);
   });
 
   it('E22 [op#25]: oversize -> all-or-marker, output always parses as JSON', () => {
