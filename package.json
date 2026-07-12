@@ -17,7 +17,12 @@
     "contracts:check": "pnpm --filter @torqclaw/contracts check",
     "bench": "node --env-file=.env ops/bench.mjs",
     "bench:quick": "node --env-file=.env ops/bench.mjs --quick --no-score",
-    "test": "vitest run"
+    "test": "vitest run",
+    "graphify:profiles": "graphify profiles",
+    "graphify:build:product": "graphify update .",
+    "graphify:build:vendor": "cmd /c \"set GRAPHIFY_OUT=%CD%\\graphify-vendor&& graphify update engines/hermes_kernel/vendor/hermes-agent\"",
+    "graphify:fitness": "graphify fitness --profile product --strict",
+    "graphify:smoke": "python scripts/test_graphify_smoke.py"
   },
   "devDependencies": {
     "@modelcontextprotocol/server-filesystem": "^2026.1.14",

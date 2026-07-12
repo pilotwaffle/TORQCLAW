@@ -1,6 +1,6 @@
 {
   "env": {
-    "GRAPHIFY_OUT": "graphify-product"
+    "GRAPHIFY_PROFILE": "product"
   },
   "hooks": {
     "PreToolUse": [

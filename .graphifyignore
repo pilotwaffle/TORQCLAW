@@ -1,0 +1,20 @@
+# TorqClaw Graphify corpus policy (see graphify.toml for profiles).
+# Product builds scan the repo root with these exclusions; the vendor graph
+# is built separately with engines/hermes_kernel/vendor/hermes-agent as the
+# explicit scan root (this file does not apply to that subtree scan).
+
+# Vendored upstream engine source (use the vendor profile for investigations)
+engines/hermes_kernel/vendor/
+
+# Graphify-generated data (all profiles) - never re-ingest graph output
+graphify-out/
+graphify-product/
+graphify-vendor/
+
+# Dependencies and generated output
+node_modules/
+dist/
+.next/
+__pycache__/
+*.pyc
+coverage/
