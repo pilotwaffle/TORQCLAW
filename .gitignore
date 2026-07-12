@@ -16,3 +16,6 @@ ops/_devup*.log
 
 # graphify knowledge graph output (380MB+, regenerable)
 graphify-out/
+# Graphify profile graphs (rebuild: pnpm graphify:build:product / :vendor)
+graphify-product/
+graphify-vendor/

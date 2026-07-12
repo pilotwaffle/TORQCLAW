@@ -1,0 +1,56 @@
+# TorqClaw Graphify consumer configuration (dual-graph policy).
+#
+# Product architecture answers must come from the product-scoped graph;
+# vendored hermes-agent internals live in a separate, opt-in vendor graph.
+# Depends on upstream project-graph-profiles (pilotwaffle/Torq-graphify#1).
+#
+# v1 note: build commands (`graphify update .`) resolve the OUTPUT dir from
+# this file's default_profile / GRAPHIFY_PROFILE, but corpus exclusion for
+# those builds is enforced by .graphifyignore (always read at scan time);
+# the exclude list below documents the same intent and feeds profile-aware
+# paths (the upstream extract path and future scan wiring).
+
+default_profile = "product"
+
+# Distinguish packages/gateway from packages/bridge (etc.) in the
+# cross-package-edges fitness metric.
+package_roots = ["packages", "apps", "engines/hermes_kernel"]
+
+[profiles.product]
+out = "graphify-product"
+description = "First-party TorqClaw: packages/*, apps/console, mcp_wrapper"
+exclude = ["engines/hermes_kernel/vendor/"]
+directed = true
+
+[profiles.product.fitness]
+# The product graph exists to exclude vendor noise - hold it to that.
+max_vendor_share_low = 0.05
+max_vendor_share_fail = 0.20
+min_cross_package_edges = 3
+
+[profiles.vendor]
+out = "graphify-vendor"
+kind = "vendor"   # vendor-dominance FAIL exemption: dominance is its job
+description = "Vendored hermes-agent upstream internals. Opt-in only: build/query with GRAPHIFY_PROFILE=vendor and scan root engines/hermes_kernel/vendor/hermes-agent"
+directed = true
+
+[ownership]
+vendor = [
+  "engines/hermes_kernel/vendor/**",
+  "**/node_modules/**",
+  "**/third_party/**",
+]
+generated = [
+  "**/dist/**",
+  "**/.next/**",
+  "**/__pycache__/**",
+  "**/generated/**",
+  "**/coverage/**",
+  "**/*.min.js",
+]
+test = [
+  "tests/**",
+  "**/*.test.*",
+  "**/*.spec.*",
+  "**/test_*.py",
+]
