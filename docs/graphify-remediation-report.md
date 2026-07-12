@@ -29,11 +29,11 @@ vendor investigation.
 
 | Metric | product | vendor |
 |---|---|---|
-| Nodes | 1,770 | 122,521 |
-| Edges | 2,248 | 222,219 |
+| Nodes | 1,777 | 122,521 |
+| Edges | 2,254 | 222,219 |
 | Vendor share | **0.0%** | 100% (`kind = "vendor"`, exempt) |
 | Cross-package edges | 228 | n/a |
-| Communities (label coverage) | 154 (100%) | 4,290 |
+| Communities (label coverage) | 147 (100%) | 4,290 |
 | Graph size | 1.4 MB | ~119 MB |
 | Fitness | **PASS under `--strict`** | **PASS** (kind exemption) |
 | Smoke | ALL PASSED | ALL PASSED |
@@ -76,7 +76,7 @@ before the vendor build in a fresh clone/worktree.
    fitness reports it as a note (never verdict-affecting). Skill flows
    re-resolve the interpreter on demand.
 4. **Clean-clone reproducibility hold.** Validated against the local audited
-   editable install (import resolves to `E:\graphify` @ `c6e89a2`). The
+   editable install (import resolves to `E:\graphify` @ `d48c5c6`). The
    draft PR stays blocked until PR #1 merges, the final merge SHA is
    recorded, graphify is installed from that exact commit
    (`pip install git+https://github.com/pilotwaffle/Torq-graphify@<merge-sha>`),
