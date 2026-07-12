@@ -5,7 +5,7 @@
 // tests/receipts-panel.test.tsx (test 2, the structural zero-button
 // assertion) — do not duplicate that half here.
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, within, act } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import type { GatewayEvent } from '@torqclaw/contracts';
 
@@ -331,6 +331,143 @@ describe('TorqTerminal live affordances (TCLAW-QA-2 — mounts the REAL TorqTerm
       // restore — do not leak the clipboard stub into other tests.
       // @ts-expect-error test cleanup of a test-local stub
       delete (navigator as any).clipboard;
+    });
+  });
+
+  describe('D2. TCLAW-5B-2 terminal "copy safe export" chip [G1R RC-5 proven — see TorqTerminal.tsx top-of-file comment]', () => {
+    function errorWithChip(requestId = 'r1'): GatewayEvent {
+      return ev({
+        type: 'ERROR',
+        requestId,
+        message: 'Task failed',
+        metadata: { recovery: ['RETRY', 'COPY_DIAGNOSTIC'], prompt: 'do it again' },
+      });
+    }
+    function safeExportFrame(taskId: string, meta: Record<string, unknown>): GatewayEvent {
+      return ev({ type: 'SYSTEM', message: 'Safe export', metadata: { safeExportView: true, taskId, ...meta } });
+    }
+    const fixtureSafeExport = {
+      torqclawSafeExport: true as const,
+      exportVersion: 1,
+      redactorVersion: 1,
+      projectionVersion: 1,
+      taskId: 'r1',
+      sessionId: 's',
+      sourceChannel: 'cli',
+      selectedTier: 'OLLAMA_LOCAL',
+      state: 'terminal',
+      resultState: 'failed',
+      cancelled: false,
+      blockedOn: null,
+      route: { tier: 'OLLAMA_LOCAL', ruleId: 'LOCAL_INTENT', score: 10, overridable: false, safetyLock: null, profile: null, reason: null, humanReason: null, blockedAlternatives: null, routerReason: null },
+      cost: { budgetLimit: null, budgetSource: null, costUsd: 0, costSource: null, costEnforceable: null },
+      execution: { elapsedMs: 10, iterations: 1, memoryUsed: false, contextChars: null },
+      toolsCalled: [],
+      approvals: [],
+      evidence: { startSeq: 1, endSeq: 2 },
+      errorClass: null,
+      error: 'boom',
+      redactionReport: { redactorVersion: 1, patternsHit: { 'api-key': 1 }, fieldsOmitted: ['taskPrompt', 'assembledContext', 'events', 'toolCallArgs', 'results', 'approvalArgs'], notice: 'Known secret shapes removed. This export does not and cannot claim to contain no secrets.' },
+    };
+
+    it('T-L3 [op#20]: click #1 dispatches exact GET_SAFE_EXPORT; click #2 (after the frame lands) writes EXACTLY renderSafeExportMarkdown(snapshot)', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.assign(navigator, { clipboard: { writeText } });
+
+      stream.events = [errorWithChip('r1')];
+      render(<TorqTerminal />);
+
+      // Listed BEFORE the raw chip (design §4.2 — preferred action first).
+      const initialChip = screen.getByText('copy safe export');
+      const rawChip = screen.getByText('copy raw diagnostic (local, unredacted)');
+      const position = initialChip.compareDocumentPosition(rawChip);
+      expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+      fireEvent.click(initialChip);
+      expect(stream.sendCommand).toHaveBeenCalledWith({ action: 'GET_SAFE_EXPORT', taskId: 'r1' });
+      // Nothing written yet — click #1 only fetches.
+      expect(writeText).toHaveBeenCalledTimes(0);
+
+      // Frame lands (push into stream.events + rerender).
+      stream.events = [errorWithChip('r1'), safeExportFrame('r1', { safeExport: fixtureSafeExport })];
+      const { rerender } = render(<TorqTerminal />);
+      rerender(<TorqTerminal />);
+
+      const readyChip = screen.getByText('copy safe export (ready)');
+      await act(async () => {
+        fireEvent.click(readyChip);
+      });
+
+      const { renderSafeExportMarkdown } = await import('../apps/console/src/components/friendly.js');
+      expect(writeText).toHaveBeenCalledWith(renderSafeExportMarkdown(fixtureSafeExport as any));
+      expect(writeText).toHaveBeenCalledTimes(1);
+
+      // @ts-expect-error test cleanup of a test-local stub
+      delete (navigator as any).clipboard;
+    });
+
+    it('T-L3 inert failure texts, not buttons: not-found/too_large/failed', () => {
+      // not-found
+      {
+        stream.events = [errorWithChip('r1'), safeExportFrame('r1', { safeExport: null })];
+        const { unmount } = render(<TorqTerminal />);
+        const text = screen.getByText('no receipt for this task');
+        expect(text.tagName).not.toBe('BUTTON');
+        unmount();
+        cleanup();
+      }
+      // too_large
+      {
+        stream.events = [errorWithChip('r1'), safeExportFrame('r1', { safeExport: null, exportOmitted: { reason: 'too_large' } })];
+        const { unmount } = render(<TorqTerminal />);
+        const text = screen.getByText('export exceeds the frame size limit — not available');
+        expect(text.tagName).not.toBe('BUTTON');
+        unmount();
+        cleanup();
+      }
+      // export_failed
+      {
+        stream.events = [errorWithChip('r1'), safeExportFrame('r1', { safeExport: null, error: 'export_failed' })];
+        render(<TorqTerminal />);
+        const text = screen.getByText('safe export failed (nothing copied)');
+        expect(text.tagName).not.toBe('BUTTON');
+      }
+    });
+
+    it('T-L3 retryable sendFailed/timeout states', () => {
+      // sendFailed
+      {
+        stream.events = [errorWithChip('r1')];
+        stream.sendCommand.mockReturnValueOnce(false);
+        render(<TorqTerminal />);
+        fireEvent.click(screen.getByText('copy safe export'));
+        expect(screen.getByText("couldn't request — try again")).toBeInTheDocument();
+        cleanup();
+        stream.sendCommand.mockClear();
+        stream.sendCommand.mockImplementation(() => true);
+      }
+      // timeout
+      {
+        vi.useFakeTimers();
+        stream.events = [errorWithChip('r1')];
+        render(<TorqTerminal />);
+        fireEvent.click(screen.getByText('copy safe export'));
+        act(() => {
+          vi.advanceTimersByTime(5000);
+        });
+        expect(screen.getByText('no response — try again')).toBeInTheDocument();
+        vi.useRealTimers();
+      }
+    });
+
+    it('T-L4 [op#21] payload purity: existing APPROVE_TOOL dispatch shape untouched by the new wiring', () => {
+      stream.events = [
+        ev({ type: 'PENDING_APPROVAL', requestId: 'r1', metadata: { approvalId: 'appr-1', toolName: 'filesystem__write_file', args: { path: '/x' } } }),
+      ];
+      render(<TorqTerminal />);
+      fireEvent.click(screen.getByText('Allow once'));
+      expect(stream.sendCommand).toHaveBeenCalledWith({ action: 'APPROVE_TOOL', approvalId: 'appr-1', decision: 'APPROVE' });
+      expect(stream.sendCommand).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -3,10 +3,33 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GatewayEvent, ClientCommand, RouterDiagnostics } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
-import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, formatGateFacts } from './friendly';
+import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, type SafeExportFrameLike } from './friendly';
 import ReceiptsPanel from './ReceiptsPanel';
 import CostPanel from './CostPanel';
 import ApprovalHistoryPanel from './ApprovalHistoryPanel';
+
+// TCLAW-5B-2 [G1R RC-5 proof, commit 2]: the terminal "copy safe export" chip
+// requires that an ERROR event's requestId equals the taskId GET_SAFE_EXPORT
+// looks up (getReceipt(taskId) -> run_receipts.task_id). Verified read-only
+// from packages/gateway/src/{events,dispatch,receipts}.ts:
+//   1. dispatch.ts's `emit` is `makeEmitter(req.sessionId, req.id, diag.tier)`
+//      (dispatch.ts:169), used for every ERROR emission on this task's path.
+//   2. events.ts:84-91 `makeEmitter(sessionId, requestId, tier)` returns an
+//      emitter that stamps `requestId` (== req.id) directly onto EVERY
+//      published GatewayEvent, including ERROR — so an ERROR event's
+//      `.requestId` field IS `req.id`.
+//   3. dispatch.ts:185 `taskStore.create(effectiveReq, diag)` runs before
+//      execution; events.ts:97-101 `taskStore.create` does
+//      `INSERT INTO tasks (request_id, ...) VALUES (req.id, ...)` — so
+//      `tasks.request_id === req.id`.
+//   4. receipts.ts:380-382 (the stale-task backfill query) joins
+//      `run_receipts r ON r.task_id = t.request_id` — i.e. `run_receipts.
+//      task_id` IS PROJECTED FROM `tasks.request_id`, never a different id.
+//   5. receipts.ts:468/474 `getReceipt(taskId)` is
+//      `SELECT * FROM run_receipts WHERE task_id = ?` — the same column.
+// Chain: ERROR.requestId === req.id === tasks.request_id === run_receipts.
+// task_id === what getReceipt(taskId)/GET_SAFE_EXPORT key on. PROVEN — the
+// chip ships.
 
 const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL ?? 'ws://localhost:18790/ws';
 const GATEWAY_TOKEN = process.env.NEXT_PUBLIC_GATEWAY_TOKEN ?? '';
@@ -250,6 +273,81 @@ export default function TorqTerminal() {
     navigator.clipboard?.writeText(block).catch(() => {});
   };
 
+  // TCLAW-5B-2: terminal "copy safe export" chip — two-click fetch-then-copy
+  // per-taskId state map (design §4.2). Uses the SAME shared
+  // selectSafeExportViewByTaskId selector as ReceiptsPanel — sound across
+  // surfaces because every GET_SAFE_EXPORT request for a taskId is
+  // parameter-identical (see friendly.ts's selector doc comment).
+  type SafeExportChipPhase = 'initial' | 'pending' | 'ready' | 'sendFailed' | 'timeout';
+  const safeExportViewByTaskId = useMemo(() => selectSafeExportViewByTaskId(events), [events]);
+  const [safeExportChipPhase, setSafeExportChipPhase] = useState<Record<string, SafeExportChipPhase>>({});
+  const [safeExportChipCopied, setSafeExportChipCopied] = useState<Record<string, boolean>>({});
+  const safeExportChipTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const safeExportChipCopiedTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  useEffect(() => {
+    // Any snapshot landing for a taskId resolves that chip's phase to
+    // 'ready' and clears its pending timer (2D-2 rule: frame arrival clears
+    // the timer).
+    for (const taskId of Object.keys(safeExportViewByTaskId)) {
+      if (safeExportChipTimers.current[taskId]) {
+        clearTimeout(safeExportChipTimers.current[taskId]);
+        delete safeExportChipTimers.current[taskId];
+      }
+    }
+    if (Object.keys(safeExportViewByTaskId).length > 0) {
+      setSafeExportChipPhase((prev) => {
+        const next = { ...prev };
+        for (const taskId of Object.keys(safeExportViewByTaskId)) {
+          if (next[taskId] === 'pending' || next[taskId] === undefined) next[taskId] = 'ready';
+        }
+        return next;
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [safeExportViewByTaskId]);
+
+  // Clear all timers on unmount.
+  useEffect(() => {
+    return () => {
+      for (const t of Object.values(safeExportChipTimers.current)) clearTimeout(t);
+      for (const t of Object.values(safeExportChipCopiedTimers.current)) clearTimeout(t);
+    };
+  }, []);
+
+  const requestSafeExportChip = (taskId: string) => {
+    if (safeExportChipTimers.current[taskId]) {
+      clearTimeout(safeExportChipTimers.current[taskId]);
+      delete safeExportChipTimers.current[taskId];
+    }
+    const sent = sendCommand({ action: 'GET_SAFE_EXPORT', taskId });
+    if (!sent) {
+      setSafeExportChipPhase((prev) => ({ ...prev, [taskId]: 'sendFailed' })); // 2D-2 rule: never arms the timer
+      return;
+    }
+    setSafeExportChipPhase((prev) => ({ ...prev, [taskId]: 'pending' }));
+    safeExportChipTimers.current[taskId] = setTimeout(() => {
+      setSafeExportChipPhase((prev) => (prev[taskId] === 'pending' ? { ...prev, [taskId]: 'timeout' } : prev));
+    }, 5000);
+  };
+
+  // Click #2: synchronous writeText of the ALREADY-SNAPSHOTTED Markdown —
+  // never re-fetched, never re-assembled (cardinal rule).
+  const copySafeExportChip = (taskId: string) => {
+    const frame = safeExportViewByTaskId[taskId];
+    if (!frame?.safeExport) return;
+    const text = renderSafeExportMarkdown(frame.safeExport);
+    const p = navigator.clipboard?.writeText(text);
+    if (!p) return; // clipboard API absent — honest no-op, no fabricated flash
+    p.then(() => {
+      if (safeExportChipCopiedTimers.current[taskId]) clearTimeout(safeExportChipCopiedTimers.current[taskId]);
+      setSafeExportChipCopied((prev) => ({ ...prev, [taskId]: true }));
+      safeExportChipCopiedTimers.current[taskId] = setTimeout(() => {
+        setSafeExportChipCopied((prev) => ({ ...prev, [taskId]: false }));
+      }, 2000);
+    }).catch(() => {});
+  };
+
   const stop = () => {
     if (!activeRequestId) {
       // No tracked task to cancel — the run is between requests or already
@@ -376,6 +474,11 @@ export default function TorqTerminal() {
             onResendCloud={resendCloud}
             onRetry={retry}
             onCopyDiagnostic={copyDiagnostic}
+            safeExportFrame={ev.requestId ? (safeExportViewByTaskId[ev.requestId] ?? null) : null}
+            safeExportChipPhase={ev.requestId ? (safeExportChipPhase[ev.requestId] ?? 'initial') : 'initial'}
+            safeExportChipCopied={ev.requestId ? !!safeExportChipCopied[ev.requestId] : false}
+            onGetSafeExportChip={requestSafeExportChip}
+            onCopySafeExportChip={copySafeExportChip}
           />
         ))}
         {busy && (
@@ -625,6 +728,7 @@ function Elapsed() {
 function EventRow({
   event, decided, toolsByRequest, draftsByQueue, onDecideSkill, onGetDraft,
   onDecideTool, onResendLocal, onResendCloud, onRetry, onCopyDiagnostic,
+  safeExportFrame, safeExportChipPhase, safeExportChipCopied, onGetSafeExportChip, onCopySafeExportChip,
 }: {
   event: GatewayEvent;
   decided: Record<string, 'APPROVE' | 'REJECT'>;
@@ -637,6 +741,13 @@ function EventRow({
   onResendCloud: (prompt: string) => void;
   onRetry: (prompt: string, suggestedBudget?: number) => void;
   onCopyDiagnostic: (errEvent: GatewayEvent) => void;
+  // TCLAW-5B-2: the terminal safe-export chip's narrow props — plain data +
+  // two per-taskId callbacks (fetch, copy), never raw sendCommand.
+  safeExportFrame: SafeExportFrameLike | null;
+  safeExportChipPhase: 'initial' | 'pending' | 'ready' | 'sendFailed' | 'timeout';
+  safeExportChipCopied: boolean;
+  onGetSafeExportChip: (taskId: string) => void;
+  onCopySafeExportChip: (taskId: string) => void;
 }) {
   const tier = tierLabel(event.tier);
   const meta = (event.metadata ?? {}) as Record<string, any>;
@@ -761,6 +872,23 @@ function EventRow({
                 run on cloud (faster)
               </button>
             )}
+            {/* TCLAW-5B-2 [G1R RC-5 proven, see top-of-file comment]: the
+                "copy safe export" chip — listed BEFORE the raw chip
+                (preferred action first, design §4.2). Requires
+                event.requestId (== the taskId GET_SAFE_EXPORT looks up);
+                when absent, only the raw chip renders. Copies Markdown
+                only; textual distinction from the raw chip, no chromatic
+                safety-coding. */}
+            {recovery.includes('COPY_DIAGNOSTIC') && event.requestId && (
+              <SafeExportChip
+                taskId={event.requestId}
+                frame={safeExportFrame}
+                phase={safeExportChipPhase}
+                copied={safeExportChipCopied}
+                onGetSafeExportChip={onGetSafeExportChip}
+                onCopySafeExportChip={onCopySafeExportChip}
+              />
+            )}
             {recovery.includes('COPY_DIAGNOSTIC') && (
               <button
                 onClick={() => onCopyDiagnostic(event)}
@@ -777,6 +905,101 @@ function EventRow({
         )}
       </div>
     </article>
+  );
+}
+
+/**
+ * TCLAW-5B-2: the terminal "copy safe export" chip (design §4.2). Two-click
+ * fetch-then-copy: click #1 requests the export (narrow callback only —
+ * never raw sendCommand reachable from this component); click #2 is a
+ * SYNCHRONOUS writeText of the already-snapshotted Markdown (never
+ * re-fetched, never client-reassembled — same cardinal-rule discipline as
+ * ReceiptsPanel's copy buttons). States mirror the panel's failure/edge
+ * copy exactly, but inert (no button) for not-found/too_large/failed —
+ * only initial/pending/ready/sendFailed/timeout are interactive.
+ */
+function SafeExportChip({
+  taskId,
+  frame,
+  phase,
+  copied,
+  onGetSafeExportChip,
+  onCopySafeExportChip,
+}: {
+  taskId: string;
+  frame: SafeExportFrameLike | null;
+  phase: 'initial' | 'pending' | 'ready' | 'sendFailed' | 'timeout';
+  copied: boolean;
+  onGetSafeExportChip: (taskId: string) => void;
+  onCopySafeExportChip: (taskId: string) => void;
+}) {
+  // Frame-terminal states are read from the snapshot, not from phase (mirrors
+  // the panel's discipline) — a frame arriving flips phase to 'ready' via the
+  // shared effect, and the FRAME's own shape decides which of the five
+  // ready-adjacent renders below applies.
+  if (frame && !frame.error && frame.exportOmitted) {
+    return <span className="text-[10px] text-neutral-600">export exceeds the frame size limit — not available</span>;
+  }
+  if (frame && frame.error) {
+    return <span className="text-[10px] text-neutral-600">safe export failed (nothing copied)</span>;
+  }
+  if (frame && !frame.error && !frame.exportOmitted && !frame.safeExport) {
+    return <span className="text-[10px] text-neutral-600">no receipt for this task</span>;
+  }
+  if (frame && frame.safeExport) {
+    const report = frame.safeExport.redactionReport;
+    const hitEntries = Object.entries(report?.patternsHit ?? {});
+    const summary =
+      hitEntries.length > 0
+        ? `removed: ${hitEntries.map(([label, n]) => `${label} ×${n}`).join(', ')} · prompt, context, events, tool args never included`
+        : 'no known secret shapes found (known shapes only) · prompt, context, events, tool args never included';
+    return (
+      <span className="flex items-center gap-2">
+        <button
+          onClick={() => onCopySafeExportChip(taskId)}
+          title="copies the redacted export as Markdown, including its redaction report"
+          className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-neutral-500"
+        >
+          {copied ? 'copied' : 'copy safe export (ready)'}
+        </button>
+        <span className="text-[10px] text-neutral-600">{summary}</span>
+      </span>
+    );
+  }
+  if (phase === 'pending') {
+    return (
+      <button disabled className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-500 opacity-60">
+        preparing…
+      </button>
+    );
+  }
+  if (phase === 'sendFailed') {
+    return (
+      <button
+        onClick={() => onGetSafeExportChip(taskId)}
+        className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-neutral-500"
+      >
+        couldn&apos;t request — try again
+      </button>
+    );
+  }
+  if (phase === 'timeout') {
+    return (
+      <button
+        onClick={() => onGetSafeExportChip(taskId)}
+        className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-neutral-500"
+      >
+        no response — try again
+      </button>
+    );
+  }
+  return (
+    <button
+      onClick={() => onGetSafeExportChip(taskId)}
+      className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-neutral-500"
+    >
+      copy safe export
+    </button>
   );
 }
 
