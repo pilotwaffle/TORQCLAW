@@ -41,6 +41,10 @@ const getReceipt: ClientCommand = {
 };
 const getCostSummary: ClientCommand = { action: 'GET_COST_SUMMARY', recentLimit: 20 };
 const listApprovals: ClientCommand = { action: 'LIST_APPROVALS', limit: 20 };
+const getSafeExport: ClientCommand = {
+  action: 'GET_SAFE_EXPORT',
+  taskId: '7c1a9e2b-4d3f-4a8c-9b2e-6f5d4c3b2a1f',
+};
 const previewRoute: ClientCommand = {
   action: 'PREVIEW_ROUTE',
   previewOf: 'x',
@@ -67,6 +71,7 @@ describe('authorize() — role-based command authorization', () => {
       ['GET_COST_SUMMARY', getCostSummary],
       ['PREVIEW_ROUTE', previewRoute],
       ['LIST_APPROVALS', listApprovals],
+      ['GET_SAFE_EXPORT', getSafeExport],
     ])('%s -> deny', (_name, cmd) => {
       const d = authorize('channel', cmd, ctx);
       expect(d.ok).toBe(false);
@@ -116,6 +121,7 @@ describe('authorize() — role-based command authorization', () => {
       ['GET_COST_SUMMARY', getCostSummary],
       ['PREVIEW_ROUTE', previewRoute],
       ['LIST_APPROVALS', listApprovals],
+      ['GET_SAFE_EXPORT', getSafeExport],
     ])('%s -> allow', (_name, cmd) => {
       expect(authorize('operator', cmd, ctx)).toEqual({ ok: true });
     });
@@ -147,6 +153,7 @@ describe('authorize() — role-based command authorization', () => {
       ['GET_COST_SUMMARY', getCostSummary],
       ['PREVIEW_ROUTE', previewRoute],
       ['LIST_APPROVALS', listApprovals],
+      ['GET_SAFE_EXPORT', getSafeExport],
     ])('%s -> deny', (_name, cmd) => {
       const d = authorize('node', cmd, ctx);
       expect(d.ok).toBe(false);

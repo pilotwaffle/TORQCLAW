@@ -77,6 +77,23 @@ export function checkResumeRole(
  *              must be too; approval telemetry reveals gated tool names and
  *              decision timing across the session. Explicit deny so the
  *              decision is legible and pinned by a test.)
+ *              (TCLAW-5B-1: GET_SAFE_EXPORT is operator-only — GET_RECEIPT is
+ *              operator-only and the export is derived from the exact same
+ *              row, so a channel grant would be a side door around that
+ *              decision. This is a STRONGER reason than most other explicit
+ *              denies here: this command's whole design intent is to produce
+ *              an artifact that may LEAVE THE MACHINE (pasted into a support
+ *              channel, an issue, a chat), whereas GET_RECEIPT stays in the
+ *              same trust domain (in-console only). "Redacted" must never be
+ *              read as "safe for a lower trust tier" — the redactor only
+ *              removes KNOWN secret shapes, never guarantees the absence of
+ *              secrets, so widening who can trigger an export would widen who
+ *              can accidentally exfiltrate whatever the redactor misses.
+ *              [G1R SC-1] Note: the export payload includes sessionId as a
+ *              labeled support correlator by explicit decision — this is
+ *              unrelated to the authz posture above (which governs who may
+ *              TRIGGER the export, not what a triggered export contains).
+ *              Explicit deny so the decision is legible and pinned by a test.)
  *   node     — every action denied.
  */
 export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): AuthzDecision {
@@ -102,6 +119,7 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     case 'GET_COST_SUMMARY':
     case 'PREVIEW_ROUTE':
     case 'LIST_APPROVALS':
+    case 'GET_SAFE_EXPORT':
       return DENY_NOT_PERMITTED;
     default:
       // Default deny for any future/unmapped action on a non-operator role.
