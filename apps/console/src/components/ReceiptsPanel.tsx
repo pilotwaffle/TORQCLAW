@@ -19,7 +19,7 @@
 // useState the moment their frame appears; every render reads from that
 // state, never from a useMemo computed directly over `events`.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ClientCommand, GatewayEvent } from '@torqclaw/contracts';
 import {
   field,
@@ -30,9 +30,19 @@ import {
   formatBlockedAlternatives,
   formatProfile,
   toReplayEventRows,
+  selectSafeExportViewByTaskId,
+  renderSafeExportMarkdown,
   type ReplayEventRowData,
   type ReceiptLike,
+  type SafeExportFrameLike,
 } from './friendly';
+
+// TCLAW-5B-2: bounded-pending/refresh-timeout register (mirrors
+// ApprovalHistoryPanel.tsx's TIMEOUT_MS/phase discipline exactly — same
+// constant value, same 2D-2 timer rules: sendFailed never arms the timer,
+// frame arrival clears it, timer cleared on unmount/row-switch).
+const SAFE_EXPORT_TIMEOUT_MS = 5000;
+type SafeExportPhase = 'idle' | 'pending' | 'ready' | 'sendFailed' | 'timeout';
 
 interface ReceiptSummary {
   taskId: string;
@@ -129,11 +139,80 @@ export default function ReceiptsPanel({
     if (found) setOpenReceipt(found);
   }, [selectedTaskId, receiptViewByTaskId]);
 
+  // ── TCLAW-5B-2: Safe-export collection + snapshot + phase machine ──────
+  // Keyed collection mirroring receiptViewByTaskId verbatim (see
+  // friendly.ts's selectSafeExportViewByTaskId doc comment for the full
+  // soundness argument). SNAPSHOT-ON-PRESENT (null init = never received —
+  // NOT this file's []-init conflation elsewhere; ApprovalHistoryPanel
+  // discipline), keyed per-taskId so a frame for task B never renders under
+  // task A.
+  const safeExportViewByTaskId = useMemo(() => selectSafeExportViewByTaskId(events), [events]);
+  const [safeExportByTaskId, setSafeExportByTaskId] = useState<Record<string, SafeExportFrameLike>>({});
+  useEffect(() => {
+    if (!selectedTaskId) return;
+    const found = safeExportViewByTaskId[selectedTaskId];
+    if (found) {
+      setSafeExportByTaskId((prev) => ({ ...prev, [selectedTaskId]: found }));
+    }
+  }, [selectedTaskId, safeExportViewByTaskId]);
+
+  const [safeExportPhase, setSafeExportPhase] = useState<SafeExportPhase>('idle');
+  const safeExportTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // [G1R SC-1] true while a FRESH request is in flight over an already-
+  // rendered (possibly stale-but-valid) snapshot — e.g. a still-in-ring
+  // frame from an earlier click satisfies the new click instantly (pending
+  // resolves to ready in one render via safeExportByTaskId already having an
+  // entry), but the fresh GET_SAFE_EXPORT is still sent and its newer frame
+  // overwrites when it lands. This never lies about the snapshot's
+  // freshness (approvals-freshness only) — it only signals a fetch is
+  // outstanding.
+  const [safeExportRefreshing, setSafeExportRefreshing] = useState(false);
+
+  const requestSafeExport = (taskId: string) => {
+    if (safeExportTimer.current) { clearTimeout(safeExportTimer.current); safeExportTimer.current = null; }
+    const alreadyHasSnapshot = !!safeExportByTaskId[taskId];
+    const sent = sendCommand({ action: 'GET_SAFE_EXPORT', taskId });
+    if (!sent) {
+      setSafeExportPhase('sendFailed'); // 2D-2 rule: never arms the timer
+      return;
+    }
+    setSafeExportRefreshing(alreadyHasSnapshot);
+    setSafeExportPhase('pending');
+    safeExportTimer.current = setTimeout(() => {
+      setSafeExportPhase((p) => (p === 'pending' ? 'timeout' : p));
+    }, SAFE_EXPORT_TIMEOUT_MS);
+  };
+
+  // Any snapshot landing for the selected task clears the pending timer,
+  // resolves to ready, and clears the refreshing indicator.
+  useEffect(() => {
+    if (!selectedTaskId) return;
+    const found = safeExportViewByTaskId[selectedTaskId];
+    if (found) {
+      if (safeExportTimer.current) { clearTimeout(safeExportTimer.current); safeExportTimer.current = null; }
+      setSafeExportPhase('ready');
+      setSafeExportRefreshing(false);
+    }
+  }, [selectedTaskId, safeExportViewByTaskId]);
+
+  // Clear the timer on unmount.
+  useEffect(() => {
+    return () => {
+      if (safeExportTimer.current) clearTimeout(safeExportTimer.current);
+    };
+  }, []);
+
   const selectRow = (taskId: string) => {
     setSelectedTaskId(taskId);
     setOpenReceipt(null); // clear stale detail while the new one loads
     setTab('detail');
     sendCommand({ action: 'GET_RECEIPT', taskId, includeEvents: true });
+    // Row switch clears the safe-export snapshot + resets phase to idle
+    // (G1R invariant 5 / spec §1.4) — a still-fetching or previously-ready
+    // safe export for the prior task must never bleed into the new row.
+    if (safeExportTimer.current) { clearTimeout(safeExportTimer.current); safeExportTimer.current = null; }
+    setSafeExportPhase('idle');
+    setSafeExportRefreshing(false);
   };
 
   return (
@@ -199,7 +278,13 @@ export default function ReceiptsPanel({
               </button>
             </div>
             {tab === 'detail' ? (
-              <ReceiptDetail openReceipt={openReceipt} />
+              <ReceiptDetail
+                openReceipt={openReceipt}
+                safeExportFrame={selectedTaskId ? (safeExportByTaskId[selectedTaskId] ?? null) : null}
+                safeExportPhase={safeExportPhase}
+                safeExportRefreshing={safeExportRefreshing}
+                onGetSafeExport={() => selectedTaskId && requestSafeExport(selectedTaskId)}
+              />
             ) : (
               <ReceiptReplay openReceipt={openReceipt} />
             )}
@@ -213,7 +298,23 @@ export default function ReceiptsPanel({
 /** Read-only detail render — identity, state, cost, execution stats, tools,
  *  approvals (as facts, never actionable), route diagnostics, evidence, error.
  *  Every value goes through field()/the format helpers — no fabrication. */
-function ReceiptDetail({ openReceipt }: { openReceipt: OpenReceipt }) {
+function ReceiptDetail({
+  openReceipt,
+  safeExportFrame,
+  safeExportPhase,
+  safeExportRefreshing,
+  onGetSafeExport,
+}: {
+  openReceipt: OpenReceipt;
+  safeExportFrame: SafeExportFrameLike | null;
+  safeExportPhase: SafeExportPhase;
+  safeExportRefreshing: boolean;
+  // NARROW callback — never raw sendCommand (ReplayEventRow boundary
+  // discipline, :343-361 / spec invariant 16). ReceiptDetail cannot dispatch
+  // anything beyond "prepare/retry the safe export for the currently open
+  // task", which is exactly what this one callback expresses.
+  onGetSafeExport: () => void;
+}) {
   const receipt = openReceipt.receipt as ReceiptLike;
   const state = formatReceiptState(receipt);
   const costRows = formatCostField(receipt);
@@ -308,6 +409,223 @@ function ReceiptDetail({ openReceipt }: { openReceipt: OpenReceipt }) {
           ].filter((r): r is { label: string; value: string } => r !== null)}
         />
       </Section>
+
+      <SafeExportSection
+        frame={safeExportFrame}
+        phase={safeExportPhase}
+        refreshing={safeExportRefreshing}
+        onGetSafeExport={onGetSafeExport}
+      />
+    </div>
+  );
+}
+
+/**
+ * TCLAW-5B-2: Safe-export section — LAST section of ReceiptDetail (spec
+ * §1.1: every section above is the receipt's facts; this one is an action on
+ * those facts, and being last means an operator who reaches the copy
+ * buttons has scrolled past the whole receipt).
+ *
+ * THE CARDINAL RULE lives here: copy JSON writes
+ * JSON.stringify(frame.safeExport, null, 2) where frame.safeExport is the
+ * server frame's metadata.safeExport object BY REFERENCE — never a
+ * re-assembled/reshaped object. copy Markdown writes
+ * renderSafeExportMarkdown(frame.safeExport). Neither ever reads
+ * openReceipt/events/anything else in this file's scope, even though the raw
+ * receipt sits right next to this component (the R1 hazard the risk
+ * register calls out by name).
+ */
+function SafeExportSection({
+  frame,
+  phase,
+  refreshing,
+  onGetSafeExport,
+}: {
+  frame: SafeExportFrameLike | null;
+  phase: SafeExportPhase;
+  refreshing: boolean;
+  onGetSafeExport: () => void;
+}) {
+  const [copied, setCopied] = useState<'json' | 'markdown' | null>(null);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    };
+  }, []);
+
+  const flashCopied = (which: 'json' | 'markdown') => {
+    if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    setCopied(which);
+    copiedTimer.current = setTimeout(() => setCopied(null), 2000);
+  };
+
+  // Clipboard writes are synchronous-from-state inside the click handler —
+  // no async gap, no gesture problem (spec invariant 9/10). clipboard
+  // absent/rejected -> honest failure, NEVER a fabricated "copied" flash.
+  const copyJson = () => {
+    const safeExport = frame?.safeExport;
+    if (!safeExport) return;
+    const text = JSON.stringify(safeExport, null, 2);
+    const p = navigator.clipboard?.writeText(text);
+    if (!p) return; // clipboard API absent — honest no-op, no fabricated flash
+    p.then(() => flashCopied('json')).catch(() => {});
+  };
+  const copyMarkdown = () => {
+    const safeExport = frame?.safeExport;
+    if (!safeExport) return;
+    const text = renderSafeExportMarkdown(safeExport);
+    const p = navigator.clipboard?.writeText(text);
+    if (!p) return;
+    p.then(() => flashCopied('markdown')).catch(() => {});
+  };
+
+  return (
+    <Section title="Safe export">
+      <p className="mb-2 text-[10px] text-neutral-600">
+        built on the gateway from the receipt only — prompt, context, event replay, and tool arguments are never included
+      </p>
+
+      {/* [G1R SC-1] `refreshing` means a FRESH request is in flight over an
+          already-rendered snapshot (a still-in-ring frame satisfied an
+          earlier click instantly; phase may be 'pending' again while the
+          newer request is outstanding) — render the EXISTING ready content
+          plus a "refreshing…" note rather than blanking out to a spinner
+          button. This never lies about freshness (approvals-freshness only)
+          and never hides a report the operator already has. */}
+      {phase === 'idle' && !frame && (
+        <button
+          onClick={onGetSafeExport}
+          className="rounded border border-neutral-700 px-2 py-0.5 text-[11px] text-neutral-300 transition-colors hover:border-neutral-500"
+        >
+          prepare safe export
+        </button>
+      )}
+
+      {phase === 'pending' && !frame && (
+        <button
+          disabled
+          className="rounded border border-neutral-700 px-2 py-0.5 text-[11px] text-neutral-500 opacity-60"
+        >
+          preparing…
+        </button>
+      )}
+
+      {phase === 'sendFailed' && !frame && (
+        <p className="text-neutral-500">
+          couldn&apos;t request the safe export — connection may be reconnecting;{' '}
+          <button type="button" onClick={onGetSafeExport} className="underline hover:text-neutral-300">
+            try again
+          </button>
+        </p>
+      )}
+
+      {phase === 'timeout' && !frame && (
+        <p className="text-neutral-500">
+          No response — <button type="button" onClick={onGetSafeExport} className="underline hover:text-neutral-300">try again.</button>
+        </p>
+      )}
+
+      {frame && (
+        <>
+          {/* export_failed frame (error present) — NO raw fallback, no receipt
+              fields, no copy affordance anywhere in this section. */}
+          {frame.error && (
+            <p className="text-[#E24B4A]">
+              safe export failed on the gateway — nothing to copy. This panel never falls back to raw data.{' '}
+              <button type="button" onClick={onGetSafeExport} className="underline hover:text-neutral-300">
+                try again
+              </button>
+            </p>
+          )}
+
+          {/* too_large frame (exportOmitted present, no error) — amber, no
+              truncation offer: a truncated export would be a data lie. */}
+          {!frame.error && frame.exportOmitted && (
+            <p className="text-amber-400">export exceeds the frame size limit — not available</p>
+          )}
+
+          {/* not-found frame — bare safeExport:null, neither error nor
+              exportOmitted present. Oracle-free: says nothing about whether
+              the task exists. */}
+          {!frame.error && !frame.exportOmitted && !frame.safeExport && (
+            <p className="text-neutral-500">No receipt for this task — nothing to export.</p>
+          )}
+
+          {/* Ready frame — the redaction report renders ABOVE the copy
+              buttons (spec §2 / G1R Q4): the operator cannot reach the share
+              affordance without the report being on screen. */}
+          {!frame.error && !frame.exportOmitted && frame.safeExport && (
+            <>
+              {refreshing && (
+                <p className="mb-1 text-[10px] text-neutral-600">refreshing…</p>
+              )}
+              <RedactionReportBlock safeExport={frame.safeExport} />
+              <div className="mt-2 flex gap-2">
+                <button
+                  onClick={copyJson}
+                  className="rounded border border-neutral-700 px-2 py-0.5 text-[11px] text-neutral-300 transition-colors hover:border-neutral-500"
+                >
+                  {copied === 'json' ? 'copied' : 'copy JSON'}
+                </button>
+                <button
+                  onClick={copyMarkdown}
+                  className="rounded border border-neutral-700 px-2 py-0.5 text-[11px] text-neutral-300 transition-colors hover:border-neutral-500"
+                >
+                  {copied === 'markdown' ? 'copied' : 'copy Markdown'}
+                </button>
+                <button
+                  type="button"
+                  onClick={onGetSafeExport}
+                  className="text-[11px] text-neutral-500 underline hover:text-neutral-300"
+                  title="re-request the safe export — a live approval may have changed since this was prepared"
+                >
+                  refresh
+                </button>
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </Section>
+  );
+}
+
+/** The redaction-report display (spec §2): version stamps line, patternsHit
+ *  rows "{n} removed" in payload order, empty-hits honest line, "never
+ *  included" row from fieldsOmitted (joined verbatim), notice footer FROM
+ *  THE PAYLOAD — never hard-coded client-side. No success iconography
+ *  anywhere (no green, no checkmark). */
+function RedactionReportBlock({ safeExport }: { safeExport: NonNullable<SafeExportFrameLike['safeExport']> }) {
+  const report = safeExport.redactionReport;
+  const patternsHit = report?.patternsHit ?? {};
+  const hitEntries = Object.entries(patternsHit);
+  const fieldsOmitted = report?.fieldsOmitted ?? [];
+
+  return (
+    <div className="rounded border border-neutral-800 px-3 py-2">
+      <h4 className="mb-1.5 text-[10px] uppercase text-neutral-500">Redaction report</h4>
+      <p className="mb-1.5 text-[10px] text-neutral-600">
+        export v{safeExport.exportVersion ?? 'not recorded'} · redactor v{safeExport.redactorVersion ?? 'not recorded'} · projection v
+        {safeExport.projectionVersion ?? 'not recorded'}
+      </p>
+      {hitEntries.length > 0 ? (
+        <dl className="space-y-1 text-[12px]">
+          {hitEntries.map(([label, count]) => (
+            <div key={label} className="flex gap-2">
+              <dt className="w-40 shrink-0 text-neutral-500">{label}</dt>
+              <dd className="text-neutral-300">{count} removed</dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <p className="text-neutral-500">no known secret shapes found — known shapes only; this is not a guarantee</p>
+      )}
+      <div className="mt-1.5 flex gap-2 text-[12px]">
+        <span className="w-40 shrink-0 text-neutral-500">never included</span>
+        <span className="text-neutral-300">{fieldsOmitted.join(', ')}</span>
+      </div>
+      <p className="mt-1.5 text-[10px] text-neutral-500">{report?.notice ?? ''}</p>
     </div>
   );
 }

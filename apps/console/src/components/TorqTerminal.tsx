@@ -764,9 +764,10 @@ function EventRow({
             {recovery.includes('COPY_DIAGNOSTIC') && (
               <button
                 onClick={() => onCopyDiagnostic(event)}
+                title="copies requestId, reason, and the last 10 event messages exactly as shown in this terminal — no redaction"
                 className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-neutral-500"
               >
-                copy diagnostic
+                copy raw diagnostic (local, unredacted)
               </button>
             )}
             {typeof meta.sideEffectNote === 'string' && (

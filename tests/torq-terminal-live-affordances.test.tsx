@@ -294,18 +294,37 @@ describe('TorqTerminal live affordances (TCLAW-QA-2 — mounts the REAL TorqTerm
       );
     });
 
-    it('copy diagnostic writes to the clipboard and does NOT dispatch sendCommand (the one inert recovery chip)', async () => {
+    it('T-L1/T-L2 [op#18,19] copy raw diagnostic (local, unredacted): EXACT relabel + tooltip pin, EXACT legacy payload bytes, does NOT dispatch sendCommand (the one inert recovery chip)', async () => {
       const writeText = vi.fn().mockResolvedValue(undefined);
       Object.assign(navigator, { clipboard: { writeText } });
 
-      stream.events = [
-        ev({ type: 'ERROR', requestId: 'r1', metadata: { recovery: ['RETRY', 'RETRY_LOCAL', 'RETRY_CLOUD', 'COPY_DIAGNOSTIC'], prompt: 'do it again', suggestedBudget: 2 } }),
-      ];
+      const errEvent = ev({ type: 'ERROR', requestId: 'r1', message: 'Task failed', metadata: { recovery: ['RETRY', 'RETRY_LOCAL', 'RETRY_CLOUD', 'COPY_DIAGNOSTIC'], prompt: 'do it again', suggestedBudget: 2 } });
+      stream.events = [errEvent];
       render(<TorqTerminal />);
 
-      const copyBtn = screen.getByText('copy diagnostic');
+      // T-L1: EXACT relabel present (the OLD selector 'copy diagnostic' is
+      // deliberately broken by this relabel — that breakage IS the tooth
+      // proving the relabel landed, per the G1R ruling).
+      const copyBtn = screen.getByText('copy raw diagnostic (local, unredacted)');
+      expect(screen.queryByText('copy diagnostic')).not.toBeInTheDocument();
+      expect(copyBtn).toHaveAttribute(
+        'title',
+        'copies requestId, reason, and the last 10 event messages exactly as shown in this terminal — no redaction',
+      );
+
       fireEvent.click(copyBtn);
 
+      // T-L2: EXACT legacy payload bytes, byte-unchanged from copyDiagnostic
+      // (:242-251) — requestId/reason/last-10-events block, built from the
+      // SAME fixture events this test set up.
+      const recent = stream.events.slice(-10).map((e) => `[${e.type}] ${e.message}`);
+      const expectedBlock = [
+        `requestId: ${errEvent.requestId ?? '(none)'}`,
+        `reason: ${errEvent.message}`,
+        '--- last 10 events ---',
+        ...recent,
+      ].join('\n');
+      expect(writeText).toHaveBeenCalledWith(expectedBlock);
       expect(writeText).toHaveBeenCalledTimes(1);
       expect(stream.sendCommand).toHaveBeenCalledTimes(0);
 

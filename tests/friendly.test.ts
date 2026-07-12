@@ -32,8 +32,13 @@ import {
   formatGateFacts,
   formatApprovalTimestamp,
   toApprovalHistoryRows,
+  selectSafeExportViewByTaskId,
+  renderSafeExportMarkdown,
+  escInline,
+  fenceBlock,
   type ReceiptLike,
   type ApprovalSummaryLike,
+  type SafeExportLike,
 } from '../apps/console/src/components/friendly.js';
 
 function ev(partial: Partial<GatewayEvent>): GatewayEvent {
@@ -838,6 +843,9 @@ describe('isPanelSystemFrame / isBusyNeutralEvent (TCLAW-UIFIX-1) — subset-rel
   function approvalListFrame(): GatewayEvent {
     return ev({ type: 'SYSTEM', message: 'Approvals listed', metadata: { approvalList: true, approvals: [] } });
   }
+  function safeExportFrame(): GatewayEvent {
+    return ev({ type: 'SYSTEM', message: 'Safe export', metadata: { safeExportView: true, taskId: 't1', safeExport: null } });
+  }
   function memoryShowFrame(): GatewayEvent {
     return ev({ type: 'SYSTEM', message: 'Memory: 2 episode(s) this session', metadata: { memory: 'SHOW', episodes: [] } });
   }
@@ -859,12 +867,13 @@ describe('isPanelSystemFrame / isBusyNeutralEvent (TCLAW-UIFIX-1) — subset-rel
   ];
 
   describe('isPanelSystemFrame', () => {
-    it('true for each of the 5 publishOnly panel markers', () => {
+    it('true for each of the 6 publishOnly panel markers', () => {
       expect(isPanelSystemFrame(previewFrame())).toBe(true);
       expect(isPanelSystemFrame(receiptListFrame())).toBe(true);
       expect(isPanelSystemFrame(receiptViewFrame())).toBe(true);
       expect(isPanelSystemFrame(costSummaryFrame())).toBe(true);
       expect(isPanelSystemFrame(approvalListFrame())).toBe(true);
+      expect(isPanelSystemFrame(safeExportFrame())).toBe(true);
     });
 
     it('false for memory, Done-receipt, markerless SYSTEM, and non-SYSTEM types', () => {
@@ -880,12 +889,13 @@ describe('isPanelSystemFrame / isBusyNeutralEvent (TCLAW-UIFIX-1) — subset-rel
   });
 
   describe('isBusyNeutralEvent', () => {
-    it('true for EVERY SYSTEM fixture (all 5 panel markers, memory, Done-receipt, markerless, arbitrary-unknown-metadata)', () => {
+    it('true for EVERY SYSTEM fixture (all 6 panel markers, memory, Done-receipt, markerless, arbitrary-unknown-metadata)', () => {
       expect(isBusyNeutralEvent(previewFrame())).toBe(true);
       expect(isBusyNeutralEvent(receiptListFrame())).toBe(true);
       expect(isBusyNeutralEvent(receiptViewFrame())).toBe(true);
       expect(isBusyNeutralEvent(costSummaryFrame())).toBe(true);
       expect(isBusyNeutralEvent(approvalListFrame())).toBe(true);
+      expect(isBusyNeutralEvent(safeExportFrame())).toBe(true);
       expect(isBusyNeutralEvent(memoryShowFrame())).toBe(true);
       expect(isBusyNeutralEvent(memoryForgetFrame())).toBe(true);
       expect(isBusyNeutralEvent(doneReceiptFrame())).toBe(true);
@@ -904,6 +914,7 @@ describe('isPanelSystemFrame / isBusyNeutralEvent (TCLAW-UIFIX-1) — subset-rel
     it('holds across every fixture covering all frame types above', () => {
       const fixtures = [
         previewFrame(), receiptListFrame(), receiptViewFrame(), costSummaryFrame(), approvalListFrame(),
+        safeExportFrame(),
         memoryShowFrame(), memoryForgetFrame(), doneReceiptFrame(), markerlessSystemFrame(),
         arbitrarySystemFrame(),
         ...nonSystemTypes.map((type) => ev({ type })),
@@ -1127,5 +1138,330 @@ describe('formatApprovalTimestamp', () => {
   it('non-matching shape -> verbatim, no suffix', () => {
     expect(formatApprovalTimestamp('2026-01-01T00:00:00.000Z')).toBe('2026-01-01T00:00:00.000Z');
     expect(formatApprovalTimestamp('garbage')).toBe('garbage');
+  });
+});
+
+// ── TCLAW-5B-2: safe-export pure helpers ────────────────────────────────
+
+function safeExportSystemEvent(meta: Record<string, unknown>): GatewayEvent {
+  return ev({ type: 'SYSTEM', message: 'Safe export', metadata: { safeExportView: true, ...meta } });
+}
+
+const minimalSafeExport: SafeExportLike = {
+  torqclawSafeExport: true,
+  exportVersion: 1,
+  redactorVersion: 1,
+  projectionVersion: 2,
+  taskId: 't1',
+  sessionId: 's1',
+  sourceChannel: 'cli',
+  selectedTier: 'OLLAMA_LOCAL',
+  state: 'terminal',
+  resultState: 'completed',
+  cancelled: false,
+  blockedOn: null,
+  route: {
+    tier: 'OLLAMA_LOCAL',
+    ruleId: 'LOCAL_INTENT',
+    score: 10,
+    overridable: false,
+    safetyLock: null,
+    profile: null,
+    reason: null,
+    humanReason: null,
+    blockedAlternatives: null,
+    routerReason: null,
+  },
+  cost: { budgetLimit: null, budgetSource: null, costUsd: 0, costSource: null, costEnforceable: null },
+  execution: { elapsedMs: 100, iterations: 1, memoryUsed: false, contextChars: null },
+  toolsCalled: [],
+  approvals: [],
+  evidence: { startSeq: 1, endSeq: 2 },
+  errorClass: null,
+  error: null,
+  redactionReport: {
+    redactorVersion: 1,
+    patternsHit: {},
+    fieldsOmitted: ['taskPrompt', 'assembledContext', 'events', 'toolCallArgs', 'results', 'approvalArgs'],
+    notice: 'Known secret shapes removed. This export does not and cannot claim to contain no secrets.',
+  },
+};
+
+describe('selectSafeExportViewByTaskId', () => {
+  it('F2a. keyed map: two different taskIds each get their own entry', () => {
+    const events = [
+      safeExportSystemEvent({ taskId: 'tA', safeExport: null }),
+      safeExportSystemEvent({ taskId: 'tB', safeExport: { ...minimalSafeExport, taskId: 'tB' } }),
+    ];
+    const map = selectSafeExportViewByTaskId(events);
+    expect(map.tA).toEqual({ taskId: 'tA', safeExport: null, exportOmitted: null, error: null });
+    expect(map.tB?.safeExport?.taskId).toBe('tB');
+  });
+
+  it('F2b. per-key last-wins: a later frame for the SAME taskId overwrites the earlier one', () => {
+    const events = [
+      safeExportSystemEvent({ taskId: 'tA', safeExport: null }),
+      safeExportSystemEvent({ taskId: 'tA', safeExport: { ...minimalSafeExport, taskId: 'tA' } }),
+    ];
+    const map = selectSafeExportViewByTaskId(events);
+    expect(map.tA?.safeExport?.taskId).toBe('tA');
+  });
+
+  it('F2c. malformed skip [SC-4]: a non-null safeExport object LACKING torqclawSafeExport:true is skipped, never clobbers a good prior entry', () => {
+    const good = { ...minimalSafeExport, taskId: 'tA' };
+    const events = [
+      safeExportSystemEvent({ taskId: 'tA', safeExport: good }),
+      safeExportSystemEvent({ taskId: 'tA', safeExport: { taskId: 'tA', bogus: true } }), // missing torqclawSafeExport
+    ];
+    const map = selectSafeExportViewByTaskId(events);
+    expect(map.tA?.safeExport).toEqual(good); // NOT clobbered by the malformed frame
+  });
+
+  it('F2d. type/marker guards: non-SYSTEM type ignored; safeExportView !== true ignored; non-string taskId ignored', () => {
+    const events = [
+      ev({ type: 'ERROR', metadata: { safeExportView: true, taskId: 'tA', safeExport: null } }),
+      safeExportSystemEvent({ safeExportView: false, taskId: 'tB', safeExport: null } as any),
+      safeExportSystemEvent({ taskId: 123 as any, safeExport: null }),
+    ];
+    const map = selectSafeExportViewByTaskId(events);
+    expect(Object.keys(map)).toHaveLength(0);
+  });
+
+  it('F2e. exportOmitted/error carried through on the frame', () => {
+    const events = [
+      safeExportSystemEvent({ taskId: 'tA', safeExport: null, exportOmitted: { reason: 'too_large' } }),
+    ];
+    const map = selectSafeExportViewByTaskId(events);
+    expect(map.tA?.exportOmitted).toEqual({ reason: 'too_large' });
+
+    const events2 = [safeExportSystemEvent({ taskId: 'tB', safeExport: null, error: 'export_failed' })];
+    const map2 = selectSafeExportViewByTaskId(events2);
+    expect(map2.tB?.error).toBe('export_failed');
+  });
+});
+
+describe('escInline', () => {
+  it('backslash escaped FIRST, before the other special chars (order pin)', () => {
+    // A trailing backslash directly before a pipe: naive escaping in the
+    // wrong order would turn `x\|` into `x\\|` (i.e. escaped backslash then
+    // a STILL-BARE pipe) instead of the correct `x\\\|` (escaped backslash
+    // then an ESCAPED pipe).
+    expect(escInline('x\\|')).toBe('x\\\\\\|');
+  });
+
+  it('every listed special char is backslash-escaped', () => {
+    expect(escInline('`*_[]<>|')).toBe('\\`\\*\\_\\[\\]\\<\\>\\|');
+  });
+
+  it('newlines (\\n, \\r\\n, \\r) collapse to a single space', () => {
+    expect(escInline('a\nb')).toBe('a b');
+    expect(escInline('a\r\nb')).toBe('a b');
+    expect(escInline('a\rb')).toBe('a b');
+  });
+
+  it('[REDACTED:label] markers render literally (brackets escaped, not special-cased)', () => {
+    expect(escInline('[REDACTED:api-key]')).toBe('\\[REDACTED:api-key\\]');
+  });
+
+  it('a markdown link attempt is neutralized: brackets and no unescaped structure survive', () => {
+    const out = escInline('[link](http://evil)');
+    expect(out).toBe('\\[link\\](http://evil)');
+  });
+});
+
+describe('fenceBlock', () => {
+  it('F5. plain content -> minimum 3-backtick fence', () => {
+    const out = fenceBlock('hello world');
+    expect(out).toBe('```\nhello world\n```');
+  });
+
+  it('F5. content-position-0 fence run (``` at char 0, not just embedded) -> emitted fence is 4+', () => {
+    const out = fenceBlock('```leading fence run');
+    const lines = out.split('\n');
+    expect(lines[0]).toBe('````'); // 4 backticks: max(3, 3+1)
+    expect(lines[lines.length - 1]).toBe('````');
+  });
+
+  it('F5. embedded 4-backtick run -> 5-backtick fence (exact fence pin)', () => {
+    const out = fenceBlock('before ```` after');
+    const lines = out.split('\n');
+    expect(lines[0]).toBe('`````'); // 5 backticks: max(3, 4+1)
+    expect(lines[lines.length - 1]).toBe('`````');
+  });
+
+  it('CRLF/CR normalized to LF', () => {
+    const out = fenceBlock('a\r\nb\rc');
+    expect(out).toBe('```\na\nb\nc\n```');
+  });
+
+  it('no info string on the opening fence', () => {
+    const out = fenceBlock('plain');
+    const firstLine = out.split('\n')[0]!;
+    expect(firstLine).toBe('```');
+  });
+});
+
+describe('renderSafeExportMarkdown', () => {
+  it('F3. includes notice at TOP (blockquote) AND in the report section', () => {
+    const out = renderSafeExportMarkdown(minimalSafeExport);
+    const noticeLine = `> ${minimalSafeExport.redactionReport!.notice}`;
+    const occurrences = out.split(noticeLine).length - 1;
+    expect(occurrences).toBe(2);
+    expect(out.startsWith('# TORQCLAW safe export')).toBe(true);
+  });
+
+  it('F3. stamps line exact, TOP-LEVEL fields only (sabotage check: nested redactionReport.redactorVersion is NOT re-read as a different value)', () => {
+    const e: SafeExportLike = {
+      ...minimalSafeExport,
+      exportVersion: 1,
+      redactorVersion: 1,
+      projectionVersion: 2,
+      redactionReport: { ...minimalSafeExport.redactionReport!, redactorVersion: 999 }, // deliberately different
+    };
+    const out = renderSafeExportMarkdown(e);
+    expect(out).toContain('export v1 · redactor v1 · projection v2');
+    // The nested-999 value must not appear as the TOP stamps line's redactor
+    // figure (it IS legitimately re-shown inside the report section's own
+    // "redactor v999" line — that is a SEPARATE, intentionally distinct
+    // stamp, not a double-read of the same fact).
+    expect(out).not.toContain('export v1 · redactor v999');
+  });
+
+  it('F3. projectionVersion null -> "not recorded" in the stamps line', () => {
+    const e: SafeExportLike = { ...minimalSafeExport, projectionVersion: null };
+    const out = renderSafeExportMarkdown(e);
+    expect(out).toContain('export v1 · redactor v1 · projection vnot recorded');
+  });
+
+  it('F3. report table rows in payload order + fieldsOmitted join', () => {
+    const e: SafeExportLike = {
+      ...minimalSafeExport,
+      redactionReport: {
+        ...minimalSafeExport.redactionReport!,
+        patternsHit: { 'api-key': 2, path: 1 },
+      },
+    };
+    const out = renderSafeExportMarkdown(e);
+    const apiKeyIdx = out.indexOf('| api-key | 2 |');
+    const pathIdx = out.indexOf('| path | 1 |');
+    expect(apiKeyIdx).toBeGreaterThan(-1);
+    expect(pathIdx).toBeGreaterThan(apiKeyIdx);
+    expect(out).toContain('never included: taskPrompt, assembledContext, events, toolCallArgs, results, approvalArgs');
+  });
+
+  it('F3. empty patternsHit -> the honest empty-hits line, no table', () => {
+    const out = renderSafeExportMarkdown(minimalSafeExport); // patternsHit: {}
+    expect(out).toContain('no known secret shapes found — known shapes only; this is not a guarantee');
+    expect(out).not.toContain('| known shape | removals |');
+  });
+
+  it('F4. an all-backticks value in BOTH an escInline cell (route rule) and a fenceBlock (error) renders literally with correct fence length', () => {
+    const e: SafeExportLike = {
+      ...minimalSafeExport,
+      route: { ...minimalSafeExport.route!, ruleId: '```' },
+      error: 'boom ```` boom',
+    };
+    const out = renderSafeExportMarkdown(e);
+    // escInline cell: backticks escaped, not fenced.
+    expect(out).toContain('| rule | \\`\\`\\` |');
+    // fenceBlock: fence length = max(3, 4+1) = 5.
+    expect(out).toContain('`````\nboom ```` boom\n`````');
+  });
+
+  it('F6. >, |  as ENTIRE cell/list values -> escaped literal (escInline set per spec §3.1: ` * _ [ ] < > | — # and - are NOT in the escape set, and are safe because the template invariant never interpolates a value bare at line-start; only inside a "| " table cell, a "- " list marker, or a fenceBlock)', () => {
+    const e: SafeExportLike = {
+      ...minimalSafeExport,
+      blockedOn: '>',
+      toolsCalled: ['#'],
+      route: { ...minimalSafeExport.route!, safetyLock: '-', profile: '|' },
+    };
+    const out = renderSafeExportMarkdown(e);
+    expect(out).toContain('| blocked on | \\> |');
+    // "#" and "-" as ENTIRE list/table values render literally UNESCAPED —
+    // they are harmless at this position because they never land at
+    // Markdown line-start (the "- " list marker / "| " table pipe already
+    // precedes them structurally).
+    expect(out).toContain('- #');
+    expect(out).toContain('| safety lock | - |');
+    expect(out).toContain('| profile | \\| |');
+  });
+
+  it('F6. newline-in-cell -> space; trailing-backslash value + pipe -> \\\\ then \\| (order pin)', () => {
+    const e: SafeExportLike = {
+      ...minimalSafeExport,
+      sourceChannel: 'line1\nline2',
+      blockedOn: 'x\\',
+    };
+    const out = renderSafeExportMarkdown(e);
+    expect(out).toContain('| source channel | line1 line2 |');
+    expect(out).toContain('| blocked on | x\\\\ |');
+  });
+
+  it('F6. [REDACTED:label] renders literally inside the Markdown output', () => {
+    const e: SafeExportLike = { ...minimalSafeExport, blockedOn: '[REDACTED:api-key]' };
+    const out = renderSafeExportMarkdown(e);
+    expect(out).toContain('| blocked on | \\[REDACTED:api-key\\] |');
+  });
+
+  it('F7. purity: sentinel-per-omitted-field fixture -> no substring of any omitted field leaks into output', () => {
+    // Every field this export must NEVER carry gets a unique sentinel that,
+    // if this function ever read it (a bug reaching into a hypothetical
+    // extra parameter or closed-over object), would show up verbatim.
+    const sentinels = {
+      taskPrompt: 'SENTINEL_TASK_PROMPT_87234',
+      assembledContext: 'SENTINEL_ASSEMBLED_CONTEXT_11923',
+      events: 'SENTINEL_EVENTS_55011',
+      toolCallArgs: 'SENTINEL_TOOLCALLARGS_29384',
+      results: 'SENTINEL_RESULTS_10293',
+      approvalArgs: 'SENTINEL_APPROVALARGS_48213',
+    };
+    // renderSafeExportMarkdown's signature accepts ONLY a SafeExportLike — a
+    // sentinel-carrying "receipt" object is never passed to it at all; this
+    // test proves the guarantee by construction (single-argument call) and
+    // by string-absence (defense in depth against a future accidental read).
+    const out = renderSafeExportMarkdown(minimalSafeExport);
+    for (const sentinel of Object.values(sentinels)) {
+      expect(out).not.toContain(sentinel);
+    }
+  });
+
+  it('F7. determinism: two calls on the same input are byte-identical', () => {
+    const out1 = renderSafeExportMarkdown(minimalSafeExport);
+    const out2 = renderSafeExportMarkdown(minimalSafeExport);
+    expect(out1).toBe(out2);
+  });
+
+  it('F7. null -> "not recorded"; booleans -> yes/no', () => {
+    const e: SafeExportLike = {
+      ...minimalSafeExport,
+      sessionId: null,
+      cancelled: null,
+      execution: { ...minimalSafeExport.execution!, memoryUsed: true },
+      route: { ...minimalSafeExport.route!, overridable: null },
+    };
+    const out = renderSafeExportMarkdown(e);
+    expect(out).toContain('| session id | not recorded |');
+    expect(out).toContain('| cancelled | not recorded |');
+    expect(out).toContain('| memory used | yes |');
+    expect(out).toContain('| overridable | not recorded |');
+  });
+
+  it('[G1R RC-4] a REAL value equal to the literal "not recorded" renders identically to the honest null case (accepted, documented — no sentinel escape invented)', () => {
+    const e: SafeExportLike = { ...minimalSafeExport, blockedOn: 'not recorded' };
+    const out = renderSafeExportMarkdown(e);
+    expect(out).toContain('| blocked on | not recorded |');
+  });
+
+  it('Evidence section states the no-event-bodies disclaimer with real seq numbers', () => {
+    const out = renderSafeExportMarkdown(minimalSafeExport);
+    expect(out).toContain('events seq 1–2 — event bodies are not part of this export.');
+  });
+
+  it('Overclaim pin: no "sanitized"/"secure"/"guaranteed"/"clean" claim words appear anywhere in the Markdown', () => {
+    const out = renderSafeExportMarkdown(minimalSafeExport);
+    expect(out).not.toMatch(/\bsanitized\b/i);
+    expect(out).not.toMatch(/\bsecure\b/i);
+    expect(out).not.toMatch(/\bguaranteed\b/i);
+    expect(out).not.toMatch(/\bclean\b/i);
   });
 });
