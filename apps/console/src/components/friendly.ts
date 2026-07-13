@@ -389,17 +389,20 @@ export function selectLatestRoutePreview(
 
 // ── TCLAW-UIFIX-1: SYSTEM-frame predicates for busy/suppression ─────────
 
-/** The publishOnly panel-response markers. Consumed ONLY by the EventRow
- *  suppression guard — coverage byte-identical to the inline check it
- *  replaces. CONVENTION: every new publishOnly panel response must add its
- *  marker here, or it will render as a stray (visible, benign) log row.
- *  Deliberately EXCLUDES memory frames and the Done receipt frame: those are
- *  persisted, user-facing output that must stay visible in the log (and in
- *  reconnect backlog replay). */
+/** The publishOnly panel-response markers: routePreview, receiptList,
+ *  receiptView, costSummary, approvalList, safeExportView (TCLAW-5B-2 — all
+ *  four safeExportView frame variants carry this marker, including the
+ *  fail-closed one; see export.ts :662/:687/:722/:733/:741). Consumed ONLY by
+ *  the EventRow suppression guard — coverage byte-identical to the inline
+ *  check it replaces. CONVENTION: every new publishOnly panel response must
+ *  add its marker here, or it will render as a stray (visible, benign) log
+ *  row. Deliberately EXCLUDES memory frames and the Done receipt frame: those
+ *  are persisted, user-facing output that must stay visible in the log (and
+ *  in reconnect backlog replay). */
 export function isPanelSystemFrame(ev: GatewayEvent): boolean {
   if (ev.type !== 'SYSTEM') return false;
   const m = (ev.metadata ?? {}) as Record<string, unknown>;
-  return !!(m.routePreview || m.receiptList || m.receiptView || m.costSummary || m.approvalList);
+  return !!(m.routePreview || m.receiptList || m.receiptView || m.costSummary || m.approvalList || m.safeExportView);
 }
 
 /** TCLAW-UIFIX-1 INVARIANT (G1R-verified against every SYSTEM producer):
@@ -773,4 +776,391 @@ export function toApprovalHistoryRows(approvals: ApprovalSummaryLike[]): Approva
       requestId: typeof a?.requestId === 'string' ? a.requestId : '',
     };
   });
+}
+
+// ── TCLAW-5B-2: Safe-export pure helpers ────────────────────────────────
+// All pure (no React, no DOM, no side effects), unit-tested in
+// tests/friendly.test.ts. Return DATA (strings/objects), never JSX. Every
+// helper honors the no-fabrication contract. THE CARDINAL RULE (this
+// ticket's whole reason for existing): the clipboard must receive EXACTLY
+// the server's redacted payload — copy JSON = JSON.stringify(safeExport,
+// null, 2) of the frame's metadata.safeExport object BY REFERENCE, never a
+// re-assembled/reshaped object; copy Markdown =
+// renderSafeExportMarkdown(safeExport). Nothing below ever reads events,
+// the raw receipt, or any other in-scope state — see packages/gateway/src/
+// export.ts for the server-side redactor this consumes (read-only from the
+// console's side; ZERO backend changes in this ticket).
+
+/** The shape this console reads off a `metadata.safeExport` object — mirrors
+ *  packages/gateway/src/export.ts's exported `SafeExport` interface field-
+ *  for-field (kept as a LOCAL, `any`-tolerant mirror rather than a cross-
+ *  package import, matching ReceiptLike's existing precedent: the console
+ *  receives this as untyped SYSTEM-event metadata over the wire, not a typed
+ *  contract import). `torqclawSafeExport: true` is the load-bearing first
+ *  key — a malformed object lacking it is never a valid SafeExport (see
+ *  selectSafeExportViewByTaskId's malformed-skip guard, G1R SC-4). */
+export interface SafeExportLike {
+  torqclawSafeExport: true;
+  exportVersion?: number | null;
+  redactorVersion?: number | null;
+  projectionVersion?: number | null;
+  taskId?: string | null;
+  sessionId?: string | null;
+  sourceChannel?: string | null;
+  selectedTier?: string | null;
+  state?: string | null;
+  resultState?: string | null;
+  cancelled?: boolean | null;
+  blockedOn?: string | null;
+  route?: {
+    tier?: string | null;
+    ruleId?: string | null;
+    score?: number | null;
+    overridable?: boolean | null;
+    safetyLock?: string | null;
+    profile?: string | null;
+    reason?: string | null;
+    humanReason?: string | null;
+    blockedAlternatives?: Array<{ tier?: string | null; why?: string | null }> | null;
+    routerReason?: string | null;
+  } | null;
+  cost?: {
+    budgetLimit?: number | null;
+    budgetSource?: string | null;
+    costUsd?: number | null;
+    costSource?: string | null;
+    costEnforceable?: number | null;
+  } | null;
+  execution?: {
+    elapsedMs?: number | null;
+    iterations?: number | null;
+    memoryUsed?: boolean | null;
+    contextChars?: number | null;
+  } | null;
+  toolsCalled?: string[] | null;
+  approvals?: Array<{ toolName?: string | null; status?: string | null; decidedAt?: string | null }> | null;
+  evidence?: { startSeq?: number | null; endSeq?: number | null } | null;
+  errorClass?: string | null;
+  error?: string | null;
+  redactionReport?: {
+    redactorVersion?: number | null;
+    patternsHit?: Record<string, number> | null;
+    fieldsOmitted?: readonly string[] | null;
+    notice?: string | null;
+  } | null;
+}
+
+/** One collected safeExportView frame, keyed shape mirroring OpenReceipt
+ *  (ReceiptsPanel.tsx) — the four variants are distinguished by KEY
+ *  PRESENCE, never by message text: `error` present -> export_failed;
+ *  `exportOmitted` present -> too_large; bare `safeExport: null` (neither
+ *  key present) -> not-found; `safeExport` object -> ready. */
+export interface SafeExportFrameLike {
+  taskId: string;
+  safeExport: SafeExportLike | null;
+  exportOmitted?: { reason: string } | null;
+  error?: string | null;
+}
+
+/** selectSafeExportViewByTaskId — mirrors ReceiptsPanel.tsx's
+ *  receiptViewByTaskId recipe verbatim (:104-130): keyed by
+ *  metadata.taskId, NOT last-wins-across-all-tasks, so switching rows never
+ *  clobbers a still-loading selection with a stale frame for a different
+ *  task. Match: ev.type==='SYSTEM' && meta.safeExportView===true &&
+ *  typeof meta.taskId==='string'.
+ *
+ *  [G1R SC-4] a `meta.safeExport` that is a non-null object LACKING
+ *  `torqclawSafeExport: true` is malformed (garbage on the wire, or a future
+ *  shape drift) -> the frame is SKIPPED entirely (never clobbers an existing
+ *  keyed entry with a bad one, and never renders under the honest "ready"
+ *  branch with a payload that isn't really a SafeExport). A bare `null`
+ *  safeExport is untouched by this guard (null is a valid not-found/other
+ *  signal, not a malformed object).
+ *
+ *  Soundness of keyed last-wins without a nonce: every GET_SAFE_EXPORT any
+ *  subscriber can emit for a given taskId is parameter-identical ({taskId}
+ *  only), and buildSafeExport is pure over an immutable receipt row — two
+ *  frames for the same taskId can differ only in live-approval freshness,
+ *  where newer is strictly better, so last-wins per key is a valid answer to
+ *  any outstanding request (a still-in-ring frame from an earlier click may
+ *  satisfy a new click instantly; the fresh request is still sent and its
+ *  newer frame overwrites when it lands). PURE: no React, no side effects. */
+export function selectSafeExportViewByTaskId(
+  events: GatewayEvent[],
+): Record<string, SafeExportFrameLike> {
+  const map: Record<string, SafeExportFrameLike> = {};
+  for (const ev of events) {
+    if (ev.type !== 'SYSTEM') continue;
+    const meta = (ev.metadata ?? {}) as Record<string, unknown>;
+    if (meta.safeExportView !== true || typeof meta.taskId !== 'string') continue;
+    const rawSafeExport = meta.safeExport;
+    // [G1R SC-4] malformed non-null object missing the load-bearing marker
+    // key -> skip this frame entirely (never clobber a good prior entry).
+    if (
+      rawSafeExport !== null &&
+      rawSafeExport !== undefined &&
+      (typeof rawSafeExport !== 'object' || (rawSafeExport as Record<string, unknown>).torqclawSafeExport !== true)
+    ) {
+      continue;
+    }
+    map[meta.taskId] = {
+      taskId: meta.taskId,
+      safeExport: (rawSafeExport ?? null) as SafeExportLike | null,
+      exportOmitted: (meta.exportOmitted ?? null) as { reason: string } | null,
+      error: typeof meta.error === 'string' ? meta.error : null,
+    };
+  }
+  return map;
+}
+
+/** escInline(s) — for table cells, list items, and prose interpolations.
+ *  ORDER MATTERS (G1R RC-3 + Q6), exactly:
+ *   1. backslash FIRST (\ -> \\) — otherwise a value ending in `\` would
+ *      neutralize the very escape appended next (e.g. `x\` + `|` -> `x\\|`
+ *      not the intended `x\|`).
+ *   2. each of ` * _ [ ] < > | backslash-escaped.
+ *   3. all newlines (\r\n|\r|\n) -> a single space (a newline in a table
+ *      cell/list item breaks the row and lets the next line start fresh
+ *      block syntax — heading/list/fence markers only bite at line start, so
+ *      killing embedded newlines kills that vector).
+ *  Never used for multi-line free text — see fenceBlock for that. */
+export function escInline(s: string): string {
+  let out = s.replace(/\\/g, '\\\\');
+  out = out.replace(/[`*_[\]<>|]/g, (c) => `\\${c}`);
+  out = out.replace(/\r\n|\r|\n/g, ' ');
+  return out;
+}
+
+/** fenceBlock(s) — for multi-line free text (scrubbed residue: error, route
+ *  reason/humanReason/routerReason). No character escaping inside (it would
+ *  corrupt the value); breakout is prevented STRUCTURALLY:
+ *   1. normalize CRLF/CR -> LF.
+ *   2. n = longest run of consecutive backticks anywhere in the (normalized)
+ *      content.
+ *   3. fence length = max(3, n + 1) backticks.
+ *   4. return fence + '\n' + content + '\n' + fence. No info string (an
+ *      attacker-influenced first line of free text can't be mistaken for
+ *      one, and `error` is not JSON).
+ *  CommonMark closes a fence only with a run at least as long as the
+ *  opener, so a fence strictly longer than any backtick run inside the
+ *  content is unbreakable by construction. */
+export function fenceBlock(s: string): string {
+  const normalized = s.replace(/\r\n|\r/g, '\n');
+  const runs = normalized.match(/`+/g) ?? [];
+  const longest = runs.reduce((max, run) => Math.max(max, run.length), 0);
+  const fenceLen = Math.max(3, longest + 1);
+  const fence = '`'.repeat(fenceLen);
+  return `${fence}\n${normalized}\n${fence}`;
+}
+
+/** null/undefined -> "not recorded" (Rows house string); booleans ->
+ *  yes/no. [G1R RC-4] a REAL payload value that happens to equal the literal
+ *  string "not recorded" renders identically to a true null — this is
+ *  accepted (rendering it is not false; it is indistinguishable from the
+ *  honest case by construction) rather than inventing a sentinel escape,
+ *  which would be new, undocumented behavior for a hypothetical collision. */
+function mdOrNotRecorded(v: string | null | undefined): string {
+  return v === null || v === undefined || v === '' ? 'not recorded' : escInline(v);
+}
+function mdYesNo(v: boolean | null | undefined): string {
+  return v === null || v === undefined ? 'not recorded' : v ? 'yes' : 'no';
+}
+function mdNum(v: number | null | undefined): string {
+  return v === null || v === undefined ? 'not recorded' : String(v);
+}
+
+/**
+ * renderSafeExportMarkdown — PURE, module-scope. Signature: (e:
+ * SafeExportLike) => string. Input is ONLY the SafeExport object — no
+ * events, no receipt, no closures, no second parameter, no import from
+ * gateway. Deterministic: no Date.now()/Math.random()/module-mutable state;
+ * two calls on equal input are byte-identical. Output contains no substring
+ * of any omitted-field content (taskPrompt/assembledContext/events/
+ * toolCallArgs/results/approvalArgs) because this function never reads
+ * anything but the fields the SafeExport type itself declares.
+ *
+ * TEMPLATE INVARIANT (load-bearing, G1R RC-3 — a future field-adder MUST
+ * honor this or route the new field through one of the two escaping
+ * helpers): no payload string is EVER interpolated at Markdown line-start
+ * outside of (a) a table cell after a `| ` pipe, (b) a `"- "` list-item
+ * marker, or (c) inside a fenceBlock. Every free-text residue field (error,
+ * route.reason, route.humanReason, route.routerReason) goes through
+ * fenceBlock ONLY; every short/constrained-ish value goes through escInline
+ * in a table cell or list item. Version stamps and taskId/sessionId etc. are
+ * escInline'd defensively even though they are contract-shaped, as defense
+ * in depth against future contract drift (R5/E19 mirror at the Markdown
+ * layer).
+ *
+ * Version stamps [G1R RC-2 + SC-3]: read TOP-LEVEL exportVersion/
+ * redactorVersion/projectionVersion ONLY — the nested
+ * redactionReport.redactorVersion is a SEPARATE, intentionally-not-reread
+ * stamp inside the report section (dropped from the top stamps line per
+ * RC-2/SC-3: reading it a second time there would double-report the same
+ * fact under a different label, which is confusing, not more honest).
+ */
+export function renderSafeExportMarkdown(e: SafeExportLike): string {
+  const notice = e.redactionReport?.notice ?? '';
+  const lines: string[] = [];
+
+  lines.push('# TORQCLAW safe export');
+  lines.push('');
+  lines.push(`> ${escInline(notice)}`);
+  lines.push('');
+  lines.push(
+    `export v${mdNum(e.exportVersion)} · redactor v${mdNum(e.redactorVersion)} · projection v${mdNum(e.projectionVersion)}`,
+  );
+  lines.push('');
+
+  // ── Task ────────────────────────────────────────────────────────────
+  lines.push('## Task');
+  lines.push('');
+  lines.push('| field | value |');
+  lines.push('| --- | --- |');
+  lines.push(`| task id | ${mdOrNotRecorded(e.taskId)} |`);
+  lines.push(`| session id | ${mdOrNotRecorded(e.sessionId)} |`);
+  lines.push(`| source channel | ${mdOrNotRecorded(e.sourceChannel)} |`);
+  lines.push(`| selected tier | ${mdOrNotRecorded(e.selectedTier)} |`);
+  lines.push(`| state | ${mdOrNotRecorded(e.state)} |`);
+  lines.push(`| result state | ${mdOrNotRecorded(e.resultState)} |`);
+  lines.push(`| cancelled | ${mdYesNo(e.cancelled)} |`);
+  lines.push(`| blocked on | ${mdOrNotRecorded(e.blockedOn)} |`);
+  lines.push('');
+
+  // ── Route ───────────────────────────────────────────────────────────
+  const route = e.route ?? null;
+  lines.push('## Route');
+  lines.push('');
+  lines.push('| field | value |');
+  lines.push('| --- | --- |');
+  lines.push(`| tier | ${mdOrNotRecorded(route?.tier)} |`);
+  lines.push(`| rule | ${mdOrNotRecorded(route?.ruleId)} |`);
+  lines.push(`| score | ${mdNum(route?.score)} |`);
+  lines.push(`| overridable | ${mdYesNo(route?.overridable)} |`);
+  lines.push(`| safety lock | ${mdOrNotRecorded(route?.safetyLock)} |`);
+  lines.push(`| profile | ${mdOrNotRecorded(route?.profile)} |`);
+  lines.push('');
+
+  if (route?.reason != null) {
+    lines.push('reason:');
+    lines.push('');
+    lines.push(fenceBlock(route.reason));
+    lines.push('');
+  }
+  if (route?.humanReason != null) {
+    lines.push('human reason:');
+    lines.push('');
+    lines.push(fenceBlock(route.humanReason));
+    lines.push('');
+  }
+  if (route?.routerReason != null) {
+    lines.push('router reason:');
+    lines.push('');
+    lines.push(fenceBlock(route.routerReason));
+    lines.push('');
+  }
+  if (route?.blockedAlternatives && route.blockedAlternatives.length > 0) {
+    lines.push('blocked alternatives:');
+    lines.push('');
+    for (const alt of route.blockedAlternatives) {
+      lines.push(`- ${mdOrNotRecorded(alt.tier)} — ${mdOrNotRecorded(alt.why)}`);
+    }
+    lines.push('');
+  }
+
+  // ── Cost ────────────────────────────────────────────────────────────
+  const cost = e.cost ?? null;
+  lines.push('## Cost');
+  lines.push('');
+  lines.push('| field | value |');
+  lines.push('| --- | --- |');
+  lines.push(`| budget limit | ${mdNum(cost?.budgetLimit)} |`);
+  lines.push(`| budget source | ${mdOrNotRecorded(cost?.budgetSource)} |`);
+  lines.push(`| cost usd | ${mdNum(cost?.costUsd)} |`);
+  lines.push(`| cost source | ${mdOrNotRecorded(cost?.costSource)} |`);
+  lines.push(`| cost enforceable | ${mdNum(cost?.costEnforceable)} |`);
+  lines.push('');
+
+  // ── Execution ───────────────────────────────────────────────────────
+  const execution = e.execution ?? null;
+  lines.push('## Execution');
+  lines.push('');
+  lines.push('| field | value |');
+  lines.push('| --- | --- |');
+  lines.push(`| elapsed ms | ${mdNum(execution?.elapsedMs)} |`);
+  lines.push(`| iterations | ${mdNum(execution?.iterations)} |`);
+  lines.push(`| memory used | ${mdYesNo(execution?.memoryUsed)} |`);
+  lines.push(`| context chars | ${mdNum(execution?.contextChars)} |`);
+  lines.push('');
+
+  // ── Tools called ────────────────────────────────────────────────────
+  lines.push('## Tools called');
+  lines.push('');
+  if (e.toolsCalled && e.toolsCalled.length > 0) {
+    for (const name of e.toolsCalled) lines.push(`- ${escInline(name)}`);
+  } else {
+    lines.push('none');
+  }
+  lines.push('');
+
+  // ── Approvals ───────────────────────────────────────────────────────
+  lines.push('## Approvals');
+  lines.push('');
+  if (e.approvals && e.approvals.length > 0) {
+    lines.push('| tool | status | decided at |');
+    lines.push('| --- | --- | --- |');
+    for (const a of e.approvals) {
+      lines.push(`| ${mdOrNotRecorded(a.toolName)} | ${mdOrNotRecorded(a.status)} | ${mdOrNotRecorded(a.decidedAt)} |`);
+    }
+  } else {
+    lines.push('none');
+  }
+  lines.push('');
+
+  // ── Evidence ────────────────────────────────────────────────────────
+  lines.push('## Evidence');
+  lines.push('');
+  const startSeq = e.evidence?.startSeq;
+  const endSeq = e.evidence?.endSeq;
+  lines.push(
+    `events seq ${startSeq === null || startSeq === undefined ? 'not recorded' : startSeq}–${
+      endSeq === null || endSeq === undefined ? 'not recorded' : endSeq
+    } — event bodies are not part of this export.`,
+  );
+  lines.push('');
+
+  // ── Error ───────────────────────────────────────────────────────────
+  lines.push('## Error');
+  lines.push('');
+  lines.push(`error class: ${e.errorClass ? escInline(e.errorClass) : 'none'}`);
+  lines.push('');
+  if (e.error != null) {
+    lines.push(fenceBlock(e.error));
+  } else {
+    lines.push('none recorded');
+  }
+  lines.push('');
+
+  // ── Redaction report ────────────────────────────────────────────────
+  lines.push('## Redaction report');
+  lines.push('');
+  lines.push(`redactor v${mdNum(e.redactionReport?.redactorVersion)}`);
+  lines.push('');
+  const patternsHit = e.redactionReport?.patternsHit ?? {};
+  const hitEntries = Object.entries(patternsHit);
+  if (hitEntries.length > 0) {
+    lines.push('| known shape | removals |');
+    lines.push('| --- | --- |');
+    for (const [label, count] of hitEntries) {
+      lines.push(`| ${escInline(label)} | ${count} |`);
+    }
+  } else {
+    lines.push('no known secret shapes found — known shapes only; this is not a guarantee');
+  }
+  lines.push('');
+  const fieldsOmitted = e.redactionReport?.fieldsOmitted ?? [];
+  lines.push(`never included: ${fieldsOmitted.map((f) => escInline(f)).join(', ')}`);
+  lines.push('');
+  lines.push(`> ${escInline(notice)}`);
+
+  return lines.join('\n');
 }

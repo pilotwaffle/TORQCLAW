@@ -120,6 +120,13 @@ function previewFrame(): GatewayEvent {
 function approvalListFrame(): GatewayEvent {
   return ev({ type: 'SYSTEM', message: 'Approvals listed', metadata: { approvalList: true, approvals: [] } });
 }
+/** TCLAW-5B-2: GET_SAFE_EXPORT response frame (bare not-found variant) — the
+ *  one-line addition to this file's tables per the builder spec's op#17
+ *  (mirrors the 5A-2 approvalList precedent above; predicate-level pins
+ *  already exist at friendly.test.ts's marker suite). */
+function safeExportFrame(): GatewayEvent {
+  return ev({ type: 'SYSTEM', message: 'Safe export', metadata: { safeExportView: true, taskId: 't1', safeExport: null } });
+}
 /** server.ts:152-155 skill confirm — no metadata at all. */
 function markerlessSystem(): GatewayEvent {
   return ev({ type: 'SYSTEM', message: 'Skill q1: APPROVE' });
@@ -205,7 +212,7 @@ describe('TorqTerminal busy/suppression (TCLAW-UIFIX-1)', () => {
     expect(screen.getByText('stop')).toBeInTheDocument();
   });
 
-  it('8a. panel frames render no inline row: receiptList/receiptView/costSummary/approvalList', () => {
+  it('8a. panel frames render no inline row: receiptList/receiptView/costSummary/approvalList/safeExportView', () => {
     stream.events = [resultFrame('A'), receiptListFrame()];
     const { unmount: u1 } = render(<TorqTerminal />);
     expect(screen.queryByText('Receipts')).not.toBeInTheDocument();
@@ -225,8 +232,14 @@ describe('TorqTerminal busy/suppression (TCLAW-UIFIX-1)', () => {
     cleanup();
 
     stream.events = [resultFrame('A'), approvalListFrame()];
-    render(<TorqTerminal />);
+    const { unmount: u4 } = render(<TorqTerminal />);
     expect(screen.queryByText('Approvals listed')).not.toBeInTheDocument();
+    u4();
+    cleanup();
+
+    stream.events = [resultFrame('A'), safeExportFrame()];
+    render(<TorqTerminal />);
+    expect(screen.queryByText('Safe export')).not.toBeInTheDocument();
   });
 
   it('8b. Done-receipt renders the ReceiptCard (rendered content present)', () => {
@@ -253,6 +266,7 @@ describe('TorqTerminal busy/suppression (TCLAW-UIFIX-1)', () => {
       ['costSummaryFrame', costSummaryFrame],
       ['previewFrame', previewFrame],
       ['approvalListFrame', approvalListFrame],
+      ['safeExportFrame', safeExportFrame],
       ['markerlessSystem', markerlessSystem],
       ['arbitrarySystem', arbitrarySystem],
     ];
@@ -283,6 +297,13 @@ describe('TorqTerminal busy/suppression (TCLAW-UIFIX-1)', () => {
 
   it('mid-task approvalList case: [tierSelected, toolCall, approvalListFrame] -> busy TRUE (the scan lands on TOOL_CALL)', () => {
     stream.events = [tierSelected('A'), toolCall('A'), approvalListFrame()];
+    render(<TorqTerminal />);
+
+    expect(screen.getByText('working…')).toBeInTheDocument();
+  });
+
+  it('mid-task safeExportView case: [tierSelected, toolCall, safeExportFrame] -> busy TRUE (the scan lands on TOOL_CALL)', () => {
+    stream.events = [tierSelected('A'), toolCall('A'), safeExportFrame()];
     render(<TorqTerminal />);
 
     expect(screen.getByText('working…')).toBeInTheDocument();
