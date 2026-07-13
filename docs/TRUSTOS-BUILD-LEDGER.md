@@ -411,3 +411,47 @@ Role mapping note: G1R and G2A run as independent Opus instances; GLM-5.2 (RB) u
 - tests/checks (Builder ×2, G1D independently re-verified, G2A re-verified post-restore): typecheck 12/12; vitest 805 (758 pre-existing + 47 new, 29 files); contracts:check OK untouched; build 7/7; uv pytest 75/75 from engines/hermes_kernel. CI: post-push gate on the PR.
 - next: operator gate — push + PR + merge; THEN the Phase-1 closeout ledger entry (restating the G1R closeout ruling verbatim: multi-surface refactor satisfied-as-architecture; FIX-G, FIX-H, GRAPHIFY-CLEANUP as non-blocking residuals) after master CI is green and the operator approves.
 - blockers: operator approval for push + PR; merge gate; CI-green on PR is the post-push gate.
+
+## ═══ PHASE 1 — Visible Trust MVP — CLOSEOUT ═══
+
+TrustOS program (PRD-TCLAW-TRUSTOS-001 rev 1.2).
+
+- date: 2026-07-13
+- PHASE STATUS: Phase 0 (Foundation) COMPLETE · Phase 1 (Visible Trust MVP) COMPLETE · Phase 2 (Governed Learning MVP) NOT STARTED (awaits explicit operator approval to scope).
+- final Phase-1 master SHA: f5fbee774c3803108f0268fe3f9303b59ec9b55d (TCLAW-5B-2 squash merge).
+- post-merge master CI: GREEN — PR #29, run 29262262717 (success). Suite at closeout: 805 TS tests / 29 files + 75 Python, all green on f5fbee7.
+
+- G1R CLOSEOUT RULING (Opus 4.7, verbatim): "5B-2 merging green closes Phase 1. Console multi-surface refactor is ruled satisfied-as-architecture (independent overlay panels + shared snapshot/predicate discipline, extended by this ticket). TCLAW-FIX-G, TCLAW-FIX-H, and TCLAW-GRAPHIFY-CLEANUP are non-blocking residuals to be restated in the closeout ledger entry."
+
+- SHIPPED-TICKET CHECKLIST (each ticket once; all merged to master via the governed pipeline, squash-only):
+  Phase 0 — 0A–0F foundation (contracts/schema-drift gate, capability classifier 0C, path-scope P5, token hygiene, Python/circuit-breaker tests).
+  Epic 1 (spend/cost) — 1A-core (cap gate + ledger), 1A-attr (cost provenance), 1B (Cost Control Center UI).
+  Epic 2 (route transparency) — 2A (router diagnostics), 2B (route chip selectors), 2C (live current-task route chip), 2D-1 (PREVIEW_ROUTE backend), 2D-2 (route-preview composer UI). [2D split backend/UI]
+  Visible Trust receipts/replay — 4A (run-receipt projection), 4B-1 (LIST_RECEIPTS/GET_RECEIPT read surface), 4B-2 (console receipts panel). [4B split backend/UI]
+  Approval surfaces — 5A-1 (LIST_APPROVALS read surface + approval-card gate facts), 5A-2 (approval history panel + Approval Card v2 render). [5A split backend/UI; serves BOTH deliverables 4 and 5]
+  Safe export — 5B-1 (gateway redactor + GET_SAFE_EXPORT), 5B-2 (console safe-export affordance + Markdown + honest dual-diagnostic). [5B split backend/UI]
+  QA/infra — QA-1 (React component harness), QA-2 (live-affordance coverage), UIFIX-1 (shared SYSTEM-frame busy/suppression predicates).
+
+- PRD PHASE-1 DELIVERABLE MAP (:850 → satisfying ticket(s)):
+  1. Route explanation panel + preview — 2A, 2B, 2C, 2D-1, 2D-2. ✓
+  2. Run receipt page + replay — 4A, 4B-1, 4B-2. ✓
+  3. Cost receipt with enforcement status — 1A-core, 1A-attr. ✓
+  4. Approval card v2 — 5A-1 (gate facts), 5A-2 (Card v2 render). ✓
+  5. Approval history API/UI — 5A-1 (LIST_APPROVALS), 5A-2 (history panel). ✓
+  6. Basic Cost Control Center — 1B. ✓
+  7. Safe diagnostic export (server-side redaction) — 5B-1 (redactor + command), 5B-2 (console affordance). ✓
+  8. Console multi-surface refactor — SATISFIED-AS-ARCHITECTURE per the G1R ruling above (independent Receipts/Cost/ApprovalHistory/SafeExport overlay consumers sharing the keyed snapshot-on-present discipline + the UIFIX-1 isPanelSystemFrame/isBusyNeutralEvent predicates; QA-1/QA-2 harness; triple-stack coexistence smoke). No residual filed.
+
+- ACCEPTANCE CRITERIA (PRD :852), all GREEN: every task has a structured route explanation (2A–2D ✓); every terminal task has a queryable receipt (4A ✓); approval card shows tool/args/category/targets/reason (5A-2 ✓ — HONESTY CAVEAT: tool ✓ and args ✓ are real; category/targets are heuristic/mechanical where applicable (category = registry-hit capability class or "write-class (unclassified)" on a miss, never fabricated; targets = path-heuristic over proposed args, labeled); reason = the mechanical gate rule only, never an invented risk assessment); cost state visible for cloud tasks (1B ✓).
+
+- NON-BLOCKING RESIDUALS carried past closeout (none is a Phase-1 acceptance criterion; no hidden Phase-1 blocker remains):
+  - TCLAW-FIX-G — receipt approval embed frozen at 'pending'; the live surfaces (LIST_APPROVALS, GET_SAFE_EXPORT) already read the live tool_approvals table, so operator-facing status is never stale. Filed, not scheduled.
+  - TCLAW-FIX-H — tasks.error / full_receipt_json.error persisted unsanitized at rest; GET_SAFE_EXPORT scrubs `error` on egress, so the safe export is unaffected; exposure is at-rest only. Filed, not scheduled.
+  - TCLAW-GRAPHIFY-CLEANUP — broken TORQCLAW-local graphify hook. Operator-lane; filed, not scheduled.
+  - graphify-on-master — graphify tooling files (graphify.toml, scripts/test_graphify_smoke.py, .graphifyignore, .claude/skills/graphify, docs/graphify-remediation-report.md) landed on master via GOVERNED Graphify PRs #26 and #28; accepted as current repository state. Any relocation to pilotwaffle/Torq-graphify remains an operator-lane item and is optional. Orthogonal to the TrustOS deliverables; NOT a Phase-1 TrustOS blocker.
+
+- SAFE-EXPORT HONESTY (do not overclaim): the safe diagnostic export removes KNOWN SECRET SHAPES only via the gateway-side allowlist-projection + pattern scrub. It does not, and cannot, guarantee that no secrets remain (novel/unknown shapes can pass). The artifact and all UI copy state exactly this; "review before sharing" is the operator's standing responsibility.
+
+- PROGRAM RECORD: Phase 1 delivered under the governed pipeline (Fable/Opus G1D scope → Opus 4.7 G1R design review → Sonnet 5 Builder → Opus 4.8 G2A empirical sabotage-verification → operator merge gate; feature-branch-per-ticket, squash-merge only, per-ticket ledger entry with independently verified facts).
+
+- next: Phase 2 (Governed Learning MVP) — NOT STARTED. No scoping begins without explicit operator approval.
