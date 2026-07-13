@@ -4,14 +4,30 @@
 **Branch:** `chore/graphify-consumer-profile` (isolated worktree; base `origin/master` @ `41bd648`)
 **Scope:** Graphify consumer configuration + Graphify-specific validation only. No product runtime, approval, governance, gateway, contracts, UI, or engine changes.
 
-## Dependency
+## Dependency (SATISFIED)
 
 ```text
-Depends on pilotwaffle/Torq-graphify#1 (feature/project-graph-profiles).
-Audited upstream head: f7d593971b2f0b2a7ddd5d0865359b78a187b1fe (second review-repair head; supersedes d48c5c6, c6e89a2)
-Do not merge until PR #1 is merged and this integration is retested against
-its final merge SHA.
+Depends on pilotwaffle/Torq-graphify#1 (project graph profiles) - MERGED into v8.
+Final upstream merge SHA: b52619ef7eb9b1021787768a2dbc46908ab37e3c
+Prior audited heads (superseded by the merge SHA; the reviewed head 1d13126
+is tree-identical to it, older heads differ):
+  1d13126 (third review-repair) -> f7d5939 -> d48c5c6 -> c6e89a2
+Minimum required Graphify commit: b52619ef7eb9b1021787768a2dbc46908ab37e3c
+  pip install git+https://github.com/pilotwaffle/Torq-graphify@b52619ef7eb9b1021787768a2dbc46908ab37e3c
 ```
+
+Fresh Codex review of the reviewed head (1d13126) returned zero findings;
+its tree is byte-identical to the v8 merge commit b52619e. This consumer
+integration was retested against a clean install from the exact merge SHA
+(not the feature branch): product rebuilt from scratch, second update
+idempotent, a temporary vendored fixture confirmed never reintroduced by
+update, product `--strict` fitness PASS, vendor fitness PASS, smoke ALL
+PASSED, hook-guard names the resolved product graph path, and the change
+set remained the ten Graphify allowlist files.
+
+Sequencing note: consumer PR #26 merged before PR #1 (operator action);
+this report correction records the final satisfied dependency after the
+fact.
 
 This integration replaces the reverted bespoke dual-graph scripting
 (`build_graphify_graphs.py` / `check_graphify_fitness.py`) with the upstream
@@ -25,7 +41,7 @@ Product architecture conclusions must be derived from the product-scoped
 graph; vendored implementation details may enter only through an explicit
 vendor investigation.
 
-## Measured results (worktree validation, upstream @ f7d5939)
+## Measured results (validation against merge-SHA install @ b52619e)
 
 | Metric | product | vendor |
 |---|---|---|
@@ -75,9 +91,9 @@ before the vendor build in a fresh clone/worktree.
 3. **Interpreter sidecar.** `update` does not write `.graphify_python`;
    fitness reports it as a note (never verdict-affecting). Skill flows
    re-resolve the interpreter on demand.
-4. **Clean-clone reproducibility hold.** Validated against the local audited
-   editable install (import resolves to `E:\graphify` @ `f7d5939`). The
-   draft PR stays blocked until PR #1 merges, the final merge SHA is
-   recorded, graphify is installed from that exact commit
-   (`pip install git+https://github.com/pilotwaffle/Torq-graphify@<merge-sha>`),
-   and this worktree is retested against it.
+4. **Clean-clone reproducibility (SATISFIED).** Validated against a fresh
+   isolated-venv install from the exact v8 merge commit
+   `pip install git+https://github.com/pilotwaffle/Torq-graphify@b52619ef7eb9b1021787768a2dbc46908ab37e3c`
+   — not the editable checkout and not the feature branch. All eight consumer
+   checks passed against that install (see the Dependency section). Note the
+   `directed: false` limitation (#1) is unchanged by the merge.
