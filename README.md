@@ -1,257 +1,299 @@
 # TORQCLAW
 
-Hybrid AI orchestrator: a **TypeScript control plane** (gateway, dynamic router,
-universal MCP bridge, console UI) driving a **forked Hermes Python engine**
-(self-improving skill loop) — combining the OpenClaw gateway paradigm with the
-Hermes learning paradigm, with the weaknesses of both engineered out.
+**TORQCLAW TrustOS** is a governed local/cloud AI agent control plane: a TypeScript gateway, router, MCP bridge, and console UI wrapped around a forked Hermes Python execution engine.
 
+It is built around one product thesis:
+
+```text
+Local when private.
+Cloud when needed.
+Approval before action.
+Budget before spend.
+Receipts after every run.
+Learning that is measurable, governed, and reversible.
 ```
- [ Channels: web / slack / discord ]
-          │  ws (Zod-validated frames)
-          ▼
+
+## Program status
+
+| Area | Status |
+|---|---|
+| Phase 0 — Foundation Repair | **Complete** |
+| Phase 1 — Visible Trust MVP | **Complete** |
+| Phase 2 — Governed Learning MVP | **Not started** |
+| Current remote baseline | `origin/master` closed Phase 1 at `1fe4ce25812da2502d2268efd65f49bf833100b5` |
+| Current green gate | `805/805` TypeScript tests · `75/75` Python tests · typecheck `12/12` · contracts drift OK · build `7/7` |
+
+The local `E:\TorqClaw` checkout was last confirmed clean at the same Phase-1 closeout state before this README refresh. This README summarizes the improvements now implemented on GitHub.
+
+## What is implemented
+
+### Governed execution
+
+- Hybrid routing across **LOCAL_EDGE** and **FRONTIER** tiers.
+- Privacy and local-only rules override model confidence.
+- Role-based command authorization for operator/channel/node seats.
+- Headless channels cannot silently approve gated actions.
+- Gateway-owned grants: clients cannot inject `grantedTools`.
+- All terminal task outcomes flow through the governed gateway event path.
+
+### Cost control
+
+- Per-task budgets from console controls or `TORQCLAW_DEFAULT_MAX_COST`.
+- Provider-reported spend is the enforcement source of truth.
+- Budget breach cancels execution and emits a clear failure path.
+- Honest fallback when spend is unavailable: the iteration cap is the guard.
+- Cost summaries and receipt fields expose enforcement state without static pricing-table claims.
+
+### Route transparency
+
+- Route preview and structured route explanation surfaces.
+- Router diagnostics are surfaced to the console and receipts.
+- Local/private safety locks are visible and not silently overridden.
+- Route receipts show what was selected and why.
+
+### Approval safety
+
+- Write-capable tools pause for approval on both tiers.
+- Approval card v2 shows mechanical gate facts without inventing risk scores.
+- Registry misses render honestly as `write-class (unclassified)`.
+- FRONTIER engine hooks render as engine approvals without fake capability labels.
+- Approval history UI reads live approval truth from `tool_approvals`, not stale receipt embeds.
+- Pending history rows are display-only; the live approval card remains the only action surface.
+
+### Receipts and replay
+
+- Terminal tasks produce queryable receipts from real telemetry.
+- Receipts avoid fabricated values and distinguish missing facts from known facts.
+- Receipt replay and safe diagnostic export are separate surfaces: raw local diagnostics remain local/unredacted, while safe export uses server-side redaction.
+
+### Safe diagnostic export
+
+- `GET_SAFE_EXPORT` is an operator-only read command.
+- Safe export is generated on demand; `run_receipts.safe_export_json` deliberately remains `NULL`.
+- Unknown fields fail closed and do not export.
+- Prompts, assembled context, raw event replay, raw args, raw results, and memory context are omitted wholesale.
+- Retained short residue is scrubbed for known secret shapes before character caps.
+- Absolute Windows, UNC, POSIX-home, and `~` paths redact to `[REDACTED:path]`.
+- Approval status is read from live `tool_approvals`, not frozen receipt embeds.
+- Safe export copy includes an explicit notice: known secret shapes were removed, but the export cannot guarantee that no secrets remain.
+
+### Protocol integrity
+
+- Zod contracts remain the TypeScript source of truth.
+- JSON Schema is emitted into both the contracts package and Python wrapper schema directory.
+- `pnpm contracts:check` verifies generated schema drift.
+- CI gates TypeScript tests, typecheck, contracts drift, build, and Python wrapper tests.
+
+### Graphify project profiles
+
+Graphify project profile files are present on `master` through governed Graphify PRs and are accepted current repository state. Graphify relocation or cleanup remains a separate operator-lane item and is not part of TrustOS Phase 1.
+
+## Architecture
+
+```text
+ [ Console / HTTP channel / future channel adapters ]
+                  │
+                  ▼
  ┌─────────────────────────────────────────────┐
- │      CONTROL PLANE (TypeScript)             │
- │  gateway :18790 → enrich → classify → route │
- └──────┬──────────────────────────┬───────────┘
-        ▼ low complexity / private ▼ high complexity / research
- ┌──────────────┐          ┌─────────────────────┐
- │ LOCAL EDGE   │          │ HERMES EXEC ENGINE  │
- │ Ollama /v1   │          │ Python · MCP        │
- │ tool loop    │          │ streamable-http     │
- └──────┬───────┘          └─────────┬───────────┘
-        └────────────┬───────────────┘
-                     ▼
+ │ TypeScript Control Plane                    │
+ │ Fastify gateway :18790 · sessions · authz   │
+ │ enrich → route → dispatch → receipts        │
+ └───────────────┬─────────────────────────────┘
+                 │
+        ┌────────┴────────┐
+        ▼                 ▼
+ ┌──────────────┐   ┌──────────────────────────┐
+ │ LOCAL_EDGE   │   │ FRONTIER / Hermes Engine │
+ │ Ollama /v1   │   │ Python · MCP wrapper     │
+ │ tool loop    │   │ streamable-http          │
+ └──────┬───────┘   └──────────┬───────────────┘
+        │                      │
+        └──────────┬───────────┘
+                   ▼
  ┌─────────────────────────────────────────────┐
- │  UNIVERSAL MCP BRIDGE                       │
- │  namespaced registry · task-filtered tools  │
- │  approval-gated writes                      │
+ │ Universal MCP Bridge                        │
+ │ namespaced tools · capability policy        │
+ │ path scope · approval-gated writes          │
  └─────────────────────────────────────────────┘
 ```
-
-## Why TORQCLAW
-
-1. **Cost circuit breakers.** A runaway agent can drain API credits fast.
-   TORQCLAW reads provider-reported spend in real time; if a task breaches its
-   `maxCost`, the bridge cancels the engine task and halts execution. When a
-   provider can't report spend, it says so once — the iteration cap is the guard.
-2. **Hybrid routing for slow-local-hardware reality.** Tasks are classified and
-   routed: trivial/private → local, ambiguous/complex → cloud. On a throttled
-   dGPU, `TORQCLAW_PREFER_CLOUD=1` makes cloud the default workhorse while
-   privacy-marked tasks still stay on-device.
-3. **Human-in-the-loop write gates on both tiers.** No write-capable tool runs —
-   local *or* cloud — without an approval card. Allow once re-runs the task with
-   a one-shot grant; Deny ends it cleanly.
-4. **Cross-language type safety.** Zod schemas compile to JSON Schema at build
-   time; the Python engine validates every inbound frame against them. Zero
-   schema drift.
-5. **Honest UX.** One terminal event per task; receipts from real telemetry
-   only; no fabricated risk scores; the agent is hard-grounded against claiming
-   tool actions it didn't perform.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `packages/contracts` | **Source of truth.** Pure Zod schemas; build emits JSON Schema for the Python engine |
-| `packages/router` | Rule hierarchy: privacy → classifier confidence → tool count → cold start → heuristics |
-| `packages/gateway` | Fastify WS server (`:18790`), session engine, SQLite+FTS5 memory, dispatch |
-| `packages/inference` | LOCAL_EDGE Ollama tool loop (defensive parse, result caps, finalization pass) |
-| `packages/bridge` | Multi-server MCP client, `server__tool` namespacing, task-based filtering, approval policy |
-| `packages/channel-http` | HTTP channel adapter — bridges `POST /task` to the gateway via the `role: 'channel'` seat |
-| `apps/console` | Next.js TORQ terminal (reconnect, seq replay, skill approval) |
-| `engines/hermes_kernel` | Streamable-HTTP MCP wrapper over vendored `hermes-agent` |
+| `packages/contracts` | Zod source of truth; emits JSON Schema for TypeScript and Python consumers |
+| `packages/router` | Hybrid route rule hierarchy and diagnostics |
+| `packages/gateway` | Fastify gateway, sessions, authz, dispatch, receipts, approvals, safe export |
+| `packages/inference` | LOCAL_EDGE Ollama-compatible tool loop |
+| `packages/bridge` | MCP server registry, namespacing, tool filtering, capability/path policy |
+| `packages/channel-http` | HTTP channel adapter using the `role: 'channel'` seat |
+| `apps/console` | Next.js console: route preview, receipts, approvals, safe export UI |
+| `engines/hermes_kernel` | Python MCP wrapper over vendored `hermes-agent` |
+| `docs/TRUSTOS-BUILD-LEDGER.md` | Implementation ledger and phase closeout record |
 
 ## Quickstart
 
 ```bash
-git clone https://github.com/pilotwaffle/TORQCLAW.git && cd TORQCLAW
-git submodule update --init --recursive          # pull pinned upstream Hermes
-pnpm install
-pnpm --filter @torqclaw/contracts build          # emit schemas (TS + Python copies)
+git clone https://github.com/pilotwaffle/TORQCLAW.git
+cd TORQCLAW
 
-# Python engine: venv + deps + the vendored agent (its deps are NOT in uv sync)
-cd engines/hermes_kernel && uv sync
+git submodule update --init --recursive
+pnpm install
+pnpm --filter @torqclaw/contracts build
+
+# Python engine: venv + deps + vendored Hermes agent dependencies
+cd engines/hermes_kernel
+uv sync
 uv pip install -e ./vendor/hermes-agent
 cd ../..
 
-pnpm model:setup                                 # optional: ollama create torq-local
-cp .env.example .env                             # then add your provider key (see Configuration)
+# Optional local model setup
+pnpm model:setup
 
-# one command brings up engine + gateway + console (engine-first ordering):
-node --env-file=.env ops/dev-up.mjs              # console at http://localhost:3000
+# Configure environment
+cp .env.example .env
+
+# Bring up engine + gateway + console
+node --env-file=.env ops/dev-up.mjs
 ```
 
-A quick stub-mode smoke test (no provider key needed): `node ops/e2e.mjs`.
+Console: `http://localhost:3000`  
+Gateway: `127.0.0.1:18790`  
+Optional HTTP channel: `127.0.0.1:18792`
 
-## Configuration (env)
-
-| Var | Default | |
-|---|---|---|
-| `TORQCLAW_DATA_DIR` | `~/.torqclaw` | state.db, credentials, skill queue |
-| `TORQCLAW_PORT` / `TORQCLAW_HOST` | `18790` / `127.0.0.1` | loopback-first; never bare 0.0.0.0 |
-| `TORQCLAW_GATEWAY_TOKEN` | _(unset = dev mode)_ | required in any non-loopback deployment |
-| `HERMES_ENGINE_URL` / `HERMES_ENGINE_TOKEN` | `http://127.0.0.1:8000/mcp` | move to a GPU box = change config, not code |
-| `OLLAMA_HOST` / `TORQCLAW_LOCAL_MODEL` | `localhost:11434` / `torq-local` | |
-| `HERMES_MODEL` / `HERMES_PROVIDER` / `HERMES_API_KEY` / `HERMES_BASE_URL` | _(unset = stub mode)_ | FRONTIER provider. **Recommended default: DeepSeek v4-flash** (`provider=deepseek`, `model=deepseek-v4-flash`, `base_url=https://api.deepseek.com`) — cheapest capable workhorse. Anthropic / OpenRouter / etc. also supported. Bring your own key. |
-| `HERMES_CODING_PROVIDER` / `HERMES_CODING_MODEL` / `HERMES_CODING_API_KEY` / `HERMES_CODING_BASE_URL` | _(optional)_ | Per-task override for `COMPLEX_CODING` — e.g. Kimi K2.6 (`provider=openai`, `model=kimi-k2.6`, `base_url=https://api.moonshot.ai/v1`) via the generic OpenAI-compatible client. Blank MODEL = use the default for coding too. |
-| `TORQCLAW_PREFER_CLOUD` | _(unset)_ | `1` lowers the local-routing bar so the ambiguous confident-middle goes to cloud — for machines where local inference is impractically slow (throttled dGPU). Privacy / LOCAL_ONLY / LOCAL_INTENT still route local. |
-| `TORQCLAW_DEFAULT_MAX_COST` | _(unset = unlimited)_ | fallback USD budget when a task sets none; a FRONTIER task with no budget logs a one-line warning |
-| `HERMES_MAX_ITERATIONS` | `30` | hard cap on the agent loop; the budget guard of last resort when spend reporting is unavailable |
-| `HERMES_STUB_COST_USD` | `0.0` | stub-mode reported spend (testing the breaker) |
-| `HERMES_STUB_COST_UNAVAILABLE` | _(unset)_ | `1` makes stub spend report `null` (testing the unenforceable-budget path) |
-
-## Run controls (per task)
-
-The console's controls strip sets, per submission, what the user alone can
-decide:
-
-- **Budget** — `default` (env fallback), `Free (local only)`, `$0.25/$1/$5`, or
-  a custom amount. Maps to `maxCostUsd`; the gateway enforces it from
-  **provider-reported spend** (no static pricing table) and cancels on breach.
-  If a provider can't report spend, the run says so once — the budget is then
-  unenforceable and `HERMES_MAX_ITERATIONS` is the only guard.
-- **Mode** — `Auto`, `This machine only` (`LOCAL_ONLY`, a hard router rule), or
-  `Cloud allowed`. `Free (local only)` forces `LOCAL_ONLY`.
-- **fast** (`urgent`) and **private** (`containsSensitiveData`, never cleared by
-  any automation — only the user sets it).
-- **stop** cancels a running task within ~one poll interval.
-
-A client-side regex surfaces a *suggestion* to keep a prompt private when it
-looks like it contains credentials — it never sets the flag or blocks
-submission. Choices persist in `sessionStorage`.
-
-## Stats
+A quick stub-mode smoke test with no provider key:
 
 ```bash
-pnpm stats   # node ops/stats.mjs — reads ~/.torqclaw/state.db (read-only)
+node ops/e2e.mjs
 ```
 
-Aggregates entirely in SQL (`->>` JSON operators): tasks by tier×state,
-FRONTIER cost (total/avg/max/p95 + cost per completed task), classifier method
-& confidence, router-reason distribution, and product metrics — non-Auto
-submission share, budget-breaker firings, user cancellations, the approval
-funnel, and tool-result truncation pressure. Every section handles zero rows.
+## Configuration
 
-The `tasks.telemetry_json` column (cost, iterations, tools) is added by an
-idempotent boot migration (`PRAGMA table_info` check), so an existing dev DB
-upgrades in place. Pre-release, deleting `~/.torqclaw/state.db` to start fresh
-is also fine.
+| Variable | Default | Notes |
+|---|---|---|
+| `TORQCLAW_DATA_DIR` | `~/.torqclaw` | Gateway state DB, credentials, skill queue |
+| `TORQCLAW_PORT` / `TORQCLAW_HOST` | `18790` / `127.0.0.1` | Loopback-first gateway binding |
+| `TORQCLAW_GATEWAY_TOKEN` | unset dev mode | Required for non-loopback deployment |
+| `HERMES_ENGINE_URL` / `HERMES_ENGINE_TOKEN` | `http://127.0.0.1:8000/mcp` | Python engine endpoint |
+| `OLLAMA_HOST` / `TORQCLAW_LOCAL_MODEL` | `localhost:11434` / `torq-local` | LOCAL_EDGE model config |
+| `HERMES_MODEL` / `HERMES_PROVIDER` / `HERMES_API_KEY` / `HERMES_BASE_URL` | unset stub mode | FRONTIER provider config |
+| `HERMES_CODING_PROVIDER` / `HERMES_CODING_MODEL` / `HERMES_CODING_API_KEY` / `HERMES_CODING_BASE_URL` | optional | Per-task override for complex coding tasks |
+| `TORQCLAW_PREFER_CLOUD` | unset | `1` lowers the bar for cloud routing while privacy/local-only still win |
+| `TORQCLAW_DEFAULT_MAX_COST` | unset/unlimited | Fallback budget when a task sets none |
+| `HERMES_MAX_ITERATIONS` | `30` | Hard cap on the Hermes loop |
+| `HERMES_STUB_COST_USD` | `0.0` | Stub-mode spend value for tests |
+| `HERMES_STUB_COST_UNAVAILABLE` | unset | `1` makes stub spend unavailable |
 
-## Adding tools (MCP servers)
+## Run controls
 
-Copy `ops/servers.example.json` to `~/.torqclaw/servers.json`. Each entry's
-`id` becomes the tool namespace prefix (`filesystem__read_file`). Both `stdio`
-(spawned command) and `streamable-http` (remote URL + optional bearer token)
-transports are supported. `approvalPatterns` are regexes — matching tools
-require a human click on LOCAL_EDGE runs; omit to use the default
-write/delete/push/create/update/send/exec set. A malformed file or an
-unreachable server degrades that server only, never the gateway. Update
-`TOOL_ROUTING_MAP` in `packages/bridge/src/toolFilter.ts` to expose new
-namespaces to the task types that need them.
+The console controls are user-owned and per submission:
 
-A `"tools": [...]` allowlist registers **only** the named (un-namespaced) tools
-from a server and drops the rest. Essential for big servers — a TradingView MCP
-exposes 80+ tools whose full schema set would overflow the local 8K context
-window; allowlisting the handful you need (e.g. `quote_get`, `symbol_info`)
-keeps LOCAL_EDGE runs viable and the model focused. Omit to register everything.
+- **Budget** — default/env fallback, free local-only, fixed amounts, or custom `maxCostUsd`.
+- **Mode** — Auto, This machine only (`LOCAL_ONLY`), or Cloud allowed.
+- **Private** — sets `containsSensitiveData`; automation must not clear it.
+- **Fast/urgent** — latency hint for routing.
+- **Stop** — cancels a running task through the gateway.
 
-> **Stateful-server gotcha:** some MCP servers report on *current state*, not a
-> queried target. The TradingView `quote_get` reads whatever symbol the desktop
-> chart currently shows — passing `symbol` only labels the output. To quote a
-> specific instrument, allowlist `chart_set_symbol` too so the agent switches the
-> chart first, then quotes. (That write tool gates for approval on LOCAL_EDGE.)
+A credential-looking prompt may trigger a client-side suggestion to mark private. It never silently flips the flag and never blocks submission.
 
-> **Tier note:** bridge-registered MCP servers feed the **LOCAL_EDGE** loop.
-> The **FRONTIER** tier runs the Hermes engine's own toolsets (web/files/etc.),
-> so a task that must use a bridge tool (like TradingView) should run
-> `LOCAL_ONLY` (the "This machine only" mode) — otherwise prefer-cloud routes it
-> to FRONTIER, which can't see the bridge server.
+## Tool approvals
 
-### Workspace path scoping (P5)
+A write-capable tool never runs without operator approval.
 
-A server entry may declare a filesystem scope, enforced in the bridge **before**
-a tool runs:
+- LOCAL_EDGE raises `ToolApprovalRequired` before executing an ungranted gated tool.
+- FRONTIER blocks through the Hermes `pre_tool_call` hook and returns through the same gateway approval path.
+- `APPROVE_TOOL` carries only `approvalId` and decision; the gateway reads the tool and args from its own database.
+- Allow once re-mints a gateway-owned one-shot grant.
+- Deny ends with a terminal error and does not store memory.
+- Approval history is read-only and display-only; history rows cannot approve.
 
-```json
-"pathArgKeys": ["path", "paths", "source", "destination"],
-"paths": {
-  "read":  ["/path/to/workspace"],
-  "write": ["/path/to/workspace"],
-  "deny":  ["~/.ssh", "~/.aws", "~/.config", ".env"]
-}
-```
+## Safe diagnostic export
 
-Every path-like argument (keys from `pathArgKeys`, else common defaults) is
-**resolved** — `~` expanded, `..` collapsed — before matching, so
-`/work/../etc/passwd` or `~/.ssh/../.ssh/id_rsa` cannot slip past a rule. `deny`
-always wins; an empty `read`/`write` list means that mode is unconstrained;
-write-capable tools check `write`, others `read`. A denied path becomes a tool
-error fed back to the model plus a SYSTEM event.
+Safe export is designed for support/debugging without pretending to solve all data-leak risk.
 
-This is **defense in depth alongside** the MCP server's own sandboxing (e.g. the
-filesystem server's allowed-dirs args) — both layers apply; either can deny.
-
-## Tool approval (both tiers)
-
-A write-capable tool never runs without a human OK — on **either** tier, via one
-shared path:
-
-- **LOCAL_EDGE:** the Ollama loop throws `ToolApprovalRequired` at a gated,
-  ungranted tool.
-- **FRONTIER:** the Hermes engine blocks the tool via its own `pre_tool_call`
-  plugin hook (registered programmatically from `mcp_wrapper/approval_hook.py` —
-  no vendor fork); the bridge then throws the same error.
-
-Either way, **dispatch** (the single terminal-emission point) registers the
-approval and emits one terminal `PENDING_APPROVAL`. The console renders a
-permission card (exact tool, args, one-time scope). **Allow once** mints a new
-request carrying a gateway-owned `grantedTools=[tool]` — constraints preserved
-verbatim, a grant-notice prepended to the context — and re-dispatches; the tool
-then runs. **Deny** ends with a terminal `ERROR`. The blocked attempt writes no
-`RESULT` and is never stored to memory, so it can't poison future context.
-
-`grantedTools` lives only on the internal `GatewayRequest` — a client
-`SUBMIT_PROMPT` cannot inject it.
+- Request via `GET_SAFE_EXPORT` from an operator seat.
+- Export is generated on demand from allowed receipt/task/approval facts.
+- Server redaction removes known secret shapes and absolute path shapes.
+- The UI displays the redaction report before copy.
+- Copy JSON uses the server SafeExport object exactly.
+- Copy Markdown is a pure projection of that object with GitHub-paste escaping.
+- Raw local diagnostics remain available only as explicitly labeled local/unredacted diagnostics.
 
 ## Channels
 
-The console is one client. The `ConnectFrame` contract reserves three roles —
-`operator` (the console), `channel` (an external surface like HTTP/Slack/
-Discord), and `node` (a future compute peer) — so any number of surfaces can
-drive the same gateway, sessions, routing, and safety gates.
-
-The first non-console channel ships in `packages/channel-http`: a plain HTTP
-adapter. It connects to the gateway as `role: 'channel'`, submits the prompt,
-waits for the single terminal event (invariant 7), and returns it as JSON.
+The console is the primary operator client. `packages/channel-http` is the first non-console adapter and connects as `role: 'channel'`.
 
 ```bash
-TORQCLAW_HTTP_CHANNEL=1 node --env-file=.env ops/dev-up.mjs   # adds :18792
+TORQCLAW_HTTP_CHANNEL=1 node --env-file=.env ops/dev-up.mjs
 
 curl -s localhost:18792/task -H 'content-type: application/json' \
   -d '{"prompt":"research MCP gateway namespacing and compare the options"}'
-# → {"ok":true,"tier":"cloud","answer":"…","sessionId":"…"}
 ```
 
-Pass `sessionId` back on the next call to keep multi-turn context; set
-`executionMode`/`sensitive`/`maxCostUsd` exactly like the console controls. A
-task that needs interactive tool approval returns `202 pending_approval` —
-a headless channel can't click a permission card, so it says so honestly rather
-than pretending the tool ran. Front-door auth via `CHANNEL_HTTP_TOKEN` (Bearer);
-the adapter's own gateway auth is the separate `TORQCLAW_GATEWAY_TOKEN`.
+A task that needs interactive approval returns a pending-approval response honestly; a headless channel cannot click the approval card.
 
-`packages/channel-http/src/gatewayClient.ts` is the reusable bridge core — a
-Slack or Discord adapter swaps only the transport layer and keeps the same
-connect → submit → await-terminal logic.
+## Adding MCP servers
+
+Copy `ops/servers.example.json` to `~/.torqclaw/servers.json`.
+
+Each server entry supports:
+
+- `id` for namespace prefixing, such as `filesystem__read_file`.
+- `stdio` or `streamable-http` transport.
+- optional `tools` allowlist to keep large servers focused.
+- capability/approval policy.
+- `pathArgKeys` and path scopes for read/write/deny enforcement.
+
+Path-like arguments are resolved before policy matching. `deny` always wins.
+
+## Verification
+
+Run the current gate:
+
+```bash
+pnpm typecheck
+pnpm test
+pnpm contracts:check
+pnpm build
+cd engines/hermes_kernel
+uv run pytest
+```
+
+Current Phase-1 closeout gate:
+
+```text
+805/805 TypeScript tests
+75/75 Python tests
+typecheck 12/12
+contracts drift OK
+build 7/7
+```
 
 ## Design invariants
 
-1. **Every frame is contract-validated** — at the WS boundary, inside the gateway
-   (it parses its own output), and at the Python boundary (compiled JSON Schema).
-2. **Sessions outlive sockets.** Execution publishes to a session bus; sockets
-   subscribe, drop, and resume via monotonic `seq` cursors — never timestamps.
-3. **Privacy beats everything** in routing; classifier uncertainty buys frontier
-   capability; write-capable tools pause for human approval on **both** tiers.
-4. **Skills never auto-deploy.** Drafts land in an approval queue; only an
-   operator decision writes to the skills directory.
-5. **Wrap, don't rewrite.** Upstream Hermes is a pinned submodule; we own only
-   `mcp_wrapper/`.
+1. **No hidden authority.** Client requests cannot inject grants, scopes, approvals, or internal authorization.
+2. **Privacy beats routing confidence.** Private/local-only tasks stay local.
+3. **Budget before spend.** Cloud tasks carry an explicit budget story.
+4. **Approval before write.** Write-class tools pause on both tiers.
+5. **Receipts from evidence.** Receipts and exports are built from recorded facts; absent facts are not invented.
+6. **Safe export is honest.** It removes known secret shapes but never claims total safety.
+7. **Protocol drift fails fast.** Generated schemas are checked against source of truth.
+8. **Wrap, do not rewrite Hermes.** Upstream Hermes remains vendored; TORQCLAW owns `mcp_wrapper/`.
+9. **Governed phases.** Phase 2 is not started until explicitly scoped and approved.
+
+## Roadmap
+
+Completed:
+
+- Phase 0 — Foundation Repair.
+- Phase 1 — Visible Trust MVP.
+
+Not started:
+
+- Phase 2 — Governed Learning MVP.
+
+Filed non-blocking residuals:
+
+- `TCLAW-FIX-G` — refresh/re-project receipt approval embeds after approval decision.
+- `TCLAW-FIX-H` — at-rest sanitization for persisted `tasks.error` / `full_receipt_json.error`.
+- `TCLAW-GRAPHIFY-CLEANUP` — Graphify cleanup/relocation operator lane.
