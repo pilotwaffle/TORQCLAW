@@ -37,11 +37,17 @@ CREATE INDEX IF NOT EXISTS idx_task_events ON task_events(task_id, cursor);
 """)
 
 
-def create(payload: dict) -> str:
-    task_id = str(uuid.uuid4())
+def create(payload: dict, task_id: str | None = None) -> str:
+    """Create an internal task idempotently.
+
+    Resilience attempts use the ledger's stable attemptId as the task id. The
+    optional id is deliberately supported without changing the legacy caller
+    contract, which still receives a generated UUID.
+    """
+    task_id = task_id or str(uuid.uuid4())
     with _lock:
         _conn.execute(
-            "INSERT INTO tasks (task_id, payload) VALUES (?, ?)",
+            "INSERT OR IGNORE INTO tasks (task_id, payload) VALUES (?, ?)",
             (task_id, json.dumps(payload)),
         )
         _conn.commit()
@@ -66,10 +72,11 @@ def complete(task_id: str, result: str, telemetry: dict | None = None) -> None:
         _conn.commit()
 
 
-def fail(task_id: str, error: str) -> None:
+def fail(task_id: str, error: str, telemetry: dict | None = None) -> None:
     with _lock:
         _conn.execute(
-            "UPDATE tasks SET state='failed', error=? WHERE task_id=?", (error, task_id)
+            "UPDATE tasks SET state='failed', error=?, telemetry=? WHERE task_id=?",
+            (error, json.dumps(telemetry or {}), task_id),
         )
         _conn.commit()
 

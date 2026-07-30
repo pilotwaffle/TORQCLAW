@@ -1,0 +1,190 @@
+{
+    "schemaVersion":  1,
+    "suite":  "TORQCLAW isolated resilience P0",
+    "claim":  "exactly 108 unique meaningful cases; not a 1,000-case claim",
+    "declared":  108,
+    "categories":  [
+                       {
+                           "name":  "initial_epoch_tombstone_id",
+                           "count":  12,
+                           "ids":  [
+                                       "initial_epoch_zero",
+                                       "initial_internal_attempt_id",
+                                       "initial_tombstone_duplicate",
+                                       "initial_outbox_atomic",
+                                       "initial_plan_hash_stored",
+                                       "initial_one_active_control",
+                                       "initial_epoch_unique",
+                                       "initial_secret_free_plan",
+                                       "initial_nonnegative_reservation",
+                                       "initial_future_plan_rejected",
+                                       "initial_expired_rejected",
+                                       "initial_over_budget_rejected"
+                                   ]
+                       },
+                       {
+                           "name":  "atomic_stale_mutations",
+                           "count":  18,
+                           "ids":  [
+                                       "stale_event",
+                                       "stale_cost",
+                                       "stale_dispatch",
+                                       "stale_state",
+                                       "stale_cancel",
+                                       "stale_complete",
+                                       "wrong_attempt",
+                                       "wrong_epoch",
+                                       "wrong_task",
+                                       "expired_cost",
+                                       "expired_complete",
+                                       "provider_state_follow_on_mutation",
+                                       "provider_state_follow_on_cost",
+                                       "provider_state_follow_on_complete",
+                                       "reserved_state_fail_closed",
+                                       "repeated_dispatch",
+                                       "post_terminal_event",
+                                       "expired_cancel"
+                                   ]
+                       },
+                       {
+                           "name":  "transition_eligibility_right",
+                           "count":  20,
+                           "ids":  [
+                                       "valid_transition",
+                                       "nonretryable_class",
+                                       "retryable_flag_false",
+                                       "unknown_successor",
+                                       "earlier_successor",
+                                       "same_successor",
+                                       "dispatch_barrier",
+                                       "cancel_barrier",
+                                       "deadline_barrier",
+                                       "right_consumed",
+                                       "limit_zero",
+                                       "ordered_chain",
+                                       "exact_tuple",
+                                       "immutable_privacy_binding",
+                                       "immutable_policy_binding",
+                                       "provider_identity_fact_tamper_rejected",
+                                       "immutable_grant_binding",
+                                       "plan_tamper_rejected",
+                                       "circuit_successor",
+                                       "historical_epoch_rejected"
+                                   ]
+                       },
+                       {
+                           "name":  "fixed_point_budget_cost",
+                           "count":  12,
+                           "ids":  [
+                                       "budget_exact_fit",
+                                       "budget_one_micro_short",
+                                       "unknown_cost_no_headroom",
+                                       "known_lower_cost_headroom",
+                                       "known_zero_cost",
+                                       "negative_actual_rejected",
+                                       "float_actual_rejected",
+                                       "negative_ceiling_rejected",
+                                       "zero_ceiling_allowed",
+                                       "unlimited_budget_overflow_rejected",
+                                       "cost_fact_headroom_tamper_rejected",
+                                       "cost_outbox_atomic"
+                                   ]
+                       },
+                       {
+                           "name":  "crash_recovery_boundaries",
+                           "count":  14,
+                           "ids":  [
+                                       "crash_create_rollback",
+                                       "crash_dispatch_rollback",
+                                       "crash_transition_rollback",
+                                       "crash_cost_rollback",
+                                       "pre_dispatch_orphan",
+                                       "post_dispatch_terminal_uncertain",
+                                       "late_orphan_event",
+                                       "late_orphan_cost",
+                                       "late_orphan_complete",
+                                       "history_readable",
+                                       "crash_completion_rollback",
+                                       "crash_recovery_outbox_rollback",
+                                       "future_version_fail_closed",
+                                       "no_down_migration"
+                                   ]
+                       },
+                       {
+                           "name":  "multi_connection_contention",
+                           "count":  8,
+                           "ids":  [
+                                       "duplicate_create_race",
+                                       "transition_race_single_winner",
+                                       "stale_writer_rejected",
+                                       "two_readers_same_active",
+                                       "two_dispatchers_one_mark",
+                                       "two_cost_writers_atomic",
+                                       "subprocess_reopen",
+                                       "wal_enabled"
+                                   ]
+                       },
+                       {
+                           "name":  "contracts_schema_drift",
+                           "count":  10,
+                           "ids":  [
+                                       "typescript_plan_schema",
+                                       "typescript_tuple_schema",
+                                       "typescript_failure_schema",
+                                       "typescript_outbox_schema",
+                                       "generated_ts_schema",
+                                       "generated_python_schema",
+                                       "schema_names_match",
+                                       "schema_json_parseable",
+                                       "strict_extra_plan",
+                                       "hash_shape"
+                                   ]
+                       },
+                       {
+                           "name":  "outbox_replay_dedupe",
+                           "count":  6,
+                           "ids":  [
+                                       "initial_outbox_order",
+                                       "transition_outbox_order",
+                                       "event_outbox_order",
+                                       "cost_outbox_order",
+                                       "dedupe_replay",
+                                       "projection_rebuild"
+                                   ]
+                       },
+                       {
+                           "name":  "secret_free_import_absence",
+                           "count":  4,
+                           "ids":  [
+                                       "no_credential_plan_rows",
+                                       "no_raw_error_failure",
+                                       "import_has_no_io",
+                                       "deterministic_fake_fixture"
+                                   ]
+                       },
+                       {
+                           "name":  "manifest_report_integrity",
+                           "count":  4,
+                           "ids":  [
+                                       "declared_count_108",
+                                       "unique_case_ids",
+                                       "all_cases_executed",
+                                       "no_skips_or_duplicates"
+                                   ]
+                       }
+                   ],
+    "reporting":  {
+                      "fields":  [
+                                     "declared",
+                                     "executed",
+                                     "passed",
+                                     "failed",
+                                     "skipped",
+                                     "duplicate",
+                                     "repetition"
+                                 ],
+                      "duplicatePolicy":  "fail",
+                      "skipPolicy":  "fail",
+                      "repetitionPolicy":  "report"
+                  }
+}

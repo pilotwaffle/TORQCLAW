@@ -219,6 +219,23 @@ app.get('/ws', { websocket: true }, (socket) => {
         const reqId = cmd.data.taskId; // gateway request_id
         const emitCancel = makeEmitter(sid, reqId, null);
         emitCancel('SYSTEM', 'Cancellation requested');
+        // Feature-on cancellation is persist-first: the resilience ledger
+        // records the irreversible cancel fact before any provider transport
+        // signal. A noop means this is a legacy/non-active task and falls
+        // through to the unchanged cancellation path.
+        if (process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED?.toLowerCase() === 'true') {
+          try {
+            const { cancelFailoverTask } = await import('./failover.js');
+            const outcome = await cancelFailoverTask(reqId, 'USER_CANCELLED');
+            if (outcome !== 'noop') {
+              emitCancel('SYSTEM', outcome === 'cancelled' ? 'Cancellation acknowledged' : 'Cancellation uncertain');
+              break;
+            }
+          } catch {
+            emitCancel('SYSTEM', 'Cancel persistence failed; provider work was not signalled.');
+            break;
+          }
+        }
         // FRONTIER: interrupt the Python agent via the bridge. LOCAL_EDGE: flip
         // the in-memory flag the ollama loop polls. Set both — the flag is free
         // and the bridge call no-ops if this wasn't a tracked frontier task.
@@ -296,5 +313,11 @@ app.get('/ws', { websocket: true }, (socket) => {
 });
 
 await connectBridge(); // discover + namespace MCP servers before traffic
+if (process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED?.toLowerCase() === 'true') {
+  const { ensureResilienceProjection, reconcileGatewayProjection } = await import('./storage.js');
+  const { pageOutbox } = await import('@torqclaw/bridge');
+  ensureResilienceProjection();
+  await reconcileGatewayProjection(async (afterCursor, limit) => pageOutbox(afterCursor, limit));
+}
 await app.listen({ port: PORT, host: HOST });
 console.log(`[torqclaw] gateway listening on ws://${HOST}:${PORT}/ws`);

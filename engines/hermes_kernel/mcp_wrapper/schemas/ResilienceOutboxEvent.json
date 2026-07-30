@@ -1,0 +1,665 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outboxId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "taskId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,256}$"
+        },
+        "attemptId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "createdAtMs": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "type": "string",
+          "const": "attempt_created"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "providerId": {
+              "type": "string",
+              "pattern": "^(?!.*(?:[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]|[sS][eE][cC][rR][eE][tT]|[pP][aA][sS][sS][wW][oO][rR][dD]|[tT][oO][kK][eE][nN]|[cC][oO][oO][kK][iI][eE]|[aA][uU][tT][hH][oO][rR][iI][zZ][aA][tT][iI][oO][nN]|[aA][pP][iI][_-]?[kK][eE][yY]|[pP][rR][oO][vV][iI][dD][eE][rR][_-]?[eE][rR][rR][oO][rR]|[hH][eE][aA][dD][eE][rR][sS]))[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+            },
+            "planHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "providerId",
+            "planHash"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "outboxId",
+        "taskId",
+        "attemptId",
+        "epoch",
+        "createdAtMs",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outboxId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "taskId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,256}$"
+        },
+        "attemptId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "createdAtMs": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "type": "string",
+          "const": "provider_event"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "eventKind": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            },
+            "payload": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "pattern": "^(?!.*(?:[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]|[sS][eE][cC][rR][eE][tT]|[pP][aA][sS][sS][wW][oO][rR][dD]|[tT][oO][kK][eE][nN]|[cC][oO][oO][kK][iI][eE]|[aA][uU][tT][hH][oO][rR][iI][zZ][aA][tT][iI][oO][nN]|[aA][pP][iI][kK][eE][yY]|[rR][aA][wW][eE][rR][rR][oO][rR]|[eE][rR][rR][oO][rR][bB][oO][dD][yY]|[pP][rR][oO][vV][iI][dD][eE][rR][eE][rR][rR][oO][rR]|[hH][eE][aA][dD][eE][rR][sS]|[eE][rR][rR][oO][rR]))[A-Za-z][A-Za-z0-9_.-]{0,63}$"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/__schema0"
+              }
+            }
+          },
+          "required": [
+            "eventKind",
+            "payload"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "outboxId",
+        "taskId",
+        "attemptId",
+        "epoch",
+        "createdAtMs",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outboxId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "taskId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,256}$"
+        },
+        "attemptId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "createdAtMs": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "type": "string",
+          "const": "dispatch_attempted"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "outboxId",
+        "taskId",
+        "attemptId",
+        "epoch",
+        "createdAtMs",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outboxId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "taskId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,256}$"
+        },
+        "attemptId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "createdAtMs": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "type": "string",
+          "const": "cost_recorded"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "actualCostMicroUsd": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "known": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "actualCostMicroUsd",
+            "known"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "outboxId",
+        "taskId",
+        "attemptId",
+        "epoch",
+        "createdAtMs",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outboxId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "taskId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,256}$"
+        },
+        "attemptId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "createdAtMs": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "type": "string",
+          "const": "state_mutated"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "provider_ready",
+                "provider_started",
+                "queued",
+                "starting",
+                "connecting",
+                "thinking",
+                "processing",
+                "streaming",
+                "receiving",
+                "waiting",
+                "progress"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "pattern": "^(?!.*(?:[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]|[sS][eE][cC][rR][eE][tT]|[pP][aA][sS][sS][wW][oO][rR][dD]|[tT][oO][kK][eE][nN]|[cC][oO][oO][kK][iI][eE]|[aA][uU][tT][hH][oO][rR][iI][zZ][aA][tT][iI][oO][nN]|[aA][pP][iI][kK][eE][yY]|[rR][aA][wW][eE][rR][rR][oO][rR]|[eE][rR][rR][oO][rR][bB][oO][dD][yY]|[pP][rR][oO][vV][iI][dD][eE][rR][eE][rR][rR][oO][rR]|[hH][eE][aA][dD][eE][rR][sS]|[eE][rR][rR][oO][rR]))[A-Za-z][A-Za-z0-9_.-]{0,63}$"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/__schema0"
+              }
+            }
+          },
+          "required": [
+            "state",
+            "payload"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "outboxId",
+        "taskId",
+        "attemptId",
+        "epoch",
+        "createdAtMs",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outboxId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "taskId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,256}$"
+        },
+        "attemptId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "createdAtMs": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "type": "string",
+          "const": "cancel_requested"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "outboxId",
+        "taskId",
+        "attemptId",
+        "epoch",
+        "createdAtMs",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outboxId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "taskId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,256}$"
+        },
+        "attemptId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "createdAtMs": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "type": "string",
+          "const": "attempt_completed"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "type": "string",
+              "enum": [
+                "completed",
+                "cancelled",
+                "cancelled_uncertain",
+                "failed",
+                "terminal"
+              ]
+            },
+            "actualCostMicroUsd": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "known": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "outcome",
+            "actualCostMicroUsd",
+            "known"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "outboxId",
+        "taskId",
+        "attemptId",
+        "epoch",
+        "createdAtMs",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outboxId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "taskId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,256}$"
+        },
+        "attemptId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "createdAtMs": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "type": "string",
+          "const": "transitioned"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "predecessor": {
+              "type": "object",
+              "properties": {
+                "taskId": {
+                  "type": "string",
+                  "pattern": "^[!-~]{1,256}$"
+                },
+                "attemptId": {
+                  "type": "string",
+                  "pattern": "^[!-~]{1,128}$"
+                },
+                "epoch": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "taskId",
+                "attemptId",
+                "epoch"
+              ],
+              "additionalProperties": false
+            },
+            "predecessorProviderId": {
+              "type": "string",
+              "pattern": "^(?!.*(?:[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]|[sS][eE][cC][rR][eE][tT]|[pP][aA][sS][sS][wW][oO][rR][dD]|[tT][oO][kK][eE][nN]|[cC][oO][oO][kK][iI][eE]|[aA][uU][tT][hH][oO][rR][iI][zZ][aA][tT][iI][oO][nN]|[aA][pP][iI][_-]?[kK][eE][yY]|[pP][rR][oO][vV][iI][dD][eE][rR][_-]?[eE][rR][rR][oO][rR]|[hH][eE][aA][dD][eE][rR][sS]))[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+            },
+            "successorProviderId": {
+              "type": "string",
+              "pattern": "^(?!.*(?:[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]|[sS][eE][cC][rR][eE][tT]|[pP][aA][sS][sS][wW][oO][rR][dD]|[tT][oO][kK][eE][nN]|[cC][oO][oO][kK][iI][eE]|[aA][uU][tT][hH][oO][rR][iI][zZ][aA][tT][iI][oO][nN]|[aA][pP][iI][_-]?[kK][eE][yY]|[pP][rR][oO][vV][iI][dD][eE][rR][_-]?[eE][rR][rR][oO][rR]|[hH][eE][aA][dD][eE][rR][sS]))[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+            },
+            "failure": {
+              "type": "object",
+              "properties": {
+                "failureClass": {
+                  "type": "string",
+                  "enum": [
+                    "retryable",
+                    "configuration",
+                    "authentication",
+                    "budget",
+                    "side_effect_uncertainty",
+                    "timeout",
+                    "cancelled",
+                    "terminal"
+                  ]
+                },
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,63}$"
+                },
+                "retryable": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "failureClass",
+                "code",
+                "retryable"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "predecessor",
+            "predecessorProviderId",
+            "successorProviderId",
+            "failure"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "outboxId",
+        "taskId",
+        "attemptId",
+        "epoch",
+        "createdAtMs",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outboxId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "taskId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,256}$"
+        },
+        "attemptId": {
+          "type": "string",
+          "pattern": "^[!-~]{1,128}$"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "createdAtMs": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "type": "string",
+          "const": "pre_dispatch_recovered"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "outboxId",
+        "taskId",
+        "attemptId",
+        "epoch",
+        "createdAtMs",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "__schema0": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "object",
+          "properties": {
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "length": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16384
+            }
+          },
+          "required": [
+            "sha256",
+            "length"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "maxItems": 256,
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/__schema0"
+          }
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^(?!.*(?:[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]|[sS][eE][cC][rR][eE][tT]|[pP][aA][sS][sS][wW][oO][rR][dD]|[tT][oO][kK][eE][nN]|[cC][oO][oO][kK][iI][eE]|[aA][uU][tT][hH][oO][rR][iI][zZ][aA][tT][iI][oO][nN]|[aA][pP][iI][kK][eE][yY]|[rR][aA][wW][eE][rR][rR][oO][rR]|[eE][rR][rR][oO][rR][bB][oO][dD][yY]|[pP][rR][oO][vV][iI][dD][eE][rR][eE][rR][rR][oO][rR]|[hH][eE][aA][dD][eE][rR][sS]|[eE][rR][rR][oO][rR]))[A-Za-z][A-Za-z0-9_.-]{0,63}$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/__schema0"
+          }
+        }
+      ]
+    }
+  }
+}

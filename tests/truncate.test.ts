@@ -3,7 +3,32 @@ import {
   truncateHeadTail,
   looksLikeRawToolCall,
   looksLikeFabricatedToolRun,
+  requestedLocalToolSequence,
 } from '../packages/inference/src/ollama.js';
+
+describe('requestedLocalToolSequence', () => {
+  const available = [
+    'playwright__browser_navigate',
+    'playwright__browser_snapshot',
+    'desktop_commander__start_process',
+  ];
+
+  it('forces an explicit browser workflow in the requested order', () => {
+    expect(requestedLocalToolSequence(
+      'Use the browser to navigate to https://example.com and take an accessibility snapshot',
+      available,
+    )).toEqual(['playwright__browser_navigate', 'playwright__browser_snapshot']);
+  });
+
+  it('forces an explicit terminal execution request', () => {
+    expect(requestedLocalToolSequence('Use the terminal to run Get-Location', available))
+      .toEqual(['desktop_commander__start_process']);
+  });
+
+  it('does not force tools for an ordinary question', () => {
+    expect(requestedLocalToolSequence('What is the purpose of this project?', available)).toEqual([]);
+  });
+});
 
 describe('truncateHeadTail (P3)', () => {
   it('returns the input unchanged when it fits', () => {

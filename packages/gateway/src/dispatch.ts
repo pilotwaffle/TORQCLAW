@@ -13,7 +13,7 @@ import { makeEmitter, taskStore } from './events.js';
 import { sessions } from './sessions.js';
 import { cancellations } from './cancellations.js';
 import { registerApproval } from './approvals.js';
-import { safeMaterializeReceipt } from './receipts.js';
+import { safeMaterializeReceipt, safeMaterializeReceipt as projectReceiptSafely } from './receipts.js';
 import {
   resolveBudgetWithSource,
   resolveSessionCap,
@@ -165,7 +165,7 @@ export function emitToolDenied(req: GatewayRequest, toolName: string, diag: Rout
  *
  *  Invariant 7: this is the SINGLE terminal emission point. Execution layers
  *  THROW typed errors; only the catch/complete here emits RESULT or ERROR. */
-export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
+function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
   const emit = makeEmitter(req.sessionId, req.id, diag.tier);
 
   // Apply resolved budget so the bridge enforces it; warn once when a FRONTIER
@@ -395,4 +395,46 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
       cancellations.clear(req.id);
     }
   })();
+}
+
+/** Feature gate is deliberately the first executable branch. The legacy path
+ * below is unchanged when the flag is off; failover is dynamically imported so
+ * it cannot open resilience projection state or add a poll/delay to legacy
+ * requests. The gateway remains the only terminal owner. */
+export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
+  if (diag.tier === ComputeTier.FRONTIER && process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED?.toLowerCase() === 'true') {
+    void dispatchFailover(req, diag);
+    return;
+  }
+  dispatchLegacy(req, diag);
+}
+
+async function dispatchFailover(req: GatewayRequest, diag: RouterDiagnostics): Promise<void> {
+  const emit = makeEmitter(req.sessionId, req.id, diag.tier);
+  const { budget, source: budgetSource } = resolveBudgetWithSource(req);
+  const effectiveReq: GatewayRequest = budget === undefined
+    ? req
+    : { ...req, constraints: { ...req.constraints, maxCost: budget } };
+  taskStore.create(effectiveReq, diag);
+  try {
+    const { runFailoverTask, FailoverTerminalError } = await import('./failover.js');
+    const result = await runFailoverTask(effectiveReq, diag, { emit });
+    const telemetry: Record<string, unknown> = { ...(result.telemetry ?? {}), budgetSource, failoverEnabled: true };
+    taskStore.complete(req.id, result.text, telemetry);
+    if (!telemetry.cancelled) sessions.storeEpisode(req.id, req.sessionId, req.payload.taskType, req.payload.prompt, result.text);
+    emit('RESULT', result.text, { failoverEnabled: true });
+    emit('SYSTEM', 'Done', { receipt: { tier: diag.tier, failoverEnabled: true } });
+    projectReceiptSafely(req.id);
+    const cost = typeof telemetry.costUsd === 'number' ? telemetry.costUsd : undefined;
+    recordSpendSafe({ taskId: req.id, sessionId: req.sessionId, sourceChannel: req.sourceChannel, costUsd: cost, costSource: typeof telemetry.costSource === 'string' ? telemetry.costSource : undefined });
+  } catch (error: unknown) {
+    const typed = error instanceof (await import('./failover.js')).FailoverTerminalError ? error as import('./failover.js').FailoverTerminalError : null;
+    const failure = typed?.failure ?? { failureClass: 'terminal', code: 'failover_failed', retryable: false };
+    const telemetry = { failoverEnabled: true, budgetSource, normalizedFailure: failure, dispatchAttempted: typed?.dispatchAttempted ?? false, terminalOutcome: typed?.terminalOutcome ?? 'terminal', ...(typed?.telemetry ?? {}) };
+    taskStore.fail(req.id, `FAILOVER: ${failure.code}`, telemetry);
+    emit('ERROR', `Execution failed: failover ${failure.code}.`, { failoverEnabled: true, normalizedFailure: failure, terminalOutcome: telemetry.terminalOutcome });
+    projectReceiptSafely(req.id);
+  } finally {
+    cancellations.clear(req.id);
+  }
 }

@@ -43,7 +43,12 @@ const MAX_ITERATIONS = 5;
 const MAX_TOOL_RESULT_CHARS = 6_000; // ~1.5k tokens; raw file reads must not nuke the window
 const INFERENCE_TIMEOUT_MS = 120_000;
 
-async function callOllama(messages: unknown[], tools?: unknown[], signal?: AbortSignal) {
+async function callOllama(
+  messages: unknown[],
+  tools?: unknown[],
+  signal?: AbortSignal,
+  toolChoice?: unknown,
+) {
   const res = await fetch(`${OLLAMA_HOST}/v1/chat/completions`, {
     method: 'POST',
     signal: signal ?? AbortSignal.timeout(INFERENCE_TIMEOUT_MS),
@@ -52,12 +57,29 @@ async function callOllama(messages: unknown[], tools?: unknown[], signal?: Abort
       model: LOCAL_MODEL,
       messages,
       tools: tools && tools.length > 0 ? tools : undefined,
-      tool_choice: tools && tools.length > 0 ? 'auto' : undefined,
+      tool_choice: tools && tools.length > 0 ? (toolChoice ?? 'auto') : undefined,
       keep_alive: '10m',
     }),
   });
   if (!res.ok) throw new Error(`Ollama API error: ${res.status} ${res.statusText}`);
   return res.json();
+}
+
+/** Explicit local-device requests need a real tool call, even when the small
+ * local model tries to answer with prose or invented code. Keep this narrow:
+ * ordinary prompts remain model-selected, while an unmistakable browser or
+ * terminal workflow gets a deterministic first-tool sequence. */
+export function requestedLocalToolSequence(prompt: string, available: string[]): string[] {
+  const p = prompt.toLowerCase();
+  const hasBrowser = /\b(browser|playwright)\b/.test(p);
+  const hasTerminal = /\b(terminal|powershell|command prompt|shell)\b/.test(p);
+  const wantsNavigation = /\b(navigate|open|go to|visit)\b/.test(p) && /https?:\/\//.test(p);
+  const wantsSnapshot = /\b(snapshot|page title|accessibility|inspect the page|read the page)\b/.test(p);
+  const sequence: string[] = [];
+  if (hasBrowser && wantsNavigation) sequence.push('playwright__browser_navigate');
+  if (hasBrowser && wantsSnapshot) sequence.push('playwright__browser_snapshot');
+  if (hasTerminal && /\b(run|execute|use|in)\b/.test(p)) sequence.push('desktop_commander__start_process');
+  return sequence.filter((name) => available.includes(name));
 }
 
 /** Stop immediately on user cancel: one finalization pass, capped at 10s; on
@@ -142,6 +164,10 @@ export async function executeLocalEdge(
   // Task-filtered, namespaced, alias-mapped, approval-gated toolset.
   const { openAITools, resolveAlias, requiresApproval } =
     await getToolsForTask(req.payload.taskType, 'LOCAL_EDGE');
+  const requestedTools = requestedLocalToolSequence(
+    req.payload.prompt,
+    openAITools.map((t) => t.function.name),
+  );
 
   // Small local models improvise without hard grounding: they fabricate tool
   // output, claim capabilities they lack, and role-play. Pin them to reality —
@@ -167,6 +193,9 @@ export async function executeLocalEdge(
         'made-up content, and never quote file contents, code, or data you have ' +
         'not actually received from a real tool result. If you have not received ' +
         'a tool result, you do not know what it would say.\n\n' +
+        (requestedTools.length
+          ? `6. This request requires real tool calls in this order: ${requestedTools.join(' -> ')}. Do not answer until they run.\n\n`
+          : '') +
         `AVAILABLE TOOLS:\n${toolList}` +
         (context ? `\n\n${context}` : ''),
     },
@@ -195,7 +224,23 @@ export async function executeLocalEdge(
       return finalizeCancelled(messages, start, iterations, toolCallCount, emit);
     }
     iterations++;
-    const result = await callOllama(messages, openAITools);
+    const nextRequested = requestedTools[toolCallCount];
+    const forcedAlias = nextRequested
+      ? openAITools.find((t) => t.function.name === nextRequested)?.function.name
+      : undefined;
+    // For an explicit device workflow, expose only the required next tool and
+    // use Ollama's portable `required` mode. Some local OpenAI-compatible
+    // servers ignore a named tool_choice when many tools are present, while
+    // `required` is reliable with a one-tool set.
+    const toolsForCall = forcedAlias
+      ? openAITools.filter((t) => t.function.name === forcedAlias)
+      : openAITools;
+    const result = await callOllama(
+      messages,
+      toolsForCall,
+      undefined,
+      forcedAlias ? 'required' : undefined,
+    );
     router.markLocalModelWarm(); // feed the cold-start rule real data
     const message = result.choices?.[0]?.message;
     if (!message) throw new Error('Ollama returned an empty completion');
@@ -227,6 +272,17 @@ export async function executeLocalEdge(
           'knowledge without tools.',
           start, iterations, toolCallCount,
         );
+      }
+      // Some local models emit a Python-style tool object as prose on a
+      // granted rerun (for example, `False` instead of JSON `false`). For an
+      // explicit workflow, give the model one bounded corrective turn rather
+      // than treating that text as a completed command.
+      if (forcedAlias && toolCallCount < requestedTools.length) {
+        messages.push({
+          role: 'user',
+          content: `You did not emit a function call. Emit the real ${forcedAlias} function call now; do not write JSON, Python, or explanatory prose.`,
+        });
+        continue;
       }
       return done(content, start, iterations, toolCallCount);
     }

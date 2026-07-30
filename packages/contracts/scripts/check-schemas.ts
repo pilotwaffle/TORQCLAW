@@ -24,6 +24,11 @@ import {
   GatewayEventSchema,
   ClientCommandSchema,
   ConnectFrameSchema,
+  ResilienceImmutablePlanSchema,
+  ResilienceActiveTupleSchema,
+  ResilienceNormalizedFailureSchema,
+  ResilienceOutboxEventSchema,
+  augmentResilienceImmutablePlanJsonSchema,
 } from '../dist/index.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -33,6 +38,10 @@ const EXPECTED_FILES = [
   'GatewayEvent.json',
   'ClientCommand.json',
   'ConnectFrame.json',
+  'ResilienceImmutablePlan.json',
+  'ResilienceActiveTuple.json',
+  'ResilienceNormalizedFailure.json',
+  'ResilienceOutboxEvent.json',
 ].sort();
 
 const artifacts: Record<string, z.ZodType> = {
@@ -40,6 +49,10 @@ const artifacts: Record<string, z.ZodType> = {
   GatewayEvent: GatewayEventSchema,
   ClientCommand: ClientCommandSchema,
   ConnectFrame: ConnectFrameSchema,
+  ResilienceImmutablePlan: ResilienceImmutablePlanSchema,
+  ResilienceActiveTuple: ResilienceActiveTupleSchema,
+  ResilienceNormalizedFailure: ResilienceNormalizedFailureSchema,
+  ResilienceOutboxEvent: ResilienceOutboxEventSchema,
 };
 
 const checkedInDirs = [
@@ -118,6 +131,29 @@ function firstDiffPath(a: unknown, b: unknown, path = '$'): string | null {
   return path;
 }
 
+function checkResiliencePlanAugmentation(path: string): string[] {
+  const schema = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  const properties = schema.properties as Record<string, unknown> | undefined;
+  const eligible = properties?.eligibleProviderIds as Record<string, unknown> | undefined;
+  const ceilings = properties?.providerCeilings as Record<string, unknown> | undefined;
+  const refinements = schema['x-torqclaw-refinements'] as Record<string, unknown> | undefined;
+  const allOf = schema.allOf;
+  const failures: string[] = [];
+  if (eligible?.uniqueItems !== true) failures.push('eligibleProviderIds.uniqueItems is missing');
+  if (ceilings?.minProperties !== 1) failures.push('providerCeilings.minProperties is missing');
+  if (!Array.isArray(allOf) || allOf.length < 64) {
+    failures.push('transitionLimit/provider-count conditionals are incomplete');
+  }
+  for (const key of [
+    'uniqueEligibleProviderIds',
+    'providerCeilingsCoverEligibleProviderIds',
+    'transitionLimitAtMostProviderCountMinusOne',
+  ]) {
+    if (refinements?.[key] !== true) failures.push(`missing parity refinement: ${key}`);
+  }
+  return failures;
+}
+
 function main(): void {
   const scratch = mkdtempSync(join(tmpdir(), 'torqclaw-contracts-check-'));
   let failed = false;
@@ -126,7 +162,16 @@ function main(): void {
   try {
     // Re-emit all 4 artifacts fresh into the scratch dir.
     for (const [name, schema] of Object.entries(artifacts)) {
-      writeFileSync(join(scratch, `${name}.json`), JSON.stringify(z.toJSONSchema(schema), null, 2));
+      const jsonSchema = z.toJSONSchema(schema) as Record<string, unknown>;
+      const emitted = name === 'ResilienceImmutablePlan'
+        ? augmentResilienceImmutablePlanJsonSchema(jsonSchema)
+        : jsonSchema;
+      writeFileSync(join(scratch, `${name}.json`), JSON.stringify(emitted, null, 2));
+    }
+
+    for (const failure of checkResiliencePlanAugmentation(join(scratch, 'ResilienceImmutablePlan.json'))) {
+      failed = true;
+      failures.push(`ResilienceImmutablePlan.json: ${failure}`);
     }
 
     for (const dir of checkedInDirs) {

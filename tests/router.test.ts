@@ -46,6 +46,32 @@ describe('router rule hierarchy', () => {
     }
   });
 
+  it('RULE 1b: computer and desktop capability requests stay local', () => {
+    const r = new TorqClawRouter();
+    for (const prompt of [
+      'what can you do for me on this computer',
+      'help me on my computer',
+      'open an app on this desktop',
+    ]) {
+      const d = r.evaluateRequest(makeRequest({ prompt, classifierConfidence: 0.3 }));
+      expect(d.tier, prompt).toBe(ComputeTier.LOCAL_EDGE);
+      expect(d.reason, prompt).toMatch(/^LOCAL_INTENT/);
+    }
+  });
+
+  it('RULE 1b\': explicit browser and terminal MCP requests stay local', () => {
+    const r = new TorqClawRouter();
+    for (const prompt of [
+      'open the browser and go to localhost:3000',
+      'use the terminal to inspect the project',
+      'run this in PowerShell',
+    ]) {
+      const d = r.evaluateRequest(makeRequest({ prompt, classifierConfidence: 0.3 }));
+      expect(d.tier, prompt).toBe(ComputeTier.LOCAL_EDGE);
+      expect(d.reason, prompt).toMatch(/^LOCAL_TOOL_INTENT/);
+    }
+  });
+
   it('RULE 1b does NOT trip on unrelated prompts (still routes normally)', () => {
     const r = new TorqClawRouter();
     // "localize" must not match; a normal research prompt routes to FRONTIER.

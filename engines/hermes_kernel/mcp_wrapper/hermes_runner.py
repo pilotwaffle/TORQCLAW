@@ -172,10 +172,20 @@ def _frontier_enabled_toolsets(task_type: str, prompt: str = "") -> list[str] | 
     return base
 
 
-def _provider_config(task_type: str) -> dict:
+def _provider_config(task_type: str, provider_ref: dict | None = None) -> dict:
     """Pick the provider/model/key/base for this task. COMPLEX_CODING uses the
     HERMES_CODING_* override when set (e.g. Kimi K2.7 Code — long context +
     agentic coding); everything else uses the default HERMES_* (DeepSeek)."""
+    if provider_ref is not None:
+        # Resilience attempts carry only provider labels and environment
+        # variable names. Resolve the values at construction time; never put
+        # credentials or endpoints in task_store, ledger, telemetry, or MCP.
+        return {
+            "model": provider_ref["modelId"],
+            "provider": provider_ref["providerId"],
+            "api_key": os.environ.get(provider_ref["credentialEnvName"]),
+            "base_url": os.environ.get(provider_ref["baseUrlEnvName"]),
+        }
     if task_type == "COMPLEX_CODING" and os.environ.get("HERMES_CODING_MODEL"):
         return {
             "model": os.environ.get("HERMES_CODING_MODEL", ""),
@@ -199,7 +209,8 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
     task_type: str = req.get("taskType", "ROUTINE_AUTOMATION")
     granted: list[str] = req.get("grantedTools", []) or []
 
-    pconf = _provider_config(task_type)
+    provider_ref = payload.get("providerRef")
+    pconf = _provider_config(task_type, provider_ref if isinstance(provider_ref, dict) else None)
     task_store.emit(task_id, "SYSTEM", f"Model: {pconf['provider']}/{pconf['model']}")
 
     enabled = _frontier_enabled_toolsets(task_type, prompt)
@@ -215,12 +226,52 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
     # the hook actually registered against the vendored plugin system.
     from . import approval_hook
     gate_on = approval_hook.register()
+    resilience_active = False
+    active_tuple = (
+        req.get("activeTuple") or req.get("resilienceActiveTuple") or req.get("active")
+        or payload.get("activeTuple") or payload.get("resilienceActiveTuple")
+    )
+    try:
+        from . import failover_runtime
+        resilience_active = failover_runtime.frontier_active(payload) and active_tuple is not None
+    except Exception:
+        resilience_active = False
     approval_hook.set_task_context(
         task_id,
         granted=granted,
         emit=lambda t, m, meta=None: task_store.emit(task_id, t, m, meta),
         enabled=gate_on,
+        active_tuple=active_tuple,
+        resilience_active=resilience_active,
     )
+    if resilience_active and not gate_on:
+        raise RuntimeError("durable tool fence is unavailable")
+
+    def _tool_started(call_id, name, args):
+        if resilience_active:
+            task_store.emit(task_id, "TOOL_CALL", "Tool dispatch fenced", {
+                "callId": str(call_id)[:256], "toolName": str(name)[:256],
+            })
+            return
+        task_store.emit(task_id, "TOOL_CALL", f"Executing {name}",
+                        {"call_id": call_id, "args": _clip(args)})
+
+    def _tool_completed(call_id, name, args, result):
+        if resilience_active:
+            task_store.emit(task_id, "SYSTEM", "Tool completed", {
+                "callId": str(call_id)[:256], "toolName": str(name)[:256],
+            })
+            return
+        task_store.emit(task_id, "SYSTEM", f"Tool {name} completed",
+                        {"call_id": call_id, "result": _clip(result)})
+
+    def _status(kind, msg):
+        if resilience_active:
+            task_store.emit(task_id, "SYSTEM", "Provider status", {
+                "kind": str(kind)[:64],
+            })
+            return
+        task_store.emit(task_id, "SYSTEM", f"[{kind}] {_clip(msg, 300)}")
 
     agent = AIAgent(
         # Provider config is env-driven + per-task (coding override). Hermes
@@ -247,15 +298,9 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
         quiet_mode=True,
         session_id=task_id,
         # ── The hijack: first-class callbacks -> cursor events ──
-        tool_start_callback=lambda cid, name, args: task_store.emit(
-            task_id, "TOOL_CALL", f"Executing {name}", {"call_id": cid, "args": _clip(args)},
-        ),
-        tool_complete_callback=lambda cid, name, args, result: task_store.emit(
-            task_id, "SYSTEM", f"Tool {name} completed", {"call_id": cid, "result": _clip(result)},
-        ),
-        status_callback=lambda kind, msg: task_store.emit(
-            task_id, "SYSTEM", f"[{kind}] {_clip(msg, 300)}",
-        ),
+        tool_start_callback=_tool_started,
+        tool_complete_callback=_tool_completed,
+        status_callback=_status,
     )
     # Register BEFORE run so cancel_task can interrupt; baseline the usage
     # delta source in case credits-micros is unavailable for this provider.

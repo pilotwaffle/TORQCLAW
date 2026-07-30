@@ -1,0 +1,41 @@
+{
+  "tools": {
+    "resilience_admit_frontier": {
+      "arguments": ["request_id", "immutable_plan", "deadline_at", "provider_order"],
+      "responseKeys": ["status", "activeTuple", "planHash", "reason"]
+    },
+    "resilience_submit_attempt": {
+      "arguments": ["payload", "immutable_plan", "active", "provider_ref", "attempt_deadline_ms", "idempotency_key"],
+      "responseKeys": ["status", "activeTuple", "providerId", "reason"]
+    },
+    "resilience_poll_observations": {
+      "arguments": ["active", "cursor", "attempt_deadline_ms"],
+      "responseKeys": ["status", "cursor", "observations", "terminal", "reason"]
+    },
+    "resilience_record_observation": {
+      "arguments": ["active", "normalized_observation", "idempotency_key"],
+      "responseKeys": ["status", "observation", "reason"]
+    },
+    "resilience_transition_once": {
+      "arguments": ["active", "successor_provider_id", "normalized_failure", "jitter_ms", "plan_hash", "idempotency_key"],
+      "responseKeys": ["status", "successor", "successorProviderId", "reason"]
+    },
+    "resilience_request_cancel": {
+      "arguments": ["active", "cancel_id"],
+      "responseKeys": ["status", "reason"]
+    },
+    "resilience_recover_and_transition_once": {
+      "arguments": ["active", "recovery_id", "jitter_ms", "normalized_failure"],
+      "responseKeys": ["status", "successor", "reason"]
+    },
+    "resilience_get_status": {
+      "arguments": ["task_id"],
+      "responseKeys": ["status", "activeTuple", "providerId", "dispatchAttempted", "cancellationRequested", "taskDeadlineMs", "reason"]
+    },
+    "resilience_page_outbox": {
+      "arguments": ["after_cursor", "limit"],
+      "responseKeys": ["status", "cursor", "highWaterMark", "events", "reason"]
+    }
+  },
+  "cancelTaskArguments": ["task_id", "reason"]
+}

@@ -15,6 +15,11 @@ import {
   GatewayEventSchema,
   ClientCommandSchema,
   ConnectFrameSchema,
+  ResilienceImmutablePlanSchema,
+  ResilienceActiveTupleSchema,
+  ResilienceNormalizedFailureSchema,
+  ResilienceOutboxEventSchema,
+  augmentResilienceImmutablePlanJsonSchema,
 } from '../dist/index.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -28,12 +33,20 @@ const artifacts: Record<string, z.ZodType> = {
   GatewayEvent: GatewayEventSchema,
   ClientCommand: ClientCommandSchema,
   ConnectFrame: ConnectFrameSchema,
+  ResilienceImmutablePlan: ResilienceImmutablePlanSchema,
+  ResilienceActiveTuple: ResilienceActiveTupleSchema,
+  ResilienceNormalizedFailure: ResilienceNormalizedFailureSchema,
+  ResilienceOutboxEvent: ResilienceOutboxEventSchema,
 };
 
 for (const dir of targets) {
   mkdirSync(dir, { recursive: true });
   for (const [name, schema] of Object.entries(artifacts)) {
-    writeFileSync(join(dir, `${name}.json`), JSON.stringify(z.toJSONSchema(schema), null, 2));
+    const jsonSchema = z.toJSONSchema(schema) as Record<string, unknown>;
+    const emitted = name === 'ResilienceImmutablePlan'
+      ? augmentResilienceImmutablePlanJsonSchema(jsonSchema)
+      : jsonSchema;
+    writeFileSync(join(dir, `${name}.json`), JSON.stringify(emitted, null, 2));
   }
   console.log(`[contracts] emitted ${Object.keys(artifacts).length} schemas -> ${dir}`);
 }

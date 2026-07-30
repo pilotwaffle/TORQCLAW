@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "taskId": {
+      "type": "string",
+      "pattern": "^[!-~]{1,256}$"
+    },
+    "attemptId": {
+      "type": "string",
+      "pattern": "^[!-~]{1,128}$"
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    }
+  },
+  "required": [
+    "taskId",
+    "attemptId",
+    "epoch"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "failureClass": {
+      "type": "string",
+      "enum": [
+        "retryable",
+        "configuration",
+        "authentication",
+        "budget",
+        "side_effect_uncertainty",
+        "timeout",
+        "cancelled",
+        "terminal"
+      ]
+    },
+    "code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "retryable": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "failureClass",
+    "code",
+    "retryable"
+  ],
+  "additionalProperties": false
+}

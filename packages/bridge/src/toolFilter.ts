@@ -6,9 +6,9 @@ import { getRegistry, type RegisteredTool } from './registry.js';
 const TOOL_ROUTING_MAP: Record<TaskType, string[]> = {
   DATA_EXTRACTION: ['db__', 'filesystem__', 'tradingview__'],
   SUMMARIZATION: ['filesystem__'],
-  ROUTINE_AUTOMATION: ['filesystem__', 'scheduler__', 'tradingview__'],
-  COMPLEX_CODING: ['filesystem__', 'github__', 'sandbox__'],
-  AUTONOMOUS_RESEARCH: ['websearch__', 'filesystem__', 'tradingview__'],
+  ROUTINE_AUTOMATION: ['filesystem__', 'scheduler__', 'tradingview__', 'desktop_commander__', 'playwright__'],
+  COMPLEX_CODING: ['filesystem__', 'github__', 'sandbox__', 'desktop_commander__', 'playwright__'],
+  AUTONOMOUS_RESEARCH: ['websearch__', 'filesystem__', 'tradingview__', 'playwright__'],
 };
 
 export function predictTools(taskType: TaskType): string[] {

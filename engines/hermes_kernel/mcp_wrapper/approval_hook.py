@@ -12,6 +12,7 @@ no grant is blocked; the engine marks the task blocked; the bridge turns that
 into the single terminal PENDING_APPROVAL (invariant 7); APPROVE re-mints the
 task with grantedTools incl the tool, which this hook then honors.
 """
+import hashlib
 import re
 import threading
 
@@ -30,7 +31,9 @@ _lock = threading.Lock()
 _ctx: dict[str, dict] = {}
 
 
-def set_task_context(task_id: str, granted: list[str], emit, enabled: bool) -> None:
+def set_task_context(task_id: str, granted: list[str], emit, enabled: bool,
+                     active_tuple: dict | None = None,
+                     resilience_active: bool = False) -> None:
     """Register a task's grant set + an emit(type, msg, meta) callback. enabled
     gates the whole mechanism (FRONTIER only; off in stub/local)."""
     with _lock:
@@ -38,6 +41,8 @@ def set_task_context(task_id: str, granted: list[str], emit, enabled: bool) -> N
             "granted": set(granted or []),
             "emit": emit,
             "enabled": enabled,
+            "active_tuple": active_tuple,
+            "resilience_active": resilience_active,
             "blocked": None,  # set to {toolName, args} on the first block
         }
 
@@ -62,6 +67,34 @@ def _requires_approval(tool_name: str, granted: set[str]) -> bool:
 def pre_tool_call(tool_name: str, args=None, task_id: str = "", **_kw):
     """The registered hook. Returns a block directive for a gated, ungranted
     tool; None otherwise (observer-safe — unknown tasks pass through)."""
+    with _lock:
+        c = _ctx.get(task_id)
+        if not c or not c["enabled"]:
+            return None
+        resilience_active = c["resilience_active"] and c["active_tuple"] is not None
+        active_tuple = c["active_tuple"]
+    if resilience_active:
+        call_id = _kw.get("call_id") or _kw.get("tool_call_id")
+        if not isinstance(call_id, str) or not call_id:
+            call_id = "hook-" + hashlib.sha256(
+                repr((tool_name, args)).encode("utf-8", "replace")
+            ).hexdigest()
+        from . import failover_runtime
+        fence = failover_runtime.authorize_tool_forward(
+            active_tuple, call_id, tool_name, args or {},
+        )
+        if fence.get("status") == "REJECTED":
+            with _lock:
+                c = _ctx.get(task_id)
+                if c is not None and c["blocked"] is None:
+                    c["blocked"] = {"toolName": tool_name, "args": {}}
+                    emit = c["emit"]
+                else:
+                    emit = None
+            if emit is not None:
+                emit("SYSTEM", f"Tool {tool_name} blocked by resilience fence",
+                     {"toolName": tool_name, "reason": "resilience_rejected"})
+            return {"action": "block", "message": "Tool call rejected by the durable execution fence."}
     with _lock:
         c = _ctx.get(task_id)
         if not c or not c["enabled"]:
