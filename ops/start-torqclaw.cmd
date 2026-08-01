@@ -16,7 +16,4 @@ echo [TORQCLAW] The console will open at http://localhost:3000 once ready.
 echo [TORQCLAW] Keep this window open while testing; close it to stop everything.
 echo.
 
-REM Open the browser shortly after launch (services need a few seconds to boot).
-start "" /b cmd /c "timeout /t 8 >nul & start http://localhost:3000"
-
 node --env-file=.env ops/dev-up.mjs
