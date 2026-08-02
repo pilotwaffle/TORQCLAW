@@ -3,6 +3,7 @@ import { join, dirname } from 'node:path';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
+import { runPersistedDiagnosticMigrationOnce } from './persistedError.js';
 
 const DATA_DIR = process.env.TORQCLAW_DATA_DIR || join(homedir(), '.torqclaw');
 mkdirSync(DATA_DIR, { recursive: true });
@@ -20,5 +21,10 @@ const taskCols = db.prepare(`PRAGMA table_info(tasks)`).all() as { name: string 
 if (!taskCols.some((c) => c.name === 'telemetry_json')) {
   db.exec(`ALTER TABLE tasks ADD COLUMN telemetry_json TEXT`);
 }
+
+// FIX-H: enforce the at-rest diagnostic boundary for historical rows once.
+// A versioned marker avoids an O(history) scan on every gateway boot. A crash
+// before the marker is written safely reruns the idempotent migration.
+runPersistedDiagnosticMigrationOnce(db);
 
 export { DATA_DIR };

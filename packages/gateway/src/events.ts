@@ -8,6 +8,7 @@ import {
   type GatewayRequest,
   type RouterDiagnostics,
 } from '@torqclaw/contracts';
+import { sanitizePersistedError } from './persistedError.js';
 
 /** Sockets subscribe per-session; execution never holds a socket reference. */
 type Listener = (event: GatewayEvent) => void;
@@ -32,7 +33,13 @@ const insertEvent = db.prepare(
 );
 
 export function persistAndPublish(event: Omit<GatewayEvent, 'seq'>): GatewayEvent {
-  const validated = GatewayEventSchema.parse(event); // gateway obeys its own contract
+  // ERROR text can originate in provider/tool exceptions. Apply the same
+  // fail-closed boundary used by tasks.error before either persistence or
+  // live publication so storage and the console cannot diverge.
+  const prepared = event.type === 'ERROR'
+    ? { ...event, message: sanitizePersistedError(event.message) }
+    : event;
+  const validated = GatewayEventSchema.parse(prepared); // gateway obeys its own contract
   const info = insertEvent.run(
     validated.id, validated.sessionId, validated.requestId, validated.tier,
     validated.type, validated.message,
@@ -119,6 +126,10 @@ export const taskStore = {
     db.prepare(
       `UPDATE tasks SET state='failed', error=?, telemetry_json=?, finished_at=CURRENT_TIMESTAMP
        WHERE request_id=?`,
-    ).run(error, telemetry === undefined ? null : JSON.stringify(telemetry), requestId);
+    ).run(
+      sanitizePersistedError(error),
+      telemetry === undefined ? null : JSON.stringify(telemetry),
+      requestId,
+    );
   },
 };
