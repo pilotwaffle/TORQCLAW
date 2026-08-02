@@ -62,7 +62,7 @@ export function resolveBudget(req: GatewayRequest): number | undefined {
 function buildReceipt(
   tier: ComputeTier, telemetry: Record<string, unknown>, req: GatewayRequest,
 ): Record<string, unknown> {
-  const r: Record<string, unknown> = { tier };
+  const r: Record<string, unknown> = { taskId: req.id, tier };
   const cost = telemetry.costUsd;
   if (typeof cost === 'number') r.costUsd = cost;
   const elapsed = telemetry.inferenceLatencyMs;

@@ -20,10 +20,10 @@ Learning that is measurable, governed, and reversible.
 | Phase 0 — Foundation Repair | **Complete** |
 | Phase 1 — Visible Trust MVP | **Complete** |
 | Phase 2 — Governed Learning MVP | **Not started** |
-| Current remote baseline | `origin/master` closed Phase 1 at `1fe4ce25812da2502d2268efd65f49bf833100b5` |
-| Current green gate | `805/805` TypeScript tests · `75/75` Python tests · typecheck `12/12` · contracts drift OK · build `7/7` |
+| Pre-PR base | `origin/master` at `d000bdab` |
+| Current local Gate-1 validation | `909/909` TypeScript tests · `81/81` Python tests · typecheck `12/12` · contracts drift OK · build `7/7` (local pre-PR worktree results; not merged CI) |
 
-The local `E:\TorqClaw` checkout was last confirmed clean at the same Phase-1 closeout state before this README refresh. This README summarizes the improvements now implemented on GitHub.
+The portable launcher derives every path from its own location; it does not require a particular drive, checkout name, or current working directory.
 
 ## What is implemented
 
@@ -136,36 +136,29 @@ Graphify project profile files are present on `master` through governed Graphify
 ```bash
 git clone https://github.com/pilotwaffle/TORQCLAW.git
 cd TORQCLAW
-
-git submodule update --init --recursive
-pnpm install
-pnpm --filter @torqclaw/contracts build
-
-# Python engine: venv + deps + vendored Hermes agent dependencies
-cd engines/hermes_kernel
-uv sync
-uv pip install -e ./vendor/hermes-agent
-cd ../..
-
-# Optional local model setup
-pnpm model:setup
-
-# Configure environment
-cp .env.example .env
-
-# Bring up engine + gateway + console
-node --env-file=.env ops/dev-up.mjs
+ops/install-torqclaw.cmd       # Windows
+# or: sh ops/install-torqclaw.sh
+copy .env.example .env         # Windows; use cp on POSIX
 ```
 
-Console: `http://localhost:3000`  
-Gateway: `127.0.0.1:18790`  
-Optional HTTP channel: `127.0.0.1:18792`
+The install wrappers run the submodule, frozen pnpm, contracts build, `uv sync --locked`, vendored Hermes editable install, and Hermes import checks. They never create or overwrite `.env`.
 
-A quick stub-mode smoke test with no provider key:
+Before production start, replace both `TORQCLAW_GATEWAY_TOKEN=change-me` and `NEXT_PUBLIC_GATEWAY_TOKEN=change-me` with the same non-placeholder value.
+
+Before starting, run `node --env-file=.env ops/doctor.mjs --preflight --production` (or `pnpm doctor`). Start the portable production path with `ops/start-torqclaw.cmd`, `sh ops/start-torqclaw.sh`, or `pnpm start`. The wrappers can be launched from any current directory and keep the stack on loopback.
+
+Console: `http://127.0.0.1:3000`
+Gateway: `127.0.0.1:18790`  
+Engine health: `127.0.0.1:8000/health`
+
+For a real provider acceptance run, configure non-placeholder matching gateway tokens plus `HERMES_MODEL`, `HERMES_PROVIDER`, and `HERMES_API_KEY`, start the stack, then run:
 
 ```bash
-node ops/e2e.mjs
+node --env-file=.env ops/doctor.mjs --runtime --production
+pnpm acceptance:live
 ```
+
+Live acceptance is deliberately not part of public CI and never succeeds by skipping, stubbing, or accepting a pending/error result. Public CI uses a synthetic-token, stub-mode production-launch e2e instead.
 
 ## Configuration
 
@@ -173,8 +166,9 @@ node ops/e2e.mjs
 |---|---|---|
 | `TORQCLAW_DATA_DIR` | `~/.torqclaw` | Gateway state DB, credentials, skill queue |
 | `TORQCLAW_PORT` / `TORQCLAW_HOST` | `18790` / `127.0.0.1` | Loopback-first gateway binding |
+| `TORQCLAW_CONSOLE_PORT` / `HERMES_BIND_HOST` | `3000` / `127.0.0.1` | Portable console and engine ports/hosts |
 | `TORQCLAW_GATEWAY_TOKEN` | unset dev mode | Required for non-loopback deployment |
-| `HERMES_ENGINE_URL` / `HERMES_ENGINE_TOKEN` | `http://127.0.0.1:8000/mcp` | Python engine endpoint |
+| `HERMES_ENGINE_URL` / `HERMES_ENGINE_TOKEN` | `http://127.0.0.1:8000/mcp` | Python engine MCP endpoint; local URLs cannot carry credentials |
 | `OLLAMA_HOST` / `TORQCLAW_LOCAL_MODEL` | `localhost:11434` / `torq-local` | LOCAL_EDGE model config |
 | `HERMES_MODEL` / `HERMES_PROVIDER` / `HERMES_API_KEY` / `HERMES_BASE_URL` | unset stub mode | FRONTIER provider config |
 | `HERMES_CODING_PROVIDER` / `HERMES_CODING_MODEL` / `HERMES_CODING_API_KEY` / `HERMES_CODING_BASE_URL` | optional | Per-task override for complex coding tasks |
@@ -259,7 +253,7 @@ cd engines/hermes_kernel
 uv run pytest
 ```
 
-Current Phase-1 closeout gate:
+Historical Phase-1 closeout gate (recorded at Phase-1 closeout; not the current portable-runtime worktree gate):
 
 ```text
 805/805 TypeScript tests

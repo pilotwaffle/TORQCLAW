@@ -8,6 +8,8 @@ import asyncio
 import os
 
 from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from . import skill_queue, task_store
 from .contracts import validate_gateway_request
@@ -17,6 +19,35 @@ mcp = FastMCP(
     host=os.environ.get("HERMES_BIND_HOST", "127.0.0.1"),
     port=int(os.environ.get("HERMES_PORT", "8000")),
 )
+
+
+def _get_hermes_available() -> bool:
+    try:
+        from .hermes_runner import hermes_available
+
+        hermes_available_now, _reason = hermes_available()
+        return hermes_available_now
+    except Exception:  # pragma: no cover - defensive import boundary
+        return False
+
+
+def _health_payload() -> dict[str, object]:
+    """Return the fixed, secret-free engine readiness contract."""
+    model_configured = bool(os.environ.get("HERMES_MODEL", "").strip())
+    hermes_available_now = _get_hermes_available()
+    live = model_configured and hermes_available_now
+    return {
+        "service": "torqclaw-hermes-engine",
+        "status": "ready",
+        "mode": "live" if live else "stub",
+        "modelConfigured": model_configured,
+        "hermesAvailable": hermes_available_now,
+    }
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(_request: Request) -> JSONResponse:
+    return JSONResponse(_health_payload())
 
 
 async def run_hermes_loop(task_id: str, payload: dict) -> None:
