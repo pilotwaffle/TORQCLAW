@@ -34,6 +34,19 @@ export class CircuitBreakerError extends Error {
   }
 }
 
+/** The engine stores cancelled work as a normalized failure so it cannot be
+ * mistaken for a successful result. Preserve that distinction across the
+ * bridge instead of leaking the storage sentinel to the gateway/UI. */
+export class HermesCancelledError extends Error {
+  readonly telemetry: Record<string, unknown>;
+
+  constructor(message: string, telemetry: Record<string, unknown> = {}) {
+    super(message);
+    this.name = 'HermesCancelledError';
+    this.telemetry = { ...telemetry, cancelled: true };
+  }
+}
+
 /** Rolling heartbeat state for one task's poll loop. */
 export interface HeartbeatState {
   lastHeartbeatAt: number;
@@ -176,6 +189,13 @@ export async function executeHermesTask(
     }
     if (status.state === 'failed') {
       engineTaskByRequest.delete(req.id);
+      if (status.telemetry?.cancelled === true) {
+        const reason = (status.telemetry.normalizedFailure as Record<string, unknown> | undefined)?.code;
+        throw new HermesCancelledError(
+          typeof reason === 'string' ? `Task cancelled: ${reason}` : 'Task cancelled',
+          status.telemetry,
+        );
+      }
       throw new Error(status.error ?? 'Hermes task failed');
     }
   }

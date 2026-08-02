@@ -3,6 +3,7 @@ import { executeLocalEdge, ToolApprovalRequired } from '@torqclaw/inference';
 import {
   executeHermesTask,
   CircuitBreakerError,
+  HermesCancelledError,
   isHermesAvailable,
   getRegistry,
   extractPaths,
@@ -326,6 +327,7 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
       }
 
       const isBudget = error instanceof CircuitBreakerError;
+      const isCancelled = error instanceof HermesCancelledError;
       const reason = isBudget ? `BUDGET: ${error.message}` : String(error?.message ?? error);
       // G1R correction A (part 1+2): a BREACHED task must not persist zero
       // telemetry. CircuitBreakerError carries the last-known provider-
@@ -343,7 +345,11 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
       const breachCostSource = isBudget ? (error as CircuitBreakerError).lastCostSource : undefined;
       taskStore.fail(
         req.id, reason,
-        isBudget ? { budgetSource, costUsd: breachCostUsd, costSource: breachCostSource } : undefined,
+        isBudget
+          ? { budgetSource, costUsd: breachCostUsd, costSource: breachCostSource }
+          : isCancelled
+            ? { ...(error as HermesCancelledError).telemetry, budgetSource }
+            : undefined,
       );
       // TCLAW-1A-core: record the breach's spend in the ledger, FRONTIER-only.
       // A budget breach only ever occurs on a FRONTIER task (the breaker is
@@ -376,7 +382,10 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
       };
       const isLocalTimeout =
         diag.tier === ComputeTier.LOCAL_EDGE && /timeout|aborted/i.test(reason);
-      if (isBudget) {
+      if (isCancelled) {
+        metaOut.recovery = ['RETRY', 'COPY_DIAGNOSTIC'];
+        metaOut.cancelled = true;
+      } else if (isBudget) {
         metaOut.recovery = ['RETRY'];
         // Suggest doubling the breached budget so a retry has headroom.
         const cur = typeof req.constraints.maxCost === 'number' ? req.constraints.maxCost : undefined;
@@ -389,7 +398,11 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
       }
       // makeEmitter/persistAndPublish owns the shared fail-closed ERROR
       // boundary for both the event log and the live frame.
-      emit('ERROR', `Execution failed: ${humanizeError(reason, diag.tier)}`, metaOut);
+      emit(
+        'ERROR',
+        isCancelled ? `Task cancelled: ${reason.replace(/^Task cancelled:\s*/i, '')}` : `Execution failed: ${humanizeError(reason, diag.tier)}`,
+        metaOut,
+      );
       safeMaterializeReceipt(req.id);
     } finally {
       cancellations.clear(req.id);
