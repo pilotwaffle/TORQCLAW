@@ -3,10 +3,14 @@
   "private": true,
   "packageManager": "pnpm@9.15.9",
   "engines": {
-    "node": ">=20.0.0",
+    "node": ">=20.9.0",
     "pnpm": ">=8.0.0"
   },
   "scripts": {
+    "setup": "node ops/install.mjs",
+    "doctor": "node --env-file=.env ops/doctor.mjs --preflight --production",
+    "start": "node --env-file=.env ops/dev-up.mjs --production",
+    "acceptance:live": "node --env-file=.env ops/acceptance-live.mjs",
     "dev": "turbo run dev",
     "build": "turbo run build",
     "lint": "turbo run lint",
@@ -14,7 +18,6 @@
     "engine:setup": "cd engines/hermes_kernel && uv sync && git submodule update --init --recursive",
     "model:setup": "ollama create torq-local -f ops/Modelfile",
     "stats": "node ops/stats.mjs",
-    "doctor": "node --env-file-if-exists=.env ops/doctor.mjs",
     "contracts:check": "pnpm --filter @torqclaw/contracts check",
     "bench": "node --env-file-if-exists=.env ops/bench.mjs",
     "bench:quick": "node --env-file-if-exists=.env ops/bench.mjs --quick --no-score",

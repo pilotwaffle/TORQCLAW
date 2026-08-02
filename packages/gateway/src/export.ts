@@ -1,6 +1,12 @@
 import { publishOnly } from './events.js';
 import { getReceipt, MAX_REPLAY_BYTES, type ReceiptRow } from './receipts.js';
 import { db } from './storage.js';
+import {
+  KNOWN_SECRET_FAILURE_LABEL,
+  KNOWN_SECRET_SHAPES,
+  redactKnownSecretText,
+  type SecretShape,
+} from './knownSecretShapes.js';
 
 /**
  * TCLAW-5B-1: the safe diagnostic export redactor + GET_SAFE_EXPORT handler.
@@ -25,18 +31,16 @@ import { db } from './storage.js';
  *  3. SCRUB SECOND, only on the retained residue: error, routerReason,
  *     routeDiagnostics.reason/.humanReason/.blockedAlternatives[].why, and the
  *     name-guarded fields (toolsCalled/blockedOn/approvals[].toolName). Only
- *     STRING values are scrubbed — typed numbers/enums/booleans in the
- *     allowlisted fields pass through untouched (the card-number pattern must
- *     never be given a chance to eat a numeric costUsd/elapsedMs field).
- *  4. CAP AFTER SCRUB (error, 2000 chars, matching dispatch.ts's sanitize
- *     precedent): capping before scrubbing can sever a secret below its
+ *     designated strings enter the core; if one contains JSON, both decoded
+ *     property names and string values are scrubbed. Typed numbers/enums/
+ *     booleans in allowlisted fields pass through untouched.
+ *  4. CAP AFTER SCRUB (error, 2000 chars, matching the persisted/live ERROR
+ *     boundary): capping before scrubbing can sever a secret below its
  *     pattern's minimum match length and leak an un-marked prefix.
  *  5. Scrub runs on DECODED values, recursively: for each designated string
  *     field, attempt JSON.parse; if it parses, scrub the parsed structure's
- *     string leaves recursively and re-serialize; else scrub the plain
- *     string. This defeats an escaped-JSON-in-string secret (a provider error
- *     body embedded as a JSON string inside `error`) and an escaped-unicode
- *     variant, neither of which a byte-level-only scrub would catch.
+ *     keys and string leaves recursively and re-serialize. Encoded malformed
+ *     JSON and resource-limit failures return a fixed fail-closed marker.
  *  6. Determinism + purity: buildSafeExport(row, approvals, REDACTOR_VERSION)
  *     is a pure function — no Date.now()/randomUUID/generatedAt anywhere in
  *     the payload, fixed key order, never mutates its inputs. Two calls with
@@ -60,7 +64,7 @@ import { db } from './storage.js';
  *  version-sensitivity test can prove v1 vs v2 differ only in the version
  *  stamps, never silently drift via a captured closure. Carried in BOTH the
  *  top-level payload (`redactorVersion`) and the nested `redactionReport`. */
-export const REDACTOR_VERSION = 1;
+export const REDACTOR_VERSION = 2;
 
 /** Export shape version (independent axis from REDACTOR_VERSION — the export
  *  JSON's field layout can change without every pattern-set bump, and vice
@@ -88,65 +92,8 @@ export const FAILOVER_EXPORT_VERSION = 2;
 // caught here, so this set can never silently narrow back to a subset of the
 // console's — see also the cross-reference comment on PRIVACY_PATTERNS itself
 // (apps/console/src/components/friendly.ts), which 5B-2 lands.
-export interface SecretShape {
-  label: string;
-  re: RegExp;
-}
-
-export const SECRET_SHAPES: SecretShape[] = [
-  // Extends dispatch.ts:28's Bearer-only sanitize (that regex protects a
-  // different, narrower surface — the live ERROR terminal message — and
-  // stays as-is; this is the export's own, broader pass).
-  { label: 'bearer-token', re: /\bBearer\s+\S+/gi },
-  // OpenAI-style AND Anthropic (`sk-ant-...`) keys share the `sk-` prefix.
-  { label: 'api-key', re: /\bsk-[A-Za-z0-9_-]{16,}\b/g },
-  // Superset of the console's ghp_-only pattern: covers every GitHub PAT
-  // prefix (personal/oauth/user-to-server/server-to-server/refresh: ghp_,
-  // gho_, ghu_, ghs_, ghr_).
-  { label: 'github-token', re: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g },
-  { label: 'aws-access-key', re: /\bAKIA[0-9A-Z]{16}\b/g },
-  // The WHOLE PEM block, not just the header line — a private key's body
-  // carries the actual secret material.
-  {
-    label: 'private-key',
-    re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
-  },
-  // High-precision 3-segment JWT shape (header.payload.signature, each
-  // segment base64url of meaningful length) — chosen to avoid firing on
-  // arbitrary short base64-looking tokens.
-  { label: 'jwt', re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b/g },
-  { label: 'ssn', re: /\b\d{3}-\d{2}-\d{4}\b/g },
-  // [G1R RC-5] NARROWED for false-positive safety: machine-generated error
-  // text routinely carries 13-digit epoch-millis timestamps and long
-  // sequential/id runs, which the console's FP-tolerant suggest-only pattern
-  // (`\b(?:\d[ -]?){13,16}\b`) would happily eat as a "card number". A real
-  // card number in a machine-generated diagnostic error is vanishingly rare;
-  // an epoch timestamp or seq-id run is common. So the export's DESTRUCTIVE
-  // scrub pattern requires actual card-like STRUCTURE:
-  //   - separated groups: \d{4}[ -]\d{4}[ -]\d{4}[ -]\d{1,4} (the visually
-  //     grouped form humans/systems actually paste), OR
-  //   - a contiguous 15 or 16 digit run (Amex/Visa/MC lengths) — but NOT 13
-  //     or 14 digits, which is exactly where epoch-millis (13 digits) and
-  //     many sequence/id shapes live. This deliberately does NOT match plain
-  //     13-digit runs (excluded by construction) — see tests/export-
-  //     redaction.test.ts's FP-negative corpus (13-digit epoch, long seq
-  //     runs survive unmangled) and positive corpus (both card shapes still
-  //     caught).
-  { label: 'card-number', re: /\b(?:\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{1,4}|\d{15,16})\b/g },
-  // [G1R RC-2] Path rule, broadened + blessed: NO absolute path of any of the
-  // three common shapes may survive, all mapped to the SAME single label
-  // (label-replacement, not basename-only — the whole path is the leak, not
-  // just the username segment). Relative basenames (src/foo.ts, foo.py) are
-  // deliberately NOT touched by any of these three patterns (negative-pinned
-  // in tests/export-redaction.test.ts) because none of them can match without
-  // a drive letter, a leading `\\`, or one of the anchored home-dir prefixes.
-  //   - bare-drive: `C:\...`, `E:\...` (Windows drive-letter absolute paths)
-  { label: 'path', re: /\b[A-Za-z]:\\[^\s"']*/g },
-  //   - UNC: `\\HOST\share\...`
-  { label: 'path', re: /\\\\[^\s"']+/g },
-  //   - POSIX home / tilde: /home/u/..., /Users/u/..., /root/..., ~/...
-  { label: 'path', re: /(?:\/home\/|\/Users\/|\/root\/|~\/)[^\s"']*/g },
-];
+export type { SecretShape };
+export const SECRET_SHAPES: SecretShape[] = KNOWN_SECRET_SHAPES;
 
 const REPLACEMENT = (label: string) => `[REDACTED:${label}]`;
 
@@ -168,97 +115,14 @@ function addHit(hits: PatternHits, label: string, n: number): void {
   hits.set(label, (hits.get(label) ?? 0) + n);
 }
 
-/** Apply every SECRET_SHAPES pattern to a single plain string, replacing
- *  matches with their label marker and recording counts into `hits`. Each
- *  pattern's global regex is applied fresh (regex objects with /g carry
- *  lastIndex state, so `re.exec`/`.test` reuse across calls would be a bug —
- *  we only ever use `.replace`, which resets its own scan per call, but we
- *  still never share a single RegExp instance's mutable state across two
- *  concurrent scrubs by constructing patterns as module-level constants used
- *  ONLY via String.prototype.replace, which is safe for /g regexes called
- *  sequentially like this). Pure: returns a new string, never mutates `s`. */
-function applyPatternsToString(s: string, hits: PatternHits): string {
-  let out = s;
-  for (const { label, re } of SECRET_SHAPES) {
-    // Fresh RegExp per call to guarantee no cross-call lastIndex leakage,
-    // regardless of how this function is invoked (recursion, multiple
-    // fields, repeated test runs against the same module-level pattern).
-    const fresh = new RegExp(re.source, re.flags);
-    let count = 0;
-    out = out.replace(fresh, () => {
-      count += 1;
-      return REPLACEMENT(label);
-    });
-    addHit(hits, label, count);
-  }
-  return out;
-}
-
-/** Recursively scrub every string leaf in an arbitrary parsed JSON value
- *  (object/array/string/number/boolean/null), leaving non-string leaves
- *  (numbers/booleans/null) completely untouched — this is what keeps a
- *  numeric field that happens to parse out of a JSON-in-string blob (e.g. an
- *  embedded `{"code": 1518000000000}`) from ever being handed to the
- *  card-number pattern as a STRING. Returns a new structure; never mutates
- *  the input (buildSafeExport's purity depends on this all the way down). */
-function scrubJsonValue(value: unknown, hits: PatternHits): unknown {
-  if (typeof value === 'string') {
-    // [G1R RC-1] Recursive decode: if this string itself parses as JSON
-    // (a provider error body embedded as a JSON string, or an escaped-unicode
-    // variant that JSON.parse un-escapes), scrub the DECODED structure's
-    // string leaves and re-serialize — never scrub only the outer serialized
-    // bytes, which would miss a secret hiding one level deeper inside an
-    // escaped inner JSON string, or hiding behind a `\uXXXX` escape that only
-    // JSON.parse (not a raw regex over the bytes) would decode.
-    try {
-      const inner = JSON.parse(value);
-      // Only recurse if this actually decoded to something structured or at
-      // least a different string — a bare scalar like `"5"` parses as the
-      // number 5, which we still want scrubbed as an (empty) no-op rather
-      // than accidentally treated as a number; re-stringifying keeps the
-      // field a string as the schema expects.
-      const scrubbedInner = scrubJsonValue(inner, hits);
-      return JSON.stringify(scrubbedInner);
-    } catch {
-      // Not JSON — scrub as a plain string.
-      return applyPatternsToString(value, hits);
-    }
-  }
-  if (Array.isArray(value)) {
-    return value.map((v) => scrubJsonValue(v, hits));
-  }
-  if (value !== null && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = scrubJsonValue(v, hits);
-    }
-    return out;
-  }
-  // number / boolean / null / undefined: pass through untouched. Typed
-  // numeric/enum/boolean fields are NEVER handed to a string pattern.
-  return value;
-}
-
 /** Public entry point: scrub ONE designated free-text string field.
- *  Recursive-decode (see scrubJsonValue) — attempts JSON.parse first; if it
- *  parses, scrubs the decoded structure's string leaves and re-serializes;
- *  else scrubs the plain string directly. Idempotent: scrubText(scrubText(s))
- *  === scrubText(s), because a marker `[REDACTED:<label>]` never itself
- *  matches any SECRET_SHAPES pattern (no pattern requires 13+ contiguous
- *  digits without separators appearing in a marker string, no `Bearer `
- *  prefix, no `sk-` prefix, etc. — pinned by the fixed-point test in
- *  tests/export-redaction.test.ts, which runs every marker literal against
- *  every pattern). Pure: never mutates `s`; returns a new string plus the
- *  hits recorded into the caller-supplied map (so a single buildSafeExport
- *  call can accumulate hits across many fields into one report). */
+ *  The dependency-free shared core recursively decodes JSON, scrubs keys and
+ *  values, bounds input/depth/work, and fails closed on encoded malformed
+ *  input or traversal failure. Its callback preserves this export's
+ *  operation-based hit accounting. Pure and idempotent: markers do not match
+ *  any known-secret shape, and the input is never mutated. */
 export function scrubText(s: string, hits: PatternHits): string {
-  try {
-    const parsed = JSON.parse(s);
-    const scrubbed = scrubJsonValue(parsed, hits);
-    return JSON.stringify(scrubbed);
-  } catch {
-    return applyPatternsToString(s, hits);
-  }
+  return redactKnownSecretText(s, (label, count) => addHit(hits, label, count));
 }
 
 /** Cap AFTER scrub — never before. Capping first can sever a secret below
@@ -269,7 +133,7 @@ function capAfterScrub(s: string, maxChars: number): string {
   return s.length > maxChars ? s.slice(0, maxChars) : s;
 }
 
-const ERROR_MAX_CHARS = 2000; // matches dispatch.ts:28's sanitize precedent
+const ERROR_MAX_CHARS = 2000; // persisted/live ERROR boundary uses the same cap
 
 // ─── Name-guard ─────────────────────────────────────────────────────────────
 
@@ -316,18 +180,13 @@ function classifyError(error: string | null): ErrorClass {
   return null;
 }
 
-// ─── LIVE approvals (never the frozen full_receipt_json.approvals embed) ───
+// ─── LIVE approvals (authoritative over the derived receipt cache) ─────────
 
-/** [G1R ruling 5 / decisive]: full_receipt_json.approvals is a PROJECTION-TIME
- *  SNAPSHOT — receipts materialize at the PENDING_APPROVAL terminal (before
- *  any decision is made) and are never re-projected afterward (see the FILED
- *  TCLAW-FIX-G obligation), so the embed can read 'pending' forever even
- *  after a real decideApproval. A support diagnostic showing a stale
- *  'pending' when the tool was actually approved/rejected is a DATA LIE.
- *  This query re-reads tool_approvals directly at export time — the exact
- *  `selectApprovals` shape receipts.ts's projector itself uses (SELECT
- *  status, tool_name, decided_at ... WHERE request_id = ?), so the live read
- *  is provably the same query the projector runs, just executed fresh. */
+/** FIX-G: decideApproval refreshes full_receipt_json best-effort, but the
+ *  projection is still a derived cache and its guarded writer may fail after
+ *  the approval commits. This query re-reads authoritative tool_approvals at
+ *  export time, using the same columns/mapping as the receipt projector and
+ *  GET_RECEIPT's live overlay, so a stale cache cannot become a data lie. */
 const selectLiveApprovals = db.prepare(
   `SELECT status, tool_name, decided_at FROM tool_approvals WHERE request_id = ?`,
 );
@@ -671,7 +530,11 @@ export function buildSafeExport(
   // Fixed order = SECRET_SHAPES iteration order (plus the name-guard label,
   // appended last) — never Object.keys/Map insertion-order-of-first-hit,
   // which would vary by which field happened to be scrubbed first.
-  const orderedLabels = [...new Set(SECRET_SHAPES.map((p) => p.label)), UNPARSED_TOOL_LABEL];
+  const orderedLabels = [
+    ...new Set(SECRET_SHAPES.map((p) => p.label)),
+    KNOWN_SECRET_FAILURE_LABEL,
+    UNPARSED_TOOL_LABEL,
+  ];
   for (const label of orderedLabels) {
     const n = hits.get(label);
     if (n && n > 0) patternsHit[label] = n;

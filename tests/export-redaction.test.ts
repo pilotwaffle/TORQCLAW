@@ -275,6 +275,68 @@ describe('TCLAW-5B-1 SECRET_SHAPES + scrubText corpus', () => {
     expect(scrubbed).toContain('[REDACTED:api-key]');
   });
 
+  it('E9b: deep Unicode-escaped JSON fails closed through the safe-export scrubber', () => {
+    const hits = new Map<string, number>();
+    const escapedKey = String.raw`\u0073\u006b\u002dFAKE00000000000000000000000000`;
+    const raw = `${'['.repeat(80)}{"${escapedKey}":"detail"}${']'.repeat(80)}`;
+    const scrubbed = scrubText(raw, hits);
+    expect(scrubbed).toBe('[REDACTED:diagnostic-too-complex]');
+    expect(scrubbed).not.toContain(escapedKey);
+    expect(hits.get('diagnostic-too-complex')).toBe(1);
+
+    const sid = makeSession();
+    const taskId = makeTask({
+      sessionId: sid,
+      state: 'failed',
+      requestJson: baseRequestJson(),
+      error: raw,
+    });
+    materializeReceipt(taskId);
+    const safeExport = buildSafeExport(getReceipt(taskId)!, [], REDACTOR_VERSION);
+    expect(safeExport.error).toBe('[REDACTED:diagnostic-too-complex]');
+    expect(safeExport.redactionReport.patternsHit['diagnostic-too-complex']).toBe(1);
+    expect(JSON.stringify(safeExport)).not.toContain(escapedKey);
+  });
+
+  it('E9c: a recursively encoded JSON key fails closed through buildSafeExport', () => {
+    const secret = 'sk-FAKE00000000000000000000000000';
+    const encoded = [...secret]
+      .map((character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
+      .join('');
+    const attack = JSON.stringify({ [encoded]: 'detail' });
+    const sid = makeSession();
+    const taskId = makeTask({
+      sessionId: sid,
+      state: 'failed',
+      requestJson: baseRequestJson(),
+      error: attack,
+    });
+    materializeReceipt(taskId);
+
+    const safeExport = buildSafeExport(getReceipt(taskId)!, [], REDACTOR_VERSION);
+    expect(safeExport.error).toBe('[REDACTED:diagnostic-too-complex]');
+    expect(safeExport.redactionReport.patternsHit['diagnostic-too-complex']).toBe(1);
+    expect(JSON.stringify(safeExport)).not.toContain(encoded);
+  });
+
+  it('E9d: a leading-zero code-point key fails closed through buildSafeExport', () => {
+    const encoded = String.raw`\u{00000073}k-FAKE00000000000000000000000000`;
+    const attack = JSON.stringify({ [encoded]: 'detail' });
+    const sid = makeSession();
+    const taskId = makeTask({
+      sessionId: sid,
+      state: 'failed',
+      requestJson: baseRequestJson(),
+      error: attack,
+    });
+    materializeReceipt(taskId);
+
+    const safeExport = buildSafeExport(getReceipt(taskId)!, [], REDACTOR_VERSION);
+    expect(safeExport.error).toBe('[REDACTED:diagnostic-too-complex]');
+    expect(safeExport.redactionReport.patternsHit['diagnostic-too-complex']).toBe(1);
+    expect(JSON.stringify(safeExport)).not.toContain(encoded);
+  });
+
   it('E10 [op#11]: scrub-before-cap — secret straddling the 2000-char boundary leaves no partial prefix (marker itself may be trimmed by the cap, but it carries no secret material, so that is harmless)', () => {
     const hits = new Map<string, number>();
     const secret = 'sk-FAKE00000000000000000000000000'; // 34 chars
@@ -543,7 +605,7 @@ describe('TCLAW-5B-1 buildSafeExport — allowlist projection', () => {
 });
 
 describe('TCLAW-5B-1 live approvals (E14 [op#15])', () => {
-  it('register -> materialize (embed frozen "pending") -> decideApproval -> export shows "approved" + non-null decidedAt WHILE full_receipt_json.approvals still says "pending"', () => {
+  it('FIX-G refreshes the embed while safe export remains live-table authoritative', () => {
     const sid = makeSession();
     const taskId = makeTask({
       sessionId: sid,
@@ -561,23 +623,33 @@ describe('TCLAW-5B-1 live approvals (E14 [op#15])', () => {
     const decided = decideApproval(approvalId, 'APPROVE');
     expect(decided).not.toBeNull();
 
-    // The embed is STILL 'pending' (receipt was never re-projected).
-    const stillFrozenRow = getReceipt(taskId)!;
-    const stillFrozenParsed = JSON.parse(stillFrozenRow.full_receipt_json);
-    expect(stillFrozenParsed.approvals[0].status).toBe('pending');
+    // FIX-G re-projects the receipt after the guarded decision.
+    const refreshedRow = getReceipt(taskId)!;
+    const refreshedParsed = JSON.parse(refreshedRow.full_receipt_json);
+    expect(refreshedParsed.approvals[0].status).toBe('approved');
+    expect(refreshedParsed.approvals[0].decidedAt).not.toBeNull();
 
-    // But the LIVE export reads the real table and shows 'approved' + decidedAt.
+    // Defense in depth: safe export still reads the live table even when its
+    // receipt input is deliberately sabotaged below.
+    const sabotagedParsed = {
+      ...refreshedParsed,
+      approvals: [{ ...refreshedParsed.approvals[0], status: 'pending', decidedAt: null }],
+    };
+    const sabotagedRow = {
+      ...refreshedRow,
+      full_receipt_json: JSON.stringify(sabotagedParsed),
+    };
     const liveApprovals = selectLiveApprovalsForExport(taskId, new Map());
-    const safeExport = buildSafeExport(stillFrozenRow, liveApprovals, REDACTOR_VERSION);
+    const safeExport = buildSafeExport(sabotagedRow, liveApprovals, REDACTOR_VERSION);
     expect(safeExport.approvals[0].status).toBe('approved');
     expect(safeExport.approvals[0].decidedAt).not.toBeNull();
 
-    // Both halves asserted directly in one place.
-    expect(stillFrozenParsed.approvals[0].status).toBe('pending');
+    // Both authoritative and sabotaged-cache halves are asserted together.
+    expect(sabotagedParsed.approvals[0].status).toBe('pending');
     expect(safeExport.approvals[0].status).toBe('approved');
   });
 
-  it('E14-handler [op#15]: the SAME divergence proven through the REAL handleGetSafeExport handler (not just the pure buildSafeExport call) — catches a regression where the handler wiring itself reads the frozen embed instead of calling the live-approvals query', () => {
+  it('E14-handler [op#15]: the real handler ignores a deliberately stale approval embed', () => {
     const sid = makeSession();
     const taskId = makeTask({
       sessionId: sid,
@@ -591,6 +663,16 @@ describe('TCLAW-5B-1 live approvals (E14 [op#15])', () => {
     const decided = decideApproval(approvalId, 'APPROVE');
     expect(decided).not.toBeNull();
 
+    // Sabotage only the derived cache to prove the handler still queries the
+    // authoritative table instead of trusting full_receipt_json.approvals.
+    const refreshedRow = getReceipt(taskId)!;
+    const stale = JSON.parse(refreshedRow.full_receipt_json);
+    stale.approvals[0] = { ...stale.approvals[0], status: 'pending', decidedAt: null };
+    db.prepare(`UPDATE run_receipts SET full_receipt_json = ? WHERE task_id = ?`).run(
+      JSON.stringify(stale),
+      taskId,
+    );
+
     // Drive the REAL production handler (the same function server.ts's
     // switch calls) — not buildSafeExport directly.
     const frames = captureFrames(sid, () => handleGetSafeExport(sid, taskId));
@@ -600,7 +682,7 @@ describe('TCLAW-5B-1 live approvals (E14 [op#15])', () => {
     expect(safeExport.approvals[0].status).toBe('approved');
     expect(safeExport.approvals[0].decidedAt).not.toBeNull();
 
-    // The frozen embed on the same row is still 'pending' — confirms the
+    // The sabotaged embed on the same row is still 'pending' — confirms the
     // handler could NOT have gotten 'approved' from the embed; it had to
     // have queried the live table.
     const rowAfter = getReceipt(taskId)!;
@@ -810,6 +892,21 @@ describe('TCLAW-5B-1 handleGetSafeExport — the real production handler', () =>
 });
 
 describe('TCLAW-5B-1 determinism (E21 [op#24])', () => {
+  it('redactor v2 is pinned to key redaction and bounded fail-closed behavior', () => {
+    expect(REDACTOR_VERSION).toBe(2);
+    const secret = 'sk-FAKE00000000000000000000000000';
+    const keyHits = new Map<string, number>();
+    expect(scrubText(JSON.stringify({ [secret]: 'detail' }), keyHits)).toBe(
+      '{"[REDACTED:api-key]":"detail"}',
+    );
+    expect(keyHits.get('api-key')).toBe(1);
+
+    const deepHits = new Map<string, number>();
+    const deep = `${'['.repeat(80)}"${secret}"${']'.repeat(80)}`;
+    expect(scrubText(deep, deepHits)).toBe('[REDACTED:diagnostic-too-complex]');
+    expect(deepHits.get('diagnostic-too-complex')).toBe(1);
+  });
+
   it('two builds of the same fixed input are byte-identical', () => {
     const sid = makeSession();
     const { taskId } = fullFixture(sid);

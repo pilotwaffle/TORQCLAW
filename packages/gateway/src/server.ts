@@ -56,6 +56,8 @@ function verifyToken(token: string): boolean {
 const app = Fastify({ logger: true });
 await app.register(websocket);
 
+app.get('/health', async () => ({ service: 'torqclaw-gateway', status: 'ready' }));
+
 app.get('/ws', { websocket: true }, (socket) => {
   let authed = false;
   let sessionId: string | null = null;

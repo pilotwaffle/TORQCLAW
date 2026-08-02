@@ -338,13 +338,14 @@ Role mapping note: G1R and G2A run as independent Opus instances; GLM-5.2 (RB) u
 - next ticket: operator direction — remaining Epic 2 items (routing profiles, override stats) or other PRD priorities.
 - blockers: operator merge approval. CI-green on PR is the post-push gate.
 
-### TCLAW-FIX-G — Refresh receipt approval embeds after approval decision (FILED — follow-up obligation, not scheduled)
+### TCLAW-FIX-G — Refresh receipt approval embeds after approval decision (RESOLVED 2026-08-01)
 
 - filed: 2026-07-11, origin: TCLAW-5A scoping (frozen-embed discovery) + G1R deferral ruling (5A ships correct WITHOUT fix G; bundling a cross-task re-projection would blur 5A's "no approval-behavior change" charter).
-- problem: run_receipts materialize at the PENDING_APPROVAL terminal (dispatch.ts safeMaterializeReceipt runs BEFORE any decision) and the blocked task is never re-projected afterward — decideApproval only updates tool_approvals; APPROVE re-mints a NEW task and REJECT creates another new degenerate task, so nothing ever touches the blocked task's receipt again. Every receipt's approvals[] embed is therefore frozen at 'pending' forever. Visible on master today: ReceiptsPanel renders "(historical — pending)" for long-decided approvals.
+- problem at filing: run_receipts materialized at the PENDING_APPROVAL terminal and the blocked task was never re-projected after decision, leaving its approvals[] embed frozen at 'pending'.
 - scope when scheduled: re-project (or refresh) the blocked task's receipt after decideApproval — a WRITE-path change to the projection trigger, not a read surface. Must preserve: deterministic rebuildable projection (drop + rebuildAll reproduces byte-identical content), zero fabrication, invariant 7 (single terminal), and the guarded-wrapper discipline (a projector throw must never break the decide path).
 - interim honesty: TCLAW-5A-1's LIST_APPROVALS reads the LIVE tool_approvals table precisely because the embed diverges. tests/approvals-read.test.ts test 9 pins the divergence in BOTH directions (live table 'approved' WHILE the same task's receipt embed still reads 'pending') — when this ticket lands, that test's frozen half flips and must be updated deliberately, not silently.
-- status: FILED. Not scheduled — Phase-1 remainder (TCLAW-5A-2 UI + Card v2, TCLAW-5B safe export) comes first per operator direction.
+- resolution: decideApproval now best-effort refreshes the derived receipt while GET_RECEIPT overlays the authoritative live tool_approvals rows on every read. Approval truth therefore survives a projection failure or crash; the cache remains rebuildable and no decision is rolled back by projection failure. Approval, rejection, duplicate-decision, refreshed-cache, and deliberately stale-cache handler tests pin the invariant.
+- status: RESOLVED in the 2026-08-01 residual-security change.
 
 ### TCLAW-5A-1 — Approval history read surface + approval card gate facts (Phase 1, Visible Trust; first half of the 5A split)
 
@@ -377,13 +378,17 @@ Role mapping note: G1R and G2A run as independent Opus instances; GLM-5.2 (RB) u
 - next ticket: TCLAW-5B (safe diagnostic export, server-side redaction) or 5A/Phase-1 closeout — ONLY after operator approval. TCLAW-FIX-G remains filed. TCLAW-GRAPHIFY-CLEANUP remains operator-lane.
 - blockers: operator approval for push + PR; then merge gate; CI-green on PR is the post-push gate.
 
-### TCLAW-FIX-H — Sanitize tasks.error at the persistence boundary (FILED — follow-up obligation, not scheduled)
+### TCLAW-FIX-H — Sanitize persisted diagnostic errors (RESOLVED 2026-08-01)
 
 - filed: 2026-07-11, origin: TCLAW-5B scoping (leak-surface inventory) + G1R RC-3 (independently confirmed in code).
-- problem: dispatch.ts builds the failure reason unsanitized (`reason = String(error?.message ?? error)`) and persists it via taskStore.fail; sanitize() (Bearer-only regex + 2000-char cap) is applied ONLY to the emitted ERROR event message, never to the persisted value. A Bearer token (or key-bearing URL/provider host) in a provider error sits in tasks.error AND full_receipt_json.error in the DB at rest today.
+- problem at filing: provider/tool failure text could be persisted unsanitized in tasks.error, ERROR events, and full_receipt_json.error.
 - scope when scheduled: apply a scrub at the fail()/persistence boundary (and consider re-projecting affected receipts); coordinate the pattern set with packages/gateway/src/export.ts SECRET_SHAPES so at-rest and egress redaction cannot drift apart.
 - interim mitigation: TCLAW-5B-1's GET_SAFE_EXPORT scrubs `error` on egress, so the SAFE export is unaffected; the exposure is at-rest (DB file, backups) and in the full in-console receipt view (operator-only, same trust domain).
-- status: FILED. Not scheduled — Phase-1 closeout (TCLAW-5B-2) first per operator direction.
+- resolution: task failures and ERROR events now cross one shared bounded redaction core before persistence/publication; safe export uses the same core and ordered known-secret policy. A versioned, row-batched startup migration rewrites legacy task/ERROR-event diagnostics and receipt errors under IMMEDIATE transactions, fails on optimistic-update conflicts, quarantines malformed/deep/oversized derived receipts for rebuild, and records its marker only after success. Known-shape redaction remains an explicit limited guarantee, not a claim that arbitrary secrets cannot remain.
+- status: RESOLVED in the 2026-08-01 residual-security change.
+- implementation record: 13 files changed. REDACTOR_VERSION advanced to 2; migration ID advanced to v2 after the adversarial duplicate-member correction. Valid legacy receipts are canonicalized so shadowed duplicate JSON members cannot retain secret bytes. GET_RECEIPT overlays live approval rows while decision-time re-projection keeps the cache fresh when available.
+- verification: 864/864 TypeScript tests across 31 files; 78/78 Python tests; typecheck 12/12; contracts:check green; production build 7/7; all six live workflows green (baseline, local approval, cloud approval, cancellation, budget breaker, HTTP channel). Ports 8000/18790/18792 were clear after cleanup.
+- independent review: security/correctness and maintainability/test agents both APPROVE with no remaining P1/P2 findings after reproducing raw/escaped/nested-key attacks, depth/node/size limits, duplicate receipt members, CAS rollback/retry, migration marker behavior, projection failure, and stale-cache approval reads. Graphify was unavailable because graphify-product/graph.json is absent; reviewers used direct source inspection and executable reproductions.
 
 ### TCLAW-5B-1 — Safe diagnostic export: gateway redactor + GET_SAFE_EXPORT (Phase 1, final deliverable, backend half)
 
@@ -445,8 +450,8 @@ TrustOS program (PRD-TCLAW-TRUSTOS-001 rev 1.2).
 - ACCEPTANCE CRITERIA (PRD :852), all GREEN: every task has a structured route explanation (2A–2D ✓); every terminal task has a queryable receipt (4A ✓); approval card shows tool/args/category/targets/reason (5A-2 ✓ — HONESTY CAVEAT: tool ✓ and args ✓ are real; category/targets are heuristic/mechanical where applicable (category = registry-hit capability class or "write-class (unclassified)" on a miss, never fabricated; targets = path-heuristic over proposed args, labeled); reason = the mechanical gate rule only, never an invented risk assessment); cost state visible for cloud tasks (1B ✓).
 
 - NON-BLOCKING RESIDUALS carried past closeout (none is a Phase-1 acceptance criterion; no hidden Phase-1 blocker remains):
-  - TCLAW-FIX-G — receipt approval embed frozen at 'pending'; the live surfaces (LIST_APPROVALS, GET_SAFE_EXPORT) already read the live tool_approvals table, so operator-facing status is never stale. Filed, not scheduled.
-  - TCLAW-FIX-H — tasks.error / full_receipt_json.error persisted unsanitized at rest; GET_SAFE_EXPORT scrubs `error` on egress, so the safe export is unaffected; exposure is at-rest only. Filed, not scheduled.
+  - TCLAW-FIX-G — RESOLVED 2026-08-01: decision-time cache refresh plus authoritative live-approval overlay in GET_RECEIPT.
+  - TCLAW-FIX-H — RESOLVED 2026-08-01: shared bounded diagnostic redaction boundary plus versioned legacy-row migration/quarantine.
   - TCLAW-GRAPHIFY-CLEANUP — broken TORQCLAW-local graphify hook. Operator-lane; filed, not scheduled.
   - graphify-on-master — graphify tooling files (graphify.toml, scripts/test_graphify_smoke.py, .graphifyignore, .claude/skills/graphify, docs/graphify-remediation-report.md) landed on master via GOVERNED Graphify PRs #26 and #28; accepted as current repository state. Any relocation to pilotwaffle/Torq-graphify remains an operator-lane item and is optional. Orthogonal to the TrustOS deliverables; NOT a Phase-1 TrustOS blocker.
 
@@ -455,3 +460,16 @@ TrustOS program (PRD-TCLAW-TRUSTOS-001 rev 1.2).
 - PROGRAM RECORD: Phase 1 delivered under the governed pipeline (Fable/Opus G1D scope → Opus 4.7 G1R design review → Sonnet 5 Builder → Opus 4.8 G2A empirical sabotage-verification → operator merge gate; feature-branch-per-ticket, squash-merge only, per-ticket ledger entry with independently verified facts).
 
 - next: Phase 2 (Governed Learning MVP) — NOT STARTED. No scoping begins without explicit operator approval.
+
+## Portable production runtime and live-provider acceptance
+
+- date: 2026-08-01
+- branch/base: `agent/torqclaw-portable-runtime` from `origin/master` `d000bdab`; pre-PR evidence only until GitHub and post-merge gates complete.
+- outcome: added location-derived Windows/POSIX install and production-start wrappers, a secret-safe dependency/config/runtime doctor, exact engine/gateway/console health gates, forced environment-bound production builds, a synthetic production-launch CI E2E, and a strict live-provider acceptance oracle. Production binds to loopback, requires distinct ports and matching non-placeholder gateway tokens, and opens the browser only after exact readiness.
+- installer evidence: the real Windows installer completed in 440.3 seconds using recursive submodules, frozen pnpm install, contracts build, `uv sync --locked`, editable pinned Hermes vendor install, and an import check. `.env` was absent before and after; lockfiles and the Hermes gitlink did not change. This installed PyYAML and eliminates the observed `ModuleNotFoundError: yaml` stub fallback.
+- runtime evidence: forced synthetic production launch passed after authenticated WebSocket submission, correlated `API_EXTERNAL` result and receipt, exact process-tree shutdown, port release, and verified temporary-data removal. The console production build exposes `/api/health`; the engine exposes an exact secret-free `/health` payload.
+- live evidence: credentialed acceptance passed with the existing provider file read-only (`request=26faaeff-7aa6-4593-96d9-e339efefaa04`). The persisted result was `API_EXTERNAL` with `engineUsed=hermes:deepseek-v4-flash`, followed by a receipt carrying the same task ID. Provider configuration was not rewritten; the run used an ephemeral gateway token, isolated ports/data, and exact cleanup.
+- compatibility evidence: all six existing operational E2Es passed (one-shot, local approval, cloud approval, cancellation, budget breaker, HTTP channel). The channel test's first serial cold-start attempt timed out waiting for the gateway and passed on its isolated rerun; this is recorded as harness timing sensitivity, not silently counted as a first-try pass.
+- current local gate: 909/909 TypeScript tests across 32 files; 81/81 Python tests; typecheck 12/12; contracts drift check green for four schemas in both generated directories; build 7/7; `git diff --check` green. The `pnpm doctor` shortcut now enforces production preflight, matching the documented production-start path. Live-provider acceptance now requires byte-for-byte `TORQCLAW_LIVE_OK` in addition to correlated FRONTIER/model evidence. Public CI now checks out recursive submodules before running the production E2E; live-provider acceptance remains intentionally manual and excluded from public CI.
+- governance evidence: G1R approved the bounded design. Independent review found and closed a POSIX path-mock defect plus an IPv4/IPv6 production-default ambiguity. G2A first rejected missing CI submodule checkout, then a fresh G2A found Windows case-insensitive environment names could bypass the synthetic-E2E scrubber. Recursive checkout is regression-pinned; inherited `TORQCLAW_`/`HERMES_`/`NEXT_PUBLIC_` names are now filtered case-insensitively with cross-platform and real Windows child-process tests. A production E2E seeded with mixed-case dummy provider values and a dead loopback provider URL passed in stub mode, proving those values did not reach the child stack.
+- remaining gate: fresh independent verifier, fresh G2A, commit/push/PR checks, merge, and post-merge `master` CI.

@@ -91,6 +91,21 @@ const selectApprovals = db.prepare(
   `SELECT status, tool_name, decided_at FROM tool_approvals WHERE request_id = ?`,
 );
 
+/** Approval state is authoritative in tool_approvals. Receipt projection and
+ *  GET_RECEIPT both use this one mapping so a stale derived cache cannot lie
+ *  after a decision or during a projection failure. */
+function listReceiptApprovals(taskId: string): Array<{
+  status: string;
+  toolName: string;
+  decidedAt: string | null;
+}> {
+  return (selectApprovals.all(taskId) as ApprovalRow[]).map((approval) => ({
+    status: approval.status,
+    toolName: approval.tool_name,
+    decidedAt: approval.decided_at,
+  }));
+}
+
 /** Both tiers (local ollama.ts and cloud hermes_runner.py) emit the TOOL_CALL
  *  message as `Executing <name>` — the local engine via
  *  `Executing ${realName}` and the cloud engine via `Executing {name}`
@@ -197,11 +212,7 @@ export function projectReceipt(taskId: string): ReceiptRow | null {
   const evidenceEndSeq = evidenceRange?.max_seq ?? null;
 
   // approvals folded into the composite receipt.
-  const approvals = (selectApprovals.all(taskId) as ApprovalRow[]).map((a) => ({
-    status: a.status,
-    toolName: a.tool_name,
-    decidedAt: a.decided_at,
-  }));
+  const approvals = listReceiptApprovals(taskId);
 
   // TCLAW-1A-core: budget_source + cost_enforceable derived from real,
   // persisted data — replaces the 4A-era hardcoded nulls. Never fabricated:
@@ -599,6 +610,12 @@ export function handleGetReceipt(
   let receipt: unknown = null;
   try {
     receipt = JSON.parse(row.full_receipt_json);
+    if (receipt !== null && !Array.isArray(receipt) && typeof receipt === 'object') {
+      receipt = {
+        ...(receipt as Record<string, unknown>),
+        approvals: listReceiptApprovals(cmd.taskId),
+      };
+    }
   } catch {
     receipt = null;
   }

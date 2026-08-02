@@ -1,6 +1,6 @@
 @echo off
 setlocal
-title TORQCLAW
+title TORQCLAW install
 set "ROOT_DIR=%~dp0.."
 pushd "%ROOT_DIR%" >nul 2>&1
 if errorlevel 1 (
@@ -19,19 +19,7 @@ if errorlevel 1 (
   popd
   exit /b 1
 )
-if not exist ".env" (
-  echo [TORQCLAW] No .env found in the repository. Copy .env.example to .env and add your values.
-  popd
-  exit /b 1
-)
-node --env-file=.env ops\doctor.mjs --preflight --production
-if errorlevel 1 (
-  echo [TORQCLAW] Preflight failed.
-  popd
-  exit /b 1
-)
-echo [TORQCLAW] Starting the production stack. The console will open when all exact readiness checks pass.
-node --env-file=.env ops\dev-up.mjs --production
+node ops\install.mjs
 set "EXIT_CODE=%ERRORLEVEL%"
 popd
 exit /b %EXIT_CODE%

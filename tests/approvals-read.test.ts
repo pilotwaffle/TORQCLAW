@@ -318,7 +318,7 @@ describe('TCLAW-5A-1 approval read surface', () => {
     expect(rows.some((r) => r.approvalId === orphanApprovalId)).toBe(false);
   });
 
-  it('9. REQUIRED — the divergence test: LIST_APPROVALS reads the live table; the frozen receipt embed does not', () => {
+  it('9. FIX-G — approval decisions refresh the receipt embed to match the live table', () => {
     const sid = makeSession();
     const toolName = 'fs__write_file';
     const taskId = makeTask({
@@ -334,6 +334,9 @@ describe('TCLAW-5A-1 approval read surface', () => {
       approvalId, toolName, requestId: taskId, args: { path: '/tmp/x' },
     });
     materializeReceipt(taskId);
+    const receiptIdBefore = (db.prepare(
+      `SELECT id FROM run_receipts WHERE task_id = ?`,
+    ).get(taskId) as { id: string }).id;
 
     // Positive baseline: the frozen embed shows 'pending' right after materialization.
     const baselineFrames = captureFrames(sid, () => handleGetReceipt(sid, { taskId, includeEvents: false }));
@@ -355,17 +358,85 @@ describe('TCLAW-5A-1 approval read surface', () => {
     expect(listed.decidedAt).not.toBeNull();
     expect(typeof listed.decidedAt).toBe('string');
 
-    // (b) The frozen receipt embed STILL shows 'pending'/'null' — receipts
-    // materialize at the PENDING_APPROVAL terminal and are NEVER re-projected
-    // after decideApproval (TCLAW-FIX-G tracks the refresh). This pins the
-    // staleness LIST_APPROVALS exists to route around: the live table
-    // diverges from the frozen embed the instant an approval is decided.
+    // (b) GET_RECEIPT is re-projected by the authoritative decision path and
+    // now agrees with the live approval table. The receipt cache row identity
+    // is preserved by the existing UPSERT.
     const afterFrames = captureFrames(sid, () => handleGetReceipt(sid, { taskId, includeEvents: false }));
     expect(afterFrames.length).toBe(1);
     const afterApprovals = afterFrames[0].metadata.receipt.approvals as any[];
     expect(afterApprovals.length).toBeGreaterThan(0);
-    expect(afterApprovals[0].status).toBe('pending');
-    expect(afterApprovals[0].decidedAt).toBeNull();
+    expect(afterApprovals[0].status).toBe('approved');
+    expect(typeof afterApprovals[0].decidedAt).toBe('string');
+    const receiptIdAfter = (db.prepare(
+      `SELECT id FROM run_receipts WHERE task_id = ?`,
+    ).get(taskId) as { id: string }).id;
+    expect(receiptIdAfter).toBe(receiptIdBefore);
+  });
+
+  it('9b. FIX-G — rejection also refreshes the receipt exactly once', () => {
+    const sid = makeSession();
+    const toolName = 'fs__delete_file';
+    const taskId = makeTask({
+      sessionId: sid,
+      state: 'completed',
+      requestJson: baseRequestJson(),
+      telemetry: { blockedOn: toolName },
+      result: '',
+    });
+    const approvalId = registerApproval(taskId, toolName, { path: '/tmp/x' });
+    materializeReceipt(taskId);
+
+    expect(decideApproval(approvalId, 'REJECT')?.status).toBe('rejected');
+    expect(decideApproval(approvalId, 'REJECT')).toBeNull();
+
+    const frames = captureFrames(sid, () => handleGetReceipt(sid, { taskId, includeEvents: false }));
+    const approvals = frames[0].metadata.receipt.approvals as any[];
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0].status).toBe('rejected');
+    expect(typeof approvals[0].decidedAt).toBe('string');
+  });
+
+  it('9c. FIX-G - GET_RECEIPT overlays live approval truth when the cache is stale', () => {
+    const sid = makeSession();
+    const toolName = 'fs__write_file';
+    const taskId = makeTask({
+      sessionId: sid,
+      state: 'completed',
+      requestJson: baseRequestJson(),
+      telemetry: { blockedOn: toolName },
+      result: '',
+    });
+    const approvalId = registerApproval(taskId, toolName, { path: '/tmp/x' });
+    materializeReceipt(taskId);
+    expect(decideApproval(approvalId, 'APPROVE')?.status).toBe('approved');
+
+    // Simulate a projection failure/crash by restoring only the derived cache
+    // to its pre-decision state. The authoritative tool_approvals row remains
+    // approved and GET_RECEIPT must never report the stale cache value.
+    const receiptRow = db.prepare(
+      `SELECT full_receipt_json FROM run_receipts WHERE task_id = ?`,
+    ).get(taskId) as { full_receipt_json: string };
+    const staleReceipt = JSON.parse(receiptRow.full_receipt_json);
+    staleReceipt.approvals[0] = {
+      ...staleReceipt.approvals[0],
+      status: 'pending',
+      decidedAt: null,
+    };
+    db.prepare(`UPDATE run_receipts SET full_receipt_json = ? WHERE task_id = ?`).run(
+      JSON.stringify(staleReceipt),
+      taskId,
+    );
+
+    const frames = captureFrames(sid, () => handleGetReceipt(sid, { taskId, includeEvents: false }));
+    const approvals = frames[0].metadata.receipt.approvals as any[];
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0].status).toBe('approved');
+    expect(typeof approvals[0].decidedAt).toBe('string');
+
+    const stillStale = JSON.parse((db.prepare(
+      `SELECT full_receipt_json FROM run_receipts WHERE task_id = ?`,
+    ).get(taskId) as { full_receipt_json: string }).full_receipt_json);
+    expect(stillStale.approvals[0].status).toBe('pending');
   });
 
   it('10. pending rows are listed, display-only; module exposes no decide surface from this handler', () => {
