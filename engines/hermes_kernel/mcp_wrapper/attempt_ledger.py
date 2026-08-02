@@ -453,7 +453,11 @@ class AttemptLedger:
         if after_sequence < 0:
             raise ValueError("after_sequence must be non-negative")
         if os.getpid() != self._boundary_process_id:
-            return {"schemaVersion": self._DIAGNOSTIC_SCHEMA_VERSION, "available": False}
+            return {
+                "schemaVersion": self._DIAGNOSTIC_SCHEMA_VERSION,
+                "available": False,
+                "reason": "process_boundary",
+            }
         with self._maintenance_lock:
             records = [
                 deepcopy(record) for record in self._boundary_records
