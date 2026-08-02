@@ -19,6 +19,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - uses: pnpm/action-setup@v6
 
@@ -47,6 +49,9 @@ jobs:
         working-directory: engines/hermes_kernel
 
       - run: pnpm build
+
+      - name: e2e - production portable launch (synthetic tokens, stub)
+        run: node ops/e2e-production-launch.mjs
 
       - name: e2e - one-shot prompt
         run: node ops/e2e.mjs

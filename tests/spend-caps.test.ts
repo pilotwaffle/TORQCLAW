@@ -18,9 +18,10 @@ const {
   SESSION_CAP_ENV_VAR, DAILY_CAP_ENV_VAR,
 } = spend;
 const { dispatch } = await import('../packages/gateway/src/dispatch.js');
-const { taskStore } = await import('../packages/gateway/src/events.js');
+const { taskStore, sessionBus } = await import('../packages/gateway/src/events.js');
 const { projectReceipt } = await import('../packages/gateway/src/receipts.js');
 const { makeRequest } = await import('./helpers.js');
+const inference = await import('../packages/inference/dist/index.js');
 
 // The bridge namespace dispatch.ts itself imports (@torqclaw/bridge resolves to
 // packages/bridge/dist/index.js — the SAME module singleton). Imported via the
@@ -515,6 +516,32 @@ describe('TCLAW-1A-core: cap GATE via dispatch() — FRONTIER-only, before spend
     const req2 = { ...makeRequest({ taskType: 'AUTONOMOUS_RESEARCH' }), id: randomUUID(), sessionId: sid };
     dispatch(req2 as any, { score: 10, reason: 'test', tier: 'API_EXTERNAL' as any });
     expect(getTask(req2.id).error).toMatch(/^CAP_EXCEEDED: session/);
+  });
+});
+
+describe('dispatch Done receipt identity', () => {
+  it('emits a Done receipt whose taskId matches the requestId', async () => {
+    const sid = makeSession();
+    const requestId = randomUUID();
+    const req = { ...makeRequest({ taskType: 'SUMMARIZATION' }), id: requestId, sessionId: sid };
+    const events: any[] = [];
+    const unsub = sessionBus.subscribe(sid, (event) => events.push(event));
+    const executeSpy = vi.spyOn(inference, 'executeLocalEdge').mockResolvedValue({
+      text: 'local result',
+      telemetry: { engineUsed: 'test-local', iterations: 1, toolCallCount: 0, inferenceLatencyMs: 1 },
+    });
+
+    try {
+      dispatch(req as any, { score: 1, reason: 'test', tier: 'OLLAMA_LOCAL' as any });
+      await vi.waitFor(() => expect(events.some((event) => event.type === 'SYSTEM' && event.message === 'Done')).toBe(true));
+    } finally {
+      executeSpy.mockRestore();
+      unsub();
+    }
+
+    const done = events.find((event) => event.type === 'SYSTEM' && event.message === 'Done');
+    expect(done.requestId).toBe(requestId);
+    expect(done.metadata.receipt.taskId).toBe(requestId);
   });
 });
 

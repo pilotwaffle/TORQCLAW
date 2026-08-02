@@ -4,9 +4,10 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { buildLauncherConfig } from './launcher-config.mjs';
-import { waitForHttpOk, waitForHttpReady, waitForHttpReachable } from './readiness.mjs';
+import { waitForHttpOk, waitForHttpReady } from './readiness.mjs';
 import { ensureRuntimeBuild } from './runtime-build.mjs';
 import { openExternalUrl, runStartupSequence } from './startup-sequence.mjs';
+import { doctorPassed, formatDoctor, runDoctor } from './doctor-core.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const ENGINE_DIR = fileURLToPath(new URL('../engines/hermes_kernel/', import.meta.url));
@@ -19,18 +20,38 @@ const ENGINE_PYTHON = fileURLToPath(new URL(
   import.meta.url,
 ));
 const NEXT_CLI = fileURLToPath(new URL('../apps/console/node_modules/next/dist/bin/next', import.meta.url));
+const production = process.argv.includes('--production');
+const envFilePresent = process.env.TORQCLAW_ENV_FILE_PRESENT === '1' ||
+  (await import('node:fs')).existsSync(fileURLToPath(new URL('../.env', import.meta.url)));
+
+const preflight = await runDoctor({
+  mode: 'preflight',
+  production,
+  liveRequested: Boolean(String(process.env.HERMES_MODEL ?? '').trim()),
+  root: ROOT,
+  env: process.env,
+  envFilePresent,
+});
+if (!doctorPassed(preflight)) {
+  console.error(formatDoctor(preflight));
+  process.exit(1);
+}
 
 let config;
 try {
-  config = buildLauncherConfig(process.env);
+  config = buildLauncherConfig(process.env, { production });
 } catch (error) {
   console.error(`[TORQCLAW] Invalid launcher configuration: ${error.message}`);
   process.exit(1);
 }
 
-// dev-up always starts a local Hermes engine; keep the gateway connection on
-// the exact endpoint that was started and probed.
-process.env.HERMES_ENGINE_URL = config.engineUrl;
+// Children inherit the validated environment plus only the derived local
+// endpoints needed to keep gateway and console on the exact started ports.
+const runtimeEnv = {
+  ...process.env,
+  HERMES_ENGINE_URL: config.engineUrl,
+  NEXT_PUBLIC_GATEWAY_URL: config.nextPublicGatewayUrl,
+};
 
 const procs = [];
 let shuttingDown = false;
@@ -64,7 +85,7 @@ const launch = (cmd, args, cwd, tag) => {
   const child = spawn(cmd, args, {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: process.env,
+    env: runtimeEnv,
     shell: false,
     detached: process.platform !== 'win32',
     windowsHide: true,
@@ -89,6 +110,9 @@ try {
   ensureRuntimeBuild({
     root: ROOT,
     includeHttpChannel: process.env.TORQCLAW_HTTP_CHANNEL === '1',
+    includeConsole: production,
+    force: production,
+    env: runtimeEnv,
   });
 
   const running = await runStartupSequence({
@@ -96,8 +120,11 @@ try {
       ENGINE_PYTHON, ['-m', 'mcp_wrapper.server'], ENGINE_DIR, 'engine',
     ),
     waitEngine: async () => {
-      await waitForHttpReachable(config.engineUrl, { timeoutMs: config.engineReadyTimeoutMs });
-      console.log(`[TORQCLAW] Engine reachable at ${config.engineUrl}`);
+      await waitForHttpReady(config.engineHealthUrl, {
+        expectedService: 'torqclaw-hermes-engine',
+        timeoutMs: config.engineReadyTimeoutMs,
+      });
+      console.log(`[TORQCLAW] Engine ready at ${config.engineHealthUrl}`);
     },
     launchGateway: () => launch(process.execPath, ['dist/server.js'], GATEWAY_DIR, 'gateway'),
     waitGateway: async () => {
@@ -108,7 +135,12 @@ try {
       console.log(`[TORQCLAW] Gateway ready at ${config.gatewayHealthUrl}`);
     },
     launchConsole: () => launch(
-      process.execPath, [NEXT_CLI, 'dev', '-p', String(config.consolePort)], CONSOLE_DIR, 'console',
+      process.execPath,
+      production
+        ? [NEXT_CLI, 'start', '-H', '127.0.0.1', '-p', String(config.consolePort)]
+        : [NEXT_CLI, 'dev', '-p', String(config.consolePort)],
+      CONSOLE_DIR,
+      'console',
     ),
     onConsoleLaunched: () => {
       if (process.env.TORQCLAW_HTTP_CHANNEL === '1') {
@@ -125,12 +157,22 @@ try {
     },
     onReady: async (health) => {
       console.log(`[TORQCLAW] Console ready (${health.status}) at ${config.consoleUrl}`);
+      const runtime = await runDoctor({
+        mode: 'runtime', production, root: ROOT, env: process.env,
+      });
+      if (!doctorPassed(runtime)) {
+        throw new Error('runtime readiness contract failed');
+      }
       if (process.env.TORQCLAW_NO_BROWSER === '1') {
         console.log('[TORQCLAW] Browser launch disabled by TORQCLAW_NO_BROWSER=1');
         return;
       }
-      await openExternalUrl(config.consoleUrl);
-      console.log(`[TORQCLAW] Opened ${config.consoleUrl}`);
+      try {
+        await openExternalUrl(config.consoleUrl);
+        console.log(`[TORQCLAW] Opened ${config.consoleUrl}`);
+      } catch {
+        console.warn(`[TORQCLAW] Browser launch failed; open this validated local URL manually: ${config.consoleUrl}`);
+      }
     },
   });
 
