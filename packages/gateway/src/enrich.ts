@@ -3,6 +3,7 @@ import type { ClientCommand, GatewayRequest } from '@torqclaw/contracts';
 import { classifyTaskType } from './classifier.js';
 import { sessions } from './sessions.js';
 import { predictTools } from '@torqclaw/bridge';
+import { resolveProfile } from './profileResolver.js';
 
 // chars/4: standard cheap approximation, good enough for routing thresholds.
 const estimateTokens = (s: string) => Math.ceil(s.length / 4);
@@ -18,6 +19,9 @@ export async function enrichCommand(
   const contextSize = estimateTokens(cmd.prompt) + estimateTokens(history);
 
   const cls = await classifyTaskType(cmd.prompt); // never throws
+  // Resolve policy before selecting tools. The resulting snapshot is carried
+  // on the gateway-owned request and is re-checked by the bridge at dispatch.
+  const effectiveProfile = resolveProfile({ taskType: cls.taskType }).profile;
 
   return {
     id: randomUUID(),
@@ -28,7 +32,7 @@ export async function enrichCommand(
       prompt: cmd.prompt,
       assembledContext: history || undefined,
       contextSize,
-      requiredTools: predictTools(cls.taskType),
+      requiredTools: predictTools(cls.taskType, effectiveProfile),
       taskType: cls.taskType,
       // Fresh request: no grants. Built explicitly (never spread from cmd) so a
       // client-injected grantedTools can never reach a GatewayRequest.
@@ -47,5 +51,6 @@ export async function enrichCommand(
       estimatedTokens: contextSize,
       memoryUsed: useMemory,
     },
+    effectiveProfile,
   };
 }

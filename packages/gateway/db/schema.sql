@@ -175,3 +175,53 @@ CREATE TABLE IF NOT EXISTS spend_ledger (
 );
 CREATE INDEX IF NOT EXISTS idx_spend_ledger_session ON spend_ledger(session_id);
 CREATE INDEX IF NOT EXISTS idx_spend_ledger_created ON spend_ledger(created_at);
+
+-- TORQCLAW_RESILIENCE_SCHEMA_BEGIN
+-- Phase-1 gateway projections are rebuildable read models. The Python ledger
+-- and its outbox remain the attempt authority; these tables never authorize a
+-- provider transition.
+CREATE TABLE IF NOT EXISTS resilience_projection_cursor (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  applied_outbox_id INTEGER NOT NULL CHECK (applied_outbox_id >= 0),
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+INSERT OR IGNORE INTO resilience_projection_cursor (id, applied_outbox_id) VALUES (1, 0);
+
+CREATE TABLE IF NOT EXISTS provider_attempt_projection (
+  task_id TEXT NOT NULL,
+  epoch INTEGER NOT NULL CHECK (epoch >= 0),
+  attempt_id TEXT NOT NULL UNIQUE,
+  provider_id TEXT NOT NULL,
+  model_id TEXT,
+  started_at_ms INTEGER,
+  ended_at_ms INTEGER,
+  failure_class TEXT,
+  failure_code TEXT,
+  failure_source TEXT,
+  dispatch_attempted INTEGER NOT NULL DEFAULT 0 CHECK (dispatch_attempted IN (0,1)),
+  terminal_outcome TEXT,
+  reserved_micro_usd INTEGER,
+  actual_micro_usd INTEGER,
+  cost_known INTEGER CHECK (cost_known IS NULL OR cost_known IN (0,1)),
+  cost_source TEXT,
+  transition_decision TEXT,
+  PRIMARY KEY (task_id, epoch)
+);
+CREATE INDEX IF NOT EXISTS idx_provider_attempt_projection_task ON provider_attempt_projection(task_id, epoch);
+
+CREATE TABLE IF NOT EXISTS failover_task_projection (
+  task_id TEXT PRIMARY KEY,
+  plan_hash TEXT NOT NULL,
+  chain_id TEXT NOT NULL,
+  feature_revision TEXT NOT NULL,
+  terminal_outcome TEXT,
+  final_provider_id TEXT,
+  active_attempt_id TEXT,
+  active_epoch INTEGER,
+  deadline_ms INTEGER NOT NULL,
+  cancellation_requested_at_ms INTEGER,
+  immutable_plan_json TEXT NOT NULL DEFAULT '{}',
+  provider_metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+
+-- TORQCLAW_RESILIENCE_SCHEMA_END

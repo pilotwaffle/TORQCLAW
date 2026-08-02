@@ -88,7 +88,12 @@ def test_fail_on_unknown_task_id_is_noop_no_raise_no_row():
     assert task_store.state_of("no-such-task-2") is None
 
 
-def test_persistence_across_reimport(fresh_module):
+def test_persistence_across_reimport(fresh_module, monkeypatch):
+    # Earlier engine tests may intentionally re-import task_store under a
+    # temporary data directory. Bind the re-import to the same directory as
+    # the module under test so this assertion tests persistence, not env-order
+    # leakage from the shared suite.
+    monkeypatch.setenv("TORQCLAW_DATA_DIR", str(task_store.DATA_DIR))
     task_id = task_store.create({"payload": {"prompt": "persisted"}})
     task_store.emit(task_id, "SYSTEM", "before reimport")
 
@@ -101,3 +106,101 @@ def test_persistence_across_reimport(fresh_module):
     assert status["state"] == "running"
     assert len(status["events"]) == 1
     assert status["events"][0]["message"] == "before reimport"
+
+
+def test_fresh_import_defaults_diagnostics_off(fresh_module):
+    task_store.shutdown_for_tests()
+    reimported = fresh_module("mcp_wrapper.task_store")
+
+    assert reimported._diagnostics_enabled is False
+    task_id = reimported.create({"payload": {"prompt": "default-off"}})
+    reimported.emit(task_id, "SYSTEM", "not captured")
+    snapshot = reimported.diagnostic_snapshot()
+    assert snapshot["lastSequence"] == 0
+    assert snapshot["records"] == []
+    reimported.shutdown_for_tests()
+
+
+def test_explicit_enable_disable_preserves_behavior_and_controls_records(monkeypatch, tmp_path, fresh_module):
+    task_store.shutdown_for_tests()
+    monkeypatch.setenv("TORQCLAW_DATA_DIR", str(tmp_path))
+    module = fresh_module("mcp_wrapper.task_store")
+
+    def run_case(task_id):
+        module.create({"payload": {"prompt": "same-behavior"}}, task_id=task_id)
+        module.emit(task_id, "SYSTEM", "hello", {"k": "v"})
+        module.complete(task_id, "result", {"costUsd": 1.5})
+        status = module.status(task_id)
+        return {
+            "state": status["state"],
+            "result": status["result"],
+            "error": status["error"],
+            "telemetry": status["telemetry"],
+            "events": [
+                {key: event[key] for key in ("type", "message", "metadata")}
+                for event in status["events"]
+            ],
+        }
+
+    module.set_diagnostics_enabled(False)
+    disabled = run_case("disabled-case")
+    disabled_sequence = module.diagnostic_snapshot()["lastSequence"]
+    module.set_diagnostics_enabled(True)
+    enabled = run_case("enabled-case")
+    enabled_snapshot = module.diagnostic_snapshot()
+    assert disabled == enabled
+    assert enabled_snapshot["lastSequence"] > disabled_sequence
+    module.set_diagnostics_enabled(False)
+    before = module.diagnostic_snapshot()["lastSequence"]
+    assert module.state_of("missing-after-disable") is None
+    assert module.diagnostic_snapshot()["lastSequence"] == before
+    module.shutdown_for_tests()
+
+
+def test_recorder_failure_does_not_change_task_result(monkeypatch, tmp_path, fresh_module):
+    task_store.shutdown_for_tests()
+    monkeypatch.setenv("TORQCLAW_DATA_DIR", str(tmp_path))
+    module = fresh_module("mcp_wrapper.task_store")
+    module.set_diagnostics_enabled(True)
+    original = module._record_diagnostic
+    monkeypatch.setattr(
+        module,
+        "_record_diagnostic",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("recorder failed")),
+    )
+
+    task_id = module.create({"payload": {"prompt": "recorder-safe"}}, task_id="recorder-safe")
+    module.complete(task_id, "result", {"costUsd": 1.5})
+    assert module.status(task_id) == {
+        "state": "completed",
+        "result": "result",
+        "error": None,
+        "telemetry": {"costUsd": 1.5},
+        "events": [],
+    }
+    assert module.state_of("missing") is None
+    module._record_diagnostic = original
+    module.shutdown_for_tests()
+
+
+def test_capture_snapshot_schema_is_bounded_and_redacted(monkeypatch, tmp_path, fresh_module):
+    task_store.shutdown_for_tests()
+    monkeypatch.setenv("TORQCLAW_DATA_DIR", str(tmp_path))
+    module = fresh_module("mcp_wrapper.task_store")
+    module.set_diagnostics_enabled(True)
+    task_id = module.create({"payload": {"prompt": "secret-prompt"}}, task_id="capture-case")
+    module.emit(task_id, "SYSTEM", "captured")
+
+    snapshot = module.diagnostic_snapshot()
+    assert set(snapshot) == {
+        "schemaVersion", "available", "store", "capacity", "droppedCount",
+        "firstSequence", "lastSequence", "records",
+    }
+    assert snapshot["schemaVersion"] == 1
+    assert snapshot["available"] is True
+    assert snapshot["store"] == "task_store"
+    assert snapshot["records"]
+    assert all(set(record) == {"sequence", "store", "operation", "durationMs"} for record in snapshot["records"])
+    assert all(record["store"] == "task_store" and record["durationMs"] >= 0 for record in snapshot["records"])
+    assert "secret-prompt" not in str(snapshot)
+    module.shutdown_for_tests()

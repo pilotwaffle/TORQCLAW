@@ -44,8 +44,22 @@ def fresh_module():
     """
 
     def _reimport(name: str):
+        parent_name, child_name = name.rsplit('.', 1)
+        old = sys.modules.get(name)
+        try:
+            old_conn = getattr(old, '_conn', None)
+            if old_conn is not None:
+                old_conn.close()
+        except Exception:
+            pass
         sys.modules.pop(name, None)
-        return importlib.import_module(name)
+        module = importlib.import_module(name)
+        # Keep `from package import child` aligned with sys.modules after a
+        # forced re-import; otherwise a prior test can leave the package
+        # attribute pointing at a closed module under the shared suite.
+        parent = importlib.import_module(parent_name)
+        setattr(parent, child_name, module)
+        return module
 
     return _reimport
 

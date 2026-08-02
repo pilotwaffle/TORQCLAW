@@ -1,7 +1,7 @@
 import { type GatewayRequest, type GatewayEventType, ToolApprovalRequired } from '@torqclaw/contracts';
 import { getClient } from './registry.js';
 
-type Emitter = (type: GatewayEventType, message: string, metadata?: unknown) => void;
+export type Emitter = (type: GatewayEventType, message: string, metadata?: unknown) => void;
 
 const POLL_INTERVAL_MS = 2_000;
 const HEARTBEAT_INTERVAL_MS = 30_000; // SYSTEM spend heartbeat cadence (max)

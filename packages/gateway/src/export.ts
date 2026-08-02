@@ -70,6 +70,7 @@ export const REDACTOR_VERSION = 2;
  *  JSON's field layout can change without every pattern-set bump, and vice
  *  versa). */
 export const EXPORT_VERSION = 1;
+export const FAILOVER_EXPORT_VERSION = 2;
 
 // ─── SECRET_SHAPES ──────────────────────────────────────────────────────────
 //
@@ -250,6 +251,20 @@ export interface SafeExportEvidence {
   endSeq: number | null;
 }
 
+export interface SafeExportAttempt {
+  epoch: number | null;
+  attemptId: string | null;
+  providerId: string | null;
+  modelId: string | null;
+  startedAtMs: number | null;
+  endedAtMs: number | null;
+  normalizedFailure: { failureClass: string | null; code: string | null; source: string | null } | null;
+  dispatchAttempted: boolean | null;
+  transitionDecision: string | null;
+  terminalOutcome: string | null;
+  cost: { reservedMicroUsd: number | null; actualMicroUsd: number | null; known: boolean | null; source: string | null };
+}
+
 /** Static, truthful list of fields this export NEVER carries in any form.
  *  This is NOT computed from anything — it is a fixed declaration of the
  *  omission contract itself, so it can never drift silently (a change here
@@ -294,6 +309,10 @@ export interface SafeExport {
   evidence: SafeExportEvidence;
   errorClass: ErrorClass;
   error: string | null;
+  failoverEnabled?: boolean;
+  finalProviderId?: string | null;
+  terminalUncertainty?: boolean | null;
+  providerAttempts?: SafeExportAttempt[];
   redactionReport: RedactionReport;
 }
 
@@ -339,6 +358,10 @@ interface ParsedFullReceipt {
   toolsCalled?: unknown;
   evidence?: { startSeq?: unknown; endSeq?: unknown } | null;
   error?: unknown;
+  failoverEnabled?: unknown;
+  finalProviderId?: unknown;
+  terminalUncertainty?: unknown;
+  providerAttempts?: unknown;
 }
 
 function asStringOrNull(v: unknown): string | null {
@@ -349,6 +372,35 @@ function asNumberOrNull(v: unknown): number | null {
 }
 function asBooleanOrNull(v: unknown): boolean | null {
   return typeof v === 'boolean' ? v : null;
+}
+
+function projectProviderAttempts(value: unknown, hits: PatternHits): SafeExportAttempt[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => {
+    const raw = (entry ?? {}) as Record<string, unknown>;
+    const failure = (raw.normalizedFailure ?? null) as Record<string, unknown> | null;
+    const cost = (raw.cost ?? {}) as Record<string, unknown>;
+    return {
+      epoch: asNumberOrNull(raw.epoch),
+      attemptId: scrubOptionalString(raw.attemptId, hits),
+      providerId: scrubOptionalString(raw.providerId, hits),
+      modelId: scrubOptionalString(raw.modelId, hits),
+      startedAtMs: asNumberOrNull(raw.startedAtMs),
+      endedAtMs: asNumberOrNull(raw.endedAtMs),
+      normalizedFailure: failure && typeof failure === 'object'
+        ? { failureClass: scrubOptionalString(failure.failureClass, hits), code: scrubOptionalString(failure.code, hits), source: scrubOptionalString(failure.source, hits) }
+        : null,
+      dispatchAttempted: asBooleanOrNull(raw.dispatchAttempted),
+      transitionDecision: scrubOptionalString(raw.transitionDecision, hits),
+      terminalOutcome: scrubOptionalString(raw.terminalOutcome, hits),
+      cost: {
+        reservedMicroUsd: asNumberOrNull(cost.reservedMicroUsd),
+        actualMicroUsd: asNumberOrNull(cost.actualMicroUsd),
+        known: asBooleanOrNull(cost.known),
+        source: scrubOptionalString(cost.source, hits),
+      },
+    };
+  });
 }
 
 /** Scrub a possibly-absent string field (route diagnostic reasons and
@@ -471,6 +523,9 @@ export function buildSafeExport(
   const blockedOn = guardToolName(asStringOrNull(parsed.blockedOn) ?? row.blocked_on ?? null, hits);
   const toolsCalled = projectToolsCalled(parsed.toolsCalled, hits);
 
+  const finalProviderId = scrubOptionalString(parsed.finalProviderId, hits);
+  const providerAttempts = projectProviderAttempts(parsed.providerAttempts, hits);
+
   const patternsHit: Record<string, number> = {};
   // Fixed order = SECRET_SHAPES iteration order (plus the name-guard label,
   // appended last) — never Object.keys/Map insertion-order-of-first-hit,
@@ -485,9 +540,10 @@ export function buildSafeExport(
     if (n && n > 0) patternsHit[label] = n;
   }
 
+  const failoverEnabled = parsed.failoverEnabled === true && row.projection_version === FAILOVER_EXPORT_VERSION;
   return {
     torqclawSafeExport: true,
-    exportVersion: EXPORT_VERSION,
+    exportVersion: failoverEnabled ? FAILOVER_EXPORT_VERSION : EXPORT_VERSION,
     redactorVersion,
     projectionVersion: typeof row.projection_version === 'number' ? row.projection_version : null,
     taskId: row.task_id,
@@ -506,6 +562,12 @@ export function buildSafeExport(
     evidence,
     errorClass,
     error,
+    ...(failoverEnabled ? {
+      failoverEnabled: true,
+      finalProviderId,
+      terminalUncertainty: asBooleanOrNull(parsed.terminalUncertainty),
+      providerAttempts,
+    } : {}),
     redactionReport: {
       redactorVersion,
       patternsHit,

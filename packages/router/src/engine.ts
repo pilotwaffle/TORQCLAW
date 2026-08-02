@@ -34,7 +34,7 @@ const RULE_META: Record<RouterRuleId, { overridable: boolean; safetyLock?: strin
  *  AND lets cloud tools touch the machine ungated. Word-boundary anchored to
  *  avoid tripping on substrings (e.g. "localize"). */
 const LOCAL_INTENT =
-  /\b(local agent|local model|on[- ]device|this machine|on this machine|local edge|locally|(train|fine[- ]?tune|improve|teach).{0,30}\b(local|agent|model|on[- ]device))\b/i;
+  /\b(local agent|local model|on[- ]device|this machine|on this machine|this computer|on this computer|my computer|this pc|on this pc|my pc|this desktop|on this desktop|local edge|locally|(train|fine[- ]?tune|improve|teach).{0,30}\b(local|agent|model|on[- ]device))\b/i;
 
 /** "local <thing>" where <thing> is a local-only integration (TradingView, a
  *  desktop app, a local tool/server). These tools live ONLY on the LOCAL_EDGE
@@ -44,7 +44,7 @@ const LOCAL_INTENT =
  *  cloud and scraped Yahoo). Matches "local" within a few words of the keyword
  *  so "use my local TV", "local tradingview", "the local TV chart" all fire. */
 const LOCAL_TOOL_INTENT =
-  /\blocal\b.{0,20}\b(tv|trading\s*view|chart|desktop app|mcp|tool|server)\b/i;
+  /\blocal\b.{0,20}\b(tv|trading\s*view|chart|desktop app|mcp|tool|server)\b|\b(browser|terminal|powershell|command prompt|shell)\b/i;
 
 export class TorqClawRouter {
   private isLocalModelWarm: boolean;

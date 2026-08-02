@@ -1,0 +1,1402 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "type": "number",
+      "const": 1
+    },
+    "taskId": {
+      "type": "string",
+      "pattern": "^[!-~]{1,256}$"
+    },
+    "chainId": {
+      "type": "string",
+      "pattern": "^[!-~]{1,128}$"
+    },
+    "eligibleProviderIds": {
+      "minItems": 1,
+      "maxItems": 64,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(?!.*(?:[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]|[sS][eE][cC][rR][eE][tT]|[pP][aA][sS][sS][wW][oO][rR][dD]|[tT][oO][kK][eE][nN]|[cC][oO][oO][kK][iI][eE]|[aA][uU][tT][hH][oO][rR][iI][zZ][aA][tT][iI][oO][nN]|[aA][pP][iI][_-]?[kK][eE][yY]|[pP][rR][oO][vV][iI][dD][eE][rR][_-]?[eE][rR][rR][oO][rR]|[hH][eE][aA][dD][eE][rR][sS]))[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+      },
+      "uniqueItems": true
+    },
+    "privacyClass": {
+      "type": "string",
+      "pattern": "^[!-~]{1,128}$"
+    },
+    "privacyHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "policyHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "contextHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "grantHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "taskDeadlineMs": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "attemptTimeoutMs": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "transitionLimit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 64
+    },
+    "budgetMicroUsd": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "providerCeilings": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^(?!.*(?:[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]|[sS][eE][cC][rR][eE][tT]|[pP][aA][sS][sS][wW][oO][rR][dD]|[tT][oO][kK][eE][nN]|[cC][oO][oO][kK][iI][eE]|[aA][uU][tT][hH][oO][rR][iI][zZ][aA][tT][iI][oO][nN]|[aA][pP][iI][_-]?[kK][eE][yY]|[pP][rR][oO][vV][iI][dD][eE][rR][_-]?[eE][rR][rR][oO][rR]|[hH][eE][aA][dD][eE][rR][sS]))[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "minProperties": 1
+    },
+    "featurePolicyRevision": {
+      "type": "string",
+      "pattern": "^[!-~]{1,128}$"
+    },
+    "planRevision": {
+      "type": "string",
+      "pattern": "^[!-~]{1,128}$"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "taskId",
+    "chainId",
+    "eligibleProviderIds",
+    "privacyClass",
+    "privacyHash",
+    "policyHash",
+    "contextHash",
+    "grantHash",
+    "taskDeadlineMs",
+    "attemptTimeoutMs",
+    "transitionLimit",
+    "budgetMicroUsd",
+    "providerCeilings",
+    "featurePolicyRevision",
+    "planRevision"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 1,
+            "maxItems": 1
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 2,
+            "maxItems": 2
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 3,
+            "maxItems": 3
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 2
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 4,
+            "maxItems": 4
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 3
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 5,
+            "maxItems": 5
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 4
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 6,
+            "maxItems": 6
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 5
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 7,
+            "maxItems": 7
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 6
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 8,
+            "maxItems": 8
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 7
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 9,
+            "maxItems": 9
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 8
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 10,
+            "maxItems": 10
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 9
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 11,
+            "maxItems": 11
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 10
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 12,
+            "maxItems": 12
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 11
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 13,
+            "maxItems": 13
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 12
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 14,
+            "maxItems": 14
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 13
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 15,
+            "maxItems": 15
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 14
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 16,
+            "maxItems": 16
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 15
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 17,
+            "maxItems": 17
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 16
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 18,
+            "maxItems": 18
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 17
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 19,
+            "maxItems": 19
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 18
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 20,
+            "maxItems": 20
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 19
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 21,
+            "maxItems": 21
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 20
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 22,
+            "maxItems": 22
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 21
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 23,
+            "maxItems": 23
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 22
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 24,
+            "maxItems": 24
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 23
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 25,
+            "maxItems": 25
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 24
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 26,
+            "maxItems": 26
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 25
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 27,
+            "maxItems": 27
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 26
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 28,
+            "maxItems": 28
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 27
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 29,
+            "maxItems": 29
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 28
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 30,
+            "maxItems": 30
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 29
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 31,
+            "maxItems": 31
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 30
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 32,
+            "maxItems": 32
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 31
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 33,
+            "maxItems": 33
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 32
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 34,
+            "maxItems": 34
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 33
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 35,
+            "maxItems": 35
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 34
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 36,
+            "maxItems": 36
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 35
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 37,
+            "maxItems": 37
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 36
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 38,
+            "maxItems": 38
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 37
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 39,
+            "maxItems": 39
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 38
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 40,
+            "maxItems": 40
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 39
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 41,
+            "maxItems": 41
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 40
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 42,
+            "maxItems": 42
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 41
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 43,
+            "maxItems": 43
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 42
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 44,
+            "maxItems": 44
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 43
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 45,
+            "maxItems": 45
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 44
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 46,
+            "maxItems": 46
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 45
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 47,
+            "maxItems": 47
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 46
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 48,
+            "maxItems": 48
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 47
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 49,
+            "maxItems": 49
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 48
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 50,
+            "maxItems": 50
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 49
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 51,
+            "maxItems": 51
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 50
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 52,
+            "maxItems": 52
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 51
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 53,
+            "maxItems": 53
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 52
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 54,
+            "maxItems": 54
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 53
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 55,
+            "maxItems": 55
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 54
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 56,
+            "maxItems": 56
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 55
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 57,
+            "maxItems": 57
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 56
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 58,
+            "maxItems": 58
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 57
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 59,
+            "maxItems": 59
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 58
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 60,
+            "maxItems": 60
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 59
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 61,
+            "maxItems": 61
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 60
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 62,
+            "maxItems": 62
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 61
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 63,
+            "maxItems": 63
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 62
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "eligibleProviderIds"
+        ],
+        "properties": {
+          "eligibleProviderIds": {
+            "minItems": 64,
+            "maxItems": 64
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "transitionLimit": {
+            "maximum": 63
+          }
+        }
+      }
+    }
+  ],
+  "x-torqclaw-refinements": {
+    "uniqueEligibleProviderIds": true,
+    "providerCeilingsCoverEligibleProviderIds": true,
+    "transitionLimitAtMostProviderCountMinusOne": true
+  }
+}

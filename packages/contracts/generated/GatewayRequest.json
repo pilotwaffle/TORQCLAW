@@ -133,6 +133,180 @@
         "memoryUsed"
       ],
       "additionalProperties": false
+    },
+    "effectiveProfile": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "string",
+          "const": "torqclaw.effective-profile/v1"
+        },
+        "profileId": {
+          "type": "string",
+          "enum": [
+            "read_only",
+            "workspace_write",
+            "browser_research",
+            "terminal_power"
+          ]
+        },
+        "profileVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "toolRegistryVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "allowedOperationIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilityClasses": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "read",
+              "write",
+              "exec",
+              "send"
+            ]
+          }
+        },
+        "sideEffectClasses": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "none",
+              "filesystem_write",
+              "browser_mutation",
+              "process",
+              "network_send"
+            ]
+          }
+        },
+        "allowedTiers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "LOCAL_EDGE",
+              "FRONTIER"
+            ]
+          }
+        },
+        "operationCapabilities": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "read",
+              "write",
+              "exec",
+              "send"
+            ]
+          }
+        },
+        "operationSideEffects": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "none",
+              "filesystem_write",
+              "browser_mutation",
+              "process",
+              "network_send"
+            ]
+          }
+        },
+        "operationApprovals": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "scopes": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "enum": [
+                "none",
+                "workspace",
+                "configured"
+              ]
+            },
+            "network": {
+              "type": "string",
+              "enum": [
+                "none",
+                "browser",
+                "configured"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "network"
+          ],
+          "additionalProperties": false
+        },
+        "approvalRequirements": {
+          "type": "object",
+          "properties": {
+            "write": {
+              "type": "boolean"
+            },
+            "exec": {
+              "type": "boolean"
+            },
+            "send": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "write",
+            "exec",
+            "send"
+          ],
+          "additionalProperties": false
+        },
+        "policyHash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "profileId",
+        "profileVersion",
+        "toolRegistryVersion",
+        "allowedOperationIds",
+        "capabilityClasses",
+        "sideEffectClasses",
+        "allowedTiers",
+        "operationCapabilities",
+        "operationSideEffects",
+        "operationApprovals",
+        "scopes",
+        "approvalRequirements",
+        "policyHash"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [

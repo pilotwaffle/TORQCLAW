@@ -11,13 +11,76 @@ Upstream API (verified against vendor/hermes-agent @ shallow HEAD):
 """
 import os
 import re
+import socket
 import sys
 import time
 from pathlib import Path
+from collections.abc import Mapping
 
 from . import task_store
 
 VENDOR = Path(__file__).parents[1] / "vendor" / "hermes-agent"
+
+
+class ProviderConfigurationError(Exception):
+    """Typed, secret-free provider configuration failure."""
+
+
+class MissingCredentialsError(ProviderConfigurationError):
+    """The selected provider's credential environment variable is absent."""
+
+
+class InvalidCredentialsError(Exception):
+    """Typed authentication failure raised by a provider client."""
+
+
+class MalformedProviderResponseError(Exception):
+    """The provider returned a response outside the runner contract."""
+
+
+def _response_status(value) -> int | None:
+    response = value.get("response") if isinstance(value, Mapping) else getattr(value, "response", None)
+    candidate = value.get("status_code") if isinstance(value, Mapping) else getattr(value, "status_code", None)
+    if candidate is None:
+        candidate = value.get("status") if isinstance(value, Mapping) else getattr(value, "status", None)
+    if candidate is None and response is not None:
+        candidate = getattr(response, "status_code", None) or getattr(response, "status", None)
+    return candidate if isinstance(candidate, int) and not isinstance(candidate, bool) else None
+
+
+def normalize_provider_failure(value) -> dict[str, object]:
+    """Convert typed runner/provider failures to the frozen safe taxonomy.
+
+    This function deliberately inspects only exception types and numeric HTTP
+    status fields. It never serializes exception text, headers, URLs, bodies,
+    or response objects.
+    """
+    status = _response_status(value)
+    if status == 408:
+        return {"failureClass": "retryable", "code": "http_408", "retryable": True}
+    if status == 429:
+        return {"failureClass": "retryable", "code": "http_429", "retryable": True}
+    if status is not None and 500 <= status <= 599:
+        return {"failureClass": "retryable", "code": "http_5xx", "retryable": True}
+    if status in {400, 404}:
+        return {"failureClass": "configuration", "code": f"http_{status}", "retryable": False}
+    if status in {401, 403}:
+        return {"failureClass": "authentication", "code": f"http_{status}", "retryable": False}
+
+    name = type(value).__name__.lower()
+    if isinstance(value, socket.gaierror) or "dns" in name or "name_resolution" in name:
+        return {"failureClass": "retryable", "code": "dns", "retryable": True}
+    if isinstance(value, (ConnectionError, TimeoutError, OSError)) or "connection" in name:
+        return {"failureClass": "retryable", "code": "connection", "retryable": True}
+    if isinstance(value, MissingCredentialsError) or "missingcredential" in name:
+        return {"failureClass": "authentication", "code": "missing_credentials", "retryable": False}
+    if isinstance(value, InvalidCredentialsError) or "invalidcredential" in name:
+        return {"failureClass": "authentication", "code": "invalid_credentials", "retryable": False}
+    if isinstance(value, ProviderConfigurationError) or "configuration" in name or "configerror" in name:
+        return {"failureClass": "configuration", "code": "configuration", "retryable": False}
+    if isinstance(value, MalformedProviderResponseError) or "malformed" in name:
+        return {"failureClass": "terminal", "code": "malformed_response", "retryable": False}
+    return {"failureClass": "terminal", "code": "unknown", "retryable": False}
 
 _import_error: str | None = None
 AIAgent = None
@@ -43,6 +106,26 @@ def _clip(obj, n: int = 500) -> str:
 # Live agent registry: lets cancel_task reach the AIAgent.interrupt() of a
 # running task from another MCP request. Single-process only (see server.py).
 RUNNING: dict[str, "AIAgent"] = {}
+
+
+def stop_attempt(task_id: str, timeout_ms: int = 2_000) -> dict[str, str]:
+    """Signal an attempt-level stop and require a typed acknowledgement.
+
+    A successful transport call with no explicit acknowledgement is
+    intentionally uncertain; the ledger re-read in failover_runtime remains
+    the authority for whether a pre-dispatch transition is safe.
+    """
+    agent = RUNNING.get(task_id)
+    if agent is None:
+        return {"status": "ACK_UNCERTAIN"}
+    try:
+        result = agent.interrupt("attempt_timeout")
+    except Exception:
+        return {"status": "ACK_UNCERTAIN"}
+    if isinstance(result, Mapping) and result.get("status") in {
+            "ACK_PRE_DISPATCH", "ACK_POST_DISPATCH", "ACK_UNCERTAIN"}:
+        return {"status": str(result["status"])}
+    return {"status": "ACK_UNCERTAIN"}
 
 # Per-task account-usage baseline for the provider-delta cost fallback.
 _USAGE_BASELINE: dict[str, float | None] = {}
@@ -157,25 +240,51 @@ _FILE_INTENT = re.compile(
 )
 
 
-def _frontier_enabled_toolsets(task_type: str, prompt: str = "") -> list[str] | None:
+def _frontier_enabled_toolsets(
+    task_type: str,
+    prompt: str = "",
+    effective_profile: dict | None = None,
+) -> list[str] | None:
     """The toolset allowlist for a FRONTIER task. None = upstream default (only
     when the operator explicitly sets HERMES_FRONTIER_TOOLSETS='*')."""
-    override = os.environ.get("HERMES_FRONTIER_TOOLSETS")
+    profile_id = effective_profile.get("profileId") if isinstance(effective_profile, dict) else None
+    # An effective profile is authoritative; deployment overrides cannot
+    # broaden the engine beyond the gateway-owned profile boundary.
+    override = None if profile_id is not None else os.environ.get("HERMES_FRONTIER_TOOLSETS")
     if override:
         if override.strip() == "*":
             return None  # upstream default — full toolset
         return [t.strip() for t in override.split(",") if t.strip()]
-    base = list(_FRONTIER_TOOLSETS.get(task_type, ["web"]))
+    profile_toolsets = {
+        # The profile is the gateway-owned capability boundary. Keep the
+        # engine's toolset no broader than that boundary even when task type
+        # heuristics or file-intent detection would otherwise add tools.
+        "read_only": ["web"],
+        "browser_research": ["web"],
+        "workspace_write": ["files"],
+        "terminal_power": ["web", "files", "terminal", "code_execution"],
+    }
+    base = list(profile_toolsets.get(profile_id, _FRONTIER_TOOLSETS.get(task_type, ["web"])))
     # File-intent override: add the (gated) files toolset so the task can act.
-    if _FILE_INTENT.search(prompt or "") and "files" not in base:
+    if profile_id not in {"read_only", "browser_research"} and _FILE_INTENT.search(prompt or "") and "files" not in base:
         base.append("files")
     return base
 
 
-def _provider_config(task_type: str) -> dict:
+def _provider_config(task_type: str, provider_ref: dict | None = None) -> dict:
     """Pick the provider/model/key/base for this task. COMPLEX_CODING uses the
     HERMES_CODING_* override when set (e.g. Kimi K2.7 Code — long context +
     agentic coding); everything else uses the default HERMES_* (DeepSeek)."""
+    if provider_ref is not None:
+        # Resilience attempts carry only provider labels and environment
+        # variable names. Resolve the values at construction time; never put
+        # credentials or endpoints in task_store, ledger, telemetry, or MCP.
+        return {
+            "model": provider_ref["modelId"],
+            "provider": provider_ref["providerId"],
+            "api_key": os.environ.get(provider_ref["credentialEnvName"]),
+            "base_url": os.environ.get(provider_ref["baseUrlEnvName"]),
+        }
     if task_type == "COMPLEX_CODING" and os.environ.get("HERMES_CODING_MODEL"):
         return {
             "model": os.environ.get("HERMES_CODING_MODEL", ""),
@@ -265,10 +374,13 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
     task_type: str = req.get("taskType", "ROUTINE_AUTOMATION")
     granted: list[str] = req.get("grantedTools", []) or []
 
-    pconf = _provider_config(task_type)
+    provider_ref = payload.get("providerRef")
+    pconf = _provider_config(task_type, provider_ref if isinstance(provider_ref, dict) else None)
+    if isinstance(provider_ref, dict) and not pconf.get("api_key"):
+        raise MissingCredentialsError()
     task_store.emit(task_id, "SYSTEM", f"Model: {pconf['provider']}/{pconf['model']}")
 
-    enabled = _frontier_enabled_toolsets(task_type, prompt)
+    enabled = _frontier_enabled_toolsets(task_type, prompt, req.get("effectiveProfile"))
     task_store.emit(
         task_id, "SYSTEM",
         f"Cloud tools enabled: {', '.join(enabled) if enabled else 'all (override)'}",
@@ -281,12 +393,52 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
     # the hook actually registered against the vendored plugin system.
     from . import approval_hook
     gate_on = approval_hook.register()
+    resilience_active = False
+    active_tuple = (
+        req.get("activeTuple") or req.get("resilienceActiveTuple") or req.get("active")
+        or payload.get("activeTuple") or payload.get("resilienceActiveTuple")
+    )
+    try:
+        from . import failover_runtime
+        resilience_active = failover_runtime.frontier_active(payload) and active_tuple is not None
+    except Exception:
+        resilience_active = False
     approval_hook.set_task_context(
         task_id,
         granted=granted,
         emit=lambda t, m, meta=None: task_store.emit(task_id, t, m, meta),
         enabled=gate_on,
+        active_tuple=active_tuple,
+        resilience_active=resilience_active,
     )
+    if resilience_active and not gate_on:
+        raise RuntimeError("durable tool fence is unavailable")
+
+    def _tool_started(call_id, name, args):
+        if resilience_active:
+            task_store.emit(task_id, "TOOL_CALL", "Tool dispatch fenced", {
+                "callId": str(call_id)[:256], "toolName": str(name)[:256],
+            })
+            return
+        task_store.emit(task_id, "TOOL_CALL", f"Executing {name}",
+                        {"call_id": call_id, "args": _clip(args)})
+
+    def _tool_completed(call_id, name, args, result):
+        if resilience_active:
+            task_store.emit(task_id, "SYSTEM", "Tool completed", {
+                "callId": str(call_id)[:256], "toolName": str(name)[:256],
+            })
+            return
+        task_store.emit(task_id, "SYSTEM", f"Tool {name} completed",
+                        {"call_id": call_id, "result": _clip(result)})
+
+    def _status(kind, msg):
+        if resilience_active:
+            task_store.emit(task_id, "SYSTEM", "Provider status", {
+                "kind": str(kind)[:64],
+            })
+            return
+        task_store.emit(task_id, "SYSTEM", f"[{kind}] {_clip(msg, 300)}")
 
     agent = AIAgent(
         # Provider config is env-driven + per-task (coding override). Hermes
@@ -313,15 +465,9 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
         quiet_mode=True,
         session_id=task_id,
         # ── The hijack: first-class callbacks -> cursor events ──
-        tool_start_callback=lambda cid, name, args: task_store.emit(
-            task_id, "TOOL_CALL", f"Executing {name}", {"call_id": cid, "args": _clip(args)},
-        ),
-        tool_complete_callback=lambda cid, name, args, result: task_store.emit(
-            task_id, "SYSTEM", f"Tool {name} completed", {"call_id": cid, "result": _clip(result)},
-        ),
-        status_callback=lambda kind, msg: task_store.emit(
-            task_id, "SYSTEM", f"[{kind}] {_clip(msg, 300)}",
-        ),
+        tool_start_callback=_tool_started,
+        tool_complete_callback=_tool_completed,
+        status_callback=_status,
     )
     # Register BEFORE run so cancel_task can interrupt; baseline the usage
     # delta source in case credits-micros is unavailable for this provider.
@@ -337,6 +483,8 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
             system_message=system_message,
             task_id=task_id,
         )
+        if not isinstance(result, Mapping) or not isinstance(result.get("final_response"), str):
+            raise MalformedProviderResponseError()
         # If the approval hook blocked a tool, this run is BLOCKED, not done —
         # surface blockedOn so run_hermes_loop emits the terminal PENDING_APPROVAL
         # instead of completing with a (likely fabricated-around-the-block) answer.

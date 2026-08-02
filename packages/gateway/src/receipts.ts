@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { db } from './storage.js';
+import { db, getFailoverProjection, getProviderAttemptProjections } from './storage.js';
 import { publishOnly } from './events.js';
 import { sessions } from './sessions.js';
 
@@ -24,6 +24,7 @@ import { sessions } from './sessions.js';
  * still not a typed emitted contract of its own.
  */
 export const PROJECTION_VERSION = 1;
+export const FAILOVER_PROJECTION_VERSION = 2;
 
 export interface ReceiptRow {
   id: string;
@@ -248,6 +249,40 @@ export function projectReceipt(taskId: string): ReceiptRow | null {
   // — zero writes, safe_export_json is never touched by GET_SAFE_EXPORT).
   const safeExportJson: string | null = null;
 
+  const featureOn = process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED?.toLowerCase() === 'true';
+  const failoverProjection = featureOn ? getFailoverProjection(taskId) : null;
+  const failoverEnabled = telemetry?.failoverEnabled === true || failoverProjection !== null;
+  const providerAttempts = failoverEnabled
+    ? getProviderAttemptProjections(taskId).map((attempt) => ({
+      epoch: attempt.epoch,
+      attemptId: attempt.attempt_id,
+      providerId: attempt.provider_id,
+      modelId: attempt.model_id,
+      startedAtMs: attempt.started_at_ms,
+      endedAtMs: attempt.ended_at_ms,
+      normalizedFailure: attempt.failure_class || attempt.failure_code
+        ? { failureClass: attempt.failure_class, code: attempt.failure_code, source: attempt.failure_source }
+        : null,
+      dispatchAttempted: attempt.dispatch_attempted === 1,
+      transitionDecision: attempt.transition_decision,
+      terminalOutcome: attempt.terminal_outcome,
+      cost: {
+        reservedMicroUsd: attempt.reserved_micro_usd,
+        actualMicroUsd: attempt.actual_micro_usd,
+        known: attempt.cost_known === null ? null : attempt.cost_known === 1,
+        source: attempt.cost_source,
+      },
+    }))
+    : undefined;
+  const finalProviderId = failoverEnabled
+    ? (typeof failoverProjection?.final_provider_id === 'string'
+      ? failoverProjection.final_provider_id
+      : providerAttempts?.at(-1)?.providerId ?? null)
+    : undefined;
+  const terminalUncertainty = failoverEnabled
+    ? providerAttempts?.some((attempt) => attempt.terminalOutcome === 'cancelled_uncertain' || attempt.dispatchAttempted && attempt.terminalOutcome !== 'completed') ?? false
+    : undefined;
+
   const fullReceipt = {
     taskId,
     sessionId: task.session_id,
@@ -272,6 +307,13 @@ export function projectReceipt(taskId: string): ReceiptRow | null {
     approvals,
     evidence: { startSeq: evidenceStartSeq, endSeq: evidenceEndSeq },
     error: task.error ?? null,
+    ...(failoverEnabled ? {
+      projectionVersion: FAILOVER_PROJECTION_VERSION,
+      failoverEnabled: true,
+      providerAttempts,
+      finalProviderId,
+      terminalUncertainty,
+    } : {}),
   };
 
   return {
@@ -297,7 +339,7 @@ export function projectReceipt(taskId: string): ReceiptRow | null {
     full_receipt_json: JSON.stringify(fullReceipt),
     evidence_start_seq: evidenceStartSeq,
     evidence_end_seq: evidenceEndSeq,
-    projection_version: PROJECTION_VERSION,
+    projection_version: failoverEnabled ? FAILOVER_PROJECTION_VERSION : PROJECTION_VERSION,
   };
 }
 

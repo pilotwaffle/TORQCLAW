@@ -1,0 +1,75 @@
+{
+  "tools": {
+    "resilience_admit_frontier": {
+      "arguments": ["request_id", "immutable_plan", "deadline_at", "provider_order"],
+      "responseKeys": ["status", "activeTuple", "planHash", "reason"]
+    },
+    "resilience_submit_attempt": {
+      "arguments": ["payload", "immutable_plan", "active", "provider_ref", "attempt_deadline_ms", "idempotency_key"],
+      "responseKeys": ["status", "activeTuple", "providerId", "executionState", "reason"]
+    },
+    "resilience_poll_observations": {
+      "arguments": ["active", "cursor", "attempt_deadline_ms"],
+      "responseKeys": ["status", "cursor", "observations", "terminal", "reason"]
+    },
+    "resilience_record_observation": {
+      "arguments": ["active", "normalized_observation", "idempotency_key"],
+      "responseKeys": ["status", "observation", "reason"]
+    },
+    "resilience_finalize_attempt": {
+      "arguments": ["active", "normalized_failure", "failure_source", "terminal_outcome", "idempotency_key"],
+      "responseKeys": ["status", "outcome", "reason"]
+    },
+    "resilience_transition_once": {
+      "arguments": ["active", "successor_provider_id", "normalized_failure", "jitter_ms", "plan_hash", "idempotency_key", "failure_source", "observation_idempotency_key"],
+      "responseKeys": ["status", "successor", "successorProviderId", "reason"]
+    },
+    "resilience_request_cancel": {
+      "arguments": ["active", "cancel_id"],
+      "responseKeys": ["status", "reason"]
+    },
+    "resilience_recover_and_transition_once": {
+      "arguments": ["active", "recovery_id", "jitter_ms", "normalized_failure"],
+      "responseKeys": ["status", "successor", "reason"]
+    },
+    "resilience_get_status": {
+      "arguments": ["task_id"],
+      "responseKeys": ["status", "activeTuple", "providerId", "dispatchAttempted", "cancellationRequested", "taskDeadlineMs", "immutablePlan", "providerOrder", "attemptState", "executionSubmitted", "reason"]
+    },
+    "resilience_page_outbox": {
+      "arguments": ["after_cursor", "limit"],
+      "responseKeys": ["status", "cursor", "highWaterMark", "events", "reason"]
+    },
+    "attempt_timeout": {
+      "arguments": ["active", "timeout_ms"],
+      "responseKeys": ["status", "activeTuple", "dispatchAttempted", "reason"]
+    }
+  },
+  "cancelTaskArguments": ["task_id", "reason"],
+  "argumentObjects": {
+    "resilience_admit_frontier": {
+      "request_id": "contract-task",
+      "immutable_plan": "$plan",
+      "deadline_at": 10000,
+      "provider_order": ["primary", "fallback"]
+    },
+    "resilience_submit_attempt": {
+      "payload": "$gatewayRequest",
+      "immutable_plan": "$plan",
+      "active": "$active",
+      "provider_ref": {"providerId": "primary", "label": "Primary", "modelId": "model", "credentialEnvName": "KEY", "baseUrlEnvName": "BASE"},
+      "attempt_deadline_ms": 9000,
+      "idempotency_key": "submit"
+    },
+    "resilience_poll_observations": {"active": "$active", "cursor": 0, "attempt_deadline_ms": 9000},
+    "resilience_record_observation": {"active": "$active", "normalized_observation": {"kind": "progress", "dispatchAttempted": false}, "idempotency_key": "record"},
+    "resilience_finalize_attempt": {"active": "$active", "normalized_failure": {"failureClass": "retryable", "code": "connection", "retryable": true}, "failure_source": "engine", "terminal_outcome": "failed", "idempotency_key": "finalize"},
+    "resilience_transition_once": {"active": "$active", "successor_provider_id": "fallback", "normalized_failure": {"failureClass": "retryable", "code": "connection", "retryable": true}, "jitter_ms": 250, "plan_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "idempotency_key": "transition"},
+    "resilience_request_cancel": {"active": "$active", "cancel_id": "cancel"},
+    "resilience_recover_and_transition_once": {"active": "$active", "recovery_id": "contract-task:contract-attempt:0:startup-recovery:v1", "jitter_ms": 250, "normalized_failure": {"failureClass": "retryable", "code": "pre_dispatch_timeout", "retryable": true}},
+    "resilience_get_status": {"task_id": "contract-task"},
+    "resilience_page_outbox": {"after_cursor": 0, "limit": 10},
+    "cancel_task": {"task_id": "contract-attempt", "reason": "USER_CANCELLED"},
+    "attempt_timeout": {"active": "$active", "timeout_ms": 2000}
+  }
+}

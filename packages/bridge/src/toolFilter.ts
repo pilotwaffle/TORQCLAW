@@ -1,20 +1,25 @@
-import type { TaskType } from '@torqclaw/contracts';
+import type { EffectiveProfile, TaskType } from '@torqclaw/contracts';
 import { getRegistry, type RegisteredTool } from './registry.js';
+import { isOperationAllowed } from './profilePolicy.js';
 
 /** Task -> tool prefix allowlist. Defeats schema bloat: with 10+ servers the
  *  full registry is 40-100KB of schemas — fatal for an 8k local window. */
 const TOOL_ROUTING_MAP: Record<TaskType, string[]> = {
   DATA_EXTRACTION: ['db__', 'filesystem__', 'tradingview__'],
   SUMMARIZATION: ['filesystem__'],
-  ROUTINE_AUTOMATION: ['filesystem__', 'scheduler__', 'tradingview__'],
-  COMPLEX_CODING: ['filesystem__', 'github__', 'sandbox__'],
-  AUTONOMOUS_RESEARCH: ['websearch__', 'filesystem__', 'tradingview__'],
+  ROUTINE_AUTOMATION: ['filesystem__', 'scheduler__', 'tradingview__', 'desktop_commander__', 'playwright__'],
+  COMPLEX_CODING: ['filesystem__', 'github__', 'sandbox__', 'desktop_commander__', 'playwright__'],
+  AUTONOMOUS_RESEARCH: ['websearch__', 'filesystem__', 'tradingview__', 'playwright__'],
 };
 
-export function predictTools(taskType: TaskType): string[] {
+export function predictTools(taskType: TaskType, profile?: EffectiveProfile): string[] {
   const prefixes = TOOL_ROUTING_MAP[taskType] ?? [];
   return getRegistry()
-    .filter((t) => prefixes.some((p) => t.name.startsWith(p)))
+    .filter(
+      (t) =>
+        prefixes.some((p) => t.name.startsWith(p)) &&
+        (!profile || isOperationAllowed(profile, t)),
+    )
     .map((t) => t.name);
 }
 
@@ -37,12 +42,24 @@ function hash8(s: string): string {
   return Math.abs(h).toString(36).slice(0, 7);
 }
 
-export async function getToolsForTask(taskType: TaskType, tier: 'LOCAL_EDGE' | 'FRONTIER') {
+export async function getToolsForTask(
+  taskType: TaskType,
+  tier: 'LOCAL_EDGE' | 'FRONTIER',
+  profile?: EffectiveProfile,
+) {
+  if (profile && !profile.allowedTiers.includes(tier)) {
+    return {
+      openAITools: [],
+      resolveAlias: (alias: string) => alias,
+      requiresApproval: (_realName: string) => false,
+    };
+  }
   const prefixes = TOOL_ROUTING_MAP[taskType] ?? [];
   const filtered = getRegistry().filter(
     (t) =>
       t.sourceServerId !== 'hermes' && // engine meta-tools never go to user loops
-      (prefixes.some((p) => t.name.startsWith(p)) || t.name.startsWith('core_meta__')),
+      (prefixes.some((p) => t.name.startsWith(p)) || t.name.startsWith('core_meta__')) &&
+      (!profile || isOperationAllowed(profile, t)),
   );
   const { toAlias, fromAlias } = buildAliases(filtered);
   const approvalSet = new Set(filtered.filter((t) => t.requiresApproval).map((t) => t.name));

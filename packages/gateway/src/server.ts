@@ -14,6 +14,7 @@ import { decideApproval, handleListApprovals } from './approvals.js';
 import { makeEmitter, sessionBus, persistAndPublish } from './events.js';
 import { router } from '@torqclaw/router';
 import { connectBridge, approveSkill, getSkillDraft, cancelHermesTask } from '@torqclaw/bridge';
+import { assertResolvedProfile, constrainTier } from './profileResolver.js';
 import { setCancelCheck } from '@torqclaw/inference';
 import { cancellations } from './cancellations.js';
 import { authorize, checkResumeRole, type Role } from './authz.js';
@@ -137,13 +138,20 @@ app.get('/ws', { websocket: true }, (socket) => {
         const emit = makeEmitter(sid, null, null);
         emit('USER_PROMPT', cmd.data.prompt); // feeds getContextWindow Tier 1
 
-        const request = await enrichCommand(cmd.data, sid, 'torq-console');
-        GatewayRequestSchema.parse(request); // throws = our bug; fail loud
+         const request = await enrichCommand(cmd.data, sid, 'torq-console');
+         GatewayRequestSchema.parse(request); // throws = our bug; fail loud
+         assertResolvedProfile(request);
 
         const reqEmit = makeEmitter(sid, request.id, null);
         reqEmit('ROUTING', `Classified as ${request.payload.taskType}`, request.enrichment);
 
-        const diag = router.evaluateRequest(request);
+         const baseDiag = constrainTier(router.evaluateRequest(request), request.effectiveProfile!);
+         const diag = {
+           ...baseDiag,
+           profile: request.effectiveProfile?.profileId,
+           profileVersion: request.effectiveProfile?.profileVersion,
+           profileHash: request.effectiveProfile?.policyHash,
+         };
         makeEmitter(sid, request.id, diag.tier)('TIER_SELECTED', diag.reason, diag);
 
         dispatch(request, diag); // returns immediately
@@ -221,6 +229,23 @@ app.get('/ws', { websocket: true }, (socket) => {
         const reqId = cmd.data.taskId; // gateway request_id
         const emitCancel = makeEmitter(sid, reqId, null);
         emitCancel('SYSTEM', 'Cancellation requested');
+        // Feature-on cancellation is persist-first: the resilience ledger
+        // records the irreversible cancel fact before any provider transport
+        // signal. A noop means this is a legacy/non-active task and falls
+        // through to the unchanged cancellation path.
+        if (process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED?.toLowerCase() === 'true') {
+          try {
+            const { cancelFailoverTask } = await import('./failover.js');
+            const outcome = await cancelFailoverTask(reqId, 'USER_CANCELLED');
+            if (outcome !== 'noop') {
+              emitCancel('SYSTEM', outcome === 'cancelled' ? 'Cancellation acknowledged' : 'Cancellation uncertain');
+              break;
+            }
+          } catch {
+            emitCancel('SYSTEM', 'Cancel persistence failed; provider work was not signalled.');
+            break;
+          }
+        }
         // FRONTIER: interrupt the Python agent via the bridge. LOCAL_EDGE: flip
         // the in-memory flag the ollama loop polls. Set both — the flag is free
         // and the bridge call no-ops if this wasn't a tracked frontier task.
@@ -298,5 +323,13 @@ app.get('/ws', { websocket: true }, (socket) => {
 });
 
 await connectBridge(); // discover + namespace MCP servers before traffic
+if (process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED?.toLowerCase() === 'true') {
+  const { ensureResilienceProjection, reconcileGatewayProjection } = await import('./storage.js');
+  const { pageOutbox } = await import('@torqclaw/bridge');
+  ensureResilienceProjection();
+  await reconcileGatewayProjection(async (afterCursor, limit) => pageOutbox(afterCursor, limit));
+  const { recoverFailoverTasks } = await import('./failover.js');
+  await recoverFailoverTasks();
+}
 await app.listen({ port: PORT, host: HOST });
 console.log(`[torqclaw] gateway listening on ws://${HOST}:${PORT}/ws`);

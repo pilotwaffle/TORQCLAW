@@ -2,6 +2,7 @@ import { publishOnly } from './events.js';
 import { enrichCommand } from './enrich.js';
 import { router } from '@torqclaw/router';
 import { GatewayRequestSchema, type ClientCommand } from '@torqclaw/contracts';
+import { assertResolvedProfile, constrainTier } from './profileResolver.js';
 
 /**
  * TCLAW-2D-1: the PREVIEW_ROUTE handler — a strict READ-ONLY subset of the
@@ -58,8 +59,15 @@ export async function handlePreviewRoute(sessionId: string, cmd: PreviewCmd): Pr
       sessionId,
       'torq-console',
     );
-    GatewayRequestSchema.parse(request); // fail loud on our own contract bug
-    const diagnostics = router.evaluateRequest(request); // SAME singleton the live path uses
+     GatewayRequestSchema.parse(request); // fail loud on our own contract bug
+     assertResolvedProfile(request);
+     const baseDiagnostics = constrainTier(router.evaluateRequest(request), request.effectiveProfile!); // SAME singleton the live path uses
+     const diagnostics = {
+       ...baseDiagnostics,
+       profile: request.effectiveProfile?.profileId,
+       profileVersion: request.effectiveProfile?.profileVersion,
+       profileHash: request.effectiveProfile?.policyHash,
+     };
 
     publishOnly(sessionId, {
       message: 'Route preview',
