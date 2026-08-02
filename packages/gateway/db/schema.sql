@@ -195,6 +195,7 @@ CREATE TABLE IF NOT EXISTS provider_attempt_projection (
   ended_at_ms INTEGER,
   failure_class TEXT,
   failure_code TEXT,
+  failure_source TEXT,
   dispatch_attempted INTEGER NOT NULL DEFAULT 0 CHECK (dispatch_attempted IN (0,1)),
   terminal_outcome TEXT,
   reserved_micro_usd INTEGER,
@@ -216,7 +217,9 @@ CREATE TABLE IF NOT EXISTS failover_task_projection (
   active_attempt_id TEXT,
   active_epoch INTEGER,
   deadline_ms INTEGER NOT NULL,
-  cancellation_requested_at_ms INTEGER
+  cancellation_requested_at_ms INTEGER,
+  immutable_plan_json TEXT NOT NULL DEFAULT '{}',
+  provider_metadata_json TEXT NOT NULL DEFAULT '{}'
 );
 
 -- TORQCLAW_RESILIENCE_SCHEMA_END

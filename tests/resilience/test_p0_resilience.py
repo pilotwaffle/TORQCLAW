@@ -545,6 +545,23 @@ for (const state of vectors.allowed) {
         reset_terminal_rows_to_active(path, task)
         assert_active_authorization_fails_closed(ledger, current, path)
         return
+    if case_id == "repeated_dispatch":
+        wall = [1_000]
+        monotonic = [10_000_000_000]
+        ledger = AttemptLedger(
+            tmp_path / "repeated-dispatch.sqlite",
+            now_ms=lambda: wall[0], monotonic_ns=lambda: monotonic[0],
+        )
+        old = ledger.create_initial("task", make_plan("task"))
+        current = ledger.transition_once(old, "p2", failure())
+        assert current is not None
+        assert ledger.mark_dispatch_attempted(current)["status"] == "NOT_READY"
+        wall[0] = current["successorSubmitNotBeforeMs"]
+        assert ledger.mark_dispatch_attempted(current)["status"] == "NOT_READY"
+        monotonic[0] += 250_000_000
+        assert ledger.mark_dispatch_attempted(current)
+        assert ledger.mark_dispatch_attempted(current) is None
+        return
     ledger, old, current = transition(tmp_path)
     if case_id == "stale_event":
         result = ledger.append_event_if_active(old, "late", {"fact": 1})
@@ -566,9 +583,6 @@ for (const state of vectors.allowed) {
         result = ledger.append_event_if_active(current | {"taskId": "other"}, "late")
     elif case_id == "closed_complete":
         result = ledger.complete_if_active(old)
-    elif case_id == "repeated_dispatch":
-        assert ledger.mark_dispatch_attempted(current)
-        result = ledger.mark_dispatch_attempted(current)
     elif case_id == "post_terminal_cost":
         assert ledger.complete_if_active(current)
         result = ledger.record_cost_if_active(current, 1)
@@ -1510,7 +1524,7 @@ def run_contention_case(tmp_path, case_id):
         ).replace("engineÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹s", "engines")
         result = subprocess.run([sys.executable, "-c", code, str(path)],
                                 capture_output=True, text=True, check=True)
-        assert result.stdout.strip() == "2:1"
+        assert result.stdout.strip() == "3:1"
     elif case_id == "wal_enabled":
         conn = sqlite3.connect(path)
         assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"

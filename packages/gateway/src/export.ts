@@ -399,7 +399,7 @@ export interface SafeExportAttempt {
   modelId: string | null;
   startedAtMs: number | null;
   endedAtMs: number | null;
-  normalizedFailure: { failureClass: string | null; code: string | null } | null;
+  normalizedFailure: { failureClass: string | null; code: string | null; source: string | null } | null;
   dispatchAttempted: boolean | null;
   transitionDecision: string | null;
   terminalOutcome: string | null;
@@ -515,7 +515,7 @@ function asBooleanOrNull(v: unknown): boolean | null {
   return typeof v === 'boolean' ? v : null;
 }
 
-function projectProviderAttempts(value: unknown): SafeExportAttempt[] {
+function projectProviderAttempts(value: unknown, hits: PatternHits): SafeExportAttempt[] {
   if (!Array.isArray(value)) return [];
   return value.map((entry) => {
     const raw = (entry ?? {}) as Record<string, unknown>;
@@ -523,22 +523,22 @@ function projectProviderAttempts(value: unknown): SafeExportAttempt[] {
     const cost = (raw.cost ?? {}) as Record<string, unknown>;
     return {
       epoch: asNumberOrNull(raw.epoch),
-      attemptId: asStringOrNull(raw.attemptId),
-      providerId: asStringOrNull(raw.providerId),
-      modelId: asStringOrNull(raw.modelId),
+      attemptId: scrubOptionalString(raw.attemptId, hits),
+      providerId: scrubOptionalString(raw.providerId, hits),
+      modelId: scrubOptionalString(raw.modelId, hits),
       startedAtMs: asNumberOrNull(raw.startedAtMs),
       endedAtMs: asNumberOrNull(raw.endedAtMs),
       normalizedFailure: failure && typeof failure === 'object'
-        ? { failureClass: asStringOrNull(failure.failureClass), code: asStringOrNull(failure.code) }
+        ? { failureClass: scrubOptionalString(failure.failureClass, hits), code: scrubOptionalString(failure.code, hits), source: scrubOptionalString(failure.source, hits) }
         : null,
       dispatchAttempted: asBooleanOrNull(raw.dispatchAttempted),
-      transitionDecision: asStringOrNull(raw.transitionDecision),
-      terminalOutcome: asStringOrNull(raw.terminalOutcome),
+      transitionDecision: scrubOptionalString(raw.transitionDecision, hits),
+      terminalOutcome: scrubOptionalString(raw.terminalOutcome, hits),
       cost: {
         reservedMicroUsd: asNumberOrNull(cost.reservedMicroUsd),
         actualMicroUsd: asNumberOrNull(cost.actualMicroUsd),
         known: asBooleanOrNull(cost.known),
-        source: asStringOrNull(cost.source),
+        source: scrubOptionalString(cost.source, hits),
       },
     };
   });
@@ -664,6 +664,9 @@ export function buildSafeExport(
   const blockedOn = guardToolName(asStringOrNull(parsed.blockedOn) ?? row.blocked_on ?? null, hits);
   const toolsCalled = projectToolsCalled(parsed.toolsCalled, hits);
 
+  const finalProviderId = scrubOptionalString(parsed.finalProviderId, hits);
+  const providerAttempts = projectProviderAttempts(parsed.providerAttempts, hits);
+
   const patternsHit: Record<string, number> = {};
   // Fixed order = SECRET_SHAPES iteration order (plus the name-guard label,
   // appended last) — never Object.keys/Map insertion-order-of-first-hit,
@@ -698,9 +701,9 @@ export function buildSafeExport(
     error,
     ...(failoverEnabled ? {
       failoverEnabled: true,
-      finalProviderId: asStringOrNull(parsed.finalProviderId),
+      finalProviderId,
       terminalUncertainty: asBooleanOrNull(parsed.terminalUncertainty),
-      providerAttempts: projectProviderAttempts(parsed.providerAttempts),
+      providerAttempts,
     } : {}),
     redactionReport: {
       redactorVersion,

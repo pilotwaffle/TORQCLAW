@@ -6,6 +6,7 @@ with Tailscale or set HERMES_ENGINE_TOKEN and a reverse proxy — never bare
 0.0.0.0 (the OpenClaw exposed-default-port incident class)."""
 import asyncio
 import os
+from contextlib import asynccontextmanager
 
 from mcp.server.fastmcp import FastMCP
 
@@ -13,10 +14,20 @@ from . import skill_queue, task_store
 from .contracts import validate_gateway_request
 from . import failover_runtime
 
+@asynccontextmanager
+async def _resilience_lifespan(_server):
+    """Checkpoint only after FastMCP has stopped accepting requests."""
+    try:
+        yield {}
+    finally:
+        await asyncio.to_thread(failover_runtime.shutdown_for_tests)
+
+
 mcp = FastMCP(
     "torqclaw-hermes-engine",
     host=os.environ.get("HERMES_BIND_HOST", "127.0.0.1"),
     port=int(os.environ.get("HERMES_PORT", "8000")),
+    lifespan=_resilience_lifespan,
 )
 
 
@@ -31,14 +42,16 @@ def _resilience_task(payload: dict) -> bool:
 def _finish_internal_observation(task_id: str, observation: dict, *, result: str = "",
                                  telemetry: dict | None = None) -> None:
     """Persist only normalized internal status; the ledger never receives rich data."""
-    task_store.emit(task_id, "OBSERVATION", "Provider observation recorded", {
-        "kind": observation.get("kind", "failure"),
-    })
-    task_store.complete(task_id, result, {
-        "resilience": True,
-        "normalizedFailure": observation if observation.get("failureClass") else None,
-        **(telemetry or {}),
-    })
+    task_store.finish_observation(
+        task_id,
+        {"kind": "result", **observation},
+        result=result,
+        telemetry={
+            "resilience": True,
+            "normalizedFailure": observation if observation.get("failureClass") else None,
+            **(telemetry or {}),
+        },
+    )
 
 
 async def run_hermes_loop(task_id: str, payload: dict) -> None:
@@ -49,7 +62,7 @@ async def run_hermes_loop(task_id: str, payload: dict) -> None:
     Explicit live configuration must never silently degrade into a fabricated
     success. Stub mode remains available only when no live model is configured
     (used by deterministic contract tests)."""
-    from .hermes_runner import hermes_available, run_hermes_sync
+    from .hermes_runner import hermes_available, normalize_provider_failure, run_hermes_sync
     resilience_task = _resilience_task(payload)
     provider_ref = payload.get("providerRef")
     resilience_live_configured = (
@@ -107,9 +120,14 @@ async def run_hermes_loop(task_id: str, payload: dict) -> None:
 
         reason = why or "HERMES_MODEL unset"
         if live_configured:
-            error = f"Hermes unavailable; refusing stub response: {reason}"
-            task_store.emit(task_id, "ERROR", error)
-            task_store.fail(task_id, error)
+            if resilience_task:
+                failure = {"failureClass": "terminal", "code": "engine_failure", "retryable": False}
+                task_store.emit(task_id, "ERROR", "Hermes provider is unavailable")
+                task_store.fail(task_id, "normalized_failure", {"normalizedFailure": failure})
+            else:
+                error = f"Hermes unavailable; refusing stub response: {reason}"
+                task_store.emit(task_id, "ERROR", error)
+                task_store.fail(task_id, error)
             return
 
         task_store.emit(task_id, "SYSTEM", f"STUB MODE ({reason}) for {task_type}")
@@ -164,15 +182,15 @@ async def run_hermes_loop(task_id: str, payload: dict) -> None:
             provider_id = str(payload.get("providerRef", {}).get("providerId", ""))
             if forced.startswith(provider_id + ":"):
                 failure_code = forced.split(":", 1)[1].strip().lower()
+                failure = (
+                    {"failureClass": "retryable", "code": failure_code, "retryable": True}
+                    if failure_code in failover_runtime._FAILURE_CODES else
+                    {"failureClass": "terminal", "code": "unknown", "retryable": False}
+                )
             else:
-                failure_code = "engine_failure"
-            retryable = failure_code in {"connection", "dns", "http_408", "http_429", "http_5xx", "pre_dispatch_timeout"}
+                failure = normalize_provider_failure(exc)
             task_store.fail(task_id, "normalized_failure", {
-                "normalizedFailure": {
-                    "failureClass": "retryable" if retryable else "terminal",
-                    "code": failure_code,
-                    "retryable": retryable,
-                },
+                "normalizedFailure": failure,
             })
         else:
             task_store.fail(task_id, str(exc))
@@ -192,60 +210,97 @@ async def submit_task(payload: dict) -> dict:
 async def resilience_admit_frontier(request_id: str, immutable_plan: dict,
                                     deadline_at: int, provider_order: list[str]) -> dict:
     """Admit one immutable two-provider FRONTIER plan."""
-    return failover_runtime.admit_frontier(request_id, immutable_plan, deadline_at, provider_order)
+    with failover_runtime.request_scope():
+        return failover_runtime.admit_frontier(request_id, immutable_plan, deadline_at, provider_order)
 
 
 @mcp.tool()
 async def resilience_submit_attempt(payload: dict, immutable_plan: dict, active: dict,
                                    provider_ref: dict, attempt_deadline_ms: int,
                                    idempotency_key: str) -> dict:
-    return failover_runtime.submit_attempt(
-        payload, immutable_plan, active, provider_ref, attempt_deadline_ms, idempotency_key,
-    )
+    with failover_runtime.request_scope():
+        return failover_runtime.submit_attempt(
+            payload, immutable_plan, active, provider_ref, attempt_deadline_ms, idempotency_key,
+        )
 
 
 @mcp.tool()
 async def resilience_poll_observations(active: dict, cursor: int,
                                       attempt_deadline_ms: int) -> dict:
-    return failover_runtime.poll_observations(active, cursor, attempt_deadline_ms)
+    with failover_runtime.request_scope():
+        return failover_runtime.poll_observations(active, cursor, attempt_deadline_ms)
 
 
 @mcp.tool()
 async def resilience_record_observation(active: dict, normalized_observation: dict,
                                        idempotency_key: str) -> dict:
-    return failover_runtime.record_observation(active, normalized_observation, idempotency_key)
+    with failover_runtime.request_scope():
+        return failover_runtime.record_observation(active, normalized_observation, idempotency_key)
+
+
+@mcp.tool()
+async def resilience_finalize_attempt(active: dict, normalized_failure: dict,
+                                      failure_source: str, terminal_outcome: str,
+                                      idempotency_key: str) -> dict:
+    with failover_runtime.request_scope():
+        return failover_runtime.finalize_attempt(
+            active, normalized_failure, failure_source, terminal_outcome,
+            idempotency_key,
+        )
 
 
 @mcp.tool()
 async def resilience_transition_once(active: dict, successor_provider_id: str,
                                      normalized_failure: dict, jitter_ms: int,
                                      plan_hash: str | None = None,
-                                     idempotency_key: str | None = None) -> dict:
-    return failover_runtime.transition_once(
-        active, successor_provider_id, normalized_failure, jitter_ms, plan_hash, idempotency_key,
-    )
+                                     idempotency_key: str | None = None,
+                                     failure_source: str | None = None,
+                                     observation_idempotency_key: str | None = None) -> dict:
+    with failover_runtime.request_scope():
+        return failover_runtime.transition_once(
+            active, successor_provider_id, normalized_failure, jitter_ms, plan_hash, idempotency_key,
+            failure_source, observation_idempotency_key,
+        )
 
 
 @mcp.tool()
 async def resilience_request_cancel(active: dict, cancel_id: str) -> dict:
-    return failover_runtime.request_cancel(active, cancel_id)
+    with failover_runtime.request_scope():
+        return failover_runtime.request_cancel(active, cancel_id)
 
 
 @mcp.tool()
 async def resilience_recover_and_transition_once(active: dict, recovery_id: str,
                                                   jitter_ms: int,
-                                                  normalized_failure: dict | None = None) -> dict:
-    return failover_runtime.recover_and_transition_once(active, recovery_id, jitter_ms, normalized_failure)
+                                                  normalized_failure: dict) -> dict:
+    with failover_runtime.request_scope():
+        return failover_runtime.recover_and_transition_once(active, recovery_id, jitter_ms, normalized_failure)
 
 
 @mcp.tool()
 async def resilience_get_status(task_id: str) -> dict:
-    return failover_runtime.get_status(task_id)
+    with failover_runtime.request_scope():
+        return failover_runtime.get_status(task_id)
 
 
 @mcp.tool()
 async def resilience_page_outbox(after_cursor: int = 0, limit: int = 100) -> dict:
-    return failover_runtime.page_outbox(after_cursor, limit)
+    with failover_runtime.request_scope():
+        return failover_runtime.page_outbox(after_cursor, limit)
+
+
+@mcp.tool()
+async def attempt_timeout(active: dict, timeout_ms: int = 2_000) -> dict:
+    """Attempt-level stop acknowledgement; never operator cancellation.
+
+    The gateway owns the subsequent transition. This handler only supplies a
+    bounded, exact-tuple/fence-checked acknowledgement or closes uncertainty.
+    """
+    timeout_id = None
+    if isinstance(active, dict) and {"taskId", "attemptId", "epoch"}.issubset(active):
+        timeout_id = f"{active['taskId']}:{active['attemptId']}:{active['epoch']}:attempt-timeout"
+    with failover_runtime.request_scope():
+        return failover_runtime.attempt_timeout(active, timeout_id=timeout_id, timeout_ms=timeout_ms)
 
 
 @mcp.tool()

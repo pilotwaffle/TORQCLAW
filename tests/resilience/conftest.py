@@ -30,6 +30,11 @@ def pytest_collection_modifyitems(session: pytest.Session, config: pytest.Config
                                    items: list[pytest.Item]) -> None:
     manifest_pairs = _manifest_pairs()
     p0_items = [item for item in items if _p0_item(item)]
+    # This plugin is shared by the resilience directory, but its manifest
+    # invariant belongs only to the P0 module.  Running the P1 module with the
+    # normal pytest discovery path must not look like a missing P0 collection.
+    if not p0_items:
+        return
     collected_pairs: list[tuple[str, str]] = []
     for item in p0_items:
         callspec = getattr(item, "callspec", None)

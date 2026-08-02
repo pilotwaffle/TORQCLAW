@@ -1,7 +1,166 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import WebSocket from 'ws';
+
+const phase1Args = process.argv.slice(2);
+const phase1Mode = phase1Args.includes('--phase1') || phase1Args.includes('--failover');
+
+function runPhase1Doctor() {
+  const jsonOutput = phase1Args.includes('--json');
+  const pathArg = phase1Args.indexOf('--chains');
+  const configuredPath = pathArg >= 0 ? phase1Args[pathArg + 1] : process.env.TORQCLAW_PROVIDER_CHAINS_PATH;
+  const chainPath = configuredPath ? resolve(configuredPath) : null;
+  const phase1Checks = [];
+  const recordPhase1 = (name, status, detail) => phase1Checks.push({ name, status, detail });
+  const safeSelector = (value) =>
+    typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(value);
+  const finiteCeiling = (value) => Number.isSafeInteger(value) && value >= 0;
+
+  if (!chainPath) {
+    recordPhase1('chains-path', 'fail', 'TORQCLAW_PROVIDER_CHAINS_PATH is not configured');
+  } else if (!existsSync(chainPath)) {
+    recordPhase1('chains-path', 'fail', 'configured provider-chain document is not readable');
+  } else {
+    let document;
+    try {
+      document = JSON.parse(readFileSync(chainPath, 'utf8'));
+    } catch {
+      recordPhase1('chains-parse', 'fail', 'provider-chain document is not valid JSON');
+    }
+    if (document !== undefined) {
+      if (!document || typeof document !== 'object' || Array.isArray(document) ||
+          typeof document.revision !== 'string' || document.revision.length === 0 ||
+          !document.chains || typeof document.chains !== 'object' || Array.isArray(document.chains)) {
+        recordPhase1('chains-schema', 'fail', 'revision and chains are required');
+      } else {
+        recordPhase1('chains-parse', 'pass', 'provider-chain JSON is parseable');
+        recordPhase1('revision', 'pass', 'chain revision is present');
+        let allValid = true;
+        let allPrivacyEligible = true;
+        let allSelectorsAccepted = true;
+        let allEnvNamesPresent = true;
+        for (const chain of Object.values(document.chains)) {
+          if (!chain || typeof chain !== 'object' || chain.id === undefined ||
+              !Array.isArray(chain.providers) || chain.providers.length !== 2 ||
+              chain.providers.some((provider) => !provider || typeof provider !== 'object')) {
+            allValid = false;
+            continue;
+          }
+          const ids = chain.providers.map((provider) => provider.id);
+          if (new Set(ids).size !== ids.length || ids.some((id) => !safeSelector(id))) {
+            allSelectorsAccepted = false;
+          }
+          for (const provider of chain.providers) {
+            if (!finiteCeiling(provider.ceilingMicroUsd)) allValid = false;
+            if (!Array.isArray(provider.privacyClasses) ||
+                !provider.privacyClasses.includes('standard') ||
+                !provider.privacyClasses.includes('sensitive')) {
+              allPrivacyEligible = false;
+            }
+            for (const envName of [provider.apiKeyEnvName, provider.baseUrlEnvName]) {
+              if (typeof envName !== 'string' || !/^[A-Z][A-Z0-9_]{0,127}$/.test(envName) ||
+                  process.env[envName] === undefined || process.env[envName] === '') {
+                allEnvNamesPresent = false;
+              }
+            }
+          }
+        }
+        recordPhase1(
+          'ordered-distinct-ids',
+          allValid && allSelectorsAccepted ? 'pass' : 'fail',
+          allValid && allSelectorsAccepted
+            ? 'chains contain two ordered accepted Hermes selectors'
+            : 'chain IDs or provider selectors are invalid',
+        );
+        recordPhase1(
+          'finite-ceilings',
+          allValid ? 'pass' : 'fail',
+          allValid
+            ? 'all provider ceilings are finite non-negative integers'
+            : 'a provider ceiling is invalid',
+        );
+        recordPhase1(
+          'privacy-eligibility',
+          allPrivacyEligible ? 'pass' : 'fail',
+          allPrivacyEligible
+            ? 'each chain has two providers eligible for standard and sensitive work'
+            : 'privacy eligibility is incomplete',
+        );
+        recordPhase1(
+          'referenced-env-presence',
+          allEnvNamesPresent ? 'pass' : 'fail',
+          allEnvNamesPresent
+            ? 'all referenced environment variables are present'
+            : 'a referenced environment variable is absent',
+        );
+      }
+    }
+  }
+
+  const diagnosticsArg = phase1Args.indexOf('--maintenance-diagnostics');
+  const configuredDiagnosticsPath = diagnosticsArg >= 0
+    ? phase1Args[diagnosticsArg + 1]
+    : process.env.TORQCLAW_MAINTENANCE_DIAGNOSTICS_PATH;
+  const diagnosticsPath = configuredDiagnosticsPath
+    ? resolve(configuredDiagnosticsPath)
+    : join(process.env.TORQCLAW_DATA_DIR || join(homedir(), '.torqclaw'), 'resilience-maintenance.json');
+  if (!existsSync(diagnosticsPath)) {
+    phase1Checks.push({
+      name: 'maintenance', status: 'warn',
+      detail: 'no shutdown maintenance snapshot is available; no checkpoint was triggered',
+      maintenanceNeeded: null, lastPassiveOutcome: null, walMaintenanceDeferred: null,
+    });
+  } else {
+    try {
+      const diagnostics = JSON.parse(readFileSync(diagnosticsPath, 'utf8'));
+      const valid = diagnostics && typeof diagnostics === 'object' &&
+        diagnostics.schemaVersion === 1 &&
+        typeof diagnostics.maintenanceNeeded === 'boolean' &&
+        diagnostics.lastPassiveOutcome && typeof diagnostics.lastPassiveOutcome === 'object' &&
+        typeof diagnostics.walMaintenanceDeferred === 'boolean';
+      if (!valid) {
+        phase1Checks.push({
+          name: 'maintenance', status: 'fail',
+          detail: 'maintenance snapshot is malformed',
+          maintenanceNeeded: null, lastPassiveOutcome: null, walMaintenanceDeferred: null,
+        });
+      } else {
+        phase1Checks.push({
+          name: 'maintenance', status: 'pass',
+          detail: 'read-only shutdown maintenance diagnostics loaded; no checkpoint triggered',
+          maintenanceNeeded: diagnostics.maintenanceNeeded,
+          lastPassiveOutcome: diagnostics.lastPassiveOutcome,
+          walMaintenanceDeferred: diagnostics.walMaintenanceDeferred,
+        });
+      }
+    } catch {
+      phase1Checks.push({
+        name: 'maintenance', status: 'fail',
+        detail: 'maintenance snapshot is not valid JSON',
+        maintenanceNeeded: null, lastPassiveOutcome: null, walMaintenanceDeferred: null,
+      });
+    }
+  }
+
+  const failed = phase1Checks.some((check) => check.status === 'fail');
+  const result = { ok: !failed, mode: 'offline-secret-free', checks: phase1Checks };
+  if (jsonOutput) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.log('TORQCLAW Phase-1 doctor (offline, secret-free)');
+    for (const check of phase1Checks) {
+      console.log(check.status.toUpperCase() + '  ' + check.name + ': ' + check.detail);
+    }
+    console.log(failed ? 'Result: NOT READY' : 'Result: READY');
+  }
+  return failed ? 1 : 0;
+}
+
+if (phase1Mode) {
+  process.exit(runPhase1Doctor());
+}
+
 
 const args = new Set(process.argv.slice(2));
 const jsonOutput = args.has('--json');

@@ -318,6 +318,8 @@ if (process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED?.toLowerCase() === 'true') {
   const { pageOutbox } = await import('@torqclaw/bridge');
   ensureResilienceProjection();
   await reconcileGatewayProjection(async (afterCursor, limit) => pageOutbox(afterCursor, limit));
+  const { recoverFailoverTasks } = await import('./failover.js');
+  await recoverFailoverTasks();
 }
 await app.listen({ port: PORT, host: HOST });
 console.log(`[torqclaw] gateway listening on ws://${HOST}:${PORT}/ws`);

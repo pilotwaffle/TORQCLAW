@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { GatewayRequest } from '@torqclaw/contracts';
 import {
   classifyProviderFailure,
+  normalizeProviderFailure,
   decideTransition,
   jitterDelayMs,
   persistFirstCancel,
@@ -63,7 +64,7 @@ describe('Phase 1 failover core', () => {
     [{ httpStatus: 404 }, 'configuration', 'http_404'],
     [{ httpStatus: 401 }, 'authentication', 'http_401'],
     [{ httpStatus: 403 }, 'authentication', 'http_403'],
-    [{ providerCode: 'unknown-provider-status' }, 'terminal', 'unknown_failure'],
+    [{ providerCode: 'unknown-provider-status' }, 'terminal', 'unknown'],
     [{ providerCode: 'connection', dispatchAttempted: true }, 'side_effect_uncertainty', 'dispatch_attempted'],
   ] as const)('classifies %j as %s/%s', (input, failureClass, code) => {
     expect(classifyProviderFailure(input)).toEqual({ failureClass, code, retryable: failureClass === 'retryable' });
@@ -84,6 +85,14 @@ describe('Phase 1 failover core', () => {
     expect(JSON.stringify(plan)).not.toContain('HERMES_API_KEY');
   });
 
+  it('defaults an attempt to sixty seconds and normalizes typed transport failures without raw text', () => {
+    const chain = resolveProviderChain(request, document, { TORQCLAW_FAILOVER_CODING_CHAIN: 'coding' });
+    expect(buildFailoverPlan(request, chain, { nowMs: 1_000, env: {} }).attemptTimeoutMs).toBe(60_000);
+    expect(normalizeProviderFailure(Object.assign(new Error('SECRET_RAW_MARKER'), { code: 'ECONNRESET' }))).toEqual({ failureClass: 'retryable', code: 'connection', retryable: true });
+    expect(normalizeProviderFailure({ response: { status: 401 }, body: 'SECRET_RAW_MARKER' })).toEqual({ failureClass: 'authentication', code: 'http_401', retryable: false });
+    expect(JSON.stringify(normalizeProviderFailure({ code: 'unknown', message: 'SECRET_RAW_MARKER' }))).not.toContain('SECRET_RAW_MARKER');
+  });
+
   it('rejects inline endpoint/credential values and non-two-provider chains', () => {
     expect(() => parseProviderChainsDocument({ revision: 'r', chains: { default: { id: 'default', providers: [{ id: 'p1', label: 'p1', modelId: 'm', apiKeyEnvName: 'KEY', baseUrlEnvName: 'URL', privacyClasses: ['standard'], ceilingMicroUsd: 1, apiKey: 'secret' }, { id: 'p2', label: 'p2', modelId: 'm', apiKeyEnvName: 'KEY2', baseUrlEnvName: 'URL2', privacyClasses: ['standard'], ceilingMicroUsd: 1 }] } } })).toThrow(/not allowed/);
     expect(() => parseProviderChainsDocument({ revision: 'r', chains: { default: { id: 'default', providers: [{ id: 'p1', label: 'p1', modelId: 'm', apiKeyEnvName: 'KEY', baseUrlEnvName: 'URL', privacyClasses: ['standard'], ceilingMicroUsd: 1 }] } } })).toThrow(/exactly two/);
@@ -97,6 +106,50 @@ describe('Phase 1 failover core', () => {
     expect(allowed.trace.at(-1)).toBe('retryable_failure:pass');
     const blocked = decideTransition({ activeExact: true, dispatchAttempted: true, cancellationRequested: false, nowMs: 100, deadlineMs: 200, successorExists: true, successorDiffers: true, successorLater: true, transitionCount: 0, privacyEligible: true, budgetAvailable: true, circuitOpen: false, failure });
     expect(blocked.reason).toBe('dispatch_attempted');
+  });
+
+  it('defers authoritative policy facts to the ledger instead of asserting them in the gateway', () => {
+    const decision = decideTransition({
+      activeExact: true,
+      dispatchAttempted: false,
+      cancellationRequested: false,
+      nowMs: 100,
+      deadlineMs: 200,
+      successorExists: true,
+      successorDiffers: true,
+      successorLater: true,
+      transitionCount: 0,
+      failure: classifyProviderFailure({ providerCode: 'connection' }),
+    });
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.authorityDeferred).toBe(true);
+    expect(decision.reason).toBe('policy_authority_deferred');
+    expect(decision.trace).toContain('privacy_eligible:deferred');
+    expect(decision.trace).toContain('budget_available:deferred');
+    expect(decision.trace).toContain('circuit_closed:deferred');
+  });
+
+  it.each([
+    ['privacyEligible', { privacyEligible: false }, 'privacy_ineligible'],
+    ['budgetAvailable', { budgetAvailable: false }, 'budget_unavailable'],
+    ['circuitOpen', { circuitOpen: true }, 'circuit_open'],
+  ] as const)('blocks an explicit authoritative %s denial', (_name, policy, reason) => {
+    const decision = decideTransition({
+      activeExact: true,
+      dispatchAttempted: false,
+      cancellationRequested: false,
+      nowMs: 100,
+      deadlineMs: 200,
+      successorExists: true,
+      successorDiffers: true,
+      successorLater: true,
+      transitionCount: 0,
+      ...policy,
+      failure: classifyProviderFailure({ providerCode: 'connection' }),
+    });
+
+    expect(decision).toMatchObject({ allowed: false, authorityDeferred: false, reason });
   });
 
   it('uses inclusive deterministic jitter bounds', () => {
@@ -121,10 +174,29 @@ describe('Phase 1 failover core', () => {
     const order: string[] = [];
     const outcome = await persistFirstCancel(
       async () => { order.push('persist'); return { status: 'ACK_CANCELLED' }; },
-      async () => { order.push('signal'); },
+      async () => { order.push('signal'); return 'cancelled'; },
     );
     expect(outcome).toBe('cancelled');
     expect(order).toEqual(['persist', 'signal']);
+  });
+
+  it.each([
+    ['noop', 'cancelled_uncertain'],
+    ['unknown', 'cancelled_uncertain'],
+  ] as const)('treats provider stop %s as %s after persistence', async (signalStatus, expected) => {
+    const order: string[] = [];
+    expect(await persistFirstCancel(
+      async () => { order.push('persist'); return { status: 'ACK_CANCELLED' }; },
+      async () => { order.push('signal'); return signalStatus; },
+    )).toBe(expected);
+    expect(order).toEqual(['persist', 'signal']);
+  });
+
+  it('treats provider stop transport failure as cancelled_uncertain', async () => {
+    expect(await persistFirstCancel(
+      async () => ({ status: 'ACK_CANCELLED' }),
+      async () => { throw new Error('transport lost'); },
+    )).toBe('cancelled_uncertain');
   });
 });
 
@@ -144,7 +216,7 @@ describe('bridge envelope and tuple bindings', () => {
     expect(result.activeTuple).toEqual(tuple);
     expect(calls[0]?.arguments.request_id).toBe('t');
     await expect(transitionOnce(tuple, 'p2', { failureClass: 'retryable', code: 'connection', retryable: true }, 250, 1000, 'a'.repeat(64), 'i', {
-      async callTool() { return { content: [{ type: 'text', text: '{"status":"TRANSITIONED","successor":{"taskId":"t","attemptId":"a2","epoch":1}}' }] }; },
+      async callTool() { return { content: [{ type: 'text', text: '{"status":"TRANSITIONED","successor":{"taskId":"t","attemptId":"a2","epoch":1},"successorProviderId":"p2","successorSubmitNotBeforeMs":500}' }] }; },
     })).resolves.toMatchObject({ status: 'TRANSITIONED', successor: { taskId: 't', epoch: 1 } });
     await expect(admitFrontier('t', plan, ['p1', 'p2'], 1000, 'idempotency', {
       async callTool() { return { content: [{ type: 'text', text: '{"status":"ADMITTED","activeTuple":{"taskId":"t"}}' }] }; },

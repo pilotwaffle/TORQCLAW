@@ -1,0 +1,73 @@
+{
+  "suite": "TORQCLAW governed Phase-1 resilience P1",
+  "declared": 36,
+  "claim": "Exactly 36 unique governed P1 fault IDs; deterministic evidence runs are separate and are not IDs.",
+  "categories": [
+    {
+      "name": "chain_admission",
+      "ids": [
+        "p1_chain_default_order",
+        "p1_chain_coding_order",
+        "p1_env_name_only",
+        "p1_privacy_prefilter",
+        "p1_budget_initial_ceiling",
+        "p1_feature_off_no_ledger"
+      ]
+    },
+    {
+      "name": "classification_precedence",
+      "ids": [
+        "p1_408_fallback",
+        "p1_429_fallback",
+        "p1_5xx_fallback",
+        "p1_401_terminal",
+        "p1_404_terminal",
+        "p1_precedence_dispatch_over_retry",
+        "p1_precedence_deadline_over_retry",
+        "p1_precedence_budget_over_circuit"
+      ]
+    },
+    {
+      "name": "side_effect_tuple_recovery",
+      "ids": [
+        "p1_fence_before_tool_forward",
+        "p1_tool_read_still_no_replay",
+        "p1_stale_epoch_output_rejected",
+        "p1_stale_epoch_tool_rejected",
+        "p1_post_dispatch_crash_uncertain",
+        "p1_pre_dispatch_orphan_then_successor",
+        "p1_no_same_provider_retry"
+      ]
+    },
+    {
+      "name": "deadline_cancel_concurrency",
+      "ids": [
+        "p1_absolute_deadline_includes_jitter",
+        "p1_attempt_timeout_ack_then_transition",
+        "p1_timeout_no_ack_uncertain",
+        "p1_cancel_persisted_before_signal",
+        "p1_cancel_during_jitter",
+        "p1_cancel_after_dispatch",
+        "p1_transition_race_one_winner"
+      ]
+    },
+    {
+      "name": "circuit_authority",
+      "ids": [
+        "p1_circuit_three_inclusive_cutoff",
+        "p1_circuit_sixty_second_open",
+        "p1_circuit_diagnostic_cache_delete_no_change",
+        "p1_circuit_diagnostic_cache_forge_no_change",
+        "p1_circuit_witness_timestamp_rewind_corrupt"
+      ]
+    },
+    {
+      "name": "provenance_compatibility_operations",
+      "ids": [
+        "p1_receipt_attempt_order_and_unknown_cost",
+        "p1_safe_export_attempt_redaction",
+        "p1_windows_fake_provider_doctor_bench"
+      ]
+    }
+  ]
+}

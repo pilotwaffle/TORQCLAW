@@ -217,7 +217,7 @@ export function buildFailoverPlan(
   const env = options.env ?? process.env;
   const nowMs = options.nowMs ?? Date.now();
   if (!Number.isSafeInteger(nowMs) || nowMs < 0) fail('nowMs is invalid');
-  const attemptTimeoutMs = positiveEnvMs(env, CHAIN_ENV_NAMES.attemptTimeout, 30_000);
+  const attemptTimeoutMs = positiveEnvMs(env, CHAIN_ENV_NAMES.attemptTimeout, 60_000);
   const taskDeadlineMs = positiveEnvMs(env, CHAIN_ENV_NAMES.taskDeadline, 120_000);
   const deadline = nowMs + taskDeadlineMs;
   if (!Number.isSafeInteger(deadline) || deadline <= nowMs) fail('task deadline overflow');

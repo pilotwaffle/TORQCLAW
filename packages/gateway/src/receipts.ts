@@ -238,8 +238,9 @@ export function projectReceipt(taskId: string): ReceiptRow | null {
   // — zero writes, safe_export_json is never touched by GET_SAFE_EXPORT).
   const safeExportJson: string | null = null;
 
-  const failoverEnabled = telemetry?.failoverEnabled === true;
-  const failoverProjection = failoverEnabled ? getFailoverProjection(taskId) : null;
+  const featureOn = process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED?.toLowerCase() === 'true';
+  const failoverProjection = featureOn ? getFailoverProjection(taskId) : null;
+  const failoverEnabled = telemetry?.failoverEnabled === true || failoverProjection !== null;
   const providerAttempts = failoverEnabled
     ? getProviderAttemptProjections(taskId).map((attempt) => ({
       epoch: attempt.epoch,
@@ -249,7 +250,7 @@ export function projectReceipt(taskId: string): ReceiptRow | null {
       startedAtMs: attempt.started_at_ms,
       endedAtMs: attempt.ended_at_ms,
       normalizedFailure: attempt.failure_class || attempt.failure_code
-        ? { failureClass: attempt.failure_class, code: attempt.failure_code }
+        ? { failureClass: attempt.failure_class, code: attempt.failure_code, source: attempt.failure_source }
         : null,
       dispatchAttempted: attempt.dispatch_attempted === 1,
       transitionDecision: attempt.transition_decision,
@@ -257,7 +258,7 @@ export function projectReceipt(taskId: string): ReceiptRow | null {
       cost: {
         reservedMicroUsd: attempt.reserved_micro_usd,
         actualMicroUsd: attempt.actual_micro_usd,
-        known: attempt.cost_known === 1,
+        known: attempt.cost_known === null ? null : attempt.cost_known === 1,
         source: attempt.cost_source,
       },
     }))

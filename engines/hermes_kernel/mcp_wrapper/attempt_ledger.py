@@ -8,16 +8,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
-LEDGER_SCHEMA_VERSION = 2
+LEDGER_SCHEMA_VERSION = 3
 IMMUTABLE_PLAN_SCHEMA_VERSION = 1
 # Kept as a compatibility alias for callers that imported the old name.  It
 # is deliberately the plan version, never the ledger version.
@@ -53,8 +57,28 @@ _OUTBOX_KINDS = {
 }
 _RETRYABLE_CODES = frozenset({
     "connection", "dns", "http_408", "http_429", "http_5xx",
-    "pre_dispatch_timeout", "deterministic_timeout", "crash",
+    "pre_dispatch_timeout", "deterministic_timeout",
 })
+_COST_SOURCES = frozenset({"exact", "account_delta", "unavailable"})
+_FAILURE_SOURCES = frozenset({"engine", "gateway", "recovery"})
+_LOGICAL_TIMING_PHASES = (
+    "openMs", "pragmaMs", "beginImmediateMs", "statementWorkMs",
+    "commitMs", "closeMs", "totalMs",
+)
+_LOGICAL_TIMING_OPERATIONS = frozenset({
+    "admit_frontier", "submit_attempt", "poll_observations",
+    "page_outbox", "transition_once",
+})
+_SAFE_FAILURE_CODES = {
+    "retryable": _RETRYABLE_CODES,
+    "configuration": frozenset({"http_400", "http_404", "configuration"}),
+    "authentication": frozenset({"http_401", "http_403", "missing_credentials", "invalid_credentials"}),
+    "budget": frozenset({"budget_exceeded"}),
+    "side_effect_uncertainty": frozenset({"dispatch_attempted", "uncertain"}),
+    "timeout": frozenset({"attempt_timeout"}),
+    "cancelled": frozenset({"operator_cancel", "timeout_uncertain"}),
+    "terminal": frozenset({"completed", "engine_failure", "malformed_response", "unknown", "approval_blocked"}),
+}
 
 
 class LedgerError(Exception):
@@ -91,28 +115,512 @@ class ActiveTuple:
         return {"taskId": self.task_id, "attemptId": self.attempt_id, "epoch": self.epoch}
 
 
+@dataclass(frozen=True)
+class CostEvidence:
+    """Internal, already-reconciled terminal cost evidence.
+
+    This type is intentionally not part of the MCP surface.  The runtime
+    derives it from the internal task store and the ledger consumes it only
+    inside the fused authority transaction.
+    """
+
+    actual_cost_micro_usd: int | None
+    source: str
+
+    @property
+    def known(self) -> bool:
+        return self.actual_cost_micro_usd is not None
+
+
+class _ObservedConnection(sqlite3.Connection):
+    """SQLite connection that reports close time to an owning ledger."""
+
+    def close(self) -> None:
+        owner = getattr(self, "_attempt_ledger", None)
+        boundary = getattr(self, "_attempt_boundary", None)
+        started = owner._diagnostic_clock_ns() if owner is not None else None
+        try:
+            super().close()
+        finally:
+            if owner is not None and started is not None:
+                elapsed = owner._elapsed_ms(started, owner._diagnostic_clock_ns())
+                owner._safe_record_timing("close", elapsed)
+                owner._record_logical_phase("closeMs", elapsed, boundary)
+
+
+def _logical_timing(operation: str):
+    """Decorate one public logical ledger operation with best-effort timing."""
+    if operation not in _LOGICAL_TIMING_OPERATIONS:
+        raise ValueError("unsupported logical timing operation")
+
+    def decorate(function):
+        def timed(self, *args, **kwargs):
+            if not self._timing_diagnostics_enabled:
+                return function(self, *args, **kwargs)
+            active = self._logical_timing_current()
+            if active is not None:
+                return function(self, *args, **kwargs)
+            context = self._new_logical_timing(operation)
+            self._logical_timing_set(context)
+            try:
+                result = function(self, *args, **kwargs)
+            except BaseException:
+                outcome = "error"
+                raise
+            else:
+                outcome = self._logical_timing_outcome(result)
+                return result
+            finally:
+                context["outcome"] = outcome
+                self._logical_timing_set(None)
+                self._safe_append_logical_record(
+                    self._logical_timing_record(context),
+                )
+
+        timed.__name__ = getattr(function, "__name__", "timed")
+        timed.__qualname__ = getattr(function, "__qualname__", timed.__name__)
+        timed.__doc__ = getattr(function, "__doc__", None)
+        return timed
+
+    return decorate
+
+
 class AttemptLedger:
-    def __init__(self, db_path: str | Path, *, now_ms: Callable[[], int] | None = None):
+    _CHECKPOINT_WATERMARK = 64
+    _BOUNDARY_RING_CAPACITY = 512
+    _DIAGNOSTIC_SCHEMA_VERSION = 1
+    _DIAGNOSTIC_STORE = "attempt_ledger"
+    _DIAGNOSTIC_OPERATIONS = frozenset({"fused_retryable_transition"})
+    _BOUNDARY_PHASE_NAMES = (
+        "openMs", "pragmaMs", "beginImmediateMs", "statementWorkMs",
+        "commitMs", "closeMs", "transactionMs",
+    )
+    # Fixture-only capture must retain a complete 100-case promotion run
+    # (including every MCP operation) so correlation can be verified.  The
+    # recorder remains default-off and bounded; 4096 records cover the
+    # current harness without changing production behavior.
+    _LOGICAL_TIMING_CAPACITY = 4096
+
+    def __init__(self, db_path: str | Path, *, now_ms: Callable[[], int] | None = None,
+                 monotonic_ns: Callable[[], int] | None = None,
+                 diagnostics_enabled: bool = True,
+                 timing_diagnostics_enabled: bool = False):
         self.db_path = str(db_path)
         self._now = now_ms or (lambda: int(time.time() * 1000))
+        self._monotonic_ns = monotonic_ns or time.monotonic_ns
+        self._diagnostics_enabled = bool(diagnostics_enabled)
+        self._timing_diagnostics_enabled = bool(timing_diagnostics_enabled)
+        self._fence_process_id = os.getpid()
+        self._fence_guards: dict[tuple[str, str, int], int] = {}
+        self._maintenance_lock = threading.RLock()
+        # SQLite serializes BEGIN IMMEDIATE writers, but allowing several
+        # request threads to reach that boundary independently turns normal
+        # contention into unbounded busy-timeout tails.  Serialize the
+        # authority transaction per ledger instance; this preserves the
+        # ledger's FULL-sync durability while keeping contention in-process
+        # and observable instead of sleeping inside SQLite.
+        self._transaction_serialization_lock = threading.RLock()
+        self._writes_since_checkpoint = 0
+        self._checkpoint_pending = False
+        self._active_transactions = 0
+        self._serving_requests = 0
+        self._closed = False
+        self._checkpoint_metrics: dict[str, Any] = {
+            "scheduled": 0,
+            "completed": 0,
+            "busy": 0,
+            "failed": 0,
+            "skipped_not_drained": 0,
+            "last": None,
+            "lastOutcome": "never",
+        }
+        self._timing_metrics: dict[str, dict[str, float | int]] = {}
+        self._boundary_process_id = os.getpid()
+        self._boundary_sequence = 0
+        self._boundary_records: list[dict[str, Any]] = []
+        self._boundary_dropped_records = 0
+        self._logical_timing_local = threading.local()
+        self._logical_timing_sequence = 0
+        self._logical_timing_records: list[dict[str, Any]] = []
+        self._logical_timing_dropped_records = 0
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise LedgerError("attempt ledger is closed")
+
+    def _diagnostic_clock_ns(self) -> int | None:
+        try:
+            return int(self._monotonic_ns())
+        except BaseException:
+            return None
+
+    def _logical_timing_current(self) -> dict[str, Any] | None:
+        return getattr(self._logical_timing_local, "current", None)
+
+    def _logical_timing_set(self, context: dict[str, Any] | None) -> None:
+        if context is None:
+            try:
+                del self._logical_timing_local.current
+            except AttributeError:
+                pass
+        else:
+            self._logical_timing_local.current = context
+
+    def _new_logical_timing(self, operation: str) -> dict[str, Any]:
+        return {
+            "operation": operation,
+            "phases": {phase: None for phase in _LOGICAL_TIMING_PHASES[:-1]},
+        }
+
+    @staticmethod
+    def _logical_timing_outcome(result: Any) -> str:
+        if result is None:
+            return "rejected"
+        if isinstance(result, Mapping):
+            status = result.get("status")
+            if status == "DUPLICATE":
+                return "duplicate"
+            if status == "REJECTED":
+                return "rejected"
+        return "completed"
+
+    @staticmethod
+    def _finite_duration(value: Any) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        value = float(value)
+        return value if math.isfinite(value) and value >= 0 else None
+
+    def _record_logical_phase(
+            self, phase: str, elapsed_ms: float | None,
+            boundary: dict[str, Any] | None = None) -> None:
+        value = self._finite_duration(elapsed_ms)
+        if value is None:
+            return
+        if boundary is not None:
+            boundary[phase] = value
+        context = self._logical_timing_current()
+        if context is None or phase not in context["phases"]:
+            return
+        prior = context["phases"][phase]
+        context["phases"][phase] = value if prior is None else prior + value
+
+    def _logical_timing_record(self, context: Mapping[str, Any]) -> dict[str, Any]:
+        phases = context.get("phases", {})
+        sqlite_ms = {
+            phase: self._finite_duration(phases.get(phase))
+            for phase in _LOGICAL_TIMING_PHASES[:-1]
+        }
+        executed = [value for value in sqlite_ms.values() if value is not None]
+        sqlite_ms["totalMs"] = sum(executed) if executed else None
+        return {
+            "schemaVersion": 1,
+            "authoritative": False,
+            "source": "fixture_only",
+            "correlation": "exact",
+            "operation": context["operation"],
+            "outcome": context.get("outcome", "error"),
+            "sqliteMs": sqlite_ms,
+        }
+
+    def _append_logical_record(self, record: Mapping[str, Any]) -> None:
+        if not self._timing_diagnostics_enabled:
+            return
+        with self._maintenance_lock:
+            self._logical_timing_records.append(dict(record))
+            self._logical_timing_sequence += 1
+            if len(self._logical_timing_records) > self._LOGICAL_TIMING_CAPACITY:
+                self._logical_timing_records.pop(0)
+                self._logical_timing_dropped_records += 1
+
+    def _safe_append_logical_record(self, record: Mapping[str, Any]) -> None:
+        try:
+            self._append_logical_record(record)
+        except BaseException:
+            return
+
+    def set_timing_diagnostics_enabled(self, enabled: bool) -> None:
+        """Fixture/test-only switch for the default-off logical timing packet."""
+        self._timing_diagnostics_enabled = bool(enabled)
+
+    def logical_timing_diagnostics(self, after_sequence: int = 0) -> dict[str, Any]:
+        if isinstance(after_sequence, bool) or not isinstance(after_sequence, int):
+            raise TypeError("after_sequence must be a non-boolean integer")
+        if after_sequence < 0:
+            raise ValueError("after_sequence must be non-negative")
+        with self._maintenance_lock:
+            records = [
+                deepcopy(record) for index, record in enumerate(self._logical_timing_records)
+                if self._logical_timing_sequence - len(self._logical_timing_records) +
+                index + 1 > after_sequence
+            ]
+            first_sequence = (
+                self._logical_timing_sequence - len(self._logical_timing_records) + 1
+                if self._logical_timing_records else self._logical_timing_sequence + 1
+            )
+            return {
+                "schemaVersion": 1,
+                "available": True,
+                "store": "attempt_ledger",
+                "capacity": self._LOGICAL_TIMING_CAPACITY,
+                "droppedCount": self._logical_timing_dropped_records,
+                "firstSequence": first_sequence,
+                "lastSequence": self._logical_timing_sequence,
+                "records": records,
+            }
+
+    diagnostic_snapshot = logical_timing_diagnostics
+
+    def _record_timing(self, name: str, elapsed_ms: float) -> None:
+        if not isinstance(elapsed_ms, (int, float)) or isinstance(elapsed_ms, bool):
+            return
+        if not math.isfinite(float(elapsed_ms)) or elapsed_ms < 0:
+            return
+        with self._maintenance_lock:
+            metric = self._timing_metrics.setdefault(
+                name, {"count": 0, "totalMs": 0.0, "maxMs": 0.0, "lastMs": 0.0}
+            )
+            metric["count"] = int(metric["count"]) + 1
+            metric["totalMs"] = float(metric["totalMs"]) + float(elapsed_ms)
+            metric["maxMs"] = max(float(metric["maxMs"]), float(elapsed_ms))
+            metric["lastMs"] = float(elapsed_ms)
+
+    @staticmethod
+    def _elapsed_ms(start_ns: int, end_ns: int) -> float | None:
+        try:
+            elapsed_ms = (int(end_ns) - int(start_ns)) / 1_000_000
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(elapsed_ms) or elapsed_ms < 0:
+            return None
+        return elapsed_ms
+
+    def _safe_record_timing(self, name: str, elapsed_ms: float | None) -> None:
+        if elapsed_ms is None:
+            return
+        try:
+            self._record_timing(name, elapsed_ms)
+        except BaseException:
+            return
+
+    def _maintenance_snapshot(self) -> dict[str, Any]:
+        with self._maintenance_lock:
+            return {
+                "writesSinceCheckpoint": self._writes_since_checkpoint,
+                "maintenanceNeeded": self._checkpoint_pending or
+                self._writes_since_checkpoint >= self._CHECKPOINT_WATERMARK,
+            }
+
+    def _append_boundary_record(
+            self, operation: str, outcome: str, boundary_ms: Mapping[str, Any],
+            maintenance_before: Mapping[str, Any], maintenance_after: Mapping[str, Any]) -> None:
+        """Best-effort append to the volatile, secret-free timing ring."""
+        if operation not in self._DIAGNOSTIC_OPERATIONS or not self._diagnostics_enabled:
+            return
+        try:
+            with self._maintenance_lock:
+                sequence = self._boundary_sequence + 1
+                record = {
+                    "sequence": sequence,
+                    "operation": operation,
+                    "outcome": outcome,
+                    "boundaryMs": dict(boundary_ms),
+                    "maintenanceBefore": dict(maintenance_before),
+                    "maintenanceAfter": dict(maintenance_after),
+                }
+                self._boundary_records.append(record)
+                self._boundary_sequence = sequence
+                if len(self._boundary_records) > self._BOUNDARY_RING_CAPACITY:
+                    self._boundary_records.pop(0)
+                    self._boundary_dropped_records += 1
+        except Exception:
+            # Diagnostics are never an authority source and must not alter the
+            # transaction result or exception propagation.
+            return
+
+    def _safe_append_boundary_record(
+            self, operation: str, outcome: str, boundary_ms: Mapping[str, Any],
+            maintenance_before: Mapping[str, Any], maintenance_after: Mapping[str, Any]) -> None:
+        try:
+            self._append_boundary_record(
+                operation, outcome, boundary_ms, maintenance_before, maintenance_after,
+            )
+        except BaseException:
+            return
+
+    def set_diagnostics_enabled(self, enabled: bool) -> None:
+        """Fixture/test-only switch; it never changes ledger authority."""
+        self._diagnostics_enabled = bool(enabled)
+
+    def boundary_diagnostics(self, after_sequence: int = 0) -> dict[str, Any]:
+        """Return only volatile fused-transaction diagnostics for this PID."""
+        if isinstance(after_sequence, bool) or not isinstance(after_sequence, int):
+            raise TypeError("after_sequence must be a non-boolean integer")
+        if after_sequence < 0:
+            raise ValueError("after_sequence must be non-negative")
+        if os.getpid() != self._boundary_process_id:
+            return {"schemaVersion": self._DIAGNOSTIC_SCHEMA_VERSION, "available": False}
+        with self._maintenance_lock:
+            records = [
+                deepcopy(record) for record in self._boundary_records
+                if record["sequence"] > after_sequence
+            ]
+            first_available = (
+                self._boundary_records[0]["sequence"]
+                if self._boundary_records else self._boundary_sequence + 1
+            )
+            return {
+                "schemaVersion": self._DIAGNOSTIC_SCHEMA_VERSION,
+                "available": True,
+                "store": self._DIAGNOSTIC_STORE,
+                "capacity": self._BOUNDARY_RING_CAPACITY,
+                "droppedCount": self._boundary_dropped_records,
+                "droppedRecords": self._boundary_dropped_records,
+                "firstSequence": self._boundary_records[0]["sequence"] if self._boundary_records else None,
+                "lastSequence": self._boundary_sequence,
+                "firstAvailableSequence": first_available,
+                "records": records,
+            }
+
+    def _bootstrap_wal(self) -> None:
+        """Establish WAL once before any schema transaction is opened.
+
+        SQLite rejects changing journal mode while a transaction is active.
+        Keep this path separate from ``_connect`` so hot request connections
+        never repeat the mode negotiation, while still refusing to proceed if
+        another process leaves the database in a non-WAL or busy state.
+        """
         conn = sqlite3.connect(self.db_path, timeout=10, isolation_level=None)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("PRAGMA synchronous=FULL")
+            conn.execute("PRAGMA wal_autocheckpoint=0")
+            current = conn.execute("PRAGMA journal_mode").fetchone()
+            mode = str(current[0]).lower() if current is not None else ""
+            if mode != "wal":
+                changed = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+                mode = str(changed[0]).lower() if changed is not None else ""
+            if mode != "wal":
+                raise LedgerError("WAL bootstrap did not return wal")
+        except sqlite3.Error as exc:
+            raise LedgerError(f"WAL bootstrap failed: {exc}") from exc
+        finally:
+            conn.close()
+
+    def _connect(self, *, boundary: dict[str, Any] | None = None) -> sqlite3.Connection:
+        self._ensure_open()
+        opened = self._monotonic_ns()
+        conn = sqlite3.connect(
+            self.db_path, timeout=10, isolation_level=None, factory=_ObservedConnection,
+        )
+        conn._attempt_ledger = self
+        conn._attempt_boundary = boundary
+        open_ms = self._elapsed_ms(opened, self._monotonic_ns())
+        self._safe_record_timing("open", open_ms)
+        self._record_logical_phase("openMs", open_ms, boundary)
+        if boundary is not None:
+            boundary["openMs"] = open_ms
         conn.row_factory = sqlite3.Row
+        pragma_started = self._monotonic_ns()
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=10000")
         conn.execute("PRAGMA synchronous=FULL")
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        pragma_ms = self._elapsed_ms(pragma_started, self._monotonic_ns())
+        self._safe_record_timing("pragma", pragma_ms)
+        self._record_logical_phase("pragmaMs", pragma_ms, boundary)
+        if boundary is not None:
+            boundary["pragmaMs"] = pragma_ms
         return conn
 
     @contextmanager
-    def _tx(self) -> Iterator[sqlite3.Connection]:
-        conn = self._connect()
+    def _tx(self, *, operation: str | None = None) -> Iterator[sqlite3.Connection]:
+        self._ensure_open()
+        self._transaction_serialization_lock.acquire()
+        transaction_lock_acquired = True
+        labelled = operation == "fused_retryable_transition"
+        boundary = {
+            "openMs": None,
+            "pragmaMs": None,
+            "beginImmediateMs": None,
+            "statementWorkMs": None,
+            "commitMs": None,
+            "closeMs": None,
+            "transactionMs": None,
+        } if labelled else None
+        maintenance_before = self._maintenance_snapshot() if labelled else None
+        started = self._monotonic_ns()
+        conn: sqlite3.Connection | None = None
+        committed = False
+        changed = False
+        registered = False
+        outcome = "setup_failed" if labelled else None
+        close_error: BaseException | None = None
         try:
-            conn.execute("BEGIN IMMEDIATE")
-            yield conn
-            conn.execute("COMMIT")
+            conn = self._connect(boundary=boundary) if labelled else self._connect()
+        except Exception:
+            if labelled:
+                outcome = "setup_failed"
+                boundary["transactionMs"] = self._elapsed_ms(started, self._monotonic_ns())
+                self._safe_append_boundary_record(
+                    operation, outcome, boundary,
+                    maintenance_before or {}, self._maintenance_snapshot(),
+                )
+            if transaction_lock_acquired:
+                self._transaction_serialization_lock.release()
+            raise
+        with self._maintenance_lock:
+            self._active_transactions += 1
+            registered = True
+        try:
+            try:
+                begin_started = self._monotonic_ns()
+                conn.execute("BEGIN IMMEDIATE")
+                begin_ms = self._elapsed_ms(begin_started, self._monotonic_ns())
+                self._safe_record_timing("beginImmediate", begin_ms)
+                self._record_logical_phase("beginImmediateMs", begin_ms, boundary)
+                if boundary is not None:
+                    boundary["beginImmediateMs"] = begin_ms
+            except Exception:
+                if labelled:
+                    outcome = "begin_failed"
+                raise
+
+            before_changes = conn.total_changes
+            work_started = self._monotonic_ns()
+            try:
+                yield conn
+                changed = conn.total_changes > before_changes
+            except Exception:
+                if boundary is not None:
+                    boundary["statementWorkMs"] = self._elapsed_ms(work_started, self._monotonic_ns())
+                    outcome = "rolled_back"
+                raise
+            else:
+                statement_ms = self._elapsed_ms(work_started, self._monotonic_ns())
+                self._safe_record_timing("statements", statement_ms)
+                self._record_logical_phase("statementWorkMs", statement_ms, boundary)
+                if boundary is not None:
+                    boundary["statementWorkMs"] = statement_ms
+
+            try:
+                commit_started = self._monotonic_ns()
+                conn.execute("COMMIT")
+                commit_ms = self._elapsed_ms(commit_started, self._monotonic_ns())
+                self._safe_record_timing("commit", commit_ms)
+                self._record_logical_phase("commitMs", commit_ms, boundary)
+                if boundary is not None:
+                    boundary["commitMs"] = commit_ms
+            except Exception:
+                if labelled:
+                    outcome = "commit_failed"
+                raise
+            committed = True
+            if labelled:
+                outcome = "committed"
         except Exception:
             try:
                 conn.execute("ROLLBACK")
@@ -120,9 +628,43 @@ class AttemptLedger:
                 pass
             raise
         finally:
-            conn.close()
+            try:
+                conn.close()
+            except BaseException as exc:
+                close_error = exc
+            if close_error is None and committed and changed:
+                self._note_successful_write()
+            if registered:
+                with self._maintenance_lock:
+                    self._active_transactions -= 1
+            if boundary is not None:
+                if close_error is not None:
+                    outcome = "close_failed"
+                boundary["transactionMs"] = self._elapsed_ms(started, self._monotonic_ns())
+                maintenance_after = self._maintenance_snapshot()
+                self._safe_append_boundary_record(
+                    operation, str(outcome), boundary,
+                    maintenance_before or {}, maintenance_after,
+                )
+            if transaction_lock_acquired:
+                self._transaction_serialization_lock.release()
+            if close_error is not None:
+                raise close_error
+
+    @contextmanager
+    def request_scope(self) -> Iterator[None]:
+        """Mark one MCP request for the shutdown drain fence."""
+        self._ensure_open()
+        with self._maintenance_lock:
+            self._serving_requests += 1
+        try:
+            yield
+        finally:
+            with self._maintenance_lock:
+                self._serving_requests -= 1
 
     def _initialize(self) -> None:
+        self._bootstrap_wal()
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -130,7 +672,6 @@ class AttemptLedger:
                          "(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             row = conn.execute("SELECT value FROM ledger_meta "
                                "WHERE key='schema_version'").fetchone()
-            created = row is None
             if row is None:
                 if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                                 "AND name<>'ledger_meta'").fetchone():
@@ -143,6 +684,13 @@ class AttemptLedger:
                 version = int(row["value"])
                 if version == 1:
                     self._migrate_v1_to_v2(conn)
+                    conn.execute("UPDATE ledger_meta SET value=? WHERE key='schema_version'",
+                                 ("2",))
+                    self._migrate_v2_to_v3(conn)
+                    conn.execute("UPDATE ledger_meta SET value=? WHERE key='schema_version'",
+                                 (str(LEDGER_SCHEMA_VERSION),))
+                elif version == 2:
+                    self._migrate_v2_to_v3(conn)
                     conn.execute("UPDATE ledger_meta SET value=? WHERE key='schema_version'",
                                  (str(LEDGER_SCHEMA_VERSION),))
                 elif version != LEDGER_SCHEMA_VERSION:
@@ -179,6 +727,9 @@ class AttemptLedger:
           actual_cost_known INTEGER NOT NULL CHECK(actual_cost_known IN(0,1)),
           actual_cost_micro_usd INTEGER CHECK(actual_cost_micro_usd IS NULL OR actual_cost_micro_usd>=0),
           failure_json TEXT, created_at_ms INTEGER NOT NULL, closed_at_ms INTEGER,
+          provider_submit_not_before_ms INTEGER NOT NULL DEFAULT 0
+            CHECK(provider_submit_not_before_ms >= 0
+              AND provider_submit_not_before_ms <= 9007199254740991),
           PRIMARY KEY(task_id,epoch), UNIQUE(task_id,attempt_id))""",
         """CREATE TABLE active_control(
           task_id TEXT PRIMARY KEY REFERENCES tasks(task_id), attempt_id TEXT NOT NULL UNIQUE,
@@ -390,6 +941,65 @@ class AttemptLedger:
                 raise CorruptLedger("migration has an extra authority witness")
 
     @staticmethod
+    def _attempt_columns(conn: sqlite3.Connection) -> set[str]:
+        return {r["name"] for r in conn.execute("PRAGMA table_info(attempts)")}
+
+    @classmethod
+    def _assert_v2_schema(cls, conn: sqlite3.Connection) -> None:
+        """Assert the pre-fence schema before the one-column v3 migration."""
+        required = {"tasks", "attempts", "active_control", "provider_events", "outbox",
+                    "circuit_transition_authority", "mutation_idempotency", "tool_fences"}
+        found = {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if required - found:
+            raise CorruptLedger(f"missing tables: {sorted(required - found)}")
+        expected_attempts = {
+            "task_id", "epoch", "attempt_id", "provider_id", "state",
+            "dispatch_attempted", "cancel_requested", "reserved_micro_usd",
+            "actual_cost_known", "actual_cost_micro_usd", "failure_json",
+            "created_at_ms", "closed_at_ms",
+        }
+        if cls._attempt_columns(conn) != expected_attempts:
+            raise CorruptLedger("v2 attempts schema is invalid")
+        authority_columns = {r["name"] for r in conn.execute(
+            "PRAGMA table_info(circuit_transition_authority)")}
+        expected_authority = {
+            "transition_outbox_id", "predecessor_task_id", "predecessor_attempt_id",
+            "predecessor_epoch", "predecessor_provider_id", "successor_task_id",
+            "successor_attempt_id", "successor_epoch", "successor_provider_id",
+            "witness_created_at_ms", "witness_digest",
+        }
+        if authority_columns != expected_authority:
+            raise CorruptLedger("circuit authority schema is invalid")
+        if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' "
+                "AND name='circuit_transition_authority_lookup'").fetchone():
+            raise CorruptLedger("circuit authority index is missing")
+
+    @classmethod
+    def _migrate_v2_to_v3(cls, conn: sqlite3.Connection) -> None:
+        """Add the durable submit fence in the surrounding atomic migration."""
+        cls._assert_v2_schema(conn)
+        conn.execute(
+            "ALTER TABLE attempts ADD COLUMN provider_submit_not_before_ms "
+            "INTEGER NOT NULL DEFAULT 0 CHECK(provider_submit_not_before_ms >= 0 "
+            "AND provider_submit_not_before_ms <= 9007199254740991)"
+        )
+        expected = {
+            "task_id", "epoch", "attempt_id", "provider_id", "state",
+            "dispatch_attempted", "cancel_requested", "reserved_micro_usd",
+            "actual_cost_known", "actual_cost_micro_usd", "failure_json",
+            "created_at_ms", "closed_at_ms", "provider_submit_not_before_ms",
+        }
+        if cls._attempt_columns(conn) != expected:
+            raise CorruptLedger("v3 attempts schema is invalid after migration")
+        for row in conn.execute(
+                "SELECT provider_submit_not_before_ms,created_at_ms FROM attempts"):
+            if row["provider_submit_not_before_ms"] != 0:
+                raise CorruptLedger("v2 migration fabricated a submit fence")
+            cls._time_ms(row["created_at_ms"])
+
+    @staticmethod
     def _assert_v1_schema(conn: sqlite3.Connection) -> None:
         required = {"tasks", "attempts", "active_control", "provider_events", "outbox"}
         found = {r["name"] for r in conn.execute(
@@ -405,6 +1015,21 @@ class AttemptLedger:
             "SELECT name FROM sqlite_master WHERE type='table'")}
         if required - found:
             raise CorruptLedger(f"missing tables: {sorted(required - found)}")
+        expected_attempts = {
+            "task_id", "epoch", "attempt_id", "provider_id", "state",
+            "dispatch_attempted", "cancel_requested", "reserved_micro_usd",
+            "actual_cost_known", "actual_cost_micro_usd", "failure_json",
+            "created_at_ms", "closed_at_ms", "provider_submit_not_before_ms",
+        }
+        if AttemptLedger._attempt_columns(conn) != expected_attempts:
+            raise CorruptLedger("v3 attempts schema is invalid")
+        for row in conn.execute(
+                "SELECT a.provider_submit_not_before_ms,a.created_at_ms,t.deadline_ms "
+                "FROM attempts a JOIN tasks t ON t.task_id=a.task_id"):
+            AttemptLedger._validate_persisted_fence_values(
+                row["provider_submit_not_before_ms"], row["created_at_ms"],
+                row["deadline_ms"],
+            )
         columns = {r["name"] for r in conn.execute(
             "PRAGMA table_info(circuit_transition_authority)")}
         expected = {
@@ -481,6 +1106,97 @@ class AttemptLedger:
                 value <= 0 or value > _SAFE_INTEGER_MAX):
             raise CorruptLedger("timestamp is outside the safe integer range")
         return value
+
+    @staticmethod
+    def _validate_persisted_fence_values(
+            fence_ms: Any, created_at_ms: Any, deadline_ms: Any | None,
+    ) -> int:
+        if (isinstance(fence_ms, bool) or not isinstance(fence_ms, int) or
+                not 0 <= fence_ms <= _SAFE_INTEGER_MAX):
+            raise CorruptLedger("provider submit fence is outside the safe integer range")
+        created = AttemptLedger._time_ms(created_at_ms)
+        if deadline_ms is None:
+            if fence_ms != 0:
+                raise CorruptLedger("nonzero submit fence lacks a task deadline")
+            return 0
+        deadline = AttemptLedger._time_ms(deadline_ms)
+        if fence_ms == 0:
+            return 0
+        delta = fence_ms - created
+        if (fence_ms <= created or fence_ms >= deadline or
+                not 250 <= delta <= 750):
+            raise CorruptLedger("provider submit fence invariant is invalid")
+        return fence_ms
+
+    @staticmethod
+    def _direct_transition_jitter(
+            jitter_ms: Any, *, allow_legacy_zero: bool,
+    ) -> int | None:
+        """Normalize exact legacy zero syntax to the minimum durable jitter."""
+        if isinstance(jitter_ms, bool) or not isinstance(jitter_ms, int):
+            return None
+        if jitter_ms == 0 and allow_legacy_zero:
+            return 250
+        if 250 <= jitter_ms <= 750:
+            return jitter_ms
+        return None
+
+    def _sync_fence_process(self) -> None:
+        current_pid = os.getpid()
+        if current_pid == self._fence_process_id:
+            return
+        with self._maintenance_lock:
+            if current_pid != self._fence_process_id:
+                self._fence_process_id = current_pid
+                self._fence_guards.clear()
+
+    def _remember_fence(self, expected: ActiveTuple, fence_ms: int,
+                        created_at_ms: int, deadline_ms: int,
+                        *, base_monotonic_ns: int | None = None) -> None:
+        self._sync_fence_process()
+        if fence_ms == 0:
+            with self._maintenance_lock:
+                self._fence_guards.pop(
+                    (expected.task_id, expected.attempt_id, expected.epoch), None,
+                )
+            return
+        delta = self._validate_persisted_fence_values(
+            fence_ms, created_at_ms, deadline_ms,
+        ) - created_at_ms
+        with self._maintenance_lock:
+            self._fence_guards[(expected.task_id, expected.attempt_id, expected.epoch)] = (
+                (base_monotonic_ns if base_monotonic_ns is not None else self._monotonic_ns())
+                + delta * 1_000_000
+            )
+
+    def _fence_readiness(self, expected: ActiveTuple, row: sqlite3.Row,
+                         wall_now_ms: int) -> dict[str, Any] | None:
+        self._sync_fence_process()
+        fence_ms = self._validate_persisted_fence_values(
+            row["provider_submit_not_before_ms"], row["created_at_ms"],
+            row["deadline_ms"],
+        )
+        if fence_ms == 0:
+            return None
+        key = (expected.task_id, expected.attempt_id, expected.epoch)
+        delta_ms = fence_ms - row["created_at_ms"]
+        with self._maintenance_lock:
+            guard_ns = self._fence_guards.get(key)
+            if guard_ns is None:
+                guard_ns = self._monotonic_ns() + delta_ms * 1_000_000
+                self._fence_guards[key] = guard_ns
+        monotonic_remaining_ns = guard_ns - self._monotonic_ns()
+        wall_remaining_ms = fence_ms - wall_now_ms
+        if monotonic_remaining_ns <= 0 and wall_remaining_ms <= 0:
+            return None
+        monotonic_remaining_ms = max(0, math.ceil(monotonic_remaining_ns / 1_000_000))
+        retry_after_ms = max(1, min(750, max(wall_remaining_ms, monotonic_remaining_ms)))
+        return {
+            "status": "NOT_READY",
+            "activeTuple": expected.as_dict(),
+            "providerSubmitNotBeforeMs": fence_ms,
+            "retryAfterMs": retry_after_ms,
+        }
 
     @staticmethod
     def _provider_id(value: Any, error_type: type[LedgerError] = InvalidPlanError) -> str:
@@ -727,7 +1443,8 @@ class AttemptLedger:
             attempts = conn.execute(
                 "SELECT task_id,epoch,attempt_id,provider_id,state,dispatch_attempted,"
                 "cancel_requested,reserved_micro_usd,actual_cost_known,"
-                "actual_cost_micro_usd,failure_json,created_at_ms,closed_at_ms FROM attempts "
+                "actual_cost_micro_usd,failure_json,created_at_ms,closed_at_ms,"
+                "provider_submit_not_before_ms FROM attempts "
                 "WHERE task_id=? ORDER BY epoch",
                 (row["task_id"],),
             ).fetchall()
@@ -747,6 +1464,10 @@ class AttemptLedger:
                 key = (attempt["task_id"], attempt["attempt_id"], attempt["epoch"])
                 if key in attempts_by_key:
                     raise CorruptLedger("duplicate attempt tuple")
+                cls._validate_persisted_fence_values(
+                    attempt["provider_submit_not_before_ms"],
+                    attempt["created_at_ms"], row["deadline_ms"],
+                )
                 attempts_by_key[key] = attempt
                 attempts_by_epoch[attempt["epoch"]] = attempt
 
@@ -788,7 +1509,8 @@ class AttemptLedger:
                 if fact["kind"] in {"attempt_created", "transitioned"}:
                     identity_facts.setdefault(key, []).append(fact_record)
                 elif fact["kind"] == "cost_recorded":
-                    if set(payload) != {"actualCostMicroUsd", "known"}:
+                    if set(payload) not in ({"actualCostMicroUsd", "known"},
+                                            {"actualCostMicroUsd", "known", "source"}):
                         raise CorruptLedger("cost fact shape is invalid")
                     known = payload["known"]
                     actual = payload["actualCostMicroUsd"]
@@ -798,6 +1520,12 @@ class AttemptLedger:
                         cls._micro(actual, CorruptLedger)
                     elif actual is not None:
                         raise CorruptLedger("unknown cost fact contains an actual cost")
+                    if "source" in payload and (
+                            not isinstance(payload["source"], str) or
+                            payload["source"] not in _COST_SOURCES):
+                        raise CorruptLedger("cost fact source is invalid")
+                    if "source" in payload and not known and payload["source"] != "unavailable":
+                        raise CorruptLedger("unknown cost fact source is not unavailable")
                     cost_facts.setdefault(key, []).append(fact_record)
                 elif fact["kind"] == "state_mutated":
                     if set(payload) != {"state", "payload"}:
@@ -824,7 +1552,8 @@ class AttemptLedger:
                         raise CorruptLedger("recovery fact shape is invalid")
                     recovery_facts.setdefault(key, []).append(fact_record)
                 elif fact["kind"] == "attempt_completed":
-                    if set(payload) != {"outcome", "actualCostMicroUsd", "known"}:
+                    if set(payload) not in ({"outcome", "actualCostMicroUsd", "known"},
+                                            {"outcome", "actualCostMicroUsd", "known", "source"}):
                         raise CorruptLedger("completion fact shape is invalid")
                     if payload["outcome"] not in {
                             "completed", "cancelled", "cancelled_uncertain",
@@ -838,6 +1567,12 @@ class AttemptLedger:
                         cls._micro(actual, CorruptLedger)
                     elif actual is not None:
                         raise CorruptLedger("unknown completion fact contains an actual cost")
+                    if "source" in payload and (
+                            not isinstance(payload["source"], str) or
+                            payload["source"] not in _COST_SOURCES):
+                        raise CorruptLedger("completion fact source is invalid")
+                    if "source" in payload and not known and payload["source"] != "unavailable":
+                        raise CorruptLedger("unknown completion fact source is not unavailable")
                     completion_facts.setdefault(key, []).append(fact_record)
 
             derived = 0
@@ -997,8 +1732,9 @@ class AttemptLedger:
                 "state": row["state"], "dispatchAttempted": bool(row["dispatch_attempted"]),
                 "cancelRequested": bool(row["cancel_requested"]),
                 "reservedMicroUsd": row["reserved_micro_usd"],
-                "actualCostKnown": bool(row["actual_cost_known"]),
-                "actualCostMicroUsd": row["actual_cost_micro_usd"]}
+                 "actualCostKnown": bool(row["actual_cost_known"]),
+                 "actualCostMicroUsd": row["actual_cost_micro_usd"],
+                 "providerSubmitNotBeforeMs": row["provider_submit_not_before_ms"]}
 
     def create_initial(self, task_id: str, immutable_plan: Mapping[str, Any]) -> dict[str, Any]:
         plan = self._validate_plan(task_id, immutable_plan)
@@ -1119,6 +1855,7 @@ class AttemptLedger:
             return {"failureClass": "retryable", "code": "pre_dispatch_timeout", "retryable": True}
         return {"failureClass": "terminal", "code": "unknown", "retryable": False}
 
+    @_logical_timing("admit_frontier")
     def admit_frontier(self, request_id: str, immutable_plan_v1: Mapping[str, Any],
                        deadline_at: int, provider_order: list[str]) -> dict[str, Any]:
         """Idempotent FRONTIER admission façade over the P0 admission fact."""
@@ -1162,6 +1899,7 @@ class AttemptLedger:
             return {"status": "REJECTED", "reason": str(exc)}
         return {"status": "ADMITTED", "tuple": active, "planHash": plan_hash}
 
+    @_logical_timing("submit_attempt")
     def submit_attempt(self, expected_tuple: ActiveTuple | Mapping[str, Any] | tuple[Any, Any, Any],
                        immutable_plan: Mapping[str, Any], provider_ref: Mapping[str, Any],
                        attempt_deadline_ms: int,
@@ -1186,6 +1924,7 @@ class AttemptLedger:
                     return {"status": "REJECTED", "reason": "provider reference env name is invalid"}
         except LedgerError as exc:
             return {"status": "REJECTED", "reason": str(exc)}
+        now = self._time_ms(self._now())
         with self._tx() as conn:
             if idempotency_key is not None:
                 prior = self._read_idempotency(conn, "submit", idempotency_key)
@@ -1195,8 +1934,21 @@ class AttemptLedger:
             if (row is None or row["provider_id"] != provider or
                     plan_hash != row["plan_hash"] or
                     attempt_deadline_ms > row["deadline_ms"] or
-                    attempt_deadline_ms <= self._now()):
+                    attempt_deadline_ms <= now):
                 return {"status": "REJECTED", "reason": "stale or mismatched active tuple"}
+            not_ready = self._fence_readiness(expected, row, now)
+            if not_ready is not None:
+                return not_ready
+            submitted = conn.execute(
+                "UPDATE attempts SET state='provider_started' WHERE task_id=? AND epoch=? "
+                "AND attempt_id=? AND " + _NONTERMINAL_STATE_SQL +
+                " AND cancel_requested=0",
+                (expected.task_id, expected.epoch, expected.attempt_id),
+            )
+            self._require_one_attempt_mutation(submitted, "attempt submit ownership")
+            self._outbox(conn, expected.task_id, expected.attempt_id, expected.epoch,
+                          "state_mutated", {"state": "provider_started", "payload": {}},
+                          now)
             result = {"status": "SUBMITTED", "activeTuple": expected.as_dict(),
                       "providerId": provider}
             if idempotency_key is not None:
@@ -1205,13 +1957,16 @@ class AttemptLedger:
 
     def record_observation(self, expected_tuple: ActiveTuple | Mapping[str, Any] | tuple[Any, Any, Any],
                            normalized_observation: Mapping[str, Any],
-                           idempotency_key: str) -> dict[str, Any]:
+                           idempotency_key: str,
+                           failure_source: str | None = None) -> dict[str, Any]:
         expected = self._tuple(expected_tuple)
         key = self._idempotency_key(idempotency_key)
         try:
             normalized = self.normalize_observation(normalized_observation)
         except LedgerError as exc:
             return {"status": "REJECTED", "reason": str(exc)}
+        if failure_source is not None and failure_source not in _FAILURE_SOURCES:
+            return {"status": "REJECTED", "reason": "failure source is invalid"}
         now = self._time_ms(self._now())
         with self._tx() as conn:
             prior = self._read_idempotency(conn, "observation", key)
@@ -1220,13 +1975,18 @@ class AttemptLedger:
             row = self._active(conn, expected)
             if row is None or now >= row["deadline_ms"]:
                 return {"status": "REJECTED", "reason": "stale, cancelled, or expired tuple"}
+            fact = {"eventKind": "observation", "payload": normalized}
+            if failure_source is not None:
+                fact["source"] = failure_source
             self._outbox(conn, expected.task_id, expected.attempt_id, expected.epoch,
-                         "provider_event", {"eventKind": "observation", "payload": normalized}, now)
+                         "provider_event", fact, now)
             result = {"status": "RECORDED", "observation": normalized,
-                      "tuple": expected.as_dict()}
+                      "tuple": expected.as_dict(),
+                      "failureSource": failure_source}
             self._write_idempotency(conn, "observation", key, result, expected)
             return result
 
+    @_logical_timing("poll_observations")
     def poll_observations(self, task_id: str, after_id: int = 0,
                           limit: int = 100) -> dict[str, Any]:
         page = self.page_outbox(after_id=after_id, limit=limit, task_id=task_id)
@@ -1238,7 +1998,7 @@ class AttemptLedger:
 
     def transition_once_result(self, expected_tuple: ActiveTuple | Mapping[str, Any] | tuple[Any, Any, Any],
                                successor_provider_id: str, normalized_failure: Mapping[str, Any],
-                               jitter_ms: int = 0, plan_hash: str | None = None,
+                               jitter_ms: int = 250, plan_hash: str | None = None,
                                idempotency_key: str | None = None) -> dict[str, Any]:
         if (isinstance(normalized_failure, Mapping) and
                 normalized_failure.get("code") == "timeout"):
@@ -1248,122 +2008,405 @@ class AttemptLedger:
                                       idempotency_key)
         return result or {"status": "REJECTED", "reason": "transition barrier rejected"}
 
+    def _transition_precheck_locked(
+            self, conn: sqlite3.Connection, expected: ActiveTuple,
+            successor_provider_id: str, failure: Mapping[str, Any],
+            jitter_ms: int, plan_hash: str | None, now: int,
+    ) -> tuple[sqlite3.Row | None, dict[str, Any] | None, int | None, int | None, str]:
+        """Read all transition authority without mutating any row."""
+        row = self._active(conn, expected)
+        if row is None:
+            return None, None, None, None, "stale_tuple"
+        plan = self._checked_plan(row, conn)
+        if plan_hash is not None and plan_hash != row["plan_hash"]:
+            return row, plan, None, None, "plan_hash_mismatch"
+        if row["dispatch_attempted"]:
+            return row, plan, None, None, "dispatch_attempted"
+        if row["cancel_requested"]:
+            return row, plan, None, None, "cancel_requested"
+        if now + jitter_ms >= row["deadline_ms"]:
+            return row, plan, None, None, "deadline_expired"
+        if row["transitions_used"] >= row["transition_limit"]:
+            return row, plan, None, None, "transition_limit"
+        providers = plan["eligibleProviderIds"]
+        try:
+            current = providers.index(row["provider_id"])
+            successor = providers.index(successor_provider_id)
+        except ValueError:
+            return row, plan, None, None, "successor_order_invalid"
+        if successor <= current:
+            return row, plan, None, None, "successor_order_invalid"
+        if self._circuit_open(conn, row["provider_id"], now, providers):
+            return row, plan, None, None, "circuit_open"
+        successor_ceiling = plan["providerCeilings"][successor_provider_id]
+        prior = row["reserved_micro_usd"]
+        effective = row["actual_cost_micro_usd"] if row["actual_cost_known"] else prior
+        replacement = row["task_reserved"] - prior + effective + successor_ceiling
+        self._micro(replacement, CorruptLedger)
+        if plan["budgetMicroUsd"] is not None and replacement > plan["budgetMicroUsd"]:
+            return row, plan, None, None, "budget_unavailable"
+        return row, plan, successor_ceiling, replacement, "eligible"
+
+    def _apply_transition_locked(
+            self, conn: sqlite3.Connection, expected: ActiveTuple,
+            row: sqlite3.Row, successor_provider_id: str,
+            failure: Mapping[str, Any], successor_ceiling: int,
+            replacement: int, now: int, jitter_ms: int,
+            idempotency_key: str | None = None,
+            fence_base_monotonic_ns: int | None = None,
+    ) -> dict[str, Any]:
+        next_id, next_epoch = uuid.uuid4().hex, expected.epoch + 1
+        successor_fence = now + jitter_ms
+        if successor_fence > _SAFE_INTEGER_MAX:
+            raise LedgerError("submit fence exceeds the safe integer range")
+        self._validate_persisted_fence_values(
+            successor_fence, now, row["deadline_ms"],
+        )
+        closed = conn.execute("UPDATE attempts SET state='closed',failure_json=?,closed_at_ms=?"
+                              " WHERE task_id=? AND epoch=? AND attempt_id=? AND "
+                              f"{_NONTERMINAL_STATE_SQL} AND cancel_requested=0 AND dispatch_attempted=0",
+                              (self._json(failure), now, expected.task_id, expected.epoch,
+                               expected.attempt_id))
+        self._require_one_attempt_mutation(closed, "transition predecessor close")
+        conn.execute("INSERT INTO attempts(task_id,epoch,attempt_id,provider_id,state,"
+                      "dispatch_attempted,cancel_requested,reserved_micro_usd,"
+                      "actual_cost_known,actual_cost_micro_usd,created_at_ms,"
+                      "provider_submit_not_before_ms)"
+                      " VALUES(?,?,?,?,'active',0,0,?,0,NULL,?,?)",
+                     (expected.task_id, next_epoch, next_id, successor_provider_id,
+                       successor_ceiling, now, successor_fence))
+        task_update = conn.execute("UPDATE tasks SET transitions_used=transitions_used+1,"
+                                   "reserved_micro_usd=? WHERE task_id=? AND status='running'",
+                                   (replacement, expected.task_id))
+        if task_update.rowcount != 1:
+            raise CorruptLedger(f"transition task update mutated {task_update.rowcount} rows")
+        control_update = conn.execute("UPDATE active_control SET attempt_id=?,epoch=?,status='active'"
+                     " WHERE task_id=? AND attempt_id=? AND epoch=? AND status='active'",
+                     (next_id, next_epoch, expected.task_id, expected.attempt_id, expected.epoch))
+        if control_update.rowcount != 1:
+            raise CorruptLedger(f"transition control update mutated {control_update.rowcount} rows")
+        self._record_diagnostic_failure(conn, row["provider_id"], now)
+        transition_id = self._outbox(conn, expected.task_id, next_id, next_epoch, "transitioned",
+                       {"predecessor": expected.as_dict(),
+                        "predecessorProviderId": row["provider_id"],
+                        "successorProviderId": successor_provider_id,
+                        "failure": dict(failure)}, now)
+        self._insert_witness(
+            conn, transition_id, expected, row["provider_id"],
+            ActiveTuple(expected.task_id, next_id, next_epoch),
+            successor_provider_id, now,
+        )
+        result = {"status": "TRANSITIONED", "taskId": expected.task_id,
+                  "attemptId": next_id, "epoch": next_epoch,
+                   "providerId": successor_provider_id, "state": "active",
+                   "dispatchAttempted": False, "reservedMicroUsd": successor_ceiling,
+                   "successorSubmitNotBeforeMs": successor_fence}
+        if idempotency_key is not None:
+            self._write_idempotency(conn, "transition", idempotency_key, result, expected)
+        self._remember_fence(
+            ActiveTuple(expected.task_id, next_id, next_epoch), successor_fence,
+            now, row["deadline_ms"], base_monotonic_ns=fence_base_monotonic_ns,
+        )
+        return result
+
+    @classmethod
+    def _observation_binding_matches(
+            cls, conn: sqlite3.Connection, key: str, expected: ActiveTuple,
+            failure: Mapping[str, Any], failure_source: str,
+    ) -> bool:
+        row = conn.execute(
+            "SELECT task_id,attempt_id,epoch,result_json FROM mutation_idempotency "
+            "WHERE operation='observation' AND idempotency_key=?", (key,),
+        ).fetchone()
+        if row is None:
+            return False
+        if (row["task_id"], row["attempt_id"], row["epoch"]) != (
+                expected.task_id, expected.attempt_id, expected.epoch):
+            return False
+        try:
+            result = json.loads(row["result_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if (result.get("observation") != dict(failure) or
+                result.get("failureSource") != failure_source):
+            return False
+        events = conn.execute(
+            "SELECT payload_json FROM outbox WHERE task_id=? AND attempt_id=? AND epoch=? "
+            "AND kind='provider_event' ORDER BY outbox_id",
+            (expected.task_id, expected.attempt_id, expected.epoch),
+        ).fetchall()
+        for event in events:
+            try:
+                payload = json.loads(event["payload_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if (payload.get("eventKind") == "observation" and
+                    payload.get("payload") == dict(failure) and
+                    payload.get("source") == failure_source):
+                return True
+        return False
+
+    @classmethod
+    def _durable_transition_result_locked(
+            cls, conn: sqlite3.Connection, result: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Refresh a replayed successor fence from its durable attempt row."""
+        status = result.get("status")
+        if status not in {"TRANSITIONED", "RECOVERED"}:
+            return dict(result)
+        tuple_payload = result.get("tuple")
+        if tuple_payload is None:
+            tuple_payload = {
+                key: result.get(key) for key in ("taskId", "attemptId", "epoch")
+            }
+        try:
+            successor = cls._tuple(tuple_payload)
+        except LedgerError as exc:
+            raise CorruptLedger("transition replay tuple is invalid") from exc
+        row = conn.execute(
+            "SELECT a.provider_submit_not_before_ms,a.created_at_ms,t.deadline_ms "
+            "FROM attempts a JOIN tasks t ON t.task_id=a.task_id "
+            "WHERE a.task_id=? AND a.attempt_id=? AND a.epoch=?",
+            (successor.task_id, successor.attempt_id, successor.epoch),
+        ).fetchone()
+        if row is None:
+            raise CorruptLedger("transition replay successor is missing")
+        fence = cls._validate_persisted_fence_values(
+            row["provider_submit_not_before_ms"], row["created_at_ms"],
+            row["deadline_ms"],
+        )
+        return {**dict(result), "successorSubmitNotBeforeMs": fence}
+
+    @_logical_timing("transition_once")
+    def record_retryable_observation_and_transition_once(
+            self, expected_tuple: ActiveTuple | Mapping[str, Any] | tuple[Any, Any, Any],
+            successor_provider_id: str, normalized_failure: Mapping[str, Any],
+            failure_source: str, jitter_ms: int, plan_hash: str,
+            observation_idempotency_key: str,
+            transition_idempotency_key: str,
+            *, cost_evidence: CostEvidence | None = None,
+    ) -> dict[str, Any]:
+        """Atomically persist retryable evidence and successor authority."""
+        expected = self._tuple(expected_tuple)
+        self._provider_id(successor_provider_id, LedgerError)
+        failure = self._failure(normalized_failure)
+        if (failure["failureClass"] != "retryable" or
+                failure["code"] not in _RETRYABLE_CODES or
+                failure["code"] == "pre_dispatch_timeout"):
+            return {"status": "REJECTED", "reason": "fused failure is not allowlisted"}
+        if failure_source not in _FAILURE_SOURCES:
+            return {"status": "REJECTED", "reason": "failure source is invalid"}
+        observation_key = self._idempotency_key(observation_idempotency_key)
+        transition_key = self._idempotency_key(transition_idempotency_key)
+        if observation_key == transition_key:
+            return {"status": "REJECTED", "reason": "idempotency keys must differ"}
+        if (isinstance(jitter_ms, bool) or not isinstance(jitter_ms, int) or
+                not 250 <= jitter_ms <= 750):
+            return {"status": "REJECTED", "reason": "jitter is outside 250-750ms bounds"}
+        if not isinstance(plan_hash, str) or not _HASH.fullmatch(plan_hash):
+            return {"status": "REJECTED", "reason": "plan hash is invalid"}
+        try:
+            cost_evidence = self._validated_cost_evidence(cost_evidence)
+        except LedgerError as exc:
+            return {"status": "REJECTED", "reason": str(exc)}
+        now = self._time_ms(self._now())
+        fence_base_monotonic_ns = self._monotonic_ns()
+        with self._tx(operation="fused_retryable_transition") as conn:
+            transition_prior = self._read_idempotency(conn, "transition", transition_key)
+            if transition_prior is not None:
+                bound_observation_key = transition_prior.get("observationIdempotencyKey")
+                if (bound_observation_key != observation_key or
+                        not self._observation_binding_matches(
+                            conn, observation_key, expected, failure, failure_source)):
+                    return {"status": "REJECTED", "reason": "transition idempotency lacks matching observation"}
+                return {
+                    **self._durable_transition_result_locked(conn, transition_prior),
+                    "idempotentReplay": True,
+                }
+
+            observation_prior = self._read_idempotency(conn, "observation", observation_key)
+            if observation_prior is not None and not self._observation_binding_matches(
+                    conn, observation_key, expected, failure, failure_source):
+                return {"status": "REJECTED", "reason": "observation idempotency binding mismatch"}
+
+            row, plan, successor_ceiling, replacement, reason = self._transition_precheck_locked(
+                conn, expected, successor_provider_id, failure, jitter_ms, plan_hash, now,
+            )
+            if row is None or plan is None:
+                return {"status": "REJECTED", "reason": reason}
+
+            if reason != "eligible":
+                # A still-active tuple can retain evidence when a controller
+                # precheck lost a race with a soft authority barrier. Hard
+                # fences (stale/cancel/deadline/dispatch) remain no-write.
+                if reason not in {"successor_order_invalid", "circuit_open", "transition_limit", "budget_unavailable"}:
+                    return {"status": "REJECTED", "reason": reason}
+                if cost_evidence is not None:
+                    row = self._apply_cost_evidence_locked(
+                        conn, expected, row, cost_evidence, now,
+                    )
+                if observation_prior is None:
+                    self._outbox(conn, expected.task_id, expected.attempt_id, expected.epoch,
+                                 "provider_event", {"eventKind": "observation",
+                                                     "payload": failure, "source": failure_source}, now)
+                    self._write_idempotency(
+                        conn, "observation", observation_key,
+                        {"status": "RECORDED", "observation": failure,
+                         "failureSource": failure_source, "tuple": expected.as_dict()}, expected,
+                    )
+                result = {"status": "OBSERVATION_RECORDED", "observation": failure,
+                          "failureSource": failure_source, "tuple": expected.as_dict(),
+                          "reason": reason, "observationIdempotencyKey": observation_key}
+                self._write_idempotency(conn, "transition", transition_key, result, expected)
+                return result
+
+            if cost_evidence is not None:
+                row = self._apply_cost_evidence_locked(
+                    conn, expected, row, cost_evidence, now,
+                )
+                row, plan, successor_ceiling, replacement, reason = self._transition_precheck_locked(
+                    conn, expected, successor_provider_id, failure, jitter_ms, plan_hash, now,
+                )
+                if row is None or plan is None:
+                    return {"status": "REJECTED", "reason": reason}
+                if reason != "eligible":
+                    if reason not in {"successor_order_invalid", "circuit_open", "transition_limit", "budget_unavailable"}:
+                        return {"status": "REJECTED", "reason": reason}
+                    if observation_prior is None:
+                        self._outbox(conn, expected.task_id, expected.attempt_id, expected.epoch,
+                                     "provider_event", {"eventKind": "observation",
+                                                         "payload": failure, "source": failure_source}, now)
+                        self._write_idempotency(
+                            conn, "observation", observation_key,
+                            {"status": "RECORDED", "observation": failure,
+                             "failureSource": failure_source, "tuple": expected.as_dict()}, expected,
+                        )
+                    result = {"status": "OBSERVATION_RECORDED", "observation": failure,
+                              "failureSource": failure_source, "tuple": expected.as_dict(),
+                              "reason": reason, "observationIdempotencyKey": observation_key}
+                    self._write_idempotency(conn, "transition", transition_key, result, expected)
+                    return result
+
+            if observation_prior is None:
+                self._outbox(conn, expected.task_id, expected.attempt_id, expected.epoch,
+                             "provider_event", {"eventKind": "observation",
+                                                 "payload": failure, "source": failure_source}, now)
+                self._write_idempotency(
+                    conn, "observation", observation_key,
+                    {"status": "RECORDED", "observation": failure,
+                     "failureSource": failure_source, "tuple": expected.as_dict()}, expected,
+                )
+            result = self._apply_transition_locked(
+                conn, expected, row, successor_provider_id, failure,
+                int(successor_ceiling), int(replacement), now, jitter_ms,
+                fence_base_monotonic_ns=fence_base_monotonic_ns,
+            )
+            result = {**result, "observationIdempotencyKey": observation_key,
+                      "failureSource": failure_source}
+            self._write_idempotency(conn, "transition", transition_key, result, expected)
+            return result
+
+    @_logical_timing("transition_once")
     def transition_once(self, expected_tuple: ActiveTuple | Mapping[str, Any] | tuple[Any, Any, Any],
                         successor_provider_id: str,
                         normalized_failure: Mapping[str, Any],
-                        jitter_ms: int = 0,
+                        jitter_ms: int = 250,
                         plan_hash: str | None = None,
                         idempotency_key: str | None = None) -> dict[str, Any] | None:
         expected = self._tuple(expected_tuple)
         self._provider_id(successor_provider_id, LedgerError)
         failure = self._failure(normalized_failure)
         if (failure["failureClass"] != "retryable" or
-                failure["code"] not in _RETRYABLE_CODES | {"timeout"}):
+                failure["code"] not in _RETRYABLE_CODES):
             return None
-        if (isinstance(jitter_ms, bool) or not isinstance(jitter_ms, int) or
-                not 0 <= jitter_ms <= 750 or (jitter_ms and jitter_ms < 250)):
+        jitter = self._direct_transition_jitter(
+            jitter_ms,
+            allow_legacy_zero=plan_hash is None and idempotency_key is None,
+        )
+        if jitter is None:
             return None
+        effective_jitter_ms = jitter
         now = self._time_ms(self._now())
+        fence_base_monotonic_ns = self._monotonic_ns()
         with self._tx() as conn:
             if idempotency_key is not None:
                 prior = self._read_idempotency(conn, "transition", idempotency_key)
                 if prior is not None:
-                    return prior
-            row = self._active(conn, expected)
-            if row is None:
-                return None
-            plan = self._checked_plan(row, conn)
-            if plan_hash is not None and plan_hash != row["plan_hash"]:
-                return None
-            if (row["dispatch_attempted"] or row["cancel_requested"] or
-                    now + jitter_ms >= row["deadline_ms"] or
-                    row["transitions_used"] >= row["transition_limit"] or
-                    failure["failureClass"] != "retryable"):
-                return None
-            providers = plan["eligibleProviderIds"]
-            try:
-                current = providers.index(row["provider_id"])
-                successor = providers.index(successor_provider_id)
-            except ValueError:
-                return None
-            if successor <= current or self._circuit_open(conn, row["provider_id"], now):
-                return None
-            successor_ceiling = plan["providerCeilings"][successor_provider_id]
-            prior = row["reserved_micro_usd"]
-            effective = row["actual_cost_micro_usd"] if row["actual_cost_known"] else prior
-            replacement = row["task_reserved"] - prior + effective + successor_ceiling
-            self._micro(replacement, CorruptLedger)
-            if (plan["budgetMicroUsd"] is not None and
-                    replacement > plan["budgetMicroUsd"]):
-                return None
-            next_id, next_epoch = uuid.uuid4().hex, expected.epoch + 1
-            closed = conn.execute("UPDATE attempts SET state='closed',failure_json=?,closed_at_ms=?"
-                                  " WHERE task_id=? AND epoch=? AND attempt_id=? AND "
-                                  f"{_NONTERMINAL_STATE_SQL} AND cancel_requested=0 AND dispatch_attempted=0",
-                                  (self._json(failure), now, expected.task_id, expected.epoch,
-                                   expected.attempt_id))
-            self._require_one_attempt_mutation(closed, "transition predecessor close")
-            conn.execute("INSERT INTO attempts(task_id,epoch,attempt_id,provider_id,state,"
-                         "dispatch_attempted,cancel_requested,reserved_micro_usd,"
-                         "actual_cost_known,actual_cost_micro_usd,created_at_ms)"
-                         " VALUES(?,?,?,?,'active',0,0,?,0,NULL,?)",
-                         (expected.task_id, next_epoch, next_id, successor_provider_id,
-                          successor_ceiling, now))
-            task_update = conn.execute("UPDATE tasks SET transitions_used=transitions_used+1,"
-                                       "reserved_micro_usd=? WHERE task_id=? AND status='running'",
-                                       (replacement, expected.task_id))
-            if task_update.rowcount != 1:
-                raise CorruptLedger(f"transition task update mutated {task_update.rowcount} rows")
-            control_update = conn.execute("UPDATE active_control SET attempt_id=?,epoch=?,status='active'"
-                         " WHERE task_id=? AND attempt_id=? AND epoch=? AND status='active'",
-                         (next_id, next_epoch, expected.task_id, expected.attempt_id, expected.epoch))
-            if control_update.rowcount != 1:
-                raise CorruptLedger(f"transition control update mutated {control_update.rowcount} rows")
-            self._record_diagnostic_failure(conn, row["provider_id"], now)
-            transition_id = self._outbox(conn, expected.task_id, next_id, next_epoch, "transitioned",
-                         {"predecessor": expected.as_dict(),
-                          "predecessorProviderId": row["provider_id"],
-                          "successorProviderId": successor_provider_id,
-                          "failure": failure}, now)
-            self._insert_witness(
-                conn, transition_id, expected, row["provider_id"],
-                ActiveTuple(expected.task_id, next_id, next_epoch),
-                successor_provider_id, now,
+                    return self._durable_transition_result_locked(conn, prior)
+            row, _plan, successor_ceiling, replacement, reason = self._transition_precheck_locked(
+                conn, expected, successor_provider_id, failure, effective_jitter_ms, plan_hash, now,
             )
-            result = {"status": "TRANSITIONED", "taskId": expected.task_id,
-                      "attemptId": next_id, "epoch": next_epoch,
-                "providerId": successor_provider_id, "state": "active",
-                "dispatchAttempted": False, "reservedMicroUsd": successor_ceiling}
-            if idempotency_key is not None:
-                self._write_idempotency(conn, "transition", idempotency_key, result, expected)
-        return result
+            if reason != "eligible" or row is None or successor_ceiling is None or replacement is None:
+                return None
+            return self._apply_transition_locked(
+                conn, expected, row, successor_provider_id, failure,
+                successor_ceiling, replacement, now, effective_jitter_ms, idempotency_key,
+                fence_base_monotonic_ns,
+            )
 
     def recover_and_transition_once(self, expected_tuple: ActiveTuple | Mapping[str, Any] | tuple[Any, Any, Any],
-                                    recovery_id: str, jitter_ms: int = 0,
+                                    recovery_id: str, jitter_ms: int = 250,
                                     normalized_failure: Mapping[str, Any] | None = None,
                                     successor_provider_id: str | None = None) -> dict[str, Any]:
         expected = self._tuple(expected_tuple)
         key = self._idempotency_key(recovery_id)
+        jitter = self._direct_transition_jitter(
+            jitter_ms,
+            allow_legacy_zero=(
+                normalized_failure is None and successor_provider_id is None
+            ),
+        )
+        if jitter is None:
+            return {"status": "REJECTED", "reason": "jitter is outside 250-750ms bounds"}
+        effective_jitter_ms = jitter
         failure = self._failure(normalized_failure or {
             "failureClass": "retryable", "code": "pre_dispatch_timeout", "retryable": True,
         })
         if (failure["failureClass"] != "retryable" or
                 failure["code"] not in _RETRYABLE_CODES):
             return {"status": "REJECTED", "reason": "recovery failure is not allowlisted"}
-        if (isinstance(jitter_ms, bool) or not isinstance(jitter_ms, int) or
-                not 0 <= jitter_ms <= 750 or (jitter_ms and jitter_ms < 250)):
-            return {"status": "REJECTED", "reason": "jitter is outside 250-750ms bounds"}
         now = self._time_ms(self._now())
+        fence_base_monotonic_ns = self._monotonic_ns()
         with self._tx() as conn:
             prior = self._read_idempotency(conn, "recovery", key)
             if prior is not None:
-                return prior
+                return self._durable_transition_result_locked(conn, prior)
             row = self._active(conn, expected)
             if row is None:
                 return {"status": "REJECTED", "reason": "stale active tuple"}
             plan = self._checked_plan(row, conn)
-            if (row["dispatch_attempted"] or row["cancel_requested"] or
-                    now + jitter_ms >= row["deadline_ms"] or
+            if row["dispatch_attempted"] or now >= row["deadline_ms"]:
+                closed = conn.execute(
+                    "UPDATE attempts SET state='terminal',closed_at_ms=? WHERE task_id=? "
+                    "AND epoch=? AND attempt_id=? AND "
+                    f"{_NONTERMINAL_STATE_SQL} AND cancel_requested=0",
+                    (now, expected.task_id, expected.epoch, expected.attempt_id),
+                )
+                self._require_one_attempt_mutation(closed, "recovery uncertainty close")
+                task_update = conn.execute(
+                    "UPDATE tasks SET status='cancelled_uncertain' WHERE task_id=? AND status='running'",
+                    (expected.task_id,),
+                )
+                if task_update.rowcount != 1:
+                    raise CorruptLedger("recovery uncertainty task update mutated an unexpected number of rows")
+                control_update = conn.execute(
+                    "UPDATE active_control SET status='terminal' WHERE task_id=? AND attempt_id=? "
+                    "AND epoch=? AND status='active'",
+                    (expected.task_id, expected.attempt_id, expected.epoch),
+                )
+                if control_update.rowcount != 1:
+                    raise CorruptLedger("recovery uncertainty control update mutated an unexpected number of rows")
+                source = self._latest_cost_source(conn, expected)
+                self._outbox(conn, expected.task_id, expected.attempt_id, expected.epoch,
+                             "attempt_completed", {
+                                 "outcome": "cancelled_uncertain",
+                                 **self._cost_payload(row["actual_cost_micro_usd"], bool(row["actual_cost_known"]), source),
+                             }, now)
+                result = {"status": "TERMINAL", "tuple": expected.as_dict(),
+                          "outcome": "cancelled_uncertain"}
+                self._write_idempotency(conn, "recovery", key, result, expected)
+                return result
+            if (row["cancel_requested"] or now + effective_jitter_ms >= row["deadline_ms"] or
                     row["transitions_used"] >= row["transition_limit"]):
                 return {"status": "REJECTED", "reason": "recovery barrier rejected"}
             providers = plan["eligibleProviderIds"]
@@ -1372,7 +2415,7 @@ class AttemptLedger:
                 if current_index + 1 < len(providers) else None
             if (successor_provider_id is None or successor_provider_id not in providers or
                     providers.index(successor_provider_id) <= current_index or
-                    self._circuit_open(conn, row["provider_id"], now)):
+                    self._circuit_open(conn, row["provider_id"], now, providers)):
                 return {"status": "REJECTED", "reason": "successor or circuit barrier rejected"}
             successor_ceiling = plan["providerCeilings"][successor_provider_id]
             effective = row["actual_cost_micro_usd"] if row["actual_cost_known"] else row["reserved_micro_usd"]
@@ -1389,12 +2432,19 @@ class AttemptLedger:
             self._outbox(conn, expected.task_id, expected.attempt_id, expected.epoch,
                          "pre_dispatch_recovered", {}, now)
             next_id, next_epoch = uuid.uuid4().hex, expected.epoch + 1
+            successor_fence = now + effective_jitter_ms
+            if successor_fence > _SAFE_INTEGER_MAX:
+                raise LedgerError("submit fence exceeds the safe integer range")
+            self._validate_persisted_fence_values(
+                successor_fence, now, row["deadline_ms"],
+            )
             conn.execute(
                 "INSERT INTO attempts(task_id,epoch,attempt_id,provider_id,state,dispatch_attempted,"
-                "cancel_requested,reserved_micro_usd,actual_cost_known,actual_cost_micro_usd,created_at_ms) "
-                "VALUES(?,?,?,?,'active',0,0,?,0,NULL,?)",
+                "cancel_requested,reserved_micro_usd,actual_cost_known,actual_cost_micro_usd,"
+                "created_at_ms,provider_submit_not_before_ms) "
+                "VALUES(?,?,?,?,'active',0,0,?,0,NULL,?,?)",
                 (expected.task_id, next_epoch, next_id, successor_provider_id,
-                 successor_ceiling, now),
+                 successor_ceiling, now, successor_fence),
             )
             task_update = conn.execute(
                 "UPDATE tasks SET transitions_used=transitions_used+1,reserved_micro_usd=? "
@@ -1412,10 +2462,10 @@ class AttemptLedger:
             self._record_diagnostic_failure(conn, row["provider_id"], now)
             transition_id = self._outbox(
                 conn, expected.task_id, next_id, next_epoch, "transitioned",
-                {"predecessor": expected.as_dict(),
-                 "predecessorProviderId": row["provider_id"],
-                 "successorProviderId": successor_provider_id,
-                 "failure": failure}, now,
+                  {"predecessor": expected.as_dict(),
+                   "predecessorProviderId": row["provider_id"],
+                   "successorProviderId": successor_provider_id,
+                   "failure": failure}, now,
             )
             self._insert_witness(
                 conn, transition_id, expected, row["provider_id"],
@@ -1424,8 +2474,13 @@ class AttemptLedger:
             )
             result = {"status": "RECOVERED", "tuple": {
                 "taskId": expected.task_id, "attemptId": next_id, "epoch": next_epoch,
-            }, "providerId": successor_provider_id}
+            }, "providerId": successor_provider_id,
+                      "successorSubmitNotBeforeMs": successor_fence}
             self._write_idempotency(conn, "recovery", key, result, expected)
+            self._remember_fence(
+                ActiveTuple(expected.task_id, next_id, next_epoch), successor_fence,
+                now, row["deadline_ms"], base_monotonic_ns=fence_base_monotonic_ns,
+            )
             return result
 
     def authorize_tool_forward(self, expected_tuple: ActiveTuple | Mapping[str, Any] | tuple[Any, Any, Any],
@@ -1461,6 +2516,9 @@ class AttemptLedger:
             if (row is None or row["cancel_requested"] or now >= row["deadline_ms"] or
                     row["state"] not in _LEDGER_MUTABLE_STATES):
                 return {"status": "REJECTED", "reason": "stale, cancelled, expired, or inactive tuple"}
+            not_ready = self._fence_readiness(expected, row, now)
+            if not_ready is not None:
+                return not_ready
             conn.execute("INSERT INTO tool_fences VALUES(?,?,?,?,?,?)",
                          (expected.task_id, expected.attempt_id, expected.epoch,
                           call_id, digest, now))
@@ -1518,11 +2576,161 @@ class AttemptLedger:
         task = self.get_task(task_id)
         if task is None:
             return {"status": "UNKNOWN", "taskId": task_id}
-        return {"status": "OK", "taskId": task_id, "taskState": task["status"],
-                "active": self.get_active(task_id),
-                "attempts": self.list_attempts(task_id),
-                "planHash": task["plan_hash"], "deadlineMs": task["deadline_ms"]}
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT a.*,c.status AS control_status FROM attempts a "
+                "JOIN active_control c ON c.task_id=a.task_id AND c.attempt_id=a.attempt_id "
+                "AND c.epoch=a.epoch WHERE c.task_id=? AND c.status IN ('active','cancel_requested')",
+                (task_id,),
+            ).fetchone()
+            active = None
+            if row is not None:
+                active = self._snapshot(row) | {
+                    "controlStatus": row["control_status"],
+                    "immutablePlan": task["plan"],
+                    "taskDeadlineMs": task["deadline_ms"],
+                }
+        finally:
+            conn.close()
 
+        return {"status": "OK", "taskId": task_id, "taskState": task["status"],
+                "active": active,
+                "attempts": self.list_attempts(task_id),
+                "immutablePlan": task["plan"], "planHash": task["plan_hash"],
+                "deadlineMs": task["deadline_ms"],
+                "cancellationPending": task["status"] == "cancel_requested"}
+
+    def _note_successful_write(self) -> None:
+        with self._maintenance_lock:
+            self._writes_since_checkpoint += 1
+            if self._writes_since_checkpoint >= self._CHECKPOINT_WATERMARK:
+                self._checkpoint_pending = True
+
+    def _schedule_checkpoint(self, *, force: bool = False) -> None:
+        """Record maintenance demand without doing maintenance.
+
+        The old implementation used this compatibility hook to start a
+        timer.  Keeping the hook as a pure diagnostic setter avoids changing
+        older tests/callers while guaranteeing that serving code cannot issue
+        a checkpoint or start a worker.
+        """
+        with self._maintenance_lock:
+            if force or self._writes_since_checkpoint >= self._CHECKPOINT_WATERMARK:
+                self._checkpoint_pending = True
+
+    def drain_fence(self) -> dict[str, Any]:
+        """Return the process-local shutdown fence without waiting."""
+        with self._maintenance_lock:
+            return {
+                "activeRequests": self._serving_requests,
+                "activeTransactions": self._active_transactions,
+                "drained": self._serving_requests == 0 and self._active_transactions == 0,
+            }
+
+    def checkpoint_after_drain(self, *, drained: bool | None = None) -> dict[str, Any]:
+        """Run one non-blocking PASSIVE checkpoint after a verified drain.
+
+        This method is intentionally not called by request paths.  A caller
+        that cannot prove the fence receives a diagnostic skip and authority
+        rows remain untouched.
+        """
+        self._ensure_open()
+        with self._maintenance_lock:
+            fence = self.drain_fence()
+            verified = fence["drained"] if drained is None else bool(drained) and fence["drained"]
+            if not verified:
+                self._checkpoint_metrics["skipped_not_drained"] += 1
+                self._checkpoint_metrics["lastOutcome"] = "skipped_not_drained"
+                return {
+                    **self._checkpoint_metrics,
+                    "status": "SKIPPED_NOT_DRAINED",
+                    "maintenanceNeeded": self._checkpoint_pending or
+                    self._writes_since_checkpoint >= self._CHECKPOINT_WATERMARK,
+                    "writesSinceCheckpoint": self._writes_since_checkpoint,
+                    "pending": self._checkpoint_pending,
+                    **fence,
+                }
+            self._checkpoint_metrics["scheduled"] += 1
+        result: tuple[int, int, int] | None = None
+        try:
+            conn = self._connect()
+            try:
+                raw = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+                if raw is None or len(raw) != 3:
+                    raise LedgerError("PASSIVE checkpoint returned an invalid result")
+                result = (int(raw[0]), int(raw[1]), int(raw[2]))
+            finally:
+                close_started = self._monotonic_ns()
+                conn.close()
+                self._safe_record_timing(
+                    "maintenanceClose", self._elapsed_ms(close_started, self._monotonic_ns())
+                )
+            with self._maintenance_lock:
+                self._checkpoint_metrics["last"] = result
+                self._checkpoint_pending = False if result[0] == 0 else True
+                if result[0] == 0:
+                    self._checkpoint_metrics["completed"] += 1
+                    self._checkpoint_metrics["lastOutcome"] = "completed"
+                    self._writes_since_checkpoint = 0
+                    status = "COMPLETED"
+                else:
+                    self._checkpoint_metrics["busy"] += 1
+                    self._checkpoint_metrics["lastOutcome"] = "busy"
+                    status = "BUSY"
+                return {
+                    **self._checkpoint_metrics,
+                    "status": status,
+                    "maintenanceNeeded": self._checkpoint_pending or
+                    self._writes_since_checkpoint >= self._CHECKPOINT_WATERMARK,
+                    "writesSinceCheckpoint": self._writes_since_checkpoint,
+                    "pending": self._checkpoint_pending,
+                    **fence,
+                }
+        except (sqlite3.Error, LedgerError, ValueError, TypeError) as exc:
+            with self._maintenance_lock:
+                self._checkpoint_metrics["failed"] += 1
+                self._checkpoint_metrics["last"] = None
+                self._checkpoint_metrics["lastOutcome"] = "error"
+                return {
+                    **self._checkpoint_metrics,
+                    "status": "ERROR",
+                    "maintenanceNeeded": True,
+                    "writesSinceCheckpoint": self._writes_since_checkpoint,
+                    "pending": self._checkpoint_pending,
+                    **fence,
+                }
+
+    def maintenance_metrics(self) -> dict[str, Any]:
+        with self._maintenance_lock:
+            return {
+                **self._checkpoint_metrics,
+                "writesSinceCheckpoint": self._writes_since_checkpoint,
+                "pending": self._checkpoint_pending,
+                "maintenanceNeeded": self._checkpoint_pending or self._writes_since_checkpoint >= self._CHECKPOINT_WATERMARK,
+                "activeTransactions": self._active_transactions,
+                "servingRequests": self._serving_requests,
+                "inflight": False,
+                "timings": {name: dict(values) for name, values in self._timing_metrics.items()},
+            }
+
+    def wait_for_maintenance(self, timeout: float = 2.0) -> dict[str, Any]:
+        """Compatibility status assertion; never waits or starts work."""
+        del timeout
+        return self.maintenance_metrics()
+
+    def shutdown_for_tests(self, *, checkpoint: bool = True) -> dict[str, Any]:
+        """Idempotently drain/close the ledger for shutdown and tests."""
+        with self._maintenance_lock:
+            if self._closed:
+                return {"status": "CLOSED", **self._checkpoint_metrics}
+        result = self.checkpoint_after_drain() if checkpoint else self.maintenance_metrics()
+        with self._maintenance_lock:
+            self._closed = True
+        return result
+
+    close = shutdown_for_tests
+    @_logical_timing("page_outbox")
     def page_outbox(self, after_id: int = 0, limit: int = 100,
                     task_id: str | None = None) -> dict[str, Any]:
         if (isinstance(after_id, bool) or not isinstance(after_id, int) or after_id < 0 or
@@ -1556,6 +2764,8 @@ class AttemptLedger:
         kind = value["failureClass"]
         if (kind not in _FAILURES or not isinstance(value["code"], str) or
                 not _SAFE_TOKEN.fullmatch(value["code"]) or
+                (value["code"] != "deterministic_timeout" and
+                 value["code"] not in _SAFE_FAILURE_CODES.get(kind, ())) or
                 not isinstance(value["retryable"], bool) or
                 value["retryable"] != (kind == "retryable")):
             raise LedgerError("normalized failure is invalid")
@@ -1563,10 +2773,17 @@ class AttemptLedger:
 
     @classmethod
     def _transition_fact_payload(cls, payload: Mapping[str, Any]) -> tuple[ActiveTuple, str, str, dict[str, Any]]:
+        base_fields = {"predecessor", "predecessorProviderId",
+                       "successorProviderId", "failure"}
         if (not isinstance(payload, Mapping) or
-                set(payload) != {"predecessor", "predecessorProviderId",
-                                 "successorProviderId", "failure"}):
+                (set(payload) != base_fields and
+                 set(payload) != base_fields | {"successorSubmitNotBeforeMs"})):
             raise CorruptLedger("transition authority fact shape is invalid")
+        if "successorSubmitNotBeforeMs" in payload and (
+                isinstance(payload["successorSubmitNotBeforeMs"], bool) or
+                not isinstance(payload["successorSubmitNotBeforeMs"], int) or
+                not 0 <= payload["successorSubmitNotBeforeMs"] <= _SAFE_INTEGER_MAX):
+            raise CorruptLedger("transition authority submit fence is invalid")
         try:
             predecessor = cls._tuple(payload["predecessor"])
             predecessor_provider = cls._provider_id(
@@ -1642,17 +2859,35 @@ class AttemptLedger:
         return materialized_provider, fact["outbox_id"], materialized_created_at
 
     @classmethod
-    def _circuit_open(cls, conn: sqlite3.Connection, provider: str, now: int) -> bool:
+    def _circuit_open(cls, conn: sqlite3.Connection, provider: str, now: int,
+                      authority_providers: list[str] | tuple[str, ...] | None = None) -> bool:
         # A witness can be the first failure in a qualifying three-failure
         # window whose third failure happened within the current 60s open
         # interval. Query six minutes so that the authoritative scan does not
         # discard that first witness merely because it is older than now-5m.
         cutoff = now - 360_000
+        # Steady-state authorization is bounded to the immutable provider chain
+        # and the six-minute witness window. Query each chain member through the
+        # approved provider/window prefix index: unrelated providers/history can
+        # never expand this decision, while one-sided corruption in another
+        # eligible chain member still fails closed before a transition.
+        provider_scope = list(authority_providers) if authority_providers is not None else [provider]
+        if (not provider_scope or len(provider_scope) > 64 or
+                provider not in provider_scope or len(set(provider_scope)) != len(provider_scope)):
+            raise CorruptLedger("circuit provider scope is invalid")
+        for scoped_provider in provider_scope:
+            cls._provider_id(scoped_provider, CorruptLedger)
+        # Keep the provider scope bounded by the immutable plan validation
+        # above, but issue one indexed lookup instead of one round trip per
+        # chain member.  Every returned witness still goes through the full
+        # authoritative validation below; this changes query fan-out only.
+        placeholders = ",".join("?" for _ in provider_scope)
         candidates = conn.execute(
             "SELECT * FROM circuit_transition_authority "
-            "WHERE witness_created_at_ms>=? "
+            f"WHERE predecessor_provider_id IN ({placeholders}) "
+            "AND witness_created_at_ms>=? "
             "ORDER BY witness_created_at_ms,transition_outbox_id",
-            (cutoff,),
+            [*provider_scope, cutoff],
         ).fetchall()
         seen_successors: set[tuple[str, str, int]] = set()
         seen_predecessors: set[tuple[str, str, int]] = set()
@@ -1754,12 +2989,173 @@ class AttemptLedger:
         return {"taskId": expected.task_id, "attemptId": expected.attempt_id,
                 "epoch": expected.epoch, "eventKind": event_kind}
 
+    @staticmethod
+    def _latest_cost_source(conn: sqlite3.Connection, expected: ActiveTuple) -> str | None:
+        row = conn.execute(
+            "SELECT payload_json FROM outbox WHERE task_id=? AND attempt_id=? AND epoch=? "
+            "AND kind='cost_recorded' ORDER BY outbox_id DESC LIMIT 1",
+            (expected.task_id, expected.attempt_id, expected.epoch),
+        ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row["payload_json"])
+        source = payload.get("source") if isinstance(payload, Mapping) else None
+        return source if isinstance(source, str) and source in _COST_SOURCES else None
+
+    @staticmethod
+    def _cost_payload(actual: int | None, known: bool, source: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"actualCostMicroUsd": actual, "known": known}
+        if source is not None:
+            if not isinstance(source, str) or source not in _COST_SOURCES:
+                raise LedgerError("cost source is invalid")
+            if not known and source != "unavailable":
+                raise LedgerError("unknown cost source must be unavailable")
+            payload["source"] = source
+        return payload
+
+    @classmethod
+    def _validated_cost_evidence(cls, evidence: CostEvidence | None) -> CostEvidence | None:
+        if evidence is None:
+            return None
+        if not isinstance(evidence, CostEvidence):
+            raise LedgerError("cost evidence has an invalid internal type")
+        if evidence.source not in _COST_SOURCES:
+            raise LedgerError("cost evidence source is invalid")
+        if evidence.actual_cost_micro_usd is not None:
+            cls._micro(evidence.actual_cost_micro_usd, LedgerError)
+            if evidence.source == "unavailable":
+                raise LedgerError("known cost evidence cannot be unavailable")
+        elif evidence.source != "unavailable":
+            raise LedgerError("unknown cost evidence must be unavailable")
+        return evidence
+
+    @classmethod
+    def _apply_cost_evidence_locked(
+            cls, conn: sqlite3.Connection, expected: ActiveTuple,
+            row: sqlite3.Row, evidence: CostEvidence, now: int,
+            *, allow_cancel_requested: bool = False,
+    ) -> sqlite3.Row:
+        """Reconcile one internal cost fact inside the fused transaction."""
+        evidence = cls._validated_cost_evidence(evidence)  # type: ignore[assignment]
+        assert evidence is not None
+        facts = conn.execute(
+            "SELECT payload_json FROM outbox WHERE task_id=? AND attempt_id=? "
+            "AND epoch=? AND kind='cost_recorded' ORDER BY outbox_id",
+            (expected.task_id, expected.attempt_id, expected.epoch),
+        ).fetchall()
+        parsed: list[dict[str, Any]] = []
+        for fact in facts:
+            payload = cls._strict_fact_payload(fact["payload_json"])
+            if set(payload) not in ({"actualCostMicroUsd", "known"},
+                                    {"actualCostMicroUsd", "known", "source"}):
+                raise CorruptLedger("cost fact shape is invalid")
+            known = payload["known"]
+            actual = payload["actualCostMicroUsd"]
+            if not isinstance(known, bool):
+                raise CorruptLedger("cost fact known flag is invalid")
+            if known:
+                cls._micro(actual, CorruptLedger)
+            elif actual is not None:
+                raise CorruptLedger("unknown cost fact contains an actual cost")
+            if "source" in payload and payload["source"] not in _COST_SOURCES:
+                raise CorruptLedger("cost fact source is invalid")
+            if "source" in payload and not known and payload["source"] != "unavailable":
+                raise CorruptLedger("unknown cost fact source is invalid")
+            parsed.append(payload)
+
+        known_facts = [fact for fact in parsed if fact["known"]]
+        if known_facts:
+            amounts = {fact["actualCostMicroUsd"] for fact in known_facts}
+            if len(amounts) != 1:
+                raise CorruptLedger("multiple known cost facts disagree")
+            if evidence.known and next(iter(amounts)) != evidence.actual_cost_micro_usd:
+                raise CorruptLedger("fused cost evidence disagrees with an authoritative cost")
+        current_known = bool(row["actual_cost_known"])
+        current_actual = row["actual_cost_micro_usd"] if current_known else None
+        if current_known and evidence.known and current_actual != evidence.actual_cost_micro_usd:
+            raise CorruptLedger("fused cost evidence disagrees with the attempt cost")
+
+        final_known = current_known or evidence.known
+        final_actual = current_actual if current_known else evidence.actual_cost_micro_usd
+        final_reserved = final_actual if final_known else row["reserved_micro_usd"]
+        replacement = row["task_reserved"] - row["reserved_micro_usd"] + final_reserved
+        cls._micro(replacement, CorruptLedger)
+
+        compatible = False
+        for fact in parsed:
+            if fact["known"] == evidence.known and (
+                    fact["actualCostMicroUsd"] == evidence.actual_cost_micro_usd):
+                compatible = True
+                break
+        cancel_clause = "cancel_requested IN (0,1)" if allow_cancel_requested else "cancel_requested=0"
+        task_clause = "status IN ('running','cancel_requested')" if allow_cancel_requested else "status='running'"
+        if not compatible:
+            updated = conn.execute(
+                "UPDATE attempts SET actual_cost_known=?,actual_cost_micro_usd=?,"
+                "reserved_micro_usd=? WHERE task_id=? AND epoch=? AND attempt_id=? AND "
+                f"{_NONTERMINAL_STATE_SQL} AND {cancel_clause}",
+                (final_known, final_actual, final_reserved,
+                 expected.task_id, expected.epoch, expected.attempt_id),
+            )
+            cls._require_one_attempt_mutation(updated, "fused cost reconciliation")
+            task_update = conn.execute(
+                f"UPDATE tasks SET reserved_micro_usd=? WHERE task_id=? AND {task_clause}",
+                (replacement, expected.task_id),
+            )
+            if task_update.rowcount != 1:
+                raise CorruptLedger("fused cost task update mutated an unexpected number of rows")
+            cls._outbox(
+                conn, expected.task_id, expected.attempt_id, expected.epoch,
+                "cost_recorded", cls._cost_payload(
+                    evidence.actual_cost_micro_usd, evidence.known, evidence.source,
+                ), now,
+            )
+        elif final_known != current_known or final_actual != current_actual:
+            # A compatible unknown fact may be upgraded by a later known
+            # observation, but it must still emit only the one new fact that
+            # carries the improved authoritative amount.
+            updated = conn.execute(
+                "UPDATE attempts SET actual_cost_known=?,actual_cost_micro_usd=?,"
+                "reserved_micro_usd=? WHERE task_id=? AND epoch=? AND attempt_id=? AND "
+                f"{_NONTERMINAL_STATE_SQL} AND {cancel_clause}",
+                (final_known, final_actual, final_reserved,
+                 expected.task_id, expected.epoch, expected.attempt_id),
+            )
+            cls._require_one_attempt_mutation(updated, "fused cost upgrade")
+            task_update = conn.execute(
+                f"UPDATE tasks SET reserved_micro_usd=? WHERE task_id=? AND {task_clause}",
+                (replacement, expected.task_id),
+            )
+            if task_update.rowcount != 1:
+                raise CorruptLedger("fused cost upgrade mutated an unexpected number of rows")
+            cls._outbox(
+                conn, expected.task_id, expected.attempt_id, expected.epoch,
+                "cost_recorded", cls._cost_payload(
+                    evidence.actual_cost_micro_usd, evidence.known, evidence.source,
+                ), now,
+            )
+        refreshed = cls._active(conn, expected)
+        if refreshed is None:
+            if allow_cancel_requested:
+                refreshed = conn.execute(
+                    "SELECT a.*,t.deadline_ms,t.reserved_micro_usd AS task_reserved "
+                    "FROM attempts a JOIN tasks t ON t.task_id=a.task_id "
+                    "WHERE a.task_id=? AND a.attempt_id=? AND a.epoch=?",
+                    (expected.task_id, expected.attempt_id, expected.epoch),
+                ).fetchone()
+            if refreshed is None:
+                raise CorruptLedger("fused cost reconciliation lost the active tuple")
+        return refreshed
+
     def mark_dispatch_attempted(self, expected_tuple: ActiveTuple | Mapping[str, Any] | tuple[Any, Any, Any]) -> dict[str, Any] | None:
         expected, now = self._tuple(expected_tuple), self._time_ms(self._now())
         with self._tx() as conn:
             row = self._completion_row(conn, expected)
             if row is None or now >= row["deadline_ms"] or row["cancel_requested"] or row["dispatch_attempted"]:
                 return None
+            not_ready = self._fence_readiness(expected, row, now)
+            if not_ready is not None:
+                return not_ready
             marked = conn.execute("UPDATE attempts SET dispatch_attempted=1 WHERE task_id=? AND epoch=? AND attempt_id=?"
                                   f" AND {_NONTERMINAL_STATE_SQL} AND cancel_requested=0 AND dispatch_attempted=0",
                                   (expected.task_id, expected.epoch, expected.attempt_id))
@@ -1769,10 +3165,13 @@ class AttemptLedger:
         return expected.as_dict() | {"dispatchAttempted": True}
 
     def record_cost_if_active(self, expected_tuple: ActiveTuple | Mapping[str, Any] | tuple[Any, Any, Any],
-                              actual_cost_micro_usd: int | None) -> dict[str, Any] | None:
+                              actual_cost_micro_usd: int | None,
+                              cost_source: str | None = None) -> dict[str, Any] | None:
         expected = self._tuple(expected_tuple)
         if actual_cost_micro_usd is not None:
             self._micro(actual_cost_micro_usd)
+        if cost_source is not None and (not isinstance(cost_source, str) or cost_source not in _COST_SOURCES):
+            raise LedgerError("cost source is invalid")
         now = self._time_ms(self._now())
         with self._tx() as conn:
             row = self._completion_row(conn, expected)
@@ -1794,11 +3193,160 @@ class AttemptLedger:
             if task_update.rowcount != 1:
                 raise CorruptLedger(f"cost task update mutated {task_update.rowcount} rows")
             self._outbox(conn, expected.task_id, expected.attempt_id, expected.epoch,
-                         "cost_recorded", {"actualCostMicroUsd": actual_cost_micro_usd,
-                                           "known": actual_cost_micro_usd is not None}, now)
+                         "cost_recorded", self._cost_payload(
+                             actual_cost_micro_usd, actual_cost_micro_usd is not None, cost_source,
+                         ), now)
         return expected.as_dict() | {"actualCostKnown": actual_cost_micro_usd is not None,
                                      "actualCostMicroUsd": actual_cost_micro_usd,
-                                     "reservedMicroUsd": new}
+                                     "reservedMicroUsd": new,
+                                     **({"costSource": cost_source} if cost_source is not None else {})}
+
+    def complete_terminal_from_poll_if_active(
+            self, expected_tuple: ActiveTuple | Mapping[str, Any] | tuple[Any, Any, Any],
+            outcome: str,
+            *,
+            actual_cost_micro_usd: int | None = None,
+            cost_source: str | None = None,
+            normalized_failure: Mapping[str, Any] | None = None,
+            failure_source: str | None = None) -> dict[str, Any] | None:
+        """Commit a terminal poll observation at one authority boundary.
+
+        The poll path is the first place where the engine has both the final
+        internal observation and the authoritative active tuple.  Keep cost,
+        failure observation, terminal attempt/control/task state, and the
+        completion outbox fact in one FULL transaction.  A retryable failure
+        is intentionally rejected here: it must remain on the existing
+        record-then-transition path.
+        """
+        expected = self._tuple(expected_tuple)
+        if outcome not in {"completed", "cancelled", "cancelled_uncertain", "failed", "terminal"}:
+            raise LedgerError("invalid terminal outcome")
+        if actual_cost_micro_usd is not None:
+            self._micro(actual_cost_micro_usd)
+        if cost_source is not None and (not isinstance(cost_source, str) or cost_source not in _COST_SOURCES):
+            raise LedgerError("cost source is invalid")
+        failure = self._failure(normalized_failure) if normalized_failure is not None else None
+        if failure is not None and failure["retryable"]:
+            raise LedgerError("retryable poll observations cannot be terminally coalesced")
+        if failure_source is not None and failure_source not in _FAILURE_SOURCES:
+            raise LedgerError("failure source is invalid")
+        if (failure is None) != (failure_source is None):
+            raise LedgerError("failure and source must be recorded together")
+        now = self._time_ms(self._now())
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT a.*, t.status AS task_status, t.deadline_ms, "
+                "t.reserved_micro_usd AS task_reserved, c.status AS control_status "
+                "FROM attempts a JOIN tasks t ON t.task_id=a.task_id "
+                "JOIN active_control c ON c.task_id=a.task_id "
+                "AND c.attempt_id=a.attempt_id AND c.epoch=a.epoch "
+                "WHERE a.task_id=? AND a.attempt_id=? AND a.epoch=?",
+                (expected.task_id, expected.attempt_id, expected.epoch),
+            ).fetchone()
+            if row is None:
+                return None
+
+            # Repeated polls are reads of the already committed terminal
+            # fact.  Returning the same marker is safe because the exact
+            # attempt_completed fact is the proof that the prior transaction
+            # committed; no new RPC is needed downstream.
+            if row["state"] == "terminal" and row["control_status"] == "terminal":
+                completion = conn.execute(
+                    "SELECT payload_json FROM outbox WHERE task_id=? AND attempt_id=? "
+                    "AND epoch=? AND kind='attempt_completed' ORDER BY outbox_id DESC LIMIT 1",
+                    (expected.task_id, expected.attempt_id, expected.epoch),
+                ).fetchone()
+                if completion is None:
+                    raise CorruptLedger("terminal attempt has no completion fact")
+                payload = self._strict_fact_payload(completion["payload_json"])
+                if payload.get("outcome") != outcome:
+                    return None
+                return expected.as_dict() | {
+                    "state": "terminal", "outcome": outcome,
+                    "terminalCommitted": True, "terminalOutcome": outcome,
+                }
+            if row["control_status"] not in {"active", "cancel_requested"} or row["state"] not in _LEDGER_MUTABLE_STATES:
+                return None
+
+            old = row["reserved_micro_usd"]
+            existing_cost = conn.execute(
+                "SELECT 1 FROM outbox WHERE task_id=? AND attempt_id=? AND epoch=? "
+                "AND kind='cost_recorded' LIMIT 1",
+                (expected.task_id, expected.attempt_id, expected.epoch),
+            ).fetchone() is not None
+            current_known = bool(row["actual_cost_known"])
+            current_actual = row["actual_cost_micro_usd"] if current_known else None
+            if current_known and actual_cost_micro_usd is not None and current_actual != actual_cost_micro_usd:
+                raise CorruptLedger("poll cost disagrees with an existing authoritative cost")
+            final_known = current_known or actual_cost_micro_usd is not None
+            final_actual = actual_cost_micro_usd if actual_cost_micro_usd is not None else current_actual
+            new_reserved = final_actual if final_known else old
+            replacement = row["task_reserved"] - old + new_reserved
+            self._micro(replacement, CorruptLedger)
+
+            if not existing_cost:
+                cost_fact_source = cost_source
+                if not final_known and cost_fact_source is None:
+                    cost_fact_source = "unavailable"
+                if final_known and cost_fact_source is None:
+                    cost_fact_source = self._latest_cost_source(conn, expected)
+                updated = conn.execute(
+                    "UPDATE attempts SET actual_cost_known=?,actual_cost_micro_usd=?, "
+                    "reserved_micro_usd=? WHERE task_id=? AND epoch=? AND attempt_id=? AND "
+                    f"{_NONTERMINAL_STATE_SQL} AND cancel_requested IN (0,1)",
+                    (final_known, final_actual, new_reserved,
+                     expected.task_id, expected.epoch, expected.attempt_id),
+                )
+                self._require_one_attempt_mutation(updated, "poll cost coalescing")
+                task_update = conn.execute(
+                    "UPDATE tasks SET reserved_micro_usd=? WHERE task_id=?",
+                    (replacement, expected.task_id),
+                )
+                if task_update.rowcount != 1:
+                    raise CorruptLedger("poll cost task update mutated an unexpected number of rows")
+                self._outbox(
+                    conn, expected.task_id, expected.attempt_id, expected.epoch,
+                    "cost_recorded", self._cost_payload(final_actual, final_known, cost_fact_source), now,
+                )
+
+            if failure is not None:
+                self._outbox(conn, expected.task_id, expected.attempt_id, expected.epoch,
+                             "provider_event", {
+                                 "eventKind": "observation", "payload": failure,
+                                 "source": failure_source,
+                             }, now)
+            closed = conn.execute(
+                "UPDATE attempts SET state='terminal',closed_at_ms=?,failure_json=COALESCE(?,failure_json) "
+                "WHERE task_id=? AND epoch=? AND attempt_id=? AND state IN (" +
+                ",".join("?" for _ in _LEDGER_MUTABLE_STATES) + ",?)",
+                (now, self._json(failure) if failure is not None else None,
+                 expected.task_id, expected.epoch, expected.attempt_id,
+                 *sorted(_LEDGER_MUTABLE_STATES), "cancel_requested"),
+            )
+            self._require_one_attempt_mutation(closed, "poll terminal close")
+            task_update = conn.execute(
+                "UPDATE tasks SET status=? WHERE task_id=? AND status IN ('running','cancel_requested')",
+                (outcome, expected.task_id),
+            )
+            if task_update.rowcount != 1:
+                raise CorruptLedger("poll terminal task update mutated an unexpected number of rows")
+            control_update = conn.execute(
+                "UPDATE active_control SET status='terminal' WHERE task_id=? AND attempt_id=? "
+                "AND epoch=? AND status IN ('active','cancel_requested')",
+                (expected.task_id, expected.attempt_id, expected.epoch),
+            )
+            if control_update.rowcount != 1:
+                raise CorruptLedger("poll terminal control update mutated an unexpected number of rows")
+            completion_source = cost_source or self._latest_cost_source(conn, expected)
+            self._outbox(conn, expected.task_id, expected.attempt_id, expected.epoch,
+                         "attempt_completed", {
+                             "outcome": outcome,
+                             **self._cost_payload(final_actual, final_known, completion_source),
+                         }, now)
+        return expected.as_dict() | {
+            "state": "terminal", "outcome": outcome,
+            "terminalCommitted": True, "terminalOutcome": outcome,
+        }
 
     def mutate_state_if_active(self, expected_tuple: ActiveTuple | Mapping[str, Any] | tuple[Any, Any, Any],
                                state: str, payload: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
@@ -1839,12 +3387,15 @@ class AttemptLedger:
         return expected.as_dict() | {"state": "cancel_requested"}
 
     def complete_if_active(self, expected_tuple: ActiveTuple | Mapping[str, Any] | tuple[Any, Any, Any],
-                           outcome: str = "completed", actual_cost_micro_usd: int | None = None) -> dict[str, Any] | None:
+                           outcome: str = "completed", actual_cost_micro_usd: int | None = None,
+                           cost_source: str | None = None) -> dict[str, Any] | None:
         expected = self._tuple(expected_tuple)
         if outcome not in {"completed", "cancelled", "cancelled_uncertain", "failed", "terminal"}:
             raise LedgerError("invalid terminal outcome")
         if actual_cost_micro_usd is not None:
             self._micro(actual_cost_micro_usd)
+        if cost_source is not None and (not isinstance(cost_source, str) or cost_source not in _COST_SOURCES):
+            raise LedgerError("cost source is invalid")
         now = self._time_ms(self._now())
         with self._tx() as conn:
             row = self._completion_row(conn, expected)
@@ -1875,14 +3426,19 @@ class AttemptLedger:
                                           (expected.task_id, expected.attempt_id, expected.epoch))
             if control_update.rowcount != 1:
                 raise CorruptLedger(f"completion control update mutated {control_update.rowcount} rows")
+            source = cost_source if cost_source is not None else self._latest_cost_source(conn, expected)
             self._outbox(conn, expected.task_id, expected.attempt_id, expected.epoch,
-                         "attempt_completed", {"outcome": outcome,
-                                               "actualCostMicroUsd": final_actual,
-                                               "known": final_known}, now)
+                         "attempt_completed", {
+                             "outcome": outcome, **self._cost_payload(final_actual, final_known, source),
+                         }, now)
         return expected.as_dict() | {"state": "terminal", "outcome": outcome}
 
     def close_terminal_if_active(self, expected_tuple: ActiveTuple | Mapping[str, Any] | tuple[Any, Any, Any],
-                                 outcome: str = "failed") -> dict[str, Any] | None:
+                                  outcome: str = "failed", cost_source: str | None = None,
+                                  normalized_failure: Mapping[str, Any] | None = None,
+                                  failure_source: str | None = None,
+                                  idempotency_key: str | None = None,
+                                  *, cost_evidence: CostEvidence | None = None) -> dict[str, Any] | None:
         """Close an internal terminal observation, including persist-first cancel.
 
         This is separate from complete_if_active because request_cancel changes
@@ -1893,10 +3449,24 @@ class AttemptLedger:
         expected = self._tuple(expected_tuple)
         if outcome not in {"completed", "cancelled", "cancelled_uncertain", "failed", "terminal"}:
             raise LedgerError("invalid terminal outcome")
+        if cost_source is not None and (not isinstance(cost_source, str) or cost_source not in _COST_SOURCES):
+            raise LedgerError("cost source is invalid")
+        failure = self._failure(normalized_failure) if normalized_failure is not None else None
+        if failure_source is not None and failure_source not in _FAILURE_SOURCES:
+            raise LedgerError("failure source is invalid")
+        if (failure is None) != (failure_source is None):
+            raise LedgerError("failure and source must be recorded together")
+        cost_evidence = self._validated_cost_evidence(cost_evidence)
+        key = self._idempotency_key(idempotency_key) if idempotency_key is not None else None
         now = self._time_ms(self._now())
         with self._tx() as conn:
+            if key is not None:
+                prior = self._read_idempotency(conn, "finalize", key)
+                if prior is not None:
+                    return {**prior, "idempotentReplay": True}
             row = conn.execute(
-                "SELECT a.*, t.status AS task_status, c.status AS control_status "
+                "SELECT a.*, t.status AS task_status, t.deadline_ms, "
+                "t.reserved_micro_usd AS task_reserved, c.status AS control_status "
                 "FROM attempts a JOIN tasks t ON t.task_id=a.task_id "
                 "JOIN active_control c ON c.task_id=a.task_id AND c.attempt_id=a.attempt_id "
                 "AND c.epoch=a.epoch WHERE a.task_id=? AND a.attempt_id=? AND a.epoch=?",
@@ -1906,12 +3476,24 @@ class AttemptLedger:
                 return None
             if row["state"] in {"terminal", "closed", "orphaned"}:
                 return None
+            if cost_evidence is not None:
+                row = self._apply_cost_evidence_locked(
+                    conn, expected, row, cost_evidence, now,
+                    allow_cancel_requested=True,
+                )
+            if failure is not None:
+                self._outbox(conn, expected.task_id, expected.attempt_id, expected.epoch,
+                             "provider_event", {
+                                 "eventKind": "observation", "payload": failure,
+                                 "source": failure_source,
+                             }, now)
             closed = conn.execute(
-                "UPDATE attempts SET state='terminal',closed_at_ms=? WHERE task_id=? "
+                "UPDATE attempts SET state='terminal',closed_at_ms=?,failure_json=COALESCE(?,failure_json) WHERE task_id=? "
                 "AND epoch=? AND attempt_id=? AND state IN (" +
                 ",".join("?" for _ in _LEDGER_MUTABLE_STATES) +
                 ",?)",
-                (now, expected.task_id, expected.epoch, expected.attempt_id,
+                (now, self._json(failure) if failure is not None else None,
+                 expected.task_id, expected.epoch, expected.attempt_id,
                  *sorted(_LEDGER_MUTABLE_STATES), "cancel_requested"),
             )
             self._require_one_attempt_mutation(closed, "terminal observation close")
@@ -1928,13 +3510,26 @@ class AttemptLedger:
             )
             if control_update.rowcount != 1:
                 raise CorruptLedger(f"terminal control update mutated {control_update.rowcount} rows")
+            source = cost_source if cost_source is not None else self._latest_cost_source(conn, expected)
             self._outbox(conn, expected.task_id, expected.attempt_id, expected.epoch,
-                         "attempt_completed", {"outcome": outcome,
-                                                "actualCostMicroUsd": row["actual_cost_micro_usd"],
-                                                "known": bool(row["actual_cost_known"])}, now)
-        return expected.as_dict() | {"state": "terminal", "outcome": outcome}
+                         "attempt_completed", {
+                             "outcome": outcome,
+                             **self._cost_payload(row["actual_cost_micro_usd"], bool(row["actual_cost_known"]), source),
+                         }, now)
+            result = expected.as_dict() | {"state": "terminal", "outcome": outcome}
+            if failure is not None:
+                result |= {"normalizedFailure": failure, "failureSource": failure_source}
+            if key is not None:
+                self._write_idempotency(conn, "finalize", key, result, expected)
+        return result
 
+    @_logical_timing("poll_observations")
     def validate_poll_tuple(self, expected_tuple: ActiveTuple | Mapping[str, Any] | tuple[Any, Any, Any]) -> bool:
+        # The production MCP poll handler uses this exact tuple-validation
+        # boundary rather than the lower-level poll_observations helper.  Keep
+        # the fixture-only timing label aligned with the live call path so
+        # diagnostics can correlate all five MCP operations without changing
+        # the authority or poll result.
         """Validate the exact active tuple, allowing repeated reads of its terminal fact."""
         expected = self._tuple(expected_tuple)
         conn = self._connect()
@@ -1960,6 +3555,15 @@ class AttemptLedger:
             row = self._completion_row(conn, expected)
             if row is None or row["cancel_requested"]:
                 return None
+            fence = self._validate_persisted_fence_values(
+                row["provider_submit_not_before_ms"], row["created_at_ms"],
+                row["deadline_ms"],
+            )
+            if fence != 0 and not row["dispatch_attempted"] and now < row["deadline_ms"]:
+                return expected.as_dict() | {
+                    "state": "pending_submit",
+                    "providerSubmitNotBeforeMs": fence,
+                }
             if row["dispatch_attempted"] or now >= row["deadline_ms"]:
                 fenced = conn.execute("UPDATE attempts SET state='terminal',closed_at_ms=? WHERE task_id=? AND epoch=? AND attempt_id=? AND "
                                       f"{_NONTERMINAL_STATE_SQL} AND cancel_requested=0",
@@ -1973,10 +3577,10 @@ class AttemptLedger:
                                               (expected.task_id, expected.attempt_id, expected.epoch))
                 if control_update.rowcount != 1:
                     raise CorruptLedger(f"recovery control update mutated {control_update.rowcount} rows")
+                source = self._latest_cost_source(conn, expected)
                 self._outbox(conn, expected.task_id, expected.attempt_id, expected.epoch,
                              "attempt_completed", {"outcome": "cancelled_uncertain",
-                                                   "actualCostMicroUsd": row["actual_cost_micro_usd"],
-                                                   "known": bool(row["actual_cost_known"])}, now)
+                                                   **self._cost_payload(row["actual_cost_micro_usd"], bool(row["actual_cost_known"]), source)}, now)
                 return expected.as_dict() | {"state": "terminal", "outcome": "cancelled_uncertain"}
             orphaned = conn.execute("UPDATE attempts SET state='orphaned',closed_at_ms=? WHERE task_id=? AND epoch=? AND attempt_id=? AND "
                                     f"{_NONTERMINAL_STATE_SQL} AND cancel_requested=0 AND dispatch_attempted=0",
