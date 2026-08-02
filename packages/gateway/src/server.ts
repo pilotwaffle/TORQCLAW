@@ -14,6 +14,7 @@ import { decideApproval, handleListApprovals } from './approvals.js';
 import { makeEmitter, sessionBus, persistAndPublish } from './events.js';
 import { router } from '@torqclaw/router';
 import { connectBridge, approveSkill, getSkillDraft, cancelHermesTask } from '@torqclaw/bridge';
+import { assertResolvedProfile, constrainTier } from './profileResolver.js';
 import { setCancelCheck } from '@torqclaw/inference';
 import { cancellations } from './cancellations.js';
 import { authorize, checkResumeRole, type Role } from './authz.js';
@@ -135,13 +136,20 @@ app.get('/ws', { websocket: true }, (socket) => {
         const emit = makeEmitter(sid, null, null);
         emit('USER_PROMPT', cmd.data.prompt); // feeds getContextWindow Tier 1
 
-        const request = await enrichCommand(cmd.data, sid, 'torq-console');
-        GatewayRequestSchema.parse(request); // throws = our bug; fail loud
+         const request = await enrichCommand(cmd.data, sid, 'torq-console');
+         GatewayRequestSchema.parse(request); // throws = our bug; fail loud
+         assertResolvedProfile(request);
 
         const reqEmit = makeEmitter(sid, request.id, null);
         reqEmit('ROUTING', `Classified as ${request.payload.taskType}`, request.enrichment);
 
-        const diag = router.evaluateRequest(request);
+         const baseDiag = constrainTier(router.evaluateRequest(request), request.effectiveProfile!);
+         const diag = {
+           ...baseDiag,
+           profile: request.effectiveProfile?.profileId,
+           profileVersion: request.effectiveProfile?.profileVersion,
+           profileHash: request.effectiveProfile?.policyHash,
+         };
         makeEmitter(sid, request.id, diag.tier)('TIER_SELECTED', diag.reason, diag);
 
         dispatch(request, diag); // returns immediately

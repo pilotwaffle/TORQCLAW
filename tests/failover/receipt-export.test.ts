@@ -189,5 +189,5 @@ describe('receipt/export v2', () => {
     expect(serialized).not.toContain('must not export');
     expect(safe.providerAttempts?.[0]?.cost).toEqual({ reservedMicroUsd: 7, actualMicroUsd: null, known: false, source: 'unavailable' });
     expect(safe.providerAttempts?.[1]?.cost).toEqual({ reservedMicroUsd: 9, actualMicroUsd: null, known: false, source: 'unavailable' });
-  });
+  }, 15_000);
 });

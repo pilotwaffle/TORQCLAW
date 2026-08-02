@@ -213,13 +213,6 @@ class AttemptLedger:
         self._fence_process_id = os.getpid()
         self._fence_guards: dict[tuple[str, str, int], int] = {}
         self._maintenance_lock = threading.RLock()
-        # SQLite serializes BEGIN IMMEDIATE writers, but allowing several
-        # request threads to reach that boundary independently turns normal
-        # contention into unbounded busy-timeout tails.  Serialize the
-        # authority transaction per ledger instance; this preserves the
-        # ledger's FULL-sync durability while keeping contention in-process
-        # and observable instead of sleeping inside SQLite.
-        self._transaction_serialization_lock = threading.RLock()
         self._writes_since_checkpoint = 0
         self._checkpoint_pending = False
         self._active_transactions = 0
@@ -539,8 +532,6 @@ class AttemptLedger:
     @contextmanager
     def _tx(self, *, operation: str | None = None) -> Iterator[sqlite3.Connection]:
         self._ensure_open()
-        self._transaction_serialization_lock.acquire()
-        transaction_lock_acquired = True
         labelled = operation == "fused_retryable_transition"
         boundary = {
             "openMs": None,
@@ -569,8 +560,6 @@ class AttemptLedger:
                     operation, outcome, boundary,
                     maintenance_before or {}, self._maintenance_snapshot(),
                 )
-            if transaction_lock_acquired:
-                self._transaction_serialization_lock.release()
             raise
         with self._maintenance_lock:
             self._active_transactions += 1
@@ -646,8 +635,6 @@ class AttemptLedger:
                     operation, str(outcome), boundary,
                     maintenance_before or {}, maintenance_after,
                 )
-            if transaction_lock_acquired:
-                self._transaction_serialization_lock.release()
             if close_error is not None:
                 raise close_error
 

@@ -88,7 +88,12 @@ def test_fail_on_unknown_task_id_is_noop_no_raise_no_row():
     assert task_store.state_of("no-such-task-2") is None
 
 
-def test_persistence_across_reimport(fresh_module):
+def test_persistence_across_reimport(fresh_module, monkeypatch):
+    # Earlier engine tests may intentionally re-import task_store under a
+    # temporary data directory. Bind the re-import to the same directory as
+    # the module under test so this assertion tests persistence, not env-order
+    # leakage from the shared suite.
+    monkeypatch.setenv("TORQCLAW_DATA_DIR", str(task_store.DATA_DIR))
     task_id = task_store.create({"payload": {"prompt": "persisted"}})
     task_store.emit(task_id, "SYSTEM", "before reimport")
 

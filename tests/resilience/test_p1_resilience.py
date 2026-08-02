@@ -493,9 +493,9 @@ def run_case(case_id: str, tmp_path: Path, monkeypatch) -> None:
         }
         assert all(case["terminalState"] is not None and case["reconciled"] for case in block["cases"])
         assert all(case["explicitProviderWaitMs"] == 0 for case in block["cases"])
-        if report["promotion"]["p95Ms"] > 500:
+        if report["promotion"]["thresholdP95Ms"] > 500:
             assert bench.returncode == 1
-            assert "repetition_1_p95_over_threshold" in report["fatalReasons"]
+            assert "repetition_1_threshold_p95_over_threshold" in report["fatalReasons"]
             assert bench_report_path.exists()
         else:
             assert bench.returncode == 0

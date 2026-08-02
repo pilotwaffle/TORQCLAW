@@ -1,6 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import type { EffectiveProfile } from '@torqclaw/contracts';
 
 import { type PathScope, checkPath, extractPaths } from './pathScope.js';
 import { type Capability, classifyCapability, isWriteClass, scopeModeFor } from './capability.js';
@@ -104,14 +105,31 @@ export function isHermesAvailable(): boolean {
   return clients.has('hermes');
 }
 
-export async function executeTool(namespacedName: string, args: unknown): Promise<unknown> {
+export async function executeTool(
+  namespacedName: string,
+  args: unknown,
+  effectiveProfile?: EffectiveProfile,
+): Promise<unknown> {
   const entry = registry.find((t) => t.name === namespacedName);
   if (!entry) throw new Error(`Unknown tool '${namespacedName}'`);
+  if (effectiveProfile) {
+    const { assertOperationAllowed } = await import('./profilePolicy.js');
+    assertOperationAllowed(effectiveProfile, entry);
+  }
 
   // P5: enforce the server's filesystem scope BEFORE the call. Resolve every
   // path-like arg (normalizes ~ and .. so traversal can't bypass a deny) and
   // check it; deny always wins. A write-capable tool checks 'write' scope, else
   // 'read'. Throwing here surfaces as a tool error back to the model.
+  if (effectiveProfile) {
+    const profilePaths = extractPaths(args, entry.pathArgKeys);
+    if (profilePaths.length > 0 && effectiveProfile.scopes.path === 'none') {
+      throw new Error(`Effective profile '${effectiveProfile.profileId}' does not permit filesystem paths`);
+    }
+    if (profilePaths.length > 0 && effectiveProfile.scopes.path !== 'none' && !entry.pathScope) {
+      throw new Error(`Tool '${entry.name}' has no configured path scope for effective profile '${effectiveProfile.profileId}'`);
+    }
+  }
   if (entry.pathScope) {
     const mode = scopeModeFor(entry.capability);
     for (const p of extractPaths(args, entry.pathArgKeys)) {

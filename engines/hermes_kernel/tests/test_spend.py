@@ -137,6 +137,20 @@ def test_frontier_toolsets_file_intent_prompt_adds_files(monkeypatch):
     assert result == ["web", "files"]
 
 
+def test_frontier_toolsets_respects_effective_profile_before_task_heuristics(monkeypatch):
+    monkeypatch.delenv("HERMES_FRONTIER_TOOLSETS", raising=False)
+    assert hermes_runner._frontier_enabled_toolsets(
+        "COMPLEX_CODING",
+        "write a file",
+        {"profileId": "read_only"},
+    ) == ["web"]
+    assert hermes_runner._frontier_enabled_toolsets(
+        "AUTONOMOUS_RESEARCH",
+        "research only",
+        {"profileId": "workspace_write"},
+    ) == ["files"]
+
+
 # ---------------------------------------------------------------------------
 # _build_system_message — stable TORQCLAW identity and truthful capabilities
 # ---------------------------------------------------------------------------

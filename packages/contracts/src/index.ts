@@ -3,3 +3,4 @@ export * from './commands.js';
 export * from './events.js';
 export * from './errors.js';
 export * from './resilience.js';
+export * from './profile.js';

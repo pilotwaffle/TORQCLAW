@@ -163,7 +163,7 @@ export async function executeLocalEdge(
 
   // Task-filtered, namespaced, alias-mapped, approval-gated toolset.
   const { openAITools, resolveAlias, requiresApproval } =
-    await getToolsForTask(req.payload.taskType, 'LOCAL_EDGE');
+    await getToolsForTask(req.payload.taskType, 'LOCAL_EDGE', req.effectiveProfile);
   const requestedTools = requestedLocalToolSequence(
     req.payload.prompt,
     openAITools.map((t) => t.function.name),
@@ -323,7 +323,7 @@ export async function executeLocalEdge(
 
       emit('TOOL_CALL', `Executing ${realName}`, { args: toolArgs });
       try {
-        const toolResult = await executeTool(realName, toolArgs);
+        const toolResult = await executeTool(realName, toolArgs, req.effectiveProfile);
         // P3: head+tail truncation — keep the start AND end. Errors and the
         // useful tail of a result cluster at log ends; a head-only cut drops them.
         const content = truncateHeadTail(JSON.stringify(toolResult), MAX_TOOL_RESULT_CHARS);

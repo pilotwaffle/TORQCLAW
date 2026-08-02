@@ -200,6 +200,9 @@ describe('Phase-1 persistent HTTP promotion instrumentation', () => {
       expect(http.syntheticMetrics).toBe(false);
       expect(http.promotion.providerWaitExcludedMs).toBe(0);
       expect(http.promotion.policyJitterIncluded).toBe(true);
+      expect(http.promotion.thresholdMetric).toBe(
+        'core_orchestration_ms_excluding_explicit_provider_wait_and_policy_jitter',
+      );
       expect(http.providerWaitAccountingProbe).toMatchObject({
         requestedProviderWaitMs: 200,
         sidecarRecordCount: 1,
@@ -222,6 +225,8 @@ describe('Phase-1 persistent HTTP promotion instrumentation', () => {
       expect(block.cases).toHaveLength(12);
       expect(new Set(block.cases.map((item: any) => item.taskId)).size).toBe(12);
       expect(block.rawPromotionValuesMs).toHaveLength(12);
+      expect(block.thresholdPromotionValuesMs).toHaveLength(12);
+      expect(block.thresholdP95Ms).toEqual(expect.any(Number));
       expect(block.policyJitterMs).toBeGreaterThan(0);
       expect(block.providerWaitExcludedMs).toBe(0);
       expect(block.operationCounts).toMatchObject({
@@ -270,6 +275,9 @@ describe('Phase-1 persistent HTTP promotion instrumentation', () => {
       for (const item of block.cases) {
         expect(item.promotionElapsedMs).toBeCloseTo(
           item.rawElapsedMs - item.explicitProviderWaitMs, 6,
+        );
+        expect(item.thresholdElapsedMs).toBeCloseTo(
+          item.promotionElapsedMs - item.policyJitterMs, 6,
         );
       }
 

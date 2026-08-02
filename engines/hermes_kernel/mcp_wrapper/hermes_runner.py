@@ -240,17 +240,33 @@ _FILE_INTENT = re.compile(
 )
 
 
-def _frontier_enabled_toolsets(task_type: str, prompt: str = "") -> list[str] | None:
+def _frontier_enabled_toolsets(
+    task_type: str,
+    prompt: str = "",
+    effective_profile: dict | None = None,
+) -> list[str] | None:
     """The toolset allowlist for a FRONTIER task. None = upstream default (only
     when the operator explicitly sets HERMES_FRONTIER_TOOLSETS='*')."""
-    override = os.environ.get("HERMES_FRONTIER_TOOLSETS")
+    profile_id = effective_profile.get("profileId") if isinstance(effective_profile, dict) else None
+    # An effective profile is authoritative; deployment overrides cannot
+    # broaden the engine beyond the gateway-owned profile boundary.
+    override = None if profile_id is not None else os.environ.get("HERMES_FRONTIER_TOOLSETS")
     if override:
         if override.strip() == "*":
             return None  # upstream default — full toolset
         return [t.strip() for t in override.split(",") if t.strip()]
-    base = list(_FRONTIER_TOOLSETS.get(task_type, ["web"]))
+    profile_toolsets = {
+        # The profile is the gateway-owned capability boundary. Keep the
+        # engine's toolset no broader than that boundary even when task type
+        # heuristics or file-intent detection would otherwise add tools.
+        "read_only": ["web"],
+        "browser_research": ["web"],
+        "workspace_write": ["files"],
+        "terminal_power": ["web", "files", "terminal", "code_execution"],
+    }
+    base = list(profile_toolsets.get(profile_id, _FRONTIER_TOOLSETS.get(task_type, ["web"])))
     # File-intent override: add the (gated) files toolset so the task can act.
-    if _FILE_INTENT.search(prompt or "") and "files" not in base:
+    if profile_id not in {"read_only", "browser_research"} and _FILE_INTENT.search(prompt or "") and "files" not in base:
         base.append("files")
     return base
 
@@ -364,7 +380,7 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
         raise MissingCredentialsError()
     task_store.emit(task_id, "SYSTEM", f"Model: {pconf['provider']}/{pconf['model']}")
 
-    enabled = _frontier_enabled_toolsets(task_type, prompt)
+    enabled = _frontier_enabled_toolsets(task_type, prompt, req.get("effectiveProfile"))
     task_store.emit(
         task_id, "SYSTEM",
         f"Cloud tools enabled: {', '.join(enabled) if enabled else 'all (override)'}",

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { EffectiveProfileSchema } from './profile.js';
 
 export const TaskTypeSchema = z.enum([
   'DATA_EXTRACTION',
@@ -51,6 +52,8 @@ export const GatewayRequestSchema = z.object({
     executionMode: z.enum(['AUTO', 'LOCAL_ONLY', 'CLOUD_OK']).default('AUTO'),
   }),
   enrichment: EnrichmentMetaSchema,
+  /** Gateway-owned, versioned policy resolved before tool prediction. */
+  effectiveProfile: EffectiveProfileSchema.optional(),
 });
 export type GatewayRequest = z.infer<typeof GatewayRequestSchema>;
 
@@ -84,5 +87,7 @@ export const RouterDiagnosticsSchema = z.object({
   overridable: z.boolean().optional(),
   safetyLock: z.string().optional(),
   profile: z.string().optional(),
+  profileVersion: z.number().int().positive().optional(),
+  profileHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 });
 export type RouterDiagnostics = z.infer<typeof RouterDiagnosticsSchema>;

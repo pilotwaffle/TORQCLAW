@@ -5,3 +5,4 @@ export * from './hermesAttempt.js';
 export * from "./serverConfig.js";
 export * from './pathScope.js';
 export * from './capability.js';
+export * from './profilePolicy.js';
