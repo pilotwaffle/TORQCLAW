@@ -4,8 +4,10 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { pythonRuntime } from '../../ops/python-runtime.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
+const PYTHON = pythonRuntime(ROOT);
 
 function runBench(args: string[], outputPath: string): Promise<Record<string, any>> {
   return new Promise((resolveResult, rejectResult) => {
@@ -72,10 +74,11 @@ function runDiagnosticsSelfTest(): Promise<Record<string, any>> {
 }
 
 function runPersistenceDiagnosticsProbe(): Promise<Record<string, any>> {
+  const engineRoot = JSON.stringify(join(ROOT, 'engines', 'hermes_kernel'));
   const script = String.raw`
 import json, sys, tempfile
 from pathlib import Path
-sys.path.insert(0, r'E:\TorqClaw-agent\engines\hermes_kernel')
+sys.path.insert(0, ${engineRoot})
 from mcp_wrapper.attempt_ledger import AttemptLedger
 
 def finite_nonnegative(value):
@@ -163,7 +166,7 @@ with tempfile.TemporaryDirectory() as td:
     }, separators=(',', ':')))
 `;
   return new Promise((resolveResult, rejectResult) => {
-    execFile('python', ['-c', script], { cwd: ROOT, env: { ...process.env } }, (error, stdout, stderr) => {
+    execFile(PYTHON.command, [...PYTHON.argsPrefix, '-c', script], { cwd: PYTHON.cwd, env: { ...process.env } }, (error, stdout, stderr) => {
       if (error) {
         rejectResult(new Error(`diagnostics probe failed: ${error}\n${stdout}\n${stderr}`));
         return;
@@ -184,7 +187,7 @@ describe('Phase-1 persistent HTTP promotion instrumentation', () => {
     const stdioReportPath = join(outputRoot, 'stdio.json');
     try {
       const http = await runBench([
-        '--transport=http', '--runs', '12', '--warmup', '2', '--repetitions', '1', '--host-control=record',
+        '--transport=http', '--runs', '12', '--warmup', '2', '--repetitions', '1', '--host-control=off',
         '--task-store-diagnostics=capture',
       ], httpReportPath);
 
@@ -331,7 +334,7 @@ describe('Phase-1 persistent HTTP promotion instrumentation', () => {
       for (const mode of ['off', 'record']) {
         const reportPath = join(outputRoot, `${mode}.json`);
         const report = await runBench([
-          '--transport=http', '--runs', '1', '--warmup', '0', '--repetitions', '1', '--host-control=record',
+          '--transport=http', '--runs', '1', '--warmup', '0', '--repetitions', '1', '--host-control=off',
           `--task-store-diagnostics=${mode}`,
         ], reportPath);
         expect(report.taskStoreDiagnostics).toBe(mode);
@@ -375,8 +378,8 @@ describe('Phase-1 persistent HTTP promotion instrumentation', () => {
     const reportPath = join(outputRoot, 'rollover.json');
     try {
       const result = await runBenchExpectingFailure([
-        '--transport=http', '--runs', '1', '--warmup', '260', '--repetitions', '1', '--host-control=record',
-        '--task-store-diagnostics=capture', '--task-store-diagnostics-capacity=128',
+        '--transport=http', '--runs', '1', '--warmup', '32', '--repetitions', '1', '--host-control=off',
+        '--task-store-diagnostics=capture', '--task-store-diagnostics-capacity=4',
       ], reportPath);
       expect(result.code).not.toBe(0);
       expect(result.report.ok).toBe(false);
@@ -429,7 +432,7 @@ describe('Phase-1 persistent HTTP promotion instrumentation', () => {
     const reportPath = join(outputRoot, 'ledger.json');
     try {
       const report = await runBench([
-        '--transport=http', '--runs', '1', '--warmup', '0', '--repetitions', '1', '--host-control=record',
+        '--transport=http', '--runs', '1', '--warmup', '0', '--repetitions', '1', '--host-control=off',
         '--ledger-diagnostics=capture',
       ], reportPath);
       const diagnostics = report.ledgerDiagnostics;

@@ -6,10 +6,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ComputeTier } from '@torqclaw/contracts';
 import type { GatewayRequest } from '@torqclaw/contracts';
 import { getStatus, pageOutbox, type ResilienceClient } from '../../packages/bridge/src/hermesAttempt.js';
+import { pythonRuntime } from '../../ops/python-runtime.mjs';
 
 let root = '';
 let runFailoverTask: typeof import('../../packages/gateway/src/failover.js').runFailoverTask;
 const RESULT_MARKER = 'TORQCLAW_TIMEOUT_RESULT=';
+const PYTHON = pythonRuntime(process.cwd());
 
 const callScript = String.raw`
 import asyncio, json, sys
@@ -26,8 +28,8 @@ function pythonClient(ack: 'ACK_PRE_DISPATCH' | 'ACK_UNCERTAIN', calls: string[]
   return {
     async callTool(call) {
       calls.push(call.name);
-      const run = spawnSync('uv', ['run', 'python', '-c', callScript, JSON.stringify({ call, ack })], {
-        cwd: join(process.cwd(), 'engines', 'hermes_kernel'),
+      const run = spawnSync(PYTHON.command, [...PYTHON.argsPrefix, '-c', callScript, JSON.stringify({ call, ack })], {
+        cwd: PYTHON.cwd,
         env: { ...process.env, TORQCLAW_DATA_DIR: root, TORQCLAW_PROVIDER_FAILOVER_ENABLED: '1' },
         encoding: 'utf8',
       });

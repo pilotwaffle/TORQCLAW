@@ -34,6 +34,7 @@ import { once } from 'node:events';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { pythonRuntime } from './python-runtime.mjs';
 
 const phase1Mode = process.argv.includes('--phase1') || process.argv.includes('--failover');
 
@@ -53,9 +54,9 @@ function ensurePhase1ProductionBuild() {
 }
 
 function startFakeProviderServer(dataDir) {
-  const python = process.platform === 'win32' ? 'uv.exe' : 'uv';
-  const child = spawn(python, ['run', 'python', join(ROOT, 'ops', 'phase1_fake_provider_server.py')], {
-    cwd: ROOT,
+  const runtime = pythonRuntime(ROOT);
+  const child = spawn(runtime.command, [...runtime.argsPrefix, join(ROOT, 'ops', 'phase1_fake_provider_server.py')], {
+    cwd: runtime.cwd,
     env: {
       ...process.env,
       TORQCLAW_DATA_DIR: dataDir,
@@ -764,8 +765,9 @@ function phase1GitRevision() {
 }
 
 function phase1PythonVersion() {
-  const result = spawnSync(process.platform === 'win32' ? 'uv.exe' : 'uv', ['run', 'python', '--version'], {
-    cwd: ROOT,
+  const runtime = pythonRuntime(ROOT);
+  const result = spawnSync(runtime.command, [...runtime.argsPrefix, '--version'], {
+    cwd: runtime.cwd,
     encoding: 'utf8',
     timeout: 20_000,
   });
@@ -850,9 +852,9 @@ async function startPhase1HttpFixture(
   taskStoreDiagnostics = 'off', ledgerTimingDiagnostics = 'off',
   taskStoreDiagnosticsCapacity = null,
 ) {
-  const python = process.platform === 'win32' ? 'uv.exe' : 'uv';
+  const runtime = pythonRuntime(ROOT);
   const fixtureArgs = [
-    'run', 'python', join(ROOT, 'ops', 'phase1_fake_provider_http_server.py'),
+    ...runtime.argsPrefix, join(ROOT, 'ops', 'phase1_fake_provider_http_server.py'),
     '--host', '127.0.0.1', '--port', String(port), '--data-dir', dataDir, '--sidecar', sidecarPath,
     '--task-store-diagnostics', taskStoreDiagnostics,
     '--ledger-timing-diagnostics', ledgerTimingDiagnostics, '--ledger-sidecar', ledgerSidecarPath,
@@ -860,8 +862,8 @@ async function startPhase1HttpFixture(
   if (taskStoreDiagnosticsCapacity !== null) {
     fixtureArgs.push('--task-store-diagnostics-capacity', String(taskStoreDiagnosticsCapacity));
   }
-  const child = spawn(python, fixtureArgs, {
-    cwd: ROOT,
+  const child = spawn(runtime.command, fixtureArgs, {
+    cwd: runtime.cwd,
     env: {
       ...process.env,
       HERMES_BIND_HOST: '127.0.0.1',

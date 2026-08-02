@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
+import { pythonRuntime } from '../../ops/python-runtime.mjs';
 
 let buildSafeExport: typeof import('../../packages/gateway/src/export.js').buildSafeExport;
 let FAILOVER_EXPORT_VERSION: typeof import('../../packages/gateway/src/export.js').FAILOVER_EXPORT_VERSION;
@@ -14,6 +15,7 @@ let receipts: typeof import('../../packages/gateway/src/receipts.js');
 let root = '';
 let closeDb: (() => void) | undefined;
 let fakeProvider: ReturnType<typeof spawn> | undefined;
+const PYTHON = pythonRuntime(process.cwd());
 const fakePending: Array<{ resolve: (value: any) => void; reject: (error: unknown) => void }> = [];
 const fakeOutbox: any[] = [];
 
@@ -37,10 +39,10 @@ beforeAll(async () => {
   buildSafeExport = exported.buildSafeExport;
   FAILOVER_EXPORT_VERSION = exported.FAILOVER_EXPORT_VERSION;
   REDACTOR_VERSION = exported.REDACTOR_VERSION;
-  fakeProvider = spawn(process.platform === 'win32' ? 'uv.exe' : 'uv', [
-    'run', 'python', join(process.cwd(), 'ops', 'phase1_fake_provider_server.py'),
+  fakeProvider = spawn(PYTHON.command, [
+    ...PYTHON.argsPrefix, join(process.cwd(), 'ops', 'phase1_fake_provider_server.py'),
   ], {
-    cwd: process.cwd(),
+    cwd: PYTHON.cwd,
     env: { ...process.env, TORQCLAW_DATA_DIR: root, TORQCLAW_PROVIDER_FAILOVER_ENABLED: '1' },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
