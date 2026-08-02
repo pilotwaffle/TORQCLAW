@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { db } from './storage.js';
 import { publishOnly } from './events.js';
+import { safeMaterializeReceipt } from './receipts.js';
 
 /** A decided approval row, with everything the re-mint / reject needs. */
 export interface DecidedApproval {
@@ -64,6 +65,12 @@ export function decideApproval(
   ).get(approvalId) as {
     request_id: string; tool_name: string; status: string; request_json: string | null;
   };
+
+  // FIX-G: refresh the derived cache after the guarded decision. This is
+  // best-effort only: GET_RECEIPT overlays the authoritative live approval
+  // rows at read time, so a crash or projection failure cannot report stale
+  // approval state. Projection failure never rolls back the decision.
+  safeMaterializeReceipt(row.request_id);
 
   return {
     approvalId,

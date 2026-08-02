@@ -11,9 +11,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_active_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- 2. Immutable event log. seq is the replay cursor: monotonic AUTOINCREMENT,
---    never wall-clock (CURRENT_TIMESTAMP has 1s resolution; tool loops emit
---    several events per second).
+-- 2. Append-only event log during normal runtime. A versioned startup security
+--    migration may rewrite legacy ERROR message text only to remove known
+--    secret shapes; seq/id/order remain unchanged. seq is the replay cursor:
+--    monotonic AUTOINCREMENT, never wall-clock (CURRENT_TIMESTAMP has 1s
+--    resolution; tool loops emit several events per second).
 CREATE TABLE IF NOT EXISTS events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     id TEXT NOT NULL UNIQUE,

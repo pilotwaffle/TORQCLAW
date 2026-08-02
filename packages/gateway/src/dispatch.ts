@@ -25,8 +25,6 @@ import {
 } from './spend.js';
 import { randomUUID } from 'node:crypto';
 
-const sanitize = (msg: string) => msg.replace(/Bearer\s+\S+/gi, 'Bearer ***').slice(0, 2_000);
-
 /** Translate opaque transport failures into something the operator can act on.
  *  A raw "fetch failed" almost always means the provider rejected the call —
  *  most often a billing/credit limit on a long run. */
@@ -389,7 +387,9 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
       } else {
         metaOut.recovery = ['RETRY', 'COPY_DIAGNOSTIC'];
       }
-      emit('ERROR', `Execution failed: ${sanitize(humanizeError(reason, diag.tier))}`, metaOut);
+      // makeEmitter/persistAndPublish owns the shared fail-closed ERROR
+      // boundary for both the event log and the live frame.
+      emit('ERROR', `Execution failed: ${humanizeError(reason, diag.tier)}`, metaOut);
       safeMaterializeReceipt(req.id);
     } finally {
       cancellations.clear(req.id);
