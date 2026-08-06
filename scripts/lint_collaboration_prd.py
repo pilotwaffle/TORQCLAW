@@ -234,6 +234,19 @@ def run(prd: Path) -> tuple[Gate, str]:
         "six flag configurations": "six valid flag configurations",
         "qualified writer claim":
             "only writer to these tables while listeners are open",
+        "metadata visibility rule": "accepted v1 behavior",
+        "post-lock close delivery": "post-lock delivery step",
+        "channel-enumerable predicate": "CHANNEL_ENUMERABLE",
+        "benchmark load phases":
+            "25 concurrent readers continuously subscribing and reading plus one held slow consumer",
+        "loopback lockout exemption":
+            "Loopback source addresses are exempt from the address-level counter",
+        "credential shape rule":
+            "present if and only if `credentialAvailable` is true",
+        "archived-error precedence":
+            "only a caller that passes its Section 4.2 predicate can observe the state error",
+        "orphan binding remediation":
+            "Startup closes any binding with a null `closed_at`",
         "name-key algorithm": "Unicode Default Case Folding",
         "name-key index": "collab_channels_active_name_key",
         "archive delivery contract":
@@ -288,6 +301,8 @@ def run(prd: Path) -> tuple[Gate, str]:
         "channel-property owner predicate": "plus operator owns target channel",
         "non-sequential slice wording": "independently gated",
         "removed mutex vagueness": "sequencer mutex where required",
+        "removed count-non-disclosure claim": "never discloses committed counts",
+        "removed unsatisfiable oracle test": "cannot learn committed counts",
         "removed quote-inclusive bound": "including surrounding quotes and all escapes",
         "removed five-config gate": "five valid cumulative flag configurations",
         "stale section reference": "every D.2 event",

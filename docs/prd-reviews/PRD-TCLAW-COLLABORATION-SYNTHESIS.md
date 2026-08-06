@@ -1,5 +1,18 @@
 # TORQCLAW Collaboration PRD Synthesis Log
 
+## Cycle 10 draft: v0.9 -> v0.10 (and Cycle 9 verdict)
+
+Cycle 9 (opus-5, pinned `8348ae2`): Reject — 0 Critical, 2 High, 4 Medium, 3 Low; rubric 5 Pass / 2 Partial / 0 Fail; every pinned byte fixture verified exactly. Receipt: `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-9.md`.
+
+Dispositions in v0.10 — one is a deliberate scope decision:
+
+- High (count oracle): dense absolute per-channel cursors inherently disclose event counts to current members across their own membership gaps, on three success paths. Rather than redesign to a relative cursor space, v0.10 takes the receipt's sanctioned alternative: the unsatisfiable non-disclosure claim and its acceptance bullet are removed, and Section 7.4 documents count-metadata visibility to current members as accepted v1 behavior. Content confidentiality and hidden-channel indistinguishability are unchanged.
+- High (close-frame delivery): Section 8.2 gains an explicit post-lock delivery step — close reasons are recorded and queues purged under the write lock; the close frame is delivered after release with no revalidation and is the final frame on the subscription.
+- Mediums: `CHANNEL_ENUMERABLE` predicate for `LIST_CHANNELS`; two-phase Section 15 load specification (10-client baseline, 25-reader writer-preference phase); loopback exemption from the address-level lockout; both credential-response shapes pinned with a presence rule.
+- Lows: epoch phrasing split; archived-error precedence sentence; startup remediation for orphan session bindings.
+
+Linter grew from 97 to 107 checks. v0.10 pre-gate: PASS 107/107. Builder handoff remains blocked pending independent v0.10 G1R; Slice 0 pivot on a clean verdict.
+
 ## Cycle 9 draft: v0.8 -> v0.9
 
 All 9 Cycle 8 conditions were accepted and closed directly in the consolidated v0.9 source. One disposition chooses a cleaner equivalent of the receipt's literal correction, with rationale: the encoded message bound now excludes the surrounding quotes, making the raw and encoded bounds equal (16,384) and the advertised raw ceiling reachable — this satisfies findings 1-2 with one number everywhere instead of the receipt's 16,386/16,382 split. Boundary fixtures pin exact values for ASCII, all-LF, and both NFC cases.
