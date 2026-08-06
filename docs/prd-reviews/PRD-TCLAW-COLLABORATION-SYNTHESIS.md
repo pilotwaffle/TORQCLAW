@@ -1,5 +1,29 @@
 # TORQCLAW Collaboration PRD Synthesis Log
 
+## Cycle 6 draft: v0.5 -> v0.6
+
+All Cycle 5 findings were accepted and closed directly in the consolidated v0.6 source:
+
+- Removed the 512 KiB page byte bound; a timeline page now ends at 100 events or the 64 KiB result-frame limit, whichever comes first.
+- Replaced the `lower(name)` index with a persisted canonical `name_key` (NFC + Unicode Default Case Folding, Unicode 15.0, computed by `CollaborationStore`) and a unique active-key index; `CHANNEL_NAME_CONFLICT` is defined against the key.
+- Defined archive delivery: archive closes live subscriptions with new subscription close reason `channel_archived`, purges unsent queues at the linearization point, and resubscribed members replay from durable backlog with no committed-event loss. Unarchive behaves identically.
+- Regenerated the final status document with historical evidence labeled.
+
+Linter updated in lockstep: `channel_archived` registry entry, `name_key` and archive-contract requirements, forbidden legacy literals, and a new cross-constraint feasibility check that no encoded byte bound exceeds the frame bound. v0.6 pre-gate: PASS 49/49. Builder handoff remains blocked pending independent v0.6 G1R.
+
+## Cycle 5: pinned v0.5 at `f851aae`
+
+All Cycle 4 findings were closed and the consistency pre-gate passed 40/40. Independent G1R returned `REJECT`: 0 Critical, 2 High, 1 Medium, and 1 Low. Accepted dispositions:
+
+- Align timeline response size with the protocol frame limit.
+- Replace SQLite `lower(name)` with enforceable canonicalization or restrict names to ASCII.
+- Define archive subscription, buffering, and socket-write behavior.
+- Make v0.5 consistency evidence canonical and label v0.4 evidence historical.
+
+Builder handoff remains blocked. Receipt: `G1R-TERRA-TCLAW-COLLABORATION-CYCLE-5.md`.
+
+
+
 ## Cycle 5 draft: v0.4 -> v0.5
 
 All Cycle 4 findings were accepted. v0.5 reorders authorization before idempotency, adds secret-redacted credential delivery and `CREATE_PRINCIPAL_CREDENTIAL`, defines one atomic keyed-write protocol, makes storage authority validation executable, separates session/subscription closure, defines safe rollback, and makes `node` fail strict frame validation. The consistency linter is updated in lockstep. Builder handoff remains blocked pending the v0.5 pre-gate and independent G1R.

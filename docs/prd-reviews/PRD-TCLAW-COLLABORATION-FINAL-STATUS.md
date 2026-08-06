@@ -1,64 +1,45 @@
 # TORQCLAW Collaboration Substrate - Review Status
 
 **Date:** 2026-08-06
-**Canonical candidate:** `PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.5.md`
-**Last completed independent review:** v0.3 by `gpt-5.6-terra`
-**Last G1R verdict:** `REJECT`
-**Builder handoff:** `BLOCKED pending v0.5 G1R`
-**Consistency pre-gate:** `PASS` (34/34 checks, 2026-08-06, report: `PRD-TCLAW-COLLABORATION-V0.4-CONSISTENCY-REPORT.md`)
+**Canonical candidate:** `PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.6.md`
+**Last completed independent review:** Cycle 5, v0.5 at `f851aae`, by `gpt-5.6-terra`
+**Last G1R verdict:** `REJECT` (Critical 0, High 2, Medium 1, Low 1)
+**Builder handoff:** `BLOCKED pending v0.6 G1R`
+**Consistency pre-gate (current):** `PASS 49/49` (2026-08-06, report: `PRD-TCLAW-COLLABORATION-V0.6-CONSISTENCY-REPORT.md`)
 
 ## Outcome
 
-The v0.3 gate found no Critical and five High issues. A subsequent source audit confirmed all five and found three additional blockers: missing principal lifecycle commands, event-kind/DDL incompatibility, and unrecoverable dual-pepper machine loss. It also identified five limit/code/idempotency conflicts.
+Five review cycles progressively eliminated contradiction, completeness, and feasibility defects. Cycle 5 confirmed every Cycle 4 correction as properly specified and found two feasibility blockers: a timeline page bound that could not fit the protocol frame limit, and channel-name uniqueness that SQLite's ASCII-only `lower()` cannot enforce.
 
-v0.4 consolidates the PRD into one normative source and addresses the expanded remediation set. It is a candidate, not an approved builder handoff.
+v0.6 closes all Cycle 5 findings:
 
-## Canonical remediation set
+1. One frame limit governs everything: a timeline page ends at 100 events or when the encoded result frame would exceed 64 KiB; the separate page byte bound is removed.
+2. Channel-name uniqueness uses a persisted canonical `name_key` (NFC then Unicode Default Case Folding, pinned to Unicode 15.0, computed by `CollaborationStore`) with a unique active-key index as the concurrency backstop.
+3. Archive delivery is deterministic: archive closes that channel's live subscriptions with subscription close reason `channel_archived`, purges unsent queues at the linearization point, and members resubscribe read-only with durable-backlog replay losing no committed event.
+4. This status document is regenerated with historical evidence labeled.
 
-1. Operation-scoped authorization predicates.
-2. Operator and agent role-bound connect frames.
-3. Channel discovery and durable cursor acknowledgement.
-4. Deterministic selected-credential rotation.
-5. Executable additive DDL with session binding and mutation-result idempotency.
-6. One authoritative benchmark in the PRD.
-7. One consolidated source with displaced clauses explicitly superseded.
-8. Agent suspend, restore, and terminal revoke commands.
-9. Exact event-kind parity between protocol and DDL; no tombstone remnants.
-10. Verified offline export for both peppers and recovery secret.
-
-The consolidation also freezes one value for message size, page size, slow-consumer limits/code, authentication rate limits, and idempotency scope.
-
-## Final hardening disposition
-
-The post-consolidation audit found and closed:
-
-- undefined operator-principal revocation;
-- final-operator-credential self-lockout;
-- rotation invalidating unrelated credential sessions through `auth_epoch`;
-- undefined authentication, channel-name, and cursor-range errors;
-- ambiguous cursor-acknowledgement idempotency;
-- missing machine restore of both Credential Manager peppers;
-- missing membership/credential access-path indexes;
-- the stale `D.2` cross-reference.
-
-Operator revocation is now offline and atomic. Final operator credential revocation is refused. Credential rotation closes only sessions using the replaced credential. Name reuse leaves the unarchive target unchanged and returns `CHANNEL_NAME_CONFLICT`.
+The consistency linter gained cross-constraint feasibility checks (no encoded bound may exceed the frame bound) and the `name_key`/archive-contract requirements, growing from 40 to 49 checks.
 
 ## Review history
 
-| Cycle | Input | Verdict | Critical | High |
-|---|---|---:|---:|---:|
-| 1 | v0.1 | Reject | 3 | 4 |
-| 2 | v0.2 | Reject | 3 | 6 |
-| 3 | v0.3 | Reject | 0 | 5 |
-| 4 | v0.4 (`2f40e3a`) | Reject | 0 | 3 |
-| next | v0.5 | Pre-gate PASS 40/40; G1R not run | unknown | unknown |
+| Cycle | Input | Verdict | Critical | High | Notes |
+|---|---|---:|---:|---:|---|
+| 1 | v0.1 | Reject | 3 | 4 | authority, revocation, scope |
+| 2 | v0.2 | Reject | 3 | 6 | recovery, protocol, migration |
+| 3 | v0.3 | Reject | 0 | 5 | internal contradictions |
+| 4 | v0.4 (`2f40e3a`) | Reject | 0 | 3 | authorization precedence, credential handling, atomicity |
+| 5 | v0.5 (`f851aae`) | Reject | 0 | 2 | frame/page feasibility, Unicode name uniqueness |
+| next | v0.6 | Pre-gate PASS 49/49; G1R not run | unknown | unknown | |
+
+## Historical evidence
+
+The following artifacts are historical only and must not be cited as current pre-gate evidence:
+
+- `PRD-TCLAW-COLLABORATION-V0.4-CONSISTENCY-REPORT.md` (34/34, superseded)
+- `PRD-TCLAW-COLLABORATION-V0.5-CONSISTENCY-REPORT.md` (40/40, superseded)
+
+The current authoritative pre-gate evidence is `PRD-TCLAW-COLLABORATION-V0.6-CONSISTENCY-REPORT.md` (49/49). A consistency PASS proves internal consistency only, never protocol feasibility or semantic correctness; the independent G1R remains the approval gate.
 
 ## Decision
 
-Do not implement from v0.1-v0.4. v0.5 contains the complete known remediation set, including the Cycle 4 authorization-precedence, credential-redaction, and atomic-idempotency corrections. Its consistency pre-gate passes (40/40); it is not builder-ready until an independent G1R reports no Critical or High issue.
-
-## Consistency pre-gate implementation
-
-The final specification pass adds startup pepper checks, an exhaustive close-reason registry, explicit idempotency classes, agent display-name validation, failed-mutation behavior, rate-lockout privacy, and mutation-results size reporting. The deterministic gate is implemented at `scripts/lint_collaboration_prd.py`; its generated report is the authoritative pre-gate evidence.
-
-The pre-gate was executed on 2026-08-06 after a document-repair pass (see synthesis log, "Corruption incident and repair") and reports PASS with 34/34 checks. The generated report is `PRD-TCLAW-COLLABORATION-V0.4-CONSISTENCY-REPORT.md`. The sole remaining gate is an independent G1R with no Critical or High findings.
+Do not implement from v0.1-v0.5. v0.6 contains the complete known remediation set across all five cycles plus both source audits. It is not builder-ready until an independent G1R of the pinned v0.6 commit reports no Critical or High finding.

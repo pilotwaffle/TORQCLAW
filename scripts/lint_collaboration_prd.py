@@ -34,8 +34,8 @@ EXPECTED_CLOSE_REASONS = {
     "recovery",
 }
 EXPECTED_SUBSCRIPTION_CLOSE_REASONS = {
-    "unsubscribed", "authorization_lost", "slow_consumer", "session_closed",
-    "socket_closed",
+    "unsubscribed", "authorization_lost", "channel_archived", "slow_consumer",
+    "session_closed", "socket_closed",
 }
 EXPECTED_IDEMPOTENCY = {
     "keyed": {
@@ -175,7 +175,13 @@ def run(prd: Path) -> tuple[Gate, str]:
 
     required = {
         "message limit": "1-16,384 UTF-8 bytes",
-        "timeline limit": "100 events and 512 KiB",
+        "timeline page bound": "A timeline page ends at **100 events**",
+        "timeline frame acceptance":
+            "the 100-event page bound and the 64 KiB result-frame bound",
+        "name-key algorithm": "Unicode Default Case Folding",
+        "name-key index": "collab_channels_active_name_key",
+        "archive delivery contract":
+            "Archive closes every live subscription on that channel",
         "slow-consumer bytes": "1 MiB",
         "slow-consumer age": "10 seconds",
         "credential rate": "5 failures per normalized credential ID per 5 minutes",
@@ -216,6 +222,9 @@ def run(prd: Path) -> tuple[Gate, str]:
         "legacy timeline limit": "limit:1..500",
         "legacy slow-consumer code": "COLLAB_SLOW_CONSUMER",
         "legacy slow-consumer bytes": "4 MiB",
+        "legacy timeline page bytes": "512 KiB",
+        "legacy name index": "collab_channels_active_name_ci",
+        "unenforceable name fold": "lower(name)",
         "stale section reference": "every D.2 event",
         "removed tombstone event": "message_tombstoned",
     }
@@ -227,6 +236,23 @@ def run(prd: Path) -> tuple[Gate, str]:
             re.search(pattern, text) is None,
             f"legacy literal remains: {literal}",
         )
+
+    frame_match = re.search(r"maximum (\d+) KiB", text)
+    frame_kib = int(frame_match.group(1)) if frame_match else 0
+    encoded_bounds = [
+        int(value.replace(",", ""))
+        for value in re.findall(r"(\d[\d,]*)\s*KiB encoded", text)
+    ]
+    gate.require(
+        "frame bound defined",
+        frame_kib > 0,
+        "no 'maximum N KiB' frame bound found",
+    )
+    gate.require(
+        "cross-constraint: encoded bounds fit frame",
+        all(bound <= frame_kib for bound in encoded_bounds),
+        f"encoded byte bound exceeds {frame_kib} KiB frame limit: {encoded_bounds}",
+    )
 
     summary = (
         f"{'PASS' if not gate.findings else 'FAIL'}: "
