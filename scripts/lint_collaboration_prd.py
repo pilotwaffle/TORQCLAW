@@ -177,7 +177,11 @@ def run(prd: Path) -> tuple[Gate, str]:
     required = {
         "message limit": "1-16,384 UTF-8 bytes",
         "encoded message bound":
-            "encoded JSON string form (including surrounding quotes and all escapes) MUST be at most **16,384 bytes**",
+            "encoded JSON string form (excluding the surrounding quotes but including all escapes) MUST be at most **16,384 bytes**",
+        "largest legal message pin":
+            "largest legal message is therefore exactly 16,384 unescaped UTF-8 bytes",
+        "boundary fixture pins":
+            "16,384 unescaped ASCII bytes accepted, 16,385 rejected",
         "control-character ban":
             "MUST NOT contain C0 or C1 control characters other than TAB",
         "name character-class ban": "bidirectional control characters",
@@ -219,6 +223,17 @@ def run(prd: Path) -> tuple[Gate, str]:
         "sequential slices": "cumulative and sequentially gated",
         "not-permitted scope":
             "reserved for `OPERATOR_GLOBAL` commands",
+        "rejoined capture point":
+            "immediately before the `member_added` event is inserted",
+        "caller-visible ack bound":
+            "visible to the calling principal in that channel",
+        "no-op archive": "no-ops that return the current",
+        "sql-computed ack max":
+            "computes and stores `max(existing,submitted)` in SQL",
+        "writer preference": "writer-preferring",
+        "six flag configurations": "six valid flag configurations",
+        "qualified writer claim":
+            "only writer to these tables while listeners are open",
         "name-key algorithm": "Unicode Default Case Folding",
         "name-key index": "collab_channels_active_name_key",
         "archive delivery contract":
@@ -251,7 +266,7 @@ def run(prd: Path) -> tuple[Gate, str]:
         "atomic keyed protocol":
             "every keyed command executes this atomic protocol",
         "storage authority validation":
-            "The `CollaborationStore` is the only production writer",
+            "The `CollaborationStore` is the only writer to these tables",
         "safe rollback":
             "Normal rollback is non-destructive",
     }
@@ -272,6 +287,9 @@ def run(prd: Path) -> tuple[Gate, str]:
         "removed credential-stdin flag": "--credential-stdin",
         "channel-property owner predicate": "plus operator owns target channel",
         "non-sequential slice wording": "independently gated",
+        "removed mutex vagueness": "sequencer mutex where required",
+        "removed quote-inclusive bound": "including surrounding quotes and all escapes",
+        "removed five-config gate": "five valid cumulative flag configurations",
         "stale section reference": "every D.2 event",
         "removed tombstone event": "message_tombstoned",
     }
@@ -311,6 +329,17 @@ def run(prd: Path) -> tuple[Gate, str]:
         "cross-constraint: encoded message fits frame with envelope",
         msg_bound is not None and msg_bound + 2048 <= frame_kib * 1024,
         f"encoded message bound {msg_bound} + 2 KiB envelope exceeds frame",
+    )
+
+    # The raw and encoded message bounds must be equal so the largest-legal
+    # pin is unambiguous (encoded form excludes quotes, so unescaped text has
+    # raw length == encoded length).
+    raw_match = re.search(r"1-(\d[\d,]*) UTF-8 bytes", text)
+    raw_bound = int(raw_match.group(1).replace(",", "")) if raw_match else None
+    gate.require(
+        "cross-constraint: raw and encoded message bounds equal",
+        raw_bound is not None and raw_bound == msg_bound,
+        f"raw bound {raw_bound} != encoded bound {msg_bound}",
     )
 
     summary = (

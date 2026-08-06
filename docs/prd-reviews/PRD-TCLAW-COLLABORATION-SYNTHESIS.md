@@ -1,5 +1,25 @@
 # TORQCLAW Collaboration PRD Synthesis Log
 
+## Cycle 9 draft: v0.8 -> v0.9
+
+All 9 Cycle 8 conditions were accepted and closed directly in the consolidated v0.9 source. One disposition chooses a cleaner equivalent of the receipt's literal correction, with rationale: the encoded message bound now excludes the surrounding quotes, making the raw and encoded bounds equal (16,384) and the advertised raw ceiling reachable — this satisfies findings 1-2 with one number everywhere instead of the receipt's 16,386/16,382 split. Boundary fixtures pin exact values for ASCII, all-LF, and both NFC cases.
+
+Other closures as recommended: `rejoined_seq` captured immediately before the `member_added` insert (members see their own join event), with a worked example and the (N, M) open-interval test; caller-visible `ACK_CHANNEL_CURSOR` bound closing the committed-count oracle; same-state archive/unarchive defined as success no-ops; explicit per-command sequencer-mutex table with SQL-computed ack max; writer-preferring authorization lock with a reader-arrival-rate benchmark; six enumerated flag configurations; only-writer claim qualified for offline CLIs; linter bound-equality arithmetic check.
+
+Linter grew from 84 to 97 checks. v0.9 pre-gate: PASS 97/97 on first run. Builder handoff remains blocked pending independent v0.9 G1R; on a clean verdict, Slice 0 begins (builder: Haiku 4.5; G2A: Opus).
+
+## Cycle 8: pinned v0.8 at `3e53e75`
+
+Reviewer: `claude-opus-5`, isolated, empirical. Verdict: Reject. Critical 0, High 4, Medium 3, Low 2. Receipt: `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-8.md`. First zero-Critical verdict of the Opus review era; finding scope narrowed from architectural to arithmetic/wording:
+
+- High: the two v0.8 message bounds interact so the mandated boundary fixture is off by exactly the two JSON quote bytes, and the raw 16,384 ceiling is unreachable (encoded bound dominates).
+- High: `rejoined_seq` capture point (before vs after the `member_added` insert) is ambiguous; the two readings disagree on whether a member sees its own join event.
+- High: `ACK_CHANNEL_CURSOR` range check is channel-scoped, not caller-scoped, giving a committed-count oracle across removal windows via `CURSOR_OUT_OF_RANGE` binary search.
+- High: lock details — "mutex where required" undefined for read-path commands; RW-lock fairness (writer preference) unstated, so the 150 ms revocation bound rests on an unstated assumption.
+- Medium/Low: no-op archive/unarchive response, flag-configuration count (six, not five), "only production writer" overclaim vs offline CLIs, linter arithmetic extension.
+
+All 9 conditions accepted for v0.9 disposition. Agreed: on a clean v0.9 verdict, pivot to Slice 0 (builder: Haiku 4.5; G2A: Opus) so remaining classes are settled by executable artifacts.
+
 ## Cycle 8 draft: v0.7 -> v0.8
 
 All 13 Cycle 7 conditions were accepted and closed directly in the consolidated v0.8 source:
