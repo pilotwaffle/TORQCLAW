@@ -1,11 +1,13 @@
 # TORQCLAW Collaboration Substrate - Review Status
 
 **Date:** 2026-08-06
-**Canonical candidate:** `PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.6.md`
-**Last completed independent review:** Cycle 5, v0.5 at `f851aae`, by `gpt-5.6-terra`
-**Last G1R verdict:** `REJECT` (Critical 0, High 2, Medium 1, Low 1)
-**Builder handoff:** `BLOCKED pending v0.6 G1R`
-**Consistency pre-gate (current):** `PASS 49/49` (2026-08-06, report: `PRD-TCLAW-COLLABORATION-V0.6-CONSISTENCY-REPORT.md`)
+**Canonical candidate:** `PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.7.md`
+**Last completed independent review:** Cycle 6, v0.6 at `cedae1f`, by `claude-opus-5`
+**Last G1R verdict:** `REJECT` (Critical 2, High 5, Medium 4, Low 2)
+**Builder handoff:** `BLOCKED pending v0.7 G1R`
+**Consistency pre-gate (current):** `PASS 67/67` (2026-08-06, report: `PRD-TCLAW-COLLABORATION-V0.7-CONSISTENCY-REPORT.md`)
+
+Note: Cycle 6 was started by `gpt-5.6-terra`, which terminated on output limits mid-receipt; per operator instruction the cycle was re-run in full by `claude-opus-5`. The receipt is `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-6.md`. Terra's truncated partial output independently identified the same JSON-escape feasibility defect recorded as Critical 1.
 
 ## Outcome
 
@@ -29,7 +31,8 @@ The consistency linter gained cross-constraint feasibility checks (no encoded bo
 | 3 | v0.3 | Reject | 0 | 5 | internal contradictions |
 | 4 | v0.4 (`2f40e3a`) | Reject | 0 | 3 | authorization precedence, credential handling, atomicity |
 | 5 | v0.5 (`f851aae`) | Reject | 0 | 2 | frame/page feasibility, Unicode name uniqueness |
-| next | v0.6 | Pre-gate PASS 49/49; G1R not run | unknown | unknown | |
+| 6 | v0.6 (`cedae1f`) | Reject | 2 | 5 | encoded-size feasibility, global-cursor oracle, lock discipline, expiry, credential errors |
+| next | v0.7 | Pre-gate PASS 67/67; G1R pending | unknown | unknown | closes all 13 Cycle 6 conditions |
 
 ## Historical evidence
 
@@ -37,9 +40,10 @@ The following artifacts are historical only and must not be cited as current pre
 
 - `PRD-TCLAW-COLLABORATION-V0.4-CONSISTENCY-REPORT.md` (34/34, superseded)
 - `PRD-TCLAW-COLLABORATION-V0.5-CONSISTENCY-REPORT.md` (40/40, superseded)
+- `PRD-TCLAW-COLLABORATION-V0.6-CONSISTENCY-REPORT.md` (49/49, superseded)
 
-The current authoritative pre-gate evidence is `PRD-TCLAW-COLLABORATION-V0.6-CONSISTENCY-REPORT.md` (49/49). A consistency PASS proves internal consistency only, never protocol feasibility or semantic correctness; the independent G1R remains the approval gate.
+The current authoritative pre-gate evidence is `PRD-TCLAW-COLLABORATION-V0.7-CONSISTENCY-REPORT.md` (67/67). A consistency PASS proves internal consistency only, never protocol feasibility or semantic correctness; the independent G1R remains the approval gate.
 
 ## Decision
 
-Do not implement from v0.1-v0.5. v0.6 contains the complete known remediation set across all five cycles plus both source audits. It is not builder-ready until an independent G1R of the pinned v0.6 commit reports no Critical or High finding.
+Do not implement from v0.1-v0.6. v0.7 closes all 13 Cycle 6 handoff conditions: encoded-size message bounds with control-character bans, per-channel `channel_seq` wire cursors (global `seq` never exposed), exact per-write lock discipline, serialization-based idempotency without the unreachable contention branch, credential expiry removed from v1, three new credential error codes with per-command mappings, passphrase-authenticated operator revocation, generalized pagination frame rule, defined `highWaterCursor` scope and cursor lifecycle, name character-class restrictions, a named accountable risk owner, and the audit index. It is not builder-ready until an independent G1R of the pinned v0.7 commit reports no Critical or High finding.

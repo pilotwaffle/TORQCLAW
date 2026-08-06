@@ -1,5 +1,34 @@
 # TORQCLAW Collaboration PRD Synthesis Log
 
+## Cycle 7 draft: v0.6 -> v0.7
+
+All 13 Cycle 6 handoff conditions were accepted and closed directly in the consolidated v0.7 source. One disposition deviates deliberately from the receipt's literal wording, with rationale:
+
+- The "operator-target guard" for credential commands is a clarification, not a prohibition: `CREATE_PRINCIPAL_CREDENTIAL` and `ROTATE_PRINCIPAL_CREDENTIAL` are explicitly valid for the operator principal, because they are the only way operator credentials are added and replaced (prohibiting them would contradict the `LAST_OPERATOR_CREDENTIAL` recovery design).
+- The lock-discipline fix keeps in-memory buffer insertion under the sequencer mutex (bounded pointer work, ordering-critical) while moving frame encoding and all socket writes outside both locks with per-write read-lock acquisition — this satisfies the finding's substance (revocation latency independent of consumer queue depth) while preserving the single-fan-out-source ordering guarantee.
+
+Other closures as recommended: encoded JSON message bound plus C0/C1 ban; per-channel `channel_seq` with `UNIQUE(channel_id,channel_seq)` and the global `seq` never exposed; contention branch deleted with serialization-assertion tests; credential expiry removed from v1 entirely; `PRINCIPAL_NOT_FOUND`/`CREDENTIAL_NOT_FOUND`/`INVALID_PRINCIPAL_STATE` registered with per-command mappings; `revoke-operator` authenticates with the recovery-kit passphrase; pagination frame rule generalized; `highWaterCursor` defined per-channel; cursor rows retained across membership and archive transitions; bidi/control character name bans; King Flowers named accountable owner for all risks (dated); `collab_audit_kind_created` index added.
+
+Linter grew from 49 to 67 checks, adding the encoded-message-fits-frame arithmetic check and required/forbidden literals for every closure. v0.7 pre-gate: PASS 67/67. Builder handoff remains blocked pending independent v0.7 G1R.
+
+## Cycle 6: pinned v0.6 at `cedae1f`
+
+Reviewer: `claude-opus-5` (gpt-5.6-terra started the cycle, hit output limits mid-receipt, and was replaced per operator instruction; its partial output independently converged on the JSON-escape defect). Verdict: Reject. Critical 2, High 5, Medium 4, Low 2. This review verified claims empirically against SQLite 3.50.4 and measured actual frame encodings.
+
+Accepted findings for disposition in v0.7:
+
+- Critical: JSON escape expansion admits messages that commit but can never be delivered in any frame (bound message text by encoded size; forbid raw control characters).
+- Critical: global `collab_events.seq` exposed as the wire cursor is a hidden-channel volume oracle (introduce per-channel `channel_seq`).
+- High: fan-out lock discipline underdetermined (per-write read-lock acquisition; mutex released at commit).
+- High: sequencer mutex makes the step-8 contention branch and mandated barrier tests unconstructible (delete step 8; assert serialization).
+- High: `expired` credential state has no setter and defeats the `LAST_OPERATOR_CREDENTIAL` guard (remove expiry from v1).
+- High: credential commands lack error codes for unknown/foreign/wrong-state targets (add `PRINCIPAL_NOT_FOUND`, `CREDENTIAL_NOT_FOUND`, `INVALID_PRINCIPAL_STATE`).
+- High: `revoke-operator` requires a credential the operator may have lost (authenticate with the recovery-kit passphrase instead).
+- Medium: generalize the frame-bound cut rule to all paginated results; define `highWaterCursor` scope; define cursor-row lifecycle; restrict name character classes.
+- Low: named risk owners with a date; `collab_audit` index.
+
+Receipt: `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-6.md`. Builder handoff remains blocked.
+
 ## Cycle 6 draft: v0.5 -> v0.6
 
 All Cycle 5 findings were accepted and closed directly in the consolidated v0.6 source:

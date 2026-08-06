@@ -52,7 +52,7 @@ Until Fable 5 access is restored, use this model routing:
 
 - **G1D / planner / orchestrator:** Opus 4.8
 - **G1R / independent reviewer:** Opus 4.7
-- **Builder / implementer:** Sonnet 5
+- **Builder / implementer:** Haiku 4.5 (operator-assigned 2026-08-06; previously Sonnet 5)
 - **RB / alternate debug worker:** GLM-5.2, if configured and available
 - **G2A / final auditor:** Opus 4.8
 - **Memory-writer:** Sonnet 5 or fast model, limited to approved memory/state files

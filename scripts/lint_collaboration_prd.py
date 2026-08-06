@@ -23,7 +23,8 @@ EXPECTED_EVENTS = {
 }
 EXPECTED_ERRORS = {
     "AUTH_FAILED", "ROLE_PRINCIPAL_MISMATCH", "SESSION_INVALID",
-    "COLLAB_NOT_FOUND", "COLLAB_NOT_PERMITTED", "CHANNEL_ARCHIVED",
+    "COLLAB_NOT_FOUND", "COLLAB_NOT_PERMITTED", "PRINCIPAL_NOT_FOUND",
+    "CREDENTIAL_NOT_FOUND", "INVALID_PRINCIPAL_STATE", "CHANNEL_ARCHIVED",
     "CHANNEL_NAME_CONFLICT", "CURSOR_OUT_OF_RANGE", "LAST_OPERATOR_CREDENTIAL",
     "INVALID_PRINCIPAL_TRANSITION", "IDEMPOTENCY_CONFLICT", "SLOW_CONSUMER",
     "INVALID_FRAME", "INVALID_REQUEST", "UNSUPPORTED_PROTOCOL",
@@ -175,9 +176,29 @@ def run(prd: Path) -> tuple[Gate, str]:
 
     required = {
         "message limit": "1-16,384 UTF-8 bytes",
+        "encoded message bound":
+            "encoded JSON string form (including surrounding quotes and all escapes) MUST be at most **16,384 bytes**",
+        "control-character ban":
+            "MUST NOT contain C0 or C1 control characters other than TAB",
+        "name character-class ban": "bidirectional control characters",
+        "paginated cut rule": "A paginated result page ends at its limit",
         "timeline page bound": "A timeline page ends at **100 events**",
         "timeline frame acceptance":
             "the 100-event page bound and the 64 KiB result-frame bound",
+        "per-channel cursor": "channel_seq",
+        "cursor never global": "never exposed in any frame, result, or error",
+        "high-water scope":
+            "greatest committed `channel_seq` visible to the caller in that channel",
+        "per-write read lock":
+            "acquired and released per socket write",
+        "serialization not contention":
+            "unique-key contention on `collab_mutation_results` cannot occur",
+        "cursor retention":
+            "retained unchanged across membership removal and re-add",
+        "passphrase revocation": "--passphrase-stdin",
+        "revocation latency bound":
+            "revocation-commit-to-last-write-boundary",
+        "audit index": "collab_audit_kind_created",
         "name-key algorithm": "Unicode Default Case Folding",
         "name-key index": "collab_channels_active_name_key",
         "archive delivery contract":
@@ -225,6 +246,10 @@ def run(prd: Path) -> tuple[Gate, str]:
         "legacy timeline page bytes": "512 KiB",
         "legacy name index": "collab_channels_active_name_ci",
         "unenforceable name fold": "lower(name)",
+        "removed credential expiry": "expires_at",
+        "removed expired state": "'expired'",
+        "removed contention branch": "unique-key contention, roll back",
+        "removed credential-stdin flag": "--credential-stdin",
         "stale section reference": "every D.2 event",
         "removed tombstone event": "message_tombstoned",
     }
@@ -252,6 +277,18 @@ def run(prd: Path) -> tuple[Gate, str]:
         "cross-constraint: encoded bounds fit frame",
         all(bound <= frame_kib for bound in encoded_bounds),
         f"encoded byte bound exceeds {frame_kib} KiB frame limit: {encoded_bounds}",
+    )
+
+    # Feasibility: the declared encoded-message bound plus a generous envelope
+    # allowance must fit one frame, so a single legal event is always deliverable.
+    encoded_msg = re.search(
+        r"encoded JSON string form.*?at most \*\*(\d[\d,]*) bytes\*\*", text
+    )
+    msg_bound = int(encoded_msg.group(1).replace(",", "")) if encoded_msg else None
+    gate.require(
+        "cross-constraint: encoded message fits frame with envelope",
+        msg_bound is not None and msg_bound + 2048 <= frame_kib * 1024,
+        f"encoded message bound {msg_bound} + 2 KiB envelope exceeds frame",
     )
 
     summary = (
