@@ -1,10 +1,10 @@
 # TORQCLAW Collaboration Substrate - Review Status
 
 **Date:** 2026-08-06
-**Canonical candidate:** `PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.4.md`
+**Canonical candidate:** `PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.5.md`
 **Last completed independent review:** v0.3 by `gpt-5.6-terra`
 **Last G1R verdict:** `REJECT`
-**Builder handoff:** `BLOCKED pending v0.4 G1R`
+**Builder handoff:** `BLOCKED pending v0.5 G1R`
 **Consistency pre-gate:** `PASS` (34/34 checks, 2026-08-06, report: `PRD-TCLAW-COLLABORATION-V0.4-CONSISTENCY-REPORT.md`)
 
 ## Outcome
@@ -50,11 +50,12 @@ Operator revocation is now offline and atomic. Final operator credential revocat
 | 1 | v0.1 | Reject | 3 | 4 |
 | 2 | v0.2 | Reject | 3 | 6 |
 | 3 | v0.3 | Reject | 0 | 5 |
-| next | v0.4 | Not run | unknown | unknown |
+| 4 | v0.4 (`2f40e3a`) | Reject | 0 | 3 |
+| next | v0.5 | Pre-gate PASS 40/40; G1R not run | unknown | unknown |
 
 ## Decision
 
-Do not implement from v0.1-v0.3. v0.4 contains the complete known remediation set, but it is not builder-ready until its consistency pre-gate passes and an independent G1R reports no Critical or High issue.
+Do not implement from v0.1-v0.4. v0.5 contains the complete known remediation set, including the Cycle 4 authorization-precedence, credential-redaction, and atomic-idempotency corrections. Its consistency pre-gate passes (40/40); it is not builder-ready until an independent G1R reports no Critical or High issue.
 
 ## Consistency pre-gate implementation
 

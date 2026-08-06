@@ -1,5 +1,26 @@
 # TORQCLAW Collaboration PRD Synthesis Log
 
+## Cycle 5 draft: v0.4 -> v0.5
+
+All Cycle 4 findings were accepted. v0.5 reorders authorization before idempotency, adds secret-redacted credential delivery and `CREATE_PRINCIPAL_CREDENTIAL`, defines one atomic keyed-write protocol, makes storage authority validation executable, separates session/subscription closure, defines safe rollback, and makes `node` fail strict frame validation. The consistency linter is updated in lockstep. Builder handoff remains blocked pending the v0.5 pre-gate and independent G1R.
+
+## Cycle 4: pinned v0.4 at 2f40e3a
+
+Verdict: Reject. Critical: 0. High: 3. Builder handoff remains blocked.
+
+Accepted findings for disposition:
+
+- Channel-scoped authorization must precede idempotency lookup so removed members and hidden resources cannot replay stored success or conflict responses.
+- Credential mutation results must persist only secret-redacted data, always expose credential IDs, and define a recoverable issuance path after one-time delivery loss.
+- Every keyed command needs one atomic `BEGIN IMMEDIATE` lookup/mutate/result protocol with deterministic duplicate-race behavior.
+- Authority invariants need executable transaction validation or triggers and negative persistence fixtures.
+- Session and subscription close reasons/lifecycles must be separated.
+- Destructive rollback needs explicit backup, acknowledgement, downtime, data-loss boundary, and receipt requirements.
+- The collaboration protocol must define deterministic handling for connection role `node`.
+
+Receipt: `G1R-TERRA-TCLAW-COLLABORATION-CYCLE-4.md`.
+
+
 **Canonical directory:** `E:\TorqClaw\docs\prd-reviews`
 **Date:** 2026-08-06
 

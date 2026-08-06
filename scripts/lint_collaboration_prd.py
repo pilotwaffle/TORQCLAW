@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 EXPECTED_COMMANDS = {
-    "CREATE_AGENT", "SUSPEND_AGENT", "RESTORE_AGENT", "REVOKE_AGENT",
+    "CREATE_AGENT", "CREATE_PRINCIPAL_CREDENTIAL", "SUSPEND_AGENT", "RESTORE_AGENT", "REVOKE_AGENT",
     "ROTATE_PRINCIPAL_CREDENTIAL", "REVOKE_PRINCIPAL_CREDENTIAL",
     "CREATE_CHANNEL", "ADD_CHANNEL_MEMBER", "REMOVE_CHANNEL_MEMBER",
     "ARCHIVE_CHANNEL", "UNARCHIVE_CHANNEL", "LIST_CHANNELS",
@@ -30,12 +30,16 @@ EXPECTED_ERRORS = {
 }
 EXPECTED_CLOSE_REASONS = {
     "credential_revoked", "principal_suspended", "principal_revoked",
-    "operator_revoked", "slow_consumer", "unsubscribed", "socket_closed",
+    "operator_revoked", "slow_consumer", "socket_closed",
     "recovery",
+}
+EXPECTED_SUBSCRIPTION_CLOSE_REASONS = {
+    "unsubscribed", "authorization_lost", "slow_consumer", "session_closed",
+    "socket_closed",
 }
 EXPECTED_IDEMPOTENCY = {
     "keyed": {
-        "CREATE_AGENT", "SUSPEND_AGENT", "RESTORE_AGENT", "REVOKE_AGENT",
+        "CREATE_AGENT", "CREATE_PRINCIPAL_CREDENTIAL", "SUSPEND_AGENT", "RESTORE_AGENT", "REVOKE_AGENT",
         "ROTATE_PRINCIPAL_CREDENTIAL", "REVOKE_PRINCIPAL_CREDENTIAL",
         "CREATE_CHANNEL", "ADD_CHANNEL_MEMBER", "REMOVE_CHANNEL_MEMBER",
         "ARCHIVE_CHANNEL", "UNARCHIVE_CHANNEL", "POST_CHANNEL_MESSAGE",
@@ -145,6 +149,9 @@ def run(prd: Path) -> tuple[Gate, str]:
     close_reasons = registry(
         sessions_text, "The exhaustive session close reasons", r"[a-z][a-z0-9_]+"
     )
+    subscription_close_reasons = registry(
+        sessions_text, "The exhaustive subscription close reasons", r"[a-z][a-z0-9_]+"
+    )
     ddl_events = check_values(ddl_table(text, "collab_events"), "kind")
     ddl_close_reasons = check_values(
         ddl_table(text, "collab_session_bindings"), "close_reason"
@@ -156,6 +163,11 @@ def run(prd: Path) -> tuple[Gate, str]:
     gate.equal("collab_events CHECK parity", ddl_events, EXPECTED_EVENTS)
     gate.equal("error registry", errors, EXPECTED_ERRORS)
     gate.equal("close-reason registry", close_reasons, EXPECTED_CLOSE_REASONS)
+    gate.equal(
+        "subscription close-reason registry",
+        subscription_close_reasons,
+        EXPECTED_SUBSCRIPTION_CLOSE_REASONS,
+    )
     gate.equal("close-reason DDL parity", ddl_close_reasons, EXPECTED_CLOSE_REASONS)
     for name, expected in EXPECTED_IDEMPOTENCY.items():
         gate.equal(f"idempotency class: {name}", classes.get(name, set()), expected)
@@ -185,6 +197,16 @@ def run(prd: Path) -> tuple[Gate, str]:
             "return `INVALID_REQUEST` when `principalId` names the operator",
         "mutation size observability":
             "`collab_mutation_results` row count and encoded result bytes",
+        "authorization before idempotency":
+            "current command predicate and hidden-resource authorization",
+        "credential result redaction":
+            "persist only `principalId`, `credentialId`, and `credentialAvailable:false`",
+        "atomic keyed protocol":
+            "every keyed command executes this atomic protocol",
+        "storage authority validation":
+            "The `CollaborationStore` is the only production writer",
+        "safe rollback":
+            "Normal rollback is non-destructive",
     }
     for name, literal in required.items():
         gate.require(name, literal in text, f"missing requirement: {literal}")
@@ -233,7 +255,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "prd", nargs="?", type=Path,
-        default=repo / "docs/prd-reviews/PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.4.md",
+        default=repo / "docs/prd-reviews/PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.5.md",
     )
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
@@ -253,4 +275,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
