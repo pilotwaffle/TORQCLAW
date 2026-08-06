@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""Deterministic consistency gate for the TORQCLAW collaboration PRD."""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+EXPECTED_COMMANDS = {
+    "CREATE_AGENT", "SUSPEND_AGENT", "RESTORE_AGENT", "REVOKE_AGENT",
+    "ROTATE_PRINCIPAL_CREDENTIAL", "REVOKE_PRINCIPAL_CREDENTIAL",
+    "CREATE_CHANNEL", "ADD_CHANNEL_MEMBER", "REMOVE_CHANNEL_MEMBER",
+    "ARCHIVE_CHANNEL", "UNARCHIVE_CHANNEL", "LIST_CHANNELS",
+    "POST_CHANNEL_MESSAGE", "GET_CHANNEL_TIMELINE", "ACK_CHANNEL_CURSOR",
+    "SUBSCRIBE_CHANNEL", "UNSUBSCRIBE_CHANNEL",
+}
+EXPECTED_EVENTS = {
+    "channel_created", "member_added", "member_removed", "message_posted",
+    "channel_archived", "channel_unarchived",
+}
+EXPECTED_ERRORS = {
+    "AUTH_FAILED", "ROLE_PRINCIPAL_MISMATCH", "SESSION_INVALID",
+    "COLLAB_NOT_FOUND", "COLLAB_NOT_PERMITTED", "CHANNEL_ARCHIVED",
+    "CHANNEL_NAME_CONFLICT", "CURSOR_OUT_OF_RANGE", "LAST_OPERATOR_CREDENTIAL",
+    "INVALID_PRINCIPAL_TRANSITION", "IDEMPOTENCY_CONFLICT", "SLOW_CONSUMER",
+    "INVALID_FRAME", "INVALID_REQUEST", "UNSUPPORTED_PROTOCOL",
+}
+EXPECTED_CLOSE_REASONS = {
+    "credential_revoked", "principal_suspended", "principal_revoked",
+    "operator_revoked", "slow_consumer", "unsubscribed", "socket_closed",
+    "recovery",
+}
+EXPECTED_IDEMPOTENCY = {
+    "keyed": {
+        "CREATE_AGENT", "SUSPEND_AGENT", "RESTORE_AGENT", "REVOKE_AGENT",
+        "ROTATE_PRINCIPAL_CREDENTIAL", "REVOKE_PRINCIPAL_CREDENTIAL",
+        "CREATE_CHANNEL", "ADD_CHANNEL_MEMBER", "REMOVE_CHANNEL_MEMBER",
+        "ARCHIVE_CHANNEL", "UNARCHIVE_CHANNEL", "POST_CHANNEL_MESSAGE",
+    },
+    "natural": {"ACK_CHANNEL_CURSOR", "UNSUBSCRIBE_CHANNEL"},
+    "none": {"LIST_CHANNELS", "GET_CHANNEL_TIMELINE", "SUBSCRIBE_CHANNEL"},
+}
+
+
+@dataclass
+class Finding:
+    check: str
+    detail: str
+
+
+class Gate:
+    def __init__(self) -> None:
+        self.findings: list[Finding] = []
+        self.passed: list[str] = []
+
+    def equal(self, name: str, actual: set[str], expected: set[str]) -> None:
+        if actual == expected:
+            self.passed.append(name)
+            return
+        self.findings.append(Finding(
+            name,
+            f"missing={sorted(expected - actual) or '[]'} "
+            f"extra={sorted(actual - expected) or '[]'}",
+        ))
+
+    def require(self, name: str, condition: bool, detail: str) -> None:
+        if condition:
+            self.passed.append(name)
+        else:
+            self.findings.append(Finding(name, detail))
+
+
+def section(text: str, heading: str, level: int = 3) -> str:
+    marker = "#" * level + " " + heading
+    start = text.find(marker)
+    if start < 0:
+        raise ValueError(f"missing section: {marker}")
+    body_start = text.find("\n", start) + 1
+    match = re.search(rf"^#{{1,{level}}}\s+", text[body_start:], re.MULTILINE)
+    end = body_start + match.start() if match else len(text)
+    return text[body_start:end]
+
+
+def ticks(value: str) -> set[str]:
+    return set(re.findall(r"`([^`]+)`", value))
+
+
+def ddl_table(text: str, table: str) -> str:
+    match = re.search(
+        rf"CREATE TABLE {re.escape(table)}\s*\((.*?)\n\);",
+        text,
+        re.DOTALL,
+    )
+    if not match:
+        raise ValueError(f"missing DDL table: {table}")
+    return match.group(1)
+
+
+def check_values(table_ddl: str, column: str) -> set[str]:
+    match = re.search(
+        rf"{re.escape(column)}\s+TEXT.*?CHECK\s*"
+        rf"\(\s*{re.escape(column)}(?:\s+IS\s+NULL\s+OR\s+{re.escape(column)})?"
+        rf"\s+IN\s*\((.*?)\)\s*\)",
+        table_ddl,
+        re.DOTALL,
+    )
+    return set(re.findall(r"'([^']+)'", match.group(1))) if match else set()
+
+
+def registry(text: str, prefix: str, pattern: str) -> set[str]:
+    line = next((item for item in text.splitlines() if item.startswith(prefix)), "")
+    return {item for item in ticks(line) if re.fullmatch(pattern, item)}
+
+
+def idempotency_classes(text: str) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    for key, label in (
+        ("keyed", "Idempotency-keyed"),
+        ("natural", "Naturally idempotent"),
+        ("none", "No idempotency key"),
+    ):
+        line = next(
+            (item for item in text.splitlines() if item.startswith(f"| {label} |")),
+            "",
+        )
+        result[key] = {item for item in ticks(line) if item in EXPECTED_COMMANDS}
+    return result
+
+
+def run(prd: Path) -> tuple[Gate, str]:
+    text = prd.read_text(encoding="utf-8")
+    gate = Gate()
+    commands_text = section(text, "7.4 Exhaustive commands")
+    events_text = section(text, "7.5 Exhaustive collaboration events")
+    errors_text = section(text, "7.6 Error precedence")
+    sessions_text = section(text, "8.1 Session binding")
+
+    commands = set(re.findall(r"^- `([A-Z][A-Z0-9_]+)", commands_text, re.MULTILINE))
+    events = set(re.findall(r"^- `([a-z][a-z0-9_]+)", events_text, re.MULTILINE))
+    errors = registry(errors_text, "The exhaustive domain error codes", r"[A-Z][A-Z0-9_]+")
+    errors |= registry(errors_text, "Framing codes are", r"[A-Z][A-Z0-9_]+")
+    close_reasons = registry(
+        sessions_text, "The exhaustive session close reasons", r"[a-z][a-z0-9_]+"
+    )
+    ddl_events = check_values(ddl_table(text, "collab_events"), "kind")
+    ddl_close_reasons = check_values(
+        ddl_table(text, "collab_session_bindings"), "close_reason"
+    )
+    classes = idempotency_classes(commands_text)
+
+    gate.equal("command allowlist", commands, EXPECTED_COMMANDS)
+    gate.equal("event allowlist", events, EXPECTED_EVENTS)
+    gate.equal("collab_events CHECK parity", ddl_events, EXPECTED_EVENTS)
+    gate.equal("error registry", errors, EXPECTED_ERRORS)
+    gate.equal("close-reason registry", close_reasons, EXPECTED_CLOSE_REASONS)
+    gate.equal("close-reason DDL parity", ddl_close_reasons, EXPECTED_CLOSE_REASONS)
+    for name, expected in EXPECTED_IDEMPOTENCY.items():
+        gate.equal(f"idempotency class: {name}", classes.get(name, set()), expected)
+    gate.equal("idempotency coverage", set().union(*classes.values()), EXPECTED_COMMANDS)
+
+    required = {
+        "message limit": "1-16,384 UTF-8 bytes",
+        "timeline limit": "100 events and 512 KiB",
+        "slow-consumer bytes": "1 MiB",
+        "slow-consumer age": "10 seconds",
+        "credential rate": "5 failures per normalized credential ID per 5 minutes",
+        "address rate": "20 failures per normalized remote address per 5 minutes",
+        "timeline benchmark": "p95 <= 100 ms",
+        "commit benchmark": "p95 <= 75 ms",
+        "fan-out benchmark": "p95 <= 150 ms",
+        "principal pepper check": "principal_pepper_check",
+        "recovery pepper check": "recovery_pepper_check",
+        "member lookup index": "collab_members_principal_state_channel",
+        "credential lookup index": "principal_credentials_principal_state",
+        "display-name validator":
+            "Agent display names are NFC-normalized, trimmed, and 1-80 Unicode scalar values.",
+        "failed mutation persistence":
+            "Failed mutations never write `collab_mutation_results`",
+        "rate-limit privacy":
+            "Rate-limit lockout is reported as `AUTH_FAILED`",
+        "operator target behavior":
+            "return `INVALID_REQUEST` when `principalId` names the operator",
+        "mutation size observability":
+            "`collab_mutation_results` row count and encoded result bytes",
+    }
+    for name, literal in required.items():
+        gate.require(name, literal in text, f"missing requirement: {literal}")
+
+    forbidden = {
+        "legacy message limit": "32,000",
+        "legacy timeline limit": "limit:1..500",
+        "legacy slow-consumer code": "COLLAB_SLOW_CONSUMER",
+        "legacy slow-consumer bytes": "4 MiB",
+        "stale section reference": "every D.2 event",
+        "removed tombstone event": "message_tombstoned",
+    }
+    for name, literal in forbidden.items():
+        # Boundary-aware: "4 MiB" must not match inside "64 MiB".
+        pattern = r"(?<![\w])" + re.escape(literal) + r"(?![\w])"
+        gate.require(
+            name,
+            re.search(pattern, text) is None,
+            f"legacy literal remains: {literal}",
+        )
+
+    summary = (
+        f"{'PASS' if not gate.findings else 'FAIL'}: "
+        f"{len(gate.passed)} checks passed, {len(gate.findings)} failed"
+    )
+    return gate, summary
+
+
+def render(prd: Path, gate: Gate, summary: str) -> str:
+    lines = [
+        "# TORQCLAW Collaboration PRD Consistency Report", "",
+        f"- PRD: `{prd}`", f"- Result: `{summary}`", "",
+        "## Passed checks", "",
+        *(f"- {name}" for name in gate.passed),
+        "", "## Findings", "",
+    ]
+    lines.extend(
+        (f"- **{item.check}:** {item.detail}" for item in gate.findings)
+        if gate.findings else ["- None."]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def main() -> int:
+    repo = Path(__file__).resolve().parents[1]
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "prd", nargs="?", type=Path,
+        default=repo / "docs/prd-reviews/PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.4.md",
+    )
+    parser.add_argument("--report", type=Path)
+    args = parser.parse_args()
+    try:
+        gate, summary = run(args.prd.resolve())
+    except (OSError, ValueError) as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
+    print(summary)
+    for item in gate.findings:
+        print(f"- {item.check}: {item.detail}")
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(render(args.prd.resolve(), gate, summary), encoding="utf-8")
+    return 1 if gate.findings else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
