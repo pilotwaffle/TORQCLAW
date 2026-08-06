@@ -35,8 +35,8 @@ EXPECTED_CLOSE_REASONS = {
     "recovery",
 }
 EXPECTED_SUBSCRIPTION_CLOSE_REASONS = {
-    "unsubscribed", "authorization_lost", "channel_archived", "slow_consumer",
-    "session_closed", "socket_closed",
+    "unsubscribed", "authorization_lost", "channel_archived",
+    "channel_unarchived", "slow_consumer", "session_closed", "socket_closed",
 }
 EXPECTED_IDEMPOTENCY = {
     "keyed": {
@@ -199,6 +199,26 @@ def run(prd: Path) -> tuple[Gate, str]:
         "revocation latency bound":
             "revocation-commit-to-last-write-boundary",
         "audit index": "collab_audit_kind_created",
+        "caller-scoped owner predicate":
+            "the current principal is the operator principal connected with role `operator`",
+        "owner invoker storage validation":
+            "verify the invoking principal equals the channel's `owner_principal_id`",
+        "membership interval": "rejoined_seq",
+        "replay floor": "max(afterCursor, rejoined_seq)",
+        "lock classes":
+            "authorization mutations acquire the authorization write lock instead of the read lock",
+        "no lock upgrade": "no upgrade path exists",
+        "nfc ordering":
+            "NFC normalization first, then trimming, then all length",
+        "cursor lookup index": "collab_cursors_principal_channel",
+        "timeline event object": "A timeline event object is",
+        "next-cursor convention": "cursor of the last element returned",
+        "decoy hmac": "fixed decoy HMAC",
+        "flag nesting": "strictly nested and validated at startup",
+        "caller-own cursor": "calling principal's own acknowledged cursor",
+        "sequential slices": "cumulative and sequentially gated",
+        "not-permitted scope":
+            "reserved for `OPERATOR_GLOBAL` commands",
         "name-key algorithm": "Unicode Default Case Folding",
         "name-key index": "collab_channels_active_name_key",
         "archive delivery contract":
@@ -250,6 +270,8 @@ def run(prd: Path) -> tuple[Gate, str]:
         "removed expired state": "'expired'",
         "removed contention branch": "unique-key contention, roll back",
         "removed credential-stdin flag": "--credential-stdin",
+        "channel-property owner predicate": "plus operator owns target channel",
+        "non-sequential slice wording": "independently gated",
         "stale section reference": "every D.2 event",
         "removed tombstone event": "message_tombstoned",
     }

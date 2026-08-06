@@ -1,5 +1,36 @@
 # TORQCLAW Collaboration PRD Synthesis Log
 
+## Cycle 8 draft: v0.7 -> v0.8
+
+All 13 Cycle 7 conditions were accepted and closed directly in the consolidated v0.8 source:
+
+- `CHANNEL_OWNER` is caller-scoped (operator principal, role `operator`, owns the target channel), with a storage-layer invoker validation and an agent-denial test with zero row changes.
+- Membership is interval-scoped: `collab_members.rejoined_seq` and a `max(afterCursor, rejoined_seq)` replay floor mean removed members never see removal-window content and new members never see pre-join content.
+- Commands are partitioned into three explicit lock classes; the write lock subsumes the read lock; no upgrade path; assertion test added.
+- Validation order fixed: NFC, then trim, then all bounds against normalized text, persisting the normalized form; U+0344 / e+U+0301 boundary fixtures added.
+- `collab_cursors_principal_channel` index added with the `LIST_CHANNELS` access pattern stated.
+- Timeline event object defined byte-exactly with the `nextCursor` convention.
+- `channel_unarchived` subscription close reason registered.
+- Credential verification made existence-oblivious via a decoy HMAC, with a timing-regression fixture.
+- Storage validation 6 replaced with row-checkable conditions.
+- Feature flags declared strictly nested with startup validation; Definition of Done expanded to the five valid configurations.
+- `COLLAB_NOT_PERMITTED` reserved for `OPERATOR_GLOBAL`; channel-scoped denials always `COLLAB_NOT_FOUND`.
+- `lastAcknowledgedCursor` defined as the caller's own, `"0"` when absent.
+- Slices reworded as cumulative and sequentially gated.
+
+Linter grew from 67 to 84 checks. v0.8 pre-gate: PASS 84/84. Builder handoff remains blocked pending independent v0.8 G1R. Agreed next step on a clean verdict: pivot to Slice 0 (builder: Haiku 4.5; G2A: Opus) so remaining defect classes are settled by executable artifacts.
+
+## Cycle 7: pinned v0.7 at `1d981da`
+
+Reviewer: `claude-opus-5`, isolated, empirical (Node.js NFC experiments, SQLite index verification). Verdict: Reject. Critical 2, High 4, Medium 4, Low 3. Receipt: `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-7.md`.
+
+The two Criticals are notable for having survived earlier cycles:
+
+- `CHANNEL_OWNER` predicate constrains the channel ("operator owns target channel" — true of every channel by construction) rather than the caller, granting any healthy agent archive/unarchive/membership administration over every channel. Present verbatim since v0.4; missed by Cycles 4-6.
+- Retained-cursor re-add semantics (added in v0.7 per Cycle 6's cursor-lifecycle finding) certify replay of messages posted during a member's removal window; membership is a boolean, not an interval, so removal pauses rather than revokes content access.
+
+Highs: lock-order self-contradiction for the seven commands that are both idempotency-keyed and authorization-state-changing; NFC normalization unordered relative to byte bounds (NFC is not length-preserving in either direction); `collab_cursors` unindexable for the `LIST_CHANNELS` access path despite the Section 14 gate claiming to check it; timeline event object shape never defined. All 13 conditions accepted for v0.8 disposition.
+
 ## Cycle 7 draft: v0.6 -> v0.7
 
 All 13 Cycle 6 handoff conditions were accepted and closed directly in the consolidated v0.7 source. One disposition deviates deliberately from the receipt's literal wording, with rationale:
