@@ -247,6 +247,19 @@ def run(prd: Path) -> tuple[Gate, str]:
             "only a caller that passes its Section 4.2 predicate can observe the state error",
         "orphan binding remediation":
             "Startup closes any binding with a null `closed_at`",
+        "fixture determinism harness": "determinism harness",
+        "injected fixture clock": "injected monotonic clock",
+        "seeded fixture uuids": "deterministic UUID generator seeded per fixture",
+        "revocation boundary definition":
+            "starts at the SQLite commit return of the authorization mutation",
+        "revocation observation floor":
+            "the revocation phase requires at least 1,000 observations",
+        "next-channel token rule": "`nextChannelId` is the `channelId` of the last element returned",
+        "secrets verify command": "torqclaw collab secrets verify",
+        "verify decrypts": "Verification decrypts the kit with the supplied passphrase",
+        "duplicate-key parser note": "raw-text position-aware parser",
+        "frame byte basis": "raw UTF-8 bytes of the complete frame",
+        "node version pin": "pinned at 22.11.0",
         "name-key algorithm": "Unicode Default Case Folding",
         "name-key index": "collab_channels_active_name_key",
         "archive delivery contract":
@@ -303,6 +316,7 @@ def run(prd: Path) -> tuple[Gate, str]:
         "removed mutex vagueness": "sequencer mutex where required",
         "removed count-non-disclosure claim": "never discloses committed counts",
         "removed unsatisfiable oracle test": "cannot learn committed counts",
+        "removed uniform observation floor": "10,000 observations per phase",
         "removed quote-inclusive bound": "including surrounding quotes and all escapes",
         "removed five-config gate": "five valid cumulative flag configurations",
         "stale section reference": "every D.2 event",

@@ -1,5 +1,13 @@
 # TORQCLAW Collaboration PRD Synthesis Log
 
+## Cycle 11 draft: v0.10 -> v0.11 (and Cycle 10 verdict)
+
+Cycle 10 (opus-5, pinned `9fdc95b`): Reject — 0 Critical, 1 High, 4 Medium, 4 Low. The sole High is purely additive: byte-for-byte fixtures need a determinism harness for server-generated UUIDs and timestamps. The receipt also explicitly tested and refuted six hostile readings (lock ordering, rejoined_seq consistency, all byte-fixture arithmetic, flag matrix, SQLite index coverage) rather than padding severity. Receipt: `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-10.md`.
+
+All 9 findings closed in v0.11: Section 10 determinism harness (injected clock pinned at 2026-01-01T00:00:00.000Z advancing 1 ms per timestamp; per-fixture seeded UUID generator; covers all server-generated fields including credential secret bytes); revocation-boundary measurement defined (commit return to write-lock release, pre-commit writes excluded); sequential benchmark phases with a 1,000-observation revocation floor supplied by suspend/restore and archive/unarchive pairs over a 100-agent pool; `nextChannelId` defined for normal and empty pages with an advancement fixture; `secrets verify` given a full invocation with decrypt-with-passphrase semantics, `recovery_kit_verified_at`, and a new `recovery_kit_verified` audit kind; duplicate-key parser trap flagged with an `INVALID_FRAME` fixture; frame bound stated as raw UTF-8 bytes; agent-ownership shape documented as deliberately application-enforced; Node.js pinned at 22.11.0 for gate measurements.
+
+Linter grew from 107 to 119 checks. v0.11 pre-gate: PASS 119/119. Convergence: 2C/5H -> 2C/4H -> 0C/4H -> 0C/2H -> 0C/1H across the Opus era. Builder handoff remains blocked pending independent v0.11 G1R; Slice 0 pivot on a clean verdict.
+
 ## Cycle 10 draft: v0.9 -> v0.10 (and Cycle 9 verdict)
 
 Cycle 9 (opus-5, pinned `8348ae2`): Reject — 0 Critical, 2 High, 4 Medium, 3 Low; rubric 5 Pass / 2 Partial / 0 Fail; every pinned byte fixture verified exactly. Receipt: `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-9.md`.

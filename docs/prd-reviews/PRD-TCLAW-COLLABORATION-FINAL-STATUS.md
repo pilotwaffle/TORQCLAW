@@ -1,11 +1,11 @@
 # TORQCLAW Collaboration Substrate - Review Status
 
 **Date:** 2026-08-06
-**Canonical candidate:** `PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.10.md`
-**Last completed independent review:** Cycle 9, v0.9 at `8348ae2`, by `claude-opus-5`
-**Last G1R verdict:** `REJECT` (Critical 0, High 2, Medium 4, Low 3)
-**Builder handoff:** `BLOCKED pending v0.10 G1R`
-**Consistency pre-gate (current):** `PASS 107/107` (2026-08-06, report: `PRD-TCLAW-COLLABORATION-V0.10-CONSISTENCY-REPORT.md`)
+**Canonical candidate:** `PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.11.md`
+**Last completed independent review:** Cycle 10, v0.10 at `9fdc95b`, by `claude-opus-5`
+**Last G1R verdict:** `REJECT` (Critical 0, High 1, Medium 4, Low 4)
+**Builder handoff:** `BLOCKED pending v0.11 G1R`
+**Consistency pre-gate (current):** `PASS 119/119` (2026-08-06, report: `PRD-TCLAW-COLLABORATION-V0.11-CONSISTENCY-REPORT.md`)
 
 Note: Cycle 6 was started by `gpt-5.6-terra`, which terminated on output limits mid-receipt; per operator instruction the cycle was re-run in full by `claude-opus-5`. The receipt is `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-6.md`. Terra's truncated partial output independently identified the same JSON-escape feasibility defect recorded as Critical 1.
 
@@ -35,7 +35,8 @@ The consistency linter gained cross-constraint feasibility checks (no encoded bo
 | 7 | v0.7 (`1d981da`) | Reject | 2 | 4 | caller-unscoped CHANNEL_OWNER (present since v0.4), removal-window replay, lock classes, NFC ordering |
 | 8 | v0.8 (`3e53e75`) | Reject | 0 | 4 | first zero-Critical Opus cycle; bounds arithmetic, rejoined_seq capture point, ack oracle, lock details |
 | 9 | v0.9 (`8348ae2`) | Reject | 0 | 2 | count oracle on success paths, close-frame lock delivery; rubric 5 Pass / 2 Partial / 0 Fail |
-| next | v0.10 | Pre-gate PASS 107/107; G1R pending | unknown | unknown | closes all 9 Cycle 9 findings; Slice 0 pivot on clean verdict |
+| 10 | v0.10 (`9fdc95b`) | Reject | 0 | 1 | sole High: fixture determinism harness (additive); reviewer refuted six hostile readings |
+| next | v0.11 | Pre-gate PASS 119/119; G1R pending | unknown | unknown | closes all 9 Cycle 10 findings; Slice 0 pivot on clean verdict |
 
 ## Historical evidence
 
@@ -47,8 +48,9 @@ The following artifacts are historical only and must not be cited as current pre
 - `PRD-TCLAW-COLLABORATION-V0.7-CONSISTENCY-REPORT.md` (67/67, superseded)
 - `PRD-TCLAW-COLLABORATION-V0.8-CONSISTENCY-REPORT.md` (84/84, superseded)
 - `PRD-TCLAW-COLLABORATION-V0.9-CONSISTENCY-REPORT.md` (97/97, superseded)
+- `PRD-TCLAW-COLLABORATION-V0.10-CONSISTENCY-REPORT.md` (107/107, superseded)
 
-The current authoritative pre-gate evidence is `PRD-TCLAW-COLLABORATION-V0.10-CONSISTENCY-REPORT.md` (107/107). A consistency PASS proves internal consistency only, never protocol feasibility or semantic correctness; the independent G1R remains the approval gate.
+The current authoritative pre-gate evidence is `PRD-TCLAW-COLLABORATION-V0.11-CONSISTENCY-REPORT.md` (119/119). A consistency PASS proves internal consistency only, never protocol feasibility or semantic correctness; the independent G1R remains the approval gate.
 
 ## Decision
 
