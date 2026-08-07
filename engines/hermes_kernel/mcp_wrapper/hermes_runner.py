@@ -18,6 +18,7 @@ from pathlib import Path
 from collections.abc import Mapping
 
 from . import task_store
+from .runtime_quiescence import hermes_run_admission
 
 VENDOR = Path(__file__).parents[1] / "vendor" / "hermes-agent"
 
@@ -504,96 +505,118 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
             return
         task_store.emit(task_id, "SYSTEM", f"[{kind}] {_clip(msg, 300)}")
 
-    agent = AIAgent(
-        # Provider config is env-driven + per-task (coding override). Hermes
-        # supports many backends; see _provider_config.
-        model=pconf["model"],
-        provider=pconf["provider"],
-        api_key=pconf["api_key"],
-        base_url=pconf["base_url"],
-        max_iterations=int(os.environ.get("HERMES_MAX_ITERATIONS", "30")),
-        # Per-task toolset allowlist — keeps cloud research off the host shell.
-        enabled_toolsets=enabled,
-        # TORQCLAW's router owns orchestration; Hermes sub-agents run outside
-        # our callback hijack, so delegation burns budget invisibly.
-        disabled_toolsets=[
-            t.strip()
-            for t in os.environ.get("HERMES_DISABLED_TOOLSETS", "delegation").split(",")
-            if t.strip()
-        ] or None,
-        # TORQCLAW owns memory (FTS5 layer) and context files; batch_runner
-        # uses the same isolation flags for programmatic runs.
-        # TORQCLAW owns memory (FTS5 layer) and context files; batch_runner
-        # uses the same isolation flags for programmatic runs.
+    # P2-1g.1 run-admission fence: construction + RUNNING registration must
+    # be atomic with respect to an in-flight skill mutation
+    # (skill_mutation_transaction in runtime_quiescence.py), or a mutation
+    # could observe RUNNING == {} and a new run could slip into existence
+    # before cache invalidation completes -- both individually "correct",
+    # together a violation of "no live agent holds a superseded skill
+    # prompt". hermes_run_admission() acquires the SAME process-wide lock a
+    # skill mutation holds across its own quiescence-check-through-
+    # invalidation span. Deliberately narrow: this fence covers ONLY
+    # construction through RUNNING[task_id] = agent below, never
+    # agent.run_conversation(...) -- holding it across the run itself would
+    # serialize every concurrent Hermes task behind one lock, which multiple
+    # ordinary tasks running concurrently (each on its own thread via
+    # asyncio.to_thread in server.py) must not be.
+    with hermes_run_admission():
+        agent = AIAgent(
+            # Provider config is env-driven + per-task (coding override). Hermes
+            # supports many backends; see _provider_config.
+            model=pconf["model"],
+            provider=pconf["provider"],
+            api_key=pconf["api_key"],
+            base_url=pconf["base_url"],
+            max_iterations=int(os.environ.get("HERMES_MAX_ITERATIONS", "30")),
+            # Per-task toolset allowlist — keeps cloud research off the host shell.
+            enabled_toolsets=enabled,
+            # TORQCLAW's router owns orchestration; Hermes sub-agents run outside
+            # our callback hijack, so delegation burns budget invisibly.
+            disabled_toolsets=[
+                t.strip()
+                for t in os.environ.get("HERMES_DISABLED_TOOLSETS", "delegation").split(",")
+                if t.strip()
+            ] or None,
+            # TORQCLAW owns memory (FTS5 layer) and context files; batch_runner
+            # uses the same isolation flags for programmatic runs.
+            # TORQCLAW owns memory (FTS5 layer) and context files; batch_runner
+            # uses the same isolation flags for programmatic runs.
+            #
+            # P2-0 DEPENDENCY: this flag is also load-bearing for the P2-0 skill-
+            # nudge invariant, not just memory ownership. Upstream's background
+            # review fork (agent/background_review.py:470-475) grants a
+            # hard-coded enabled_toolsets=["memory", "skills"] whitelist that is
+            # independent of TORQCLAW's own allowlist. That fork is currently
+            # unreachable because _spawn_background_review only fires when
+            # (_should_review_memory or _should_review_skills)
+            # (agent/turn_finalizer.py:393); _should_review_skills is false
+            # because _suppress_skill_nudge below zeroes the interval, and
+            # _should_review_memory requires agent._memory_store to be truthy
+            # (agent/turn_context.py:209-213), which skip_memory=True prevents
+            # from ever being populated. Flipping this to False would leave
+            # _should_review_memory able to go true, spawning a review fork that
+            # inherits "skills" and holds a whitelist permitting skill_manage —
+            # reopening the bypass path P2-0 closed. See
+            # test_skip_memory_is_p2_0_invariant_dependency in
+            # test_skill_nudge_suppression.py.
+            skip_memory=True,
+            skip_context_files=True,
+            save_trajectories=False,
+            quiet_mode=True,
+            session_id=task_id,
+            # ── The hijack: first-class callbacks -> cursor events ──
+            tool_start_callback=_tool_started,
+            tool_complete_callback=_tool_completed,
+            status_callback=_status,
+        )
+        # P2-0 L1b — primary control, applied unconditionally to every agent this
+        # wrapper constructs, independent of the toolset allowlist that produced
+        # `enabled` above. Holds even under HERMES_FRONTIER_TOOLSETS="*" (where
+        # `enabled` is None and L1 above cannot see/reject "skills"). Fails the
+        # task closed (raises SkillNudgeSuppressionUnavailable) if upstream ever
+        # changes such that this control can no longer be applied or verified —
+        # never silently continue with an unverified skill-nudge state.
+        _suppress_skill_nudge(agent)
+        # Evidence: record the resolved suppression state on the task's own event
+        # stream so "TORQCLAW records/surfaces suppression" is independently
+        # observable (not just an internal assertion), including in the
+        # HERMES_FRONTIER_TOOLSETS="*" case where the secondary allowlist control
+        # (L1) cannot hold.
         #
-        # P2-0 DEPENDENCY: this flag is also load-bearing for the P2-0 skill-
-        # nudge invariant, not just memory ownership. Upstream's background
-        # review fork (agent/background_review.py:470-475) grants a
-        # hard-coded enabled_toolsets=["memory", "skills"] whitelist that is
-        # independent of TORQCLAW's own allowlist. That fork is currently
-        # unreachable because _spawn_background_review only fires when
-        # (_should_review_memory or _should_review_skills)
-        # (agent/turn_finalizer.py:393); _should_review_skills is false
-        # because _suppress_skill_nudge below zeroes the interval, and
-        # _should_review_memory requires agent._memory_store to be truthy
-        # (agent/turn_context.py:209-213), which skip_memory=True prevents
-        # from ever being populated. Flipping this to False would leave
-        # _should_review_memory able to go true, spawning a review fork that
-        # inherits "skills" and holds a whitelist permitting skill_manage —
-        # reopening the bypass path P2-0 closed. See
-        # test_skip_memory_is_p2_0_invariant_dependency in
-        # test_skill_nudge_suppression.py.
-        skip_memory=True,
-        skip_context_files=True,
-        save_trajectories=False,
-        quiet_mode=True,
-        session_id=task_id,
-        # ── The hijack: first-class callbacks -> cursor events ──
-        tool_start_callback=_tool_started,
-        tool_complete_callback=_tool_completed,
-        status_callback=_status,
-    )
-    # P2-0 L1b — primary control, applied unconditionally to every agent this
-    # wrapper constructs, independent of the toolset allowlist that produced
-    # `enabled` above. Holds even under HERMES_FRONTIER_TOOLSETS="*" (where
-    # `enabled` is None and L1 above cannot see/reject "skills"). Fails the
-    # task closed (raises SkillNudgeSuppressionUnavailable) if upstream ever
-    # changes such that this control can no longer be applied or verified —
-    # never silently continue with an unverified skill-nudge state.
-    _suppress_skill_nudge(agent)
-    # Evidence: record the resolved suppression state on the task's own event
-    # stream so "TORQCLAW records/surfaces suppression" is independently
-    # observable (not just an internal assertion), including in the
-    # HERMES_FRONTIER_TOOLSETS="*" case where the secondary allowlist control
-    # (L1) cannot hold.
-    #
-    # Read defensively rather than via `agent._skill_nudge_interval` directly:
-    # _suppress_skill_nudge already verified this attribute above, so this
-    # should never fail — but if a future regression weakens that check to be
-    # non-fatal, a bare attribute access here would surface a misleading raw
-    # AttributeError instead of the real diagnosis. Re-raise as
-    # SkillNudgeSuppressionUnavailable so the failure still points at the
-    # actual cause (an unverifiable skill-nudge control), not an incidental
-    # NameError-shaped symptom of it.
-    try:
-        _interval_after_suppression = agent._skill_nudge_interval
-    except AttributeError as exc:
-        raise SkillNudgeSuppressionUnavailable(
-            "agent._skill_nudge_interval became unreadable after "
-            "_suppress_skill_nudge reported success — the P2-0 skill nudge "
-            "suppression control is in an inconsistent state; refusing to "
-            "run this task with an unverified skill-creation nudge state."
-        ) from exc
-    task_store.emit(
-        task_id, "SYSTEM",
-        "Skill nudge suppressed (agent._skill_nudge_interval=0); "
-        f"toolset override active: {enabled is None}",
-        {"skillNudgeIntervalAfterSuppression": _interval_after_suppression,
-         "toolsetWildcardOverride": enabled is None},
-    )
-    # Register BEFORE run so cancel_task can interrupt; baseline the usage
-    # delta source in case credits-micros is unavailable for this provider.
-    RUNNING[task_id] = agent
+        # Read defensively rather than via `agent._skill_nudge_interval` directly:
+        # _suppress_skill_nudge already verified this attribute above, so this
+        # should never fail — but if a future regression weakens that check to be
+        # non-fatal, a bare attribute access here would surface a misleading raw
+        # AttributeError instead of the real diagnosis. Re-raise as
+        # SkillNudgeSuppressionUnavailable so the failure still points at the
+        # actual cause (an unverifiable skill-nudge control), not an incidental
+        # NameError-shaped symptom of it.
+        try:
+            _interval_after_suppression = agent._skill_nudge_interval
+        except AttributeError as exc:
+            raise SkillNudgeSuppressionUnavailable(
+                "agent._skill_nudge_interval became unreadable after "
+                "_suppress_skill_nudge reported success — the P2-0 skill nudge "
+                "suppression control is in an inconsistent state; refusing to "
+                "run this task with an unverified skill-creation nudge state."
+            ) from exc
+        task_store.emit(
+            task_id, "SYSTEM",
+            "Skill nudge suppressed (agent._skill_nudge_interval=0); "
+            f"toolset override active: {enabled is None}",
+            {"skillNudgeIntervalAfterSuppression": _interval_after_suppression,
+             "toolsetWildcardOverride": enabled is None},
+        )
+        # Register BEFORE run so cancel_task can interrupt; baseline the usage
+        # delta source in case credits-micros is unavailable for this provider.
+        # Registration happens INSIDE the fence (last statement before it
+        # releases): this is the write skill_mutation_transaction's
+        # quiescence check must never race.
+        RUNNING[task_id] = agent
+    # Everything from here on runs OUTSIDE hermes_run_admission(): the usage
+    # baseline snapshot and, further below, agent.run_conversation() itself
+    # are deliberately unfenced so concurrent Hermes tasks are not
+    # serialized against each other.
     _USAGE_BASELINE[task_id] = _snapshot_account_usage_usd(force=True)
     # Stable product identity plus anti-fabrication grounding. Recalled session
     # context is delimited as untrusted data so it cannot redefine TORQCLAW or
