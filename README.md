@@ -20,8 +20,11 @@ Learning that is measurable, governed, and reversible.
 | Phase 0 — Foundation Repair | **Complete** |
 | Phase 1 — Visible Trust MVP | **Complete** |
 | Phase 2 — Governed Learning MVP | **Not started** |
-| Pre-PR base | `origin/master` at `d000bdab` |
-| Current local Gate-1 validation | `909/909` TypeScript tests · `81/81` Python tests · typecheck `12/12` · contracts drift OK · build `7/7` (local pre-PR worktree results; not merged CI) |
+| Resilient extensibility (PRD-TCLAW-RESILIENT-EXTENSIBILITY-001) | **Partially landed** — see [Resilient extensibility](#resilient-extensibility-partially-landed) |
+| Current master | `e3ae332` (PR #37), CI green |
+| Verified gate on `e3ae332` | `991/991` TypeScript tests across 43 files · `186` passed / `1` skipped Python engine tests · typecheck `12/12` · contracts drift OK (8 schemas, 2 dirs) · build `7/7` |
+
+Gate figures above were reproduced from a clean checkout of `e3ae332`, not copied from a pre-merge worktree.
 
 The portable launcher derives every path from its own location; it does not require a particular drive, checkout name, or current working directory.
 
@@ -35,6 +38,8 @@ The portable launcher derives every path from its own location; it does not requ
 - Headless channels cannot silently approve gated actions.
 - Gateway-owned grants: clients cannot inject `grantedTools`.
 - All terminal task outcomes flow through the governed gateway event path.
+- Every task binds to one named execution profile before dispatch; out-of-profile tools are never offered to the model.
+- Optional provider failover retries retryable provider failures without replaying tool calls or side effects.
 
 ### Cost control
 
@@ -84,7 +89,71 @@ The portable launcher derives every path from its own location; it does not requ
 - `pnpm contracts:check` verifies generated schema drift.
 - CI gates TypeScript tests, typecheck, contracts drift, build, and Python wrapper tests.
 
-### Graphify project profiles
+## Resilient extensibility (partially landed)
+
+`docs/PRD-TCLAW-RESILIENT-EXTENSIBILITY-001.md` scopes three slices. Their real
+state on `master` differs per slice, and the distinction matters before relying
+on any of them.
+
+### Provider failover — landed, opt-in, default off
+
+Deterministic provider chains with side-effect-safe retry. A task that fails on
+a retryable provider error can complete on a healthy fallback; failover never
+replays a tool call or an external side effect, and never switches providers
+after an irreversible side effect in the same task. Each attempt, transition
+reason, elapsed time, and cost provenance is recorded on the receipt.
+
+Failover stays off unless `TORQCLAW_PROVIDER_FAILOVER_ENABLED=true` **and**
+`TORQCLAW_PROVIDER_CHAINS_PATH` points at a valid chain file. Invalid
+configuration fails closed with `FAILOVER_CONFIG_REJECTED` rather than silently
+running unprotected. None of these variables are in `.env.example`; they are
+deliberately explicit opt-in.
+
+| Variable | Notes |
+|---|---|
+| `TORQCLAW_PROVIDER_FAILOVER_ENABLED` | Must be exactly `true` to enable |
+| `TORQCLAW_PROVIDER_CHAINS_PATH` | Required when enabled; chain definition file |
+| `TORQCLAW_PROVIDER_CHAIN_REVISION` | Chain revision stamp |
+| `TORQCLAW_FAILOVER_DEFAULT_CHAIN` / `TORQCLAW_FAILOVER_CODING_CHAIN` | Chain selection by task class |
+| `TORQCLAW_FAILOVER_ATTEMPT_TIMEOUT_MS` / `TORQCLAW_FAILOVER_TASK_DEADLINE_MS` | Per-attempt and whole-task bounds |
+| `TORQCLAW_FAILOVER_TRANSITION_MIN_MS` / `TORQCLAW_FAILOVER_TRANSITION_MAX_MS` | Transition backoff bounds |
+| `TORQCLAW_FAILOVER_CANCEL_ACK_MS` | Cancellation acknowledgement bound |
+
+### Execution profiles — landed and always on
+
+Every task resolves to exactly one named profile before dispatch, visible in
+route preview and on the receipt. A tool outside the active profile is never
+sent to the model and cannot execute through the bridge. Requesting a *broader*
+profile than the session default requires operator authority; requesting a
+stricter one does not. Unknown or unauthorized broadening fails closed.
+
+| Profile | Capabilities | Tiers | Path / network | Approval required |
+|---|---|---|---|---|
+| `read_only` | read | LOCAL_EDGE | none / none | — |
+| `workspace_write` | read, write | LOCAL_EDGE, FRONTIER | workspace / none | write |
+| `browser_research` | read | LOCAL_EDGE, FRONTIER | none / browser | — |
+| `terminal_power` | read, write, exec | LOCAL_EDGE, FRONTIER | configured / configured | write, exec |
+
+Default profile by task type: `DATA_EXTRACTION` and `SUMMARIZATION` →
+`read_only`; `ROUTINE_AUTOMATION` → `workspace_write`; `AUTONOMOUS_RESEARCH` →
+`browser_research`; `COMPLEX_CODING` → `terminal_power`.
+
+### Verified skills — not a usable feature yet
+
+`engines/hermes_kernel/mcp_wrapper/verified_skill_store.py` implements atomic
+staging, digest-bound approval, activation, rollback, journal recovery, and
+Ed25519 origin trust bundles, and it is covered by tests. **It is not imported
+by the engine server and is not reachable at runtime.** Remote skill
+distribution — downloader, HTTPS bounds, pinned upgrades, revocation refresh,
+and gateway/engine integration — is not implemented. Treat this slice as
+verified library code awaiting integration, not as an installed-skill pipeline.
+
+Two further caveats recorded with the checkpoint: Phase-1 failover evidence
+rests on a deterministic loopback/fake-provider fixture rather than a live
+two-provider pilot, and canonical signing uses a bounded deterministic JSON
+canonicalizer without RFC 8785 interoperability vectors.
+
+## Graphify project profiles
 
 Graphify project profile files are present on `master` through governed Graphify PRs and are accepted current repository state. Graphify relocation or cleanup remains a separate operator-lane item and is not part of TrustOS Phase 1.
 
@@ -123,13 +192,15 @@ Graphify project profile files are present on `master` through governed Graphify
 |---|---|
 | `packages/contracts` | Zod source of truth; emits JSON Schema for TypeScript and Python consumers |
 | `packages/router` | Hybrid route rule hierarchy and diagnostics |
-| `packages/gateway` | Fastify gateway, sessions, authz, dispatch, receipts, approvals, safe export |
+| `packages/gateway` | Fastify gateway, sessions, authz, dispatch, receipts, approvals, safe export, profile resolution, provider failover |
 | `packages/inference` | LOCAL_EDGE Ollama-compatible tool loop |
-| `packages/bridge` | MCP server registry, namespacing, tool filtering, capability/path policy |
+| `packages/bridge` | MCP server registry, namespacing, tool filtering, capability/path/profile policy |
 | `packages/channel-http` | HTTP channel adapter using the `role: 'channel'` seat |
-| `apps/console` | Next.js console: route preview, receipts, approvals, safe export UI |
-| `engines/hermes_kernel` | Python MCP wrapper over vendored `hermes-agent` |
+| `apps/console` | Next.js console: route preview, receipts, approvals, safe export UI, `/api/health` |
+| `engines/hermes_kernel` | Python MCP wrapper over vendored `hermes-agent`; attempt ledger, failover runtime, verified skill store |
+| `ops/` | Portable install/start wrappers, doctor, readiness, e2e and live-acceptance harnesses |
 | `docs/TRUSTOS-BUILD-LEDGER.md` | Implementation ledger and phase closeout record |
+| `docs/PRD-TCLAW-RESILIENT-EXTENSIBILITY-001.md` | Failover / profiles / verified-skills program spec |
 
 ## Quickstart
 
@@ -147,7 +218,7 @@ Before production start, replace both `TORQCLAW_GATEWAY_TOKEN=change-me` and `NE
 
 Before starting, run `node --env-file=.env ops/doctor.mjs --preflight --production` (or `pnpm doctor`). Start the portable production path with `ops/start-torqclaw.cmd`, `sh ops/start-torqclaw.sh`, or `pnpm start`. The wrappers can be launched from any current directory and keep the stack on loopback.
 
-Console: `http://127.0.0.1:3000`
+Console: `http://127.0.0.1:3000`  
 Gateway: `127.0.0.1:18790`  
 Engine health: `127.0.0.1:8000/health`
 
@@ -253,15 +324,28 @@ cd engines/hermes_kernel
 uv run pytest
 ```
 
-Historical Phase-1 closeout gate (recorded at Phase-1 closeout; not the current portable-runtime worktree gate):
+Current gate, reproduced from a clean checkout of `e3ae332`:
 
 ```text
-805/805 TypeScript tests
-75/75 Python tests
+991/991 TypeScript tests across 43 files
+186 passed / 1 skipped Python engine tests
 typecheck 12/12
-contracts drift OK
+contracts drift OK — 8 schemas in 2 checked-in dirs
 build 7/7
 ```
+
+The Python figure is CI's gate: `uv run pytest` from `engines/hermes_kernel`.
+The `tests/resilience/` suite at the repository root is a separate
+manifest-driven harness and is not part of that count.
+
+On a cold checkout the `tests/failover/*` cases spawn real engine subprocesses
+and can exceed the 15s per-test timeout while the Python environment is still
+being resolved. This presents as roughly a dozen failing files on a first run
+and clears on a warm re-run. Let `uv sync` finish before treating a failover
+timeout as a real regression.
+
+Historical Phase-1 closeout gate, for reference only — `805/805` TypeScript and
+`75/75` Python tests at commit `f5fbee7`.
 
 ## Design invariants
 
@@ -281,6 +365,13 @@ Completed:
 
 - Phase 0 — Foundation Repair.
 - Phase 1 — Visible Trust MVP.
+- Portable production runtime, doctor/readiness gating, and live-provider acceptance harness.
+- `TCLAW-FIX-G` — resolved 2026-08-01: decision-time cache refresh plus authoritative live-approval overlay in `GET_RECEIPT`.
+- `TCLAW-FIX-H` — resolved 2026-08-01: shared bounded diagnostic redaction boundary plus versioned legacy-row migration/quarantine.
+
+In progress:
+
+- Resilient extensibility — provider failover and execution profiles landed; verified skills not integrated. See the section above for per-slice status and exit criteria.
 
 Not started:
 
@@ -288,6 +379,4 @@ Not started:
 
 Filed non-blocking residuals:
 
-- `TCLAW-FIX-G` — refresh/re-project receipt approval embeds after approval decision.
-- `TCLAW-FIX-H` — at-rest sanitization for persisted `tasks.error` / `full_receipt_json.error`.
 - `TCLAW-GRAPHIFY-CLEANUP` — Graphify cleanup/relocation operator lane.
