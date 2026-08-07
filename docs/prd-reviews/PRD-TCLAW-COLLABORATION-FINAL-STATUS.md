@@ -6,7 +6,8 @@
 **Last G1R verdict:** `REJECT` (Critical 0, High 2, Medium 4, Low 3) — all nine handoff conditions closed in v0.13
 **Builder handoff:** `AUTHORIZED — operator decision 2026-08-06: Slice 0 pivot; document G1R loop retired in favor of executable gates (builder Haiku 4.5, G2A Opus 4.8)`
 **Consistency pre-gate (current):** `PASS 163/163` (2026-08-06, report: `PRD-TCLAW-COLLABORATION-V0.14-CONSISTENCY-REPORT.md`)
-**Slice 0 status:** first build (Haiku 4.5) passed 928/928 unit tests but was REJECTED by the G2A audit (Opus 4.8): 4 Critical, 3 High, 2 Low — frame-parser escape handling, non-finite detection, UUID-generator collisions/seed collisions, the Section 7.1/10 trim contradiction (now fixed in v0.14), plus a tautological-test meta-finding. Fix pass in flight; audit receipt: `G2A-OPUS-TCLAW-COLLABORATION-SLICE0-CYCLE-1.md`
+**Slice 0 status:** `APPROVED by G2A (Opus 4.8) on 2026-08-07` — receipt `G2A-OPUS-TCLAW-COLLABORATION-SLICE0-CYCLE-2.md`. History: Cycle 1 build (Haiku 4.5) rejected 4C/3H/2L (`G2A-OPUS-TCLAW-COLLABORATION-SLICE0-CYCLE-1.md`); fix pass closed all eight production conditions; Cycle 2 initially rejected on test-strengthening alone; follow-up closed it with mutation-verified boundary and version tests. Suite at approval: 110/110 collab, 1101/1101 full (warm). Deliverables: `packages/collab` (migration, frame, text, fold, harness) + `tests/collab`.
+**Provenance:** master was rebased 2026-08-07 (originals preserved on `backup/pre-sync-2026-08-07`); document-era pinned SHAs remain resolvable there; v0.13 = `2cb1099`, v0.14 = `0e9c83e` on current master.
 
 Note: Cycle 6 was started by `gpt-5.6-terra`, which terminated on output limits mid-receipt; per operator instruction the cycle was re-run in full by `claude-opus-5`. The receipt is `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-6.md`. Terra's truncated partial output independently identified the same JSON-escape feasibility defect recorded as Critical 1.
 

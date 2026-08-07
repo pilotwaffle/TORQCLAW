@@ -1,0 +1,19 @@
+{
+  "name": "@torqclaw/collab",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TORQCLAW Collaboration Substrate v1",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^20.0.0"
+  }
+}

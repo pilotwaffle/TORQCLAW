@@ -46,18 +46,15 @@ When working in this repo:
 
 TORQCLAW has its own repo-local authority and safety rules.
 
-## Temporary Model-Role Contract
+## Model-Role Contract (operator-updated 2026-08-07)
 
-Until Fable 5 access is restored, use this model routing:
-
-- **G1D / planner / orchestrator:** Opus 4.8
-- **G1R / independent reviewer:** Opus 4.7
-- **Builder / implementer:** Haiku 4.5 (operator-assigned 2026-08-06; previously Sonnet 5)
+- **G1D / planner / orchestrator / task router:** Fable 5
+- **G1R / independent reviewer:** Opus 4.7 — required when design, architecture, risk, or security review is needed
+- **Builder / implementer:** Sonnet 5 (operator-reassigned 2026-08-07; Haiku 4.5 built Slice 0 Cycle 1-2 under the 2026-08-06 contract)
 - **RB / alternate debug worker:** GLM-5.2, if configured and available
-- **G2A / final auditor:** Opus 4.8
-- **Memory-writer:** Sonnet 5 or fast model, limited to approved memory/state files
-
-After Fable 5 access returns, Fable 5 may resume as G1D / top-level planner if the operator explicitly enables it.
+- **G2A / final verifier:** Opus 4.8 — grades against files, tests, build output, git state, and acceptance criteria for high-impact changes
+- **Haiku / fast model:** cheap verification, checklist grading, log triage, scope sanity checks only; never sole final authority for risky code, merges, security, production, or architecture decisions
+- **Memory-writer:** updates STATE.md / MEMORY.md only after meaningful progress, tests pass, and verifier/G2A passes
 
 Authority rules:
 
