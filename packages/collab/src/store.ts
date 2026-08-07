@@ -59,11 +59,12 @@
 import { createHash } from 'node:crypto';
 import { canonicalJson } from './canonical.js';
 import { issueCredential, type CredentialLookup } from './credentials.js';
-import { normalizeName } from './text.js';
+import { normalizeName, normalizeMessageText } from './text.js';
+import { nameKey } from './fold.js';
 import type { RandomSource, Clock, UuidSource, BootstrapDb } from './bootstrap.js';
 
 // ---------------------------------------------------------------------------
-// Errors / result codes (Section 7.4 / 7.6 subset relevant to Slice 1)
+// Errors / result codes (Section 7.4 / 7.6 subset relevant to Slice 1 + 2)
 // ---------------------------------------------------------------------------
 
 export type CollabErrorCode =
@@ -74,7 +75,24 @@ export type CollabErrorCode =
   | 'INVALID_REQUEST'
   | 'LAST_OPERATOR_CREDENTIAL'
   | 'IDEMPOTENCY_CONFLICT'
-  | 'COLLAB_NOT_PERMITTED';
+  | 'COLLAB_NOT_PERMITTED'
+  | 'COLLAB_NOT_FOUND'
+  | 'CHANNEL_ARCHIVED'
+  | 'CHANNEL_NAME_CONFLICT'
+  | 'CURSOR_OUT_OF_RANGE';
+
+/**
+ * (C3) COLLAB_NOT_FOUND is byte-identical across every denial cause —
+ * absent, hidden, archived-hidden, non-member, and owner-only-by-non-owner.
+ * Fixed message text, retryable:false, so no code path may construct this
+ * error with a different message string (which would create a distinguishing
+ * oracle even though the `code` matches).
+ */
+const COLLAB_NOT_FOUND_MESSAGE = 'Request could not be completed';
+
+function notFound(): CollabError {
+  return new CollabError('COLLAB_NOT_FOUND', COLLAB_NOT_FOUND_MESSAGE);
+}
 
 export class CollabError extends Error {
   readonly code: CollabErrorCode;
@@ -126,6 +144,40 @@ interface CredentialRow {
   last_used_at: string | null;
 }
 
+interface ChannelRow {
+  id: string;
+  name: string;
+  name_key: string;
+  state: 'active' | 'archived';
+  owner_principal_id: string;
+  channel_epoch: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface MemberRow {
+  channel_id: string;
+  principal_id: string;
+  role: 'owner' | 'agent';
+  state: 'active' | 'removed';
+  membership_epoch: number;
+  rejoined_seq: number;
+  joined_at: string;
+  removed_at: string | null;
+}
+
+interface EventRow {
+  seq: number;
+  id: string;
+  schema_version: number;
+  channel_id: string;
+  channel_seq: number;
+  actor_principal_id: string;
+  kind: string;
+  content_json: string;
+  created_at: string;
+}
+
 // ---------------------------------------------------------------------------
 // Command result shapes (Section 7.4)
 // ---------------------------------------------------------------------------
@@ -150,6 +202,67 @@ export interface RevokeAgentResult extends AgentLifecycleResult {
 export interface RevokeCredentialResult {
   credentialId: string;
   revokedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Command result shapes (Section 7.4 channel commands)
+// ---------------------------------------------------------------------------
+
+export interface CreateChannelResult {
+  channelId: string;
+  name: string;
+}
+
+export interface ChannelMemberResult {
+  channelId: string;
+  principalId: string;
+  membershipEpoch: number;
+}
+
+export interface ChannelArchiveResult {
+  channelId: string;
+  state: 'active' | 'archived';
+  channelEpoch: number;
+}
+
+export interface TimelineEventObject {
+  cursor: string;
+  id: string;
+  kind: string;
+  actorPrincipalId: string;
+  occurredAt: string;
+  payload: Record<string, unknown>;
+}
+
+export interface ListChannelsEntry {
+  channelId: string;
+  name: string;
+  state: 'active' | 'archived';
+  role: 'owner' | 'agent';
+  lastAcknowledgedCursor: string;
+}
+
+export interface ListChannelsResult {
+  channels: ListChannelsEntry[];
+  nextChannelId: string | null;
+  hasMore: boolean;
+}
+
+export interface GetChannelTimelineResult {
+  events: TimelineEventObject[];
+  nextCursor: string;
+  hasMore: boolean;
+}
+
+export interface AckChannelCursorResult {
+  channelId: string;
+  acknowledgedCursor: string;
+}
+
+export interface PostChannelMessageResult {
+  eventId: string;
+  cursor: string;
+  occurredAt: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -625,6 +738,661 @@ export class CollaborationStore {
   }
 
   // -------------------------------------------------------------------
+  // Channel commands (Slice 2 / Section 4.2, 5.3, 5.4, 7.4)
+  //
+  // (C1) Lock-class split:
+  //  - keyed mutations (this.runKeyedCommand, via this.mutex): CREATE_CHANNEL,
+  //    ADD_CHANNEL_MEMBER, REMOVE_CHANNEL_MEMBER, ARCHIVE_CHANNEL,
+  //    UNARCHIVE_CHANNEL, POST_CHANNEL_MESSAGE.
+  //  - naturally-idempotent (this.runNaturallyIdempotentCommand, via
+  //    this.mutex, BEGIN IMMEDIATE, but NEVER touches
+  //    collab_mutation_results): ACK_CHANNEL_CURSOR.
+  //  - read-path (this.runReadCommand, no mutex, no BEGIN IMMEDIATE, no
+  //    result row): LIST_CHANNELS, GET_CHANNEL_TIMELINE.
+  //
+  // (C2) Every channel-scoped predicate — channel resolution, membership
+  // lookup, and owner check — runs INSIDE the transaction/read-snapshot in
+  // the step-2 predicate slot, and throws COLLAB_NOT_FOUND (byte-identical
+  // message) for every denial cause. There is NO channel resolution before
+  // BEGIN IMMEDIATE (or before the read snapshot starts) anywhere below.
+  // -------------------------------------------------------------------
+
+  async createChannel(
+    caller: CallerContext,
+    body: { name: string },
+    idempotencyKey: string
+  ): Promise<CreateChannelResult> {
+    // (L1) Normalize BEFORE hashing and persisting — mirrors createAgent's
+    // F2 discipline. NFC + trim via normalizeName.
+    const normalized = normalizeName(body.name);
+    if ('error' in normalized) {
+      throw new CollabError('INVALID_REQUEST', normalized.message);
+    }
+    const normalizedBody = { name: normalized.name };
+
+    return this.mutex.withLock(() =>
+      this.runKeyedCommand(
+        caller.principalId,
+        'CREATE_CHANNEL',
+        idempotencyKey,
+        normalizedBody,
+        (tx) => this.assertOperatorCaller(tx, caller),
+        (tx) => {
+          const operator = this.getOperatorOrThrow(tx);
+          const key = nameKey(normalizedBody.name);
+
+          const channelId = this.env.uuids.next();
+          const now = this.env.clock.next();
+
+          try {
+            tx
+              .prepare(
+                'INSERT INTO collab_channels(id, name, name_key, state, owner_principal_id, channel_epoch, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)'
+              )
+              .run(channelId, normalizedBody.name, key, 'active', operator.id, 1, now, now);
+          } catch (err) {
+            throw this.mapChannelNameConflict(err);
+          }
+
+          // Validation 2: one active owner membership (rejoined_seq 0) +
+          // channel_created event at channel_seq 1, same transaction.
+          tx
+            .prepare(
+              'INSERT INTO collab_members(channel_id, principal_id, role, state, membership_epoch, rejoined_seq, joined_at, removed_at) VALUES(?,?,?,?,?,?,?,?)'
+            )
+            .run(channelId, operator.id, 'owner', 'active', 1, 0, now, null);
+
+          const eventId = this.env.uuids.next();
+          const eventNow = this.env.clock.next();
+          tx
+            .prepare(
+              'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)'
+            )
+            .run(
+              eventId,
+              1,
+              channelId,
+              1,
+              operator.id,
+              'channel_created',
+              canonicalJson({ channelId, name: normalizedBody.name }),
+              eventNow
+            );
+
+          const result: CreateChannelResult = { channelId, name: normalizedBody.name };
+          return { result, redacted: result };
+        }
+      )
+    );
+  }
+
+  async addChannelMember(
+    caller: CallerContext,
+    body: { channelId: string; principalId: string },
+    idempotencyKey: string
+  ): Promise<ChannelMemberResult> {
+    return this.mutex.withLock(() =>
+      this.runKeyedCommand(
+        caller.principalId,
+        'ADD_CHANNEL_MEMBER',
+        idempotencyKey,
+        body,
+        // (C2) CHANNEL_OWNER predicate: resolved entirely inside the tx.
+        (tx) => this.assertChannelOwner(tx, caller, body.channelId),
+        (tx) => {
+          const channel = this.getChannelOrThrow(tx, body.channelId);
+          if (channel.state === 'archived') {
+            throw new CollabError('CHANNEL_ARCHIVED', 'Channel is archived');
+          }
+
+          // Validation 3: target is kind agent, owned by the channel
+          // operator, role agent; owner-role insert rejected (there is no
+          // caller-supplied role — this command only ever inserts role
+          // 'agent', so "owner-role insert rejected" is enforced by never
+          // accepting a role parameter here).
+          const target = tx.prepare('SELECT * FROM principals WHERE id = ?').get(body.principalId) as
+            | PrincipalRow
+            | undefined;
+          if (!target || target.kind !== 'agent' || target.owner_principal_id !== channel.owner_principal_id) {
+            throw notFound();
+          }
+
+          const existing = tx
+            .prepare('SELECT * FROM collab_members WHERE channel_id = ? AND principal_id = ?')
+            .get(channel.id, target.id) as MemberRow | undefined;
+
+          if (existing && existing.role === 'owner') {
+            // Owner membership cannot be re-added/mutated via this path.
+            throw notFound();
+          }
+
+          if (existing && existing.state === 'active') {
+            // Idempotent-at-storage same-state: Section 5.3 "same-state
+            // repetition is idempotent" — return current epoch, no mutation.
+            const result: ChannelMemberResult = {
+              channelId: channel.id,
+              principalId: target.id,
+              membershipEpoch: existing.membership_epoch,
+            };
+            return { result, redacted: result };
+          }
+
+          // (H1) rejoined_seq = MAX(channel_seq) for the channel, captured
+          // BEFORE inserting the member_added event, same transaction.
+          const rejoinedSeq = this.getMaxChannelSeq(tx, channel.id);
+          const nextSeq = rejoinedSeq + 1;
+          const now = this.env.clock.next();
+
+          let newEpoch: number;
+          if (existing) {
+            // Re-add: existing removed row -> active again, own epoch bump.
+            newEpoch = existing.membership_epoch + 1;
+            tx
+              .prepare(
+                'UPDATE collab_members SET state = ?, membership_epoch = ?, rejoined_seq = ?, joined_at = ?, removed_at = ? WHERE channel_id = ? AND principal_id = ?'
+              )
+              .run('active', newEpoch, rejoinedSeq, now, null, channel.id, target.id);
+          } else {
+            newEpoch = 1;
+            tx
+              .prepare(
+                'INSERT INTO collab_members(channel_id, principal_id, role, state, membership_epoch, rejoined_seq, joined_at, removed_at) VALUES(?,?,?,?,?,?,?,?)'
+              )
+              .run(channel.id, target.id, 'agent', 'active', newEpoch, rejoinedSeq, now, null);
+          }
+
+          const eventId = this.env.uuids.next();
+          const eventNow = this.env.clock.next();
+          tx
+            .prepare(
+              'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)'
+            )
+            .run(
+              eventId,
+              1,
+              channel.id,
+              nextSeq,
+              caller.principalId,
+              'member_added',
+              canonicalJson({ channelId: channel.id, principalId: target.id, membershipEpoch: newEpoch }),
+              eventNow
+            );
+
+          const result: ChannelMemberResult = { channelId: channel.id, principalId: target.id, membershipEpoch: newEpoch };
+          return { result, redacted: result };
+        }
+      )
+    );
+  }
+
+  async removeChannelMember(
+    caller: CallerContext,
+    body: { channelId: string; principalId: string },
+    idempotencyKey: string
+  ): Promise<ChannelMemberResult> {
+    return this.mutex.withLock(() =>
+      this.runKeyedCommand(
+        caller.principalId,
+        'REMOVE_CHANNEL_MEMBER',
+        idempotencyKey,
+        body,
+        (tx) => this.assertChannelOwner(tx, caller, body.channelId),
+        (tx) => {
+          const channel = this.getChannelOrThrow(tx, body.channelId);
+          if (channel.state === 'archived') {
+            throw new CollabError('CHANNEL_ARCHIVED', 'Channel is archived');
+          }
+
+          const existing = tx
+            .prepare('SELECT * FROM collab_members WHERE channel_id = ? AND principal_id = ?')
+            .get(channel.id, body.principalId) as MemberRow | undefined;
+
+          if (!existing) {
+            throw notFound();
+          }
+
+          // Validation 4: owner membership removal is rejected.
+          if (existing.role === 'owner') {
+            throw notFound();
+          }
+
+          if (existing.state === 'removed') {
+            // Same-state repetition is idempotent.
+            const result: ChannelMemberResult = {
+              channelId: channel.id,
+              principalId: existing.principal_id,
+              membershipEpoch: existing.membership_epoch,
+            };
+            return { result, redacted: result };
+          }
+
+          const nextSeq = this.getMaxChannelSeq(tx, channel.id) + 1;
+          const now = this.env.clock.next();
+          const newEpoch = existing.membership_epoch + 1;
+
+          tx
+            .prepare(
+              'UPDATE collab_members SET state = ?, membership_epoch = ?, removed_at = ? WHERE channel_id = ? AND principal_id = ?'
+            )
+            .run('removed', newEpoch, now, channel.id, existing.principal_id);
+
+          const eventId = this.env.uuids.next();
+          const eventNow = this.env.clock.next();
+          tx
+            .prepare(
+              'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)'
+            )
+            .run(
+              eventId,
+              1,
+              channel.id,
+              nextSeq,
+              caller.principalId,
+              'member_removed',
+              canonicalJson({ channelId: channel.id, principalId: existing.principal_id, membershipEpoch: newEpoch }),
+              eventNow
+            );
+
+          const result: ChannelMemberResult = {
+            channelId: channel.id,
+            principalId: existing.principal_id,
+            membershipEpoch: newEpoch,
+          };
+          return { result, redacted: result };
+        }
+      )
+    );
+  }
+
+  async archiveChannel(
+    caller: CallerContext,
+    body: { channelId: string },
+    idempotencyKey: string
+  ): Promise<ChannelArchiveResult> {
+    return this.mutex.withLock(() =>
+      this.runKeyedCommand(
+        caller.principalId,
+        'ARCHIVE_CHANNEL',
+        idempotencyKey,
+        body,
+        (tx) => this.assertChannelOwner(tx, caller, body.channelId),
+        (tx) => {
+          const channel = this.getChannelOrThrow(tx, body.channelId);
+
+          if (channel.state === 'archived') {
+            // Same-state no-op: return current state, no epoch, no event.
+            const result: ChannelArchiveResult = {
+              channelId: channel.id,
+              state: 'archived',
+              channelEpoch: channel.channel_epoch,
+            };
+            return { result, redacted: result };
+          }
+
+          const now = this.env.clock.next();
+          const newEpoch = channel.channel_epoch + 1;
+          tx
+            .prepare('UPDATE collab_channels SET state = ?, channel_epoch = ?, updated_at = ? WHERE id = ?')
+            .run('archived', newEpoch, now, channel.id);
+
+          const nextSeq = this.getMaxChannelSeq(tx, channel.id) + 1;
+          const eventId = this.env.uuids.next();
+          const eventNow = this.env.clock.next();
+          tx
+            .prepare(
+              'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)'
+            )
+            .run(
+              eventId,
+              1,
+              channel.id,
+              nextSeq,
+              caller.principalId,
+              'channel_archived',
+              canonicalJson({ channelId: channel.id, channelEpoch: newEpoch }),
+              eventNow
+            );
+
+          const result: ChannelArchiveResult = { channelId: channel.id, state: 'archived', channelEpoch: newEpoch };
+          return { result, redacted: result };
+        }
+      )
+    );
+  }
+
+  async unarchiveChannel(
+    caller: CallerContext,
+    body: { channelId: string },
+    idempotencyKey: string
+  ): Promise<ChannelArchiveResult> {
+    return this.mutex.withLock(() =>
+      this.runKeyedCommand(
+        caller.principalId,
+        'UNARCHIVE_CHANNEL',
+        idempotencyKey,
+        body,
+        (tx) => this.assertChannelOwner(tx, caller, body.channelId),
+        (tx) => {
+          const channel = this.getChannelOrThrow(tx, body.channelId);
+
+          if (channel.state === 'active') {
+            // Same-state no-op.
+            const result: ChannelArchiveResult = {
+              channelId: channel.id,
+              state: 'active',
+              channelEpoch: channel.channel_epoch,
+            };
+            return { result, redacted: result };
+          }
+
+          // (M2) recompute name_key on unarchive; on active-name collision,
+          // roll back leaving the target archived, CHANNEL_NAME_CONFLICT,
+          // no epoch bump. The unique active-name_key index is the
+          // concurrency backstop; catching its violation maps to
+          // CHANNEL_NAME_CONFLICT and the whole transaction (including this
+          // UPDATE) rolls back, so the channel is left exactly as it was
+          // (archived, prior name_key, prior epoch).
+          const key = nameKey(channel.name);
+          const now = this.env.clock.next();
+          const newEpoch = channel.channel_epoch + 1;
+
+          try {
+            tx
+              .prepare(
+                'UPDATE collab_channels SET state = ?, name_key = ?, channel_epoch = ?, updated_at = ? WHERE id = ?'
+              )
+              .run('active', key, newEpoch, now, channel.id);
+          } catch (err) {
+            throw this.mapChannelNameConflict(err);
+          }
+
+          const nextSeq = this.getMaxChannelSeq(tx, channel.id) + 1;
+          const eventId = this.env.uuids.next();
+          const eventNow = this.env.clock.next();
+          tx
+            .prepare(
+              'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)'
+            )
+            .run(
+              eventId,
+              1,
+              channel.id,
+              nextSeq,
+              caller.principalId,
+              'channel_unarchived',
+              canonicalJson({ channelId: channel.id, channelEpoch: newEpoch }),
+              eventNow
+            );
+
+          const result: ChannelArchiveResult = { channelId: channel.id, state: 'active', channelEpoch: newEpoch };
+          return { result, redacted: result };
+        }
+      )
+    );
+  }
+
+  async postChannelMessage(
+    caller: CallerContext,
+    body: { channelId: string; text: string },
+    idempotencyKey: string
+  ): Promise<PostChannelMessageResult> {
+    // (L1) Normalize text BEFORE hashing/persisting.
+    const normalized = normalizeMessageText(body.text);
+    if ('error' in normalized) {
+      throw new CollabError('INVALID_REQUEST', normalized.message);
+    }
+    const normalizedBody = { channelId: body.channelId, text: normalized.text };
+
+    return this.mutex.withLock(() =>
+      this.runKeyedCommand(
+        caller.principalId,
+        'POST_CHANNEL_MESSAGE',
+        idempotencyKey,
+        normalizedBody,
+        // (M3) CHANNEL_WRITABLE == CHANNEL_VISIBLE, state-free: the
+        // predicate slot checks ONLY visibility/membership, never state. A
+        // non-member (predicate fails) throws COLLAB_NOT_FOUND here and
+        // NEVER reaches the state check below.
+        (tx) => this.assertChannelVisible(tx, caller, normalizedBody.channelId),
+        (tx) => {
+          // (M3) Evaluation order: predicate already passed (caller is an
+          // active/passing member) -> THEN the active-channel state check.
+          // A member posting to an archived channel gets CHANNEL_ARCHIVED,
+          // never COLLAB_NOT_FOUND.
+          const channel = this.getChannelOrThrow(tx, normalizedBody.channelId);
+          if (channel.state === 'archived') {
+            throw new CollabError('CHANNEL_ARCHIVED', 'Channel is archived');
+          }
+
+          const nextSeq = this.getMaxChannelSeq(tx, channel.id) + 1;
+          const eventId = this.env.uuids.next();
+          const occurredAt = this.env.clock.next();
+          tx
+            .prepare(
+              'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)'
+            )
+            .run(
+              eventId,
+              1,
+              channel.id,
+              nextSeq,
+              caller.principalId,
+              'message_posted',
+              canonicalJson({ channelId: channel.id, text: normalizedBody.text }),
+              occurredAt
+            );
+
+          const result: PostChannelMessageResult = {
+            eventId,
+            cursor: String(nextSeq),
+            occurredAt,
+          };
+          return { result, redacted: result };
+        }
+      )
+    );
+  }
+
+  /**
+   * ACK_CHANNEL_CURSOR: naturally-idempotent path (C1). Takes the sequencer
+   * mutex and BEGIN IMMEDIATE, runs its predicate in-transaction, but NEVER
+   * reads or writes collab_mutation_results — cursor upsert with
+   * max(existing,submitted) computed in SQL (L2) is itself the idempotent
+   * operation; no separate mutation-result envelope is needed or permitted.
+   */
+  async ackChannelCursor(
+    caller: CallerContext,
+    body: { channelId: string; cursor: string }
+  ): Promise<AckChannelCursorResult> {
+    return this.mutex.withLock(() =>
+      this.runNaturallyIdempotentCommand(caller.principalId, 'ACK_CHANNEL_CURSOR', (tx) => {
+        // (C2) CURSOR_OWNER == CHANNEL_VISIBLE, resolved inside the tx.
+        const member = this.assertChannelVisible(tx, caller, body.channelId);
+        const channel = this.getChannelOrThrow(tx, body.channelId);
+
+        const submitted = this.parseCursor(body.cursor);
+
+        // (H3 / two-branch bound) caller-visible bound: greatest committed
+        // channel_seq when events above rejoined_seq exist, otherwise
+        // rejoined_seq.
+        const bound = this.callerVisibleBound(tx, channel.id, member.rejoined_seq);
+        if (submitted > bound) {
+          throw new CollabError('CURSOR_OUT_OF_RANGE', `Cursor ${submitted} exceeds caller-visible bound ${bound}`);
+        }
+
+        // (L2) upsert-from-zero, max(existing,submitted) computed in SQL.
+        const now = this.env.clock.next();
+        tx
+          .prepare(
+            `INSERT INTO collab_cursors(channel_id, principal_id, acknowledged_seq, updated_at)
+             VALUES(?,?,?,?)
+             ON CONFLICT(channel_id, principal_id) DO UPDATE SET
+               acknowledged_seq = MAX(acknowledged_seq, excluded.acknowledged_seq),
+               updated_at = excluded.updated_at`
+          )
+          .run(channel.id, caller.principalId, submitted, now);
+
+        const row = tx
+          .prepare('SELECT acknowledged_seq FROM collab_cursors WHERE channel_id = ? AND principal_id = ?')
+          .get(channel.id, caller.principalId) as { acknowledged_seq: number };
+
+        return { channelId: channel.id, acknowledgedCursor: String(row.acknowledged_seq) };
+      })
+    );
+  }
+
+  /**
+   * LIST_CHANNELS: read-path (C1). No sequencer mutex, no result row; a
+   * plain read against the current committed state is sufficient (SQLite's
+   * default isolation for a sequence of statements outside an explicit
+   * transaction is consistent enough for a read-only listing command with
+   * no cross-row invariant to preserve).
+   */
+  async listChannels(
+    caller: CallerContext,
+    body: { afterChannelId: string | null; limit: number; includeArchived: boolean }
+  ): Promise<ListChannelsResult> {
+    return this.runReadCommand(() => {
+      if (body.limit < 1 || body.limit > 100) {
+        throw new CollabError('INVALID_REQUEST', 'limit must be between 1 and 100');
+      }
+
+      const db = this.env.db;
+      const stateFilter = body.includeArchived ? "('active','archived')" : "('active')";
+      const rows = db
+        .prepare(
+          `SELECT c.id as channel_id, c.name as name, c.state as state, m.role as role, m.membership_epoch as membership_epoch
+           FROM collab_channels c
+           JOIN collab_members m ON m.channel_id = c.id
+           WHERE m.principal_id = ? AND m.state = 'active' AND c.state IN ${stateFilter}
+             AND (? IS NULL OR c.id > ?)
+           ORDER BY c.id ASC
+           LIMIT ?`
+        )
+        .all(caller.principalId, body.afterChannelId, body.afterChannelId, body.limit + 1) as Array<{
+        channel_id: string;
+        name: string;
+        state: 'active' | 'archived';
+        role: 'owner' | 'agent';
+        membership_epoch: number;
+      }>;
+
+      // Frame-cut (H3): trim to the 64 KiB result-frame bound in addition
+      // to the row-count limit. Encode incrementally and stop before the
+      // frame would exceed 65536 bytes.
+      const encoder = new TextEncoder();
+      const channels: ListChannelsEntry[] = [];
+      let hasMore = false;
+      let encodedLen = 2; // '{}' shell approximation; refined below per item
+
+      for (let i = 0; i < rows.length; i++) {
+        if (channels.length >= body.limit) {
+          hasMore = true;
+          break;
+        }
+        const row = rows[i]!;
+        const cursorRow = db
+          .prepare('SELECT acknowledged_seq FROM collab_cursors WHERE channel_id = ? AND principal_id = ?')
+          .get(row.channel_id, caller.principalId) as { acknowledged_seq: number } | undefined;
+
+        const entry: ListChannelsEntry = {
+          channelId: row.channel_id,
+          name: row.name,
+          state: row.state,
+          role: row.role,
+          lastAcknowledgedCursor: cursorRow ? String(cursorRow.acknowledged_seq) : '0',
+        };
+
+        const entryBytes = encoder.encode(JSON.stringify(entry)).length;
+        if (channels.length > 0 && encodedLen + entryBytes + 1 > 65536) {
+          hasMore = true;
+          break;
+        }
+        encodedLen += entryBytes + 1;
+        channels.push(entry);
+      }
+
+      // If the query fetched limit+1 rows and we consumed exactly `limit`
+      // without a frame cut, there is at least one more matching row.
+      if (!hasMore && rows.length > channels.length) {
+        hasMore = true;
+      }
+
+      const nextChannelId = channels.length > 0 ? channels[channels.length - 1]!.channelId : body.afterChannelId;
+
+      return { channels, nextChannelId, hasMore };
+    });
+  }
+
+  /**
+   * GET_CHANNEL_TIMELINE: read-path (C1). No sequencer mutex, no result row.
+   */
+  async getChannelTimeline(
+    caller: CallerContext,
+    body: { channelId: string; afterCursor: string; limit: number }
+  ): Promise<GetChannelTimelineResult> {
+    return this.runReadCommand(() => {
+      if (body.limit < 1 || body.limit > 100) {
+        throw new CollabError('INVALID_REQUEST', 'limit must be between 1 and 100');
+      }
+
+      const db = this.env.db;
+      const member = this.assertChannelVisible(db, caller, body.channelId);
+
+      const requested = this.parseCursor(body.afterCursor);
+      // Clamp effective afterCursor to max(afterCursor, rejoined_seq).
+      const effectiveAfter = Math.max(requested, member.rejoined_seq);
+
+      // (H1) event visible iff channel_seq STRICTLY > rejoined_seq — the
+      // clamp above already enforces this for the lower bound of the page,
+      // and the query below re-asserts channel_seq > effectiveAfter, which
+      // is >= rejoined_seq, so no event at or before rejoined_seq is ever
+      // returned.
+      const rows = db
+        .prepare(
+          `SELECT * FROM collab_events WHERE channel_id = ? AND channel_seq > ? ORDER BY channel_seq ASC LIMIT ?`
+        )
+        .all(body.channelId, effectiveAfter, body.limit + 1) as EventRow[];
+
+      const encoder = new TextEncoder();
+      const events: TimelineEventObject[] = [];
+      let hasMore = false;
+      let encodedLen = 2;
+
+      for (const row of rows) {
+        if (events.length >= body.limit) {
+          hasMore = true;
+          break;
+        }
+        const payload = JSON.parse(row.content_json) as Record<string, unknown>;
+        const eventObj: TimelineEventObject = {
+          cursor: String(row.channel_seq),
+          id: row.id,
+          kind: row.kind,
+          actorPrincipalId: row.actor_principal_id,
+          occurredAt: row.created_at,
+          payload,
+        };
+        const entryBytes = encoder.encode(JSON.stringify(eventObj)).length;
+        if (events.length > 0 && encodedLen + entryBytes + 1 > 65536) {
+          hasMore = true;
+          break;
+        }
+        encodedLen += entryBytes + 1;
+        events.push(eventObj);
+      }
+
+      if (!hasMore && rows.length > events.length) {
+        hasMore = true;
+      }
+
+      const nextCursor = events.length > 0 ? events[events.length - 1]!.cursor : String(effectiveAfter);
+
+      return { events, nextCursor, hasMore };
+    });
+  }
+
+  // -------------------------------------------------------------------
   // Direct storage-level negative-fixture surface (Section 9 validations)
   // -------------------------------------------------------------------
 
@@ -743,6 +1511,119 @@ export class CollaborationStore {
         'Only the active operator principal, connected with role operator, may invoke this command'
       );
     }
+  }
+
+  // -------------------------------------------------------------------
+  // Channel helpers (Slice 2)
+  // -------------------------------------------------------------------
+
+  /**
+   * (C2) Channel resolution used ONLY inside a predicate/read slot that has
+   * already decided the channel is hidden -> throws COLLAB_NOT_FOUND. Never
+   * called before BEGIN IMMEDIATE / before a read snapshot begins.
+   */
+  private getChannelOrThrow(tx: BootstrapDb, channelId: string): ChannelRow {
+    const row = tx.prepare('SELECT * FROM collab_channels WHERE id = ?').get(channelId) as ChannelRow | undefined;
+    if (!row) {
+      throw notFound();
+    }
+    return row;
+  }
+
+  /**
+   * CHANNEL_OWNER predicate (Section 4.2): BASE plus the current principal
+   * is the operator principal connected with role operator, and the target
+   * channel's owner_principal_id equals the current principal ID; channel
+   * may be active or archived (state is NEVER part of this predicate — see
+   * M3/step-8). Every denial cause here — absent channel, hidden channel,
+   * non-operator caller, or operator-but-not-this-channel's-owner — is
+   * COLLAB_NOT_FOUND, byte-identical. Section 9 validation 9: the invoking
+   * principal's operator-ness is a DB read, never caller-asserted.
+   */
+  private assertChannelOwner(tx: BootstrapDb, caller: CallerContext, channelId: string): ChannelRow {
+    const callerRow = tx.prepare('SELECT * FROM principals WHERE id = ?').get(caller.principalId) as
+      | PrincipalRow
+      | undefined;
+    const channel = tx.prepare('SELECT * FROM collab_channels WHERE id = ?').get(channelId) as
+      | ChannelRow
+      | undefined;
+
+    if (
+      !callerRow ||
+      callerRow.kind !== 'operator' ||
+      callerRow.status !== 'active' ||
+      !channel ||
+      channel.owner_principal_id !== callerRow.id
+    ) {
+      throw notFound();
+    }
+    return channel;
+  }
+
+  /**
+   * CHANNEL_VISIBLE / CHANNEL_WRITABLE / CURSOR_OWNER predicate (Section
+   * 4.2): BASE plus active-or-archived channel and active membership. State
+   * is never part of this predicate. Every denial cause — absent, hidden,
+   * archived-hidden, non-member — is COLLAB_NOT_FOUND, byte-identical.
+   * Returns the caller's own active membership row.
+   */
+  private assertChannelVisible(tx: BootstrapDb, caller: CallerContext, channelId: string): MemberRow {
+    const channel = tx.prepare('SELECT * FROM collab_channels WHERE id = ?').get(channelId) as
+      | ChannelRow
+      | undefined;
+    if (!channel) {
+      throw notFound();
+    }
+    const member = tx
+      .prepare('SELECT * FROM collab_members WHERE channel_id = ? AND principal_id = ?')
+      .get(channelId, caller.principalId) as MemberRow | undefined;
+    if (!member || member.state !== 'active') {
+      throw notFound();
+    }
+    return member;
+  }
+
+  private getMaxChannelSeq(tx: BootstrapDb, channelId: string): number {
+    const row = tx
+      .prepare('SELECT COALESCE(MAX(channel_seq), 0) as m FROM collab_events WHERE channel_id = ?')
+      .get(channelId) as { m: number };
+    return row.m;
+  }
+
+  /**
+   * (H3) The two-branch caller-visible cursor bound: the greatest committed
+   * channel_seq when any committed event in the channel has channel_seq
+   * greater than the member's current rejoined_seq; otherwise the member's
+   * rejoined_seq.
+   */
+  private callerVisibleBound(tx: BootstrapDb, channelId: string, rejoinedSeq: number): number {
+    const maxSeq = this.getMaxChannelSeq(tx, channelId);
+    return maxSeq > rejoinedSeq ? maxSeq : rejoinedSeq;
+  }
+
+  private parseCursor(cursor: string): number {
+    if (!/^(0|[1-9][0-9]*)$/.test(cursor)) {
+      throw new CollabError('INVALID_REQUEST', `Cursor must be an unsigned base-10 integer without leading zeroes: ${cursor}`);
+    }
+    const n = Number(cursor);
+    if (!Number.isSafeInteger(n) || n < 0) {
+      throw new CollabError('INVALID_REQUEST', `Cursor out of representable range: ${cursor}`);
+    }
+    return n;
+  }
+
+  /**
+   * Maps a UNIQUE(collab_channels_active_name_key) constraint violation to
+   * CHANNEL_NAME_CONFLICT. Used by both CREATE_CHANNEL and UNARCHIVE_CHANNEL
+   * (Section 9 validation 8: the unique active-name_key index is the
+   * concurrency backstop for both).
+   */
+  private mapChannelNameConflict(err: unknown): unknown {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/UNIQUE constraint failed.*name_key/i.test(message) || /collab_channels_active_name_key/i.test(message)) {
+      return new CollabError('CHANNEL_NAME_CONFLICT', 'An active channel with this name already exists');
+    }
+    return err;
   }
 
   private insertAudit(
@@ -905,6 +1786,35 @@ export class CollaborationStore {
         this.pendingSecretBytes = undefined;
       }
     }
+  }
+
+  /**
+   * (C1) The naturally-idempotent driver path: sequencer mutex + BEGIN
+   * IMMEDIATE, predicate revalidated in-transaction, but NEVER reads or
+   * writes collab_mutation_results. Used solely by ACK_CHANNEL_CURSOR,
+   * whose own upsert-with-max semantics ARE the idempotency mechanism.
+   */
+  private runNaturallyIdempotentCommand<TResult>(
+    _principalId: string,
+    _command: string,
+    fn: (tx: BootstrapDb) => TResult
+  ): TResult {
+    let finalResult: TResult;
+    const tx = this.env.db.transaction(() => {
+      finalResult = fn(this.env.db);
+    });
+    tx();
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    return finalResult!;
+  }
+
+  /**
+   * (C1) The read-path driver: NO sequencer mutex, no BEGIN IMMEDIATE, no
+   * result row. Used by LIST_CHANNELS and GET_CHANNEL_TIMELINE. Runs the
+   * predicate/query directly against the current committed state.
+   */
+  private runReadCommand<TResult>(fn: () => TResult): TResult {
+    return fn();
   }
 }
 

@@ -71,7 +71,7 @@ export {
   type CheckResult,
 } from './ratelimit.js';
 
-// Collaboration store (identity layer)
+// Collaboration store (identity + channel layer)
 export {
   CollaborationStore,
   CollabError,
@@ -85,6 +85,15 @@ export {
   type AgentLifecycleResult,
   type RevokeAgentResult,
   type RevokeCredentialResult,
+  type CreateChannelResult,
+  type ChannelMemberResult,
+  type ChannelArchiveResult,
+  type TimelineEventObject,
+  type ListChannelsEntry,
+  type ListChannelsResult,
+  type GetChannelTimelineResult,
+  type AckChannelCursorResult,
+  type PostChannelMessageResult,
 } from './store.js';
 
 // Sessions
