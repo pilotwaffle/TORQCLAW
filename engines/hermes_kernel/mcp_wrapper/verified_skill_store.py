@@ -87,6 +87,17 @@ class SkillRecoveryError(SkillStoreError):
     """The durable state or journal cannot be reconciled safely."""
 
 
+class SkillAuditCapacityError(SkillStoreError):
+    """The bounded audit log is full; no historical record may be deleted.
+
+    This is an operator-actionable capacity condition, not data corruption:
+    it must never be caught by handlers that treat ``SkillRecoveryError`` as
+    "state needs reconciliation" (see ``reconcile()``), because the correct
+    response is to fail the governed mutation closed, not to paper over a
+    journal entry as a recoverable warning.
+    """
+
+
 def package_digest(manifest_bytes: bytes, skill_bytes: bytes) -> str:
     """Return the exact digest bound to a package's raw two-file contents."""
 
@@ -435,6 +446,13 @@ class VerifiedSkillStore:
                     raise SkillRecoveryError(f"invalid transaction journal: {tx_path.name}")
                 try:
                     recovered = self._reconcile_transaction(state, tx)
+                except SkillAuditCapacityError:
+                    # Not a corruption/recovery condition: do not launder it
+                    # into a warning and do not let the in-place mutations
+                    # _reconcile_transaction already made to ``state`` reach
+                    # the unconditional _save_state below.  Fail the whole
+                    # reconcile() call closed instead.
+                    raise
                 except (SkillStoreError, OSError, ValueError) as exc:
                     report["warnings"].append(f"{tx_path.name}: {exc}")
                     continue
@@ -636,13 +654,24 @@ class VerifiedSkillStore:
         audit = state.setdefault("audit", [])
         if not isinstance(audit, list):
             raise SkillRecoveryError("audit state is invalid")
+        # Fail closed at capacity instead of discarding history.  This check
+        # must run before the audit list (or any other part of ``state``) is
+        # mutated: every caller holds a freshly loaded, not-yet-persisted
+        # ``state`` dict and calls ``_save_state`` immediately after this
+        # method returns, so raising here guarantees the in-memory governed
+        # mutation the caller just made is discarded unsaved and no partial
+        # write reaches state.json.
+        if len(audit) >= MAX_AUDIT_ENTRIES:
+            raise SkillAuditCapacityError(
+                "verified skill audit capacity reached; "
+                "no historical records were deleted"
+            )
         audit.append({
             "action": action,
             "skillId": artifact["manifest"]["id"],
             "digest": artifact["digest"],
             "at": time.time_ns(),
         })
-        del audit[:-MAX_AUDIT_ENTRIES]
 
 
 def _empty_state() -> dict[str, Any]:
