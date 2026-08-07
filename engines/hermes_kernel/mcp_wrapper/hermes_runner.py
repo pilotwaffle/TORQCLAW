@@ -175,6 +175,58 @@ def _snapshot_account_usage_usd(*, force: bool = False) -> float | None:
     return value
 
 
+class SkillNudgeSuppressionUnavailable(RuntimeError):
+    """Raised when the agent instance no longer exposes a settable
+    `_skill_nudge_interval`, i.e. the L1b control this ticket relies on has
+    gone stale against upstream. Must fail the task closed — never silently
+    let an unsuppressed skill-nudge loop run just because the attribute
+    check couldn't be performed."""
+
+
+def _suppress_skill_nudge(agent) -> None:
+    """P2-0 L1b — the primary, configuration-independent control.
+
+    Upstream's autonomous skill-creation nudge (vendor/hermes-agent
+    agent/turn_finalizer.py:377-379, and the same three-conjunct guard at
+    conversation_loop.py:518 and codex_runtime.py:278-283) fires only when
+    ALL of:
+      1. agent._skill_nudge_interval > 0
+      2. agent._iters_since_skill >= agent._skill_nudge_interval
+      3. "skill_manage" in agent.valid_tool_names
+
+    Forcing conjunct (1) to 0 holds regardless of the toolset allowlist, so
+    it still suppresses the nudge even when HERMES_FRONTIER_TOOLSETS="*"
+    restores "skill_manage" to valid_tool_names (see
+    _frontier_enabled_toolsets — under "*" enabled_toolsets is None, which is
+    upstream's own full-default toolset list, and L1 below cannot see
+    "skills" in a None list to reject it). This is upstream's own idiom for
+    disabling the nudge post-construction (background_review.py:423,
+    curator.py:1764 both do the same assignment after their agent exists),
+    not a hack against the vendored code.
+
+    Fails closed: if the attribute is missing or the assignment doesn't
+    stick (upstream renamed/removed the field, replaced it with a property
+    with no setter, etc.), raise rather than silently proceeding with an
+    agent whose skill-nudge loop might still be live.
+    """
+    if not hasattr(agent, "_skill_nudge_interval"):
+        raise SkillNudgeSuppressionUnavailable(
+            "agent has no _skill_nudge_interval attribute — the P2-0 skill "
+            "nudge suppression control is no longer compatible with the "
+            "vendored hermes-agent; refusing to run this task with an "
+            "unverified skill-creation nudge state."
+        )
+    agent._skill_nudge_interval = 0
+    if getattr(agent, "_skill_nudge_interval", None) != 0:
+        raise SkillNudgeSuppressionUnavailable(
+            "setting agent._skill_nudge_interval = 0 did not take effect "
+            "(read-back mismatch) — the P2-0 skill nudge suppression "
+            "control is no longer compatible with the vendored hermes-agent; "
+            "refusing to run this task with an unverified skill-creation "
+            "nudge state."
+        )
+
+
 def get_spend_usd(agent, task_id: str) -> tuple[float | None, str]:
     """USD spent so far on this task, paired with its provenance tag. Returns
     (cost, costSource) — costSource is ALWAYS a non-null string, even when
@@ -381,6 +433,18 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
     task_store.emit(task_id, "SYSTEM", f"Model: {pconf['provider']}/{pconf['model']}")
 
     enabled = _frontier_enabled_toolsets(task_type, prompt, req.get("effectiveProfile"))
+
+    # P2-0 L1 — secondary control: reject "skills" from an explicit allowlist
+    # before ever constructing the agent. This is belt-and-suspenders only:
+    # under the normal allowlist (_FRONTIER_TOOLSETS above) "skills" is never
+    # present, so this should never fire in practice. It CANNOT hold under
+    # HERMES_FRONTIER_TOOLSETS="*" — there `enabled` is None (upstream's full
+    # default, "skills" included) and there is nothing here to assert against;
+    # L1b (_suppress_skill_nudge, applied unconditionally below right after
+    # construction) is what actually holds in that case. Follows the existing
+    # per-task fail-closed precedent (durable tool fence check below).
+    if enabled is not None and "skills" in enabled:
+        raise RuntimeError("skill toolset must not reach the agent constructor")
     task_store.emit(
         task_id, "SYSTEM",
         f"Cloud tools enabled: {', '.join(enabled) if enabled else 'all (override)'}",
@@ -459,6 +523,26 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
         ] or None,
         # TORQCLAW owns memory (FTS5 layer) and context files; batch_runner
         # uses the same isolation flags for programmatic runs.
+        # TORQCLAW owns memory (FTS5 layer) and context files; batch_runner
+        # uses the same isolation flags for programmatic runs.
+        #
+        # P2-0 DEPENDENCY: this flag is also load-bearing for the P2-0 skill-
+        # nudge invariant, not just memory ownership. Upstream's background
+        # review fork (agent/background_review.py:470-475) grants a
+        # hard-coded enabled_toolsets=["memory", "skills"] whitelist that is
+        # independent of TORQCLAW's own allowlist. That fork is currently
+        # unreachable because _spawn_background_review only fires when
+        # (_should_review_memory or _should_review_skills)
+        # (agent/turn_finalizer.py:393); _should_review_skills is false
+        # because _suppress_skill_nudge below zeroes the interval, and
+        # _should_review_memory requires agent._memory_store to be truthy
+        # (agent/turn_context.py:209-213), which skip_memory=True prevents
+        # from ever being populated. Flipping this to False would leave
+        # _should_review_memory able to go true, spawning a review fork that
+        # inherits "skills" and holds a whitelist permitting skill_manage —
+        # reopening the bypass path P2-0 closed. See
+        # test_skip_memory_is_p2_0_invariant_dependency in
+        # test_skill_nudge_suppression.py.
         skip_memory=True,
         skip_context_files=True,
         save_trajectories=False,
@@ -468,6 +552,44 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
         tool_start_callback=_tool_started,
         tool_complete_callback=_tool_completed,
         status_callback=_status,
+    )
+    # P2-0 L1b — primary control, applied unconditionally to every agent this
+    # wrapper constructs, independent of the toolset allowlist that produced
+    # `enabled` above. Holds even under HERMES_FRONTIER_TOOLSETS="*" (where
+    # `enabled` is None and L1 above cannot see/reject "skills"). Fails the
+    # task closed (raises SkillNudgeSuppressionUnavailable) if upstream ever
+    # changes such that this control can no longer be applied or verified —
+    # never silently continue with an unverified skill-nudge state.
+    _suppress_skill_nudge(agent)
+    # Evidence: record the resolved suppression state on the task's own event
+    # stream so "TORQCLAW records/surfaces suppression" is independently
+    # observable (not just an internal assertion), including in the
+    # HERMES_FRONTIER_TOOLSETS="*" case where the secondary allowlist control
+    # (L1) cannot hold.
+    #
+    # Read defensively rather than via `agent._skill_nudge_interval` directly:
+    # _suppress_skill_nudge already verified this attribute above, so this
+    # should never fail — but if a future regression weakens that check to be
+    # non-fatal, a bare attribute access here would surface a misleading raw
+    # AttributeError instead of the real diagnosis. Re-raise as
+    # SkillNudgeSuppressionUnavailable so the failure still points at the
+    # actual cause (an unverifiable skill-nudge control), not an incidental
+    # NameError-shaped symptom of it.
+    try:
+        _interval_after_suppression = agent._skill_nudge_interval
+    except AttributeError as exc:
+        raise SkillNudgeSuppressionUnavailable(
+            "agent._skill_nudge_interval became unreadable after "
+            "_suppress_skill_nudge reported success — the P2-0 skill nudge "
+            "suppression control is in an inconsistent state; refusing to "
+            "run this task with an unverified skill-creation nudge state."
+        ) from exc
+    task_store.emit(
+        task_id, "SYSTEM",
+        "Skill nudge suppressed (agent._skill_nudge_interval=0); "
+        f"toolset override active: {enabled is None}",
+        {"skillNudgeIntervalAfterSuppression": _interval_after_suppression,
+         "toolsetWildcardOverride": enabled is None},
     )
     # Register BEFORE run so cancel_task can interrupt; baseline the usage
     # delta source in case credits-micros is unavailable for this provider.
