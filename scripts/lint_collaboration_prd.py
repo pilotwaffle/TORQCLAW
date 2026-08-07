@@ -30,8 +30,8 @@ EXPECTED_ERRORS = {
     "INVALID_FRAME", "INVALID_REQUEST", "UNSUPPORTED_PROTOCOL",
 }
 EXPECTED_CLOSE_REASONS = {
-    "credential_revoked", "principal_suspended", "principal_revoked",
-    "operator_revoked", "slow_consumer", "socket_closed",
+    "credential_revoked", "principal_suspended", "principal_restored",
+    "principal_revoked", "operator_revoked", "slow_consumer", "socket_closed",
     "recovery",
 }
 EXPECTED_SUBSCRIPTION_CLOSE_REASONS = {
@@ -308,6 +308,46 @@ def run(prd: Path) -> tuple[Gate, str]:
             "The `CollaborationStore` is the only writer to these tables",
         "safe rollback":
             "Normal rollback is non-destructive",
+        "per-row membership epoch":
+            "per-membership-row counter on `collab_members`",
+        "no channel-level membership counter":
+            "There is no channel-level membership counter",
+        "own-row epoch snapshot":
+            "the epoch of the subscribing principal's own `collab_members` row",
+        "authorization-lost epoch binding":
+            "`authorization_lost` when the caller's own membership row is no longer active",
+        "restore close reason":
+            "session close reason `principal_restored`",
+        "restore zero-session fixture": "closes exactly zero sessions",
+        "fresh-key same-state rule": "with a fresh idempotency key",
+        "non-authorization lock class exact":
+            "Non-authorization mutations (`CREATE_AGENT`, `CREATE_PRINCIPAL_CREDENTIAL`, "
+            "`CREATE_CHANNEL`, `POST_CHANNEL_MESSAGE`)",
+        "authorization lock class exact":
+            "Authorization mutations (`SUSPEND_AGENT`, `RESTORE_AGENT`, `REVOKE_AGENT`, "
+            "`ROTATE_PRINCIPAL_CREDENTIAL`, `REVOKE_PRINCIPAL_CREDENTIAL`, `ADD_CHANNEL_MEMBER`, "
+            "`REMOVE_CHANNEL_MEMBER`, `ARCHIVE_CHANNEL`, `UNARCHIVE_CHANNEL`)",
+        "subscription-survival fixture": "(subscription survival)",
+        "inline two-branch cursor bound":
+            "otherwise the bound is the member's `rejoined_seq`",
+        "re-added-at-head fixture": "(re-added-at-head boundary)",
+        "unmapped-scalar fold rule": "any unmapped scalar maps to itself",
+        "no post-fold normalization":
+            "No second NFC normalization pass follows folding",
+        "list-channels hasmore definition":
+            "has a channel ID greater than `nextChannelId`",
+        "frame-cut timeline pin":
+            "the page returns exactly three events with `hasMore` true",
+        "hundred-event fixture content": "whose text is the single byte `a`",
+        "discovery capacity pin":
+            "provisions exactly 100 channels whose names are exactly 80 ASCII characters",
+        "revocation apportionment suspend":
+            "at least 450 `SUSPEND_AGENT`/`RESTORE_AGENT` pair observations",
+        "revocation apportionment archive":
+            "at least 450 `ARCHIVE_CHANNEL`/`UNARCHIVE_CHANNEL` pair observations",
+        "terminal revoke sample":
+            "exactly 100 terminal `REVOKE_AGENT` observations",
+        "delegation deadline": "Delegation decision deadline",
     }
     for name, literal in required.items():
         gate.require(name, literal in text, f"missing requirement: {literal}")
@@ -338,6 +378,16 @@ def run(prd: Path) -> tuple[Gate, str]:
         "removed five-config gate": "five valid cumulative flag configurations",
         "stale section reference": "every D.2 event",
         "removed tombstone event": "message_tombstoned",
+        "removed stored-status effectiveness clause":
+            "even if their stored status is active",
+        "removed disjunctive discovery fixture":
+            "stays within the frame bound or paginates",
+        "removed by-reference cursor validation":
+            "(the Section 7.4 caller-visible bound)",
+        "removed read-lock member-add classification":
+            "`RESTORE_AGENT`, `CREATE_CHANNEL`",
+        "removed restore-less authorization class":
+            "`SUSPEND_AGENT`, `REVOKE_AGENT`",
     }
     for name, literal in forbidden.items():
         # Boundary-aware: "4 MiB" must not match inside "64 MiB".

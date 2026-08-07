@@ -1,11 +1,11 @@
 # TORQCLAW Collaboration Substrate - Review Status
 
 **Date:** 2026-08-06
-**Canonical candidate:** `PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.12.md`
+**Canonical candidate:** `PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.13.md`
 **Last completed independent review:** Cycle 12, v0.12 at `201c972`, by `claude-opus-5`
-**Last G1R verdict:** `REJECT` (Critical 0, High 2, Medium 4, Low 3)
-**Builder handoff:** `BLOCKED pending operator decision: v0.13 cycle or Slice 0 pivot`
-**Consistency pre-gate (current):** `PASS 132/132` (2026-08-06, report: `PRD-TCLAW-COLLABORATION-V0.12-CONSISTENCY-REPORT.md`)
+**Last G1R verdict:** `REJECT` (Critical 0, High 2, Medium 4, Low 3) — all nine handoff conditions closed in v0.13
+**Builder handoff:** `AUTHORIZED — operator decision 2026-08-06: Slice 0 pivot; document G1R loop retired in favor of executable gates (builder Haiku 4.5, G2A Opus 4.8)`
+**Consistency pre-gate (current):** `PASS 159/159` (2026-08-06, report: `PRD-TCLAW-COLLABORATION-V0.13-CONSISTENCY-REPORT.md`)
 
 Note: Cycle 6 was started by `gpt-5.6-terra`, which terminated on output limits mid-receipt; per operator instruction the cycle was re-run in full by `claude-opus-5`. The receipt is `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-6.md`. Terra's truncated partial output independently identified the same JSON-escape feasibility defect recorded as Critical 1.
 
@@ -38,7 +38,7 @@ The consistency linter gained cross-constraint feasibility checks (no encoded bo
 | 10 | v0.10 (`9fdc95b`) | Reject | 0 | 1 | sole High: fixture determinism harness (additive); reviewer refuted six hostile readings |
 | 11 | v0.11 (`fe20293`) | Reject | 1 | 4 | regressions in new text: state-bearing WRITABLE predicate vs v0.10 precedence rule, re-add truncation, first-ack, rotation guard, fold-table sourcing |
 | 12 | v0.12 (`201c972`) | Reject | 0 | 2 | latent epoch/lock-class holes: membership_epoch scope, RESTORE_AGENT semantics |
-| next | v0.13 or Slice 0 | Operator decision pending | unknown | unknown | High-band oscillation for four cycles; remaining classes are implementation-adjacent |
+| 13 | v0.13 | No document G1R — Slice 0 pivot | — | — | operator decision 2026-08-06: all nine Cycle-12 conditions closed, pre-gate 159/159; verification moves to executable gates (fixtures, tests, linter) with G2A audit |
 
 ## Historical evidence
 
@@ -52,9 +52,12 @@ The following artifacts are historical only and must not be cited as current pre
 - `PRD-TCLAW-COLLABORATION-V0.9-CONSISTENCY-REPORT.md` (97/97, superseded)
 - `PRD-TCLAW-COLLABORATION-V0.10-CONSISTENCY-REPORT.md` (107/107, superseded)
 - `PRD-TCLAW-COLLABORATION-V0.11-CONSISTENCY-REPORT.md` (119/119, superseded)
+- `PRD-TCLAW-COLLABORATION-V0.12-CONSISTENCY-REPORT.md` (132/132, superseded)
 
-The current authoritative pre-gate evidence is `PRD-TCLAW-COLLABORATION-V0.12-CONSISTENCY-REPORT.md` (132/132). A consistency PASS proves internal consistency only, never protocol feasibility or semantic correctness; the independent G1R remains the approval gate.
+The current authoritative pre-gate evidence is `PRD-TCLAW-COLLABORATION-V0.13-CONSISTENCY-REPORT.md` (159/159). A consistency PASS proves internal consistency only, never protocol feasibility or semantic correctness; the independent G1R remains the approval gate.
 
 ## Decision
 
-Do not implement from v0.1-v0.6. v0.7 closes all 13 Cycle 6 handoff conditions: encoded-size message bounds with control-character bans, per-channel `channel_seq` wire cursors (global `seq` never exposed), exact per-write lock discipline, serialization-based idempotency without the unreachable contention branch, credential expiry removed from v1, three new credential error codes with per-command mappings, passphrase-authenticated operator revocation, generalized pagination frame rule, defined `highWaterCursor` scope and cursor lifecycle, name character-class restrictions, a named accountable risk owner, and the audit index. It is not builder-ready until an independent G1R of the pinned v0.7 commit reports no Critical or High finding.
+Implement from v0.13 only. On 2026-08-06 the operator (King Flowers) closed the document-review loop: twelve G1R cycles eliminated the contradiction, completeness, feasibility, and leak defect classes, and the verdict then oscillated in the High band for four consecutive cycles on implementation-adjacent classes (lock-class assignment, epoch scoping, fixture pinning, benchmark apportionment) that executable artifacts settle mechanically. v0.13 closes all nine Cycle-12 conditions with lockstep linter enforcement (159 checks). Verification authority now transfers to Slice 0 executable gates — the conformance fixtures, deterministic tests, and consistency linter of Sections 10 and 14 — built by Haiku 4.5 and audited by Opus 4.8 as G2A. The Section 19 definition of done is unchanged except that its independent-review requirement is discharged by the G2A audit of built artifacts rather than a thirteenth document review.
+
+Historical context (superseded): do not implement from v0.1-v0.6. v0.7 closed all 13 Cycle 6 handoff conditions: encoded-size message bounds with control-character bans, per-channel `channel_seq` wire cursors (global `seq` never exposed), exact per-write lock discipline, serialization-based idempotency without the unreachable contention branch, credential expiry removed from v1, three new credential error codes with per-command mappings, passphrase-authenticated operator revocation, generalized pagination frame rule, defined `highWaterCursor` scope and cursor lifecycle, name character-class restrictions, a named accountable risk owner, and the audit index. It is not builder-ready until an independent G1R of the pinned v0.7 commit reports no Critical or High finding.

@@ -1,5 +1,13 @@
 # TORQCLAW Collaboration PRD Synthesis Log
 
+## v0.13 and Slice 0 pivot (operator decision 2026-08-06)
+
+Operator decision: option (a) — draft v0.13 closing all nine Cycle-12 conditions, then pivot to Slice 0 with no thirteenth document review. The G1R document loop is retired; verification authority transfers to executable gates (Section 10 fixtures, deterministic tests, Section 14 linter) built by Haiku 4.5 with Opus 4.8 as G2A auditor, per the standing model-role contract. Builders and auditors are instructed to launch subagents for parallelizable work.
+
+v0.13 closures: `membership_epoch` pinned as a per-membership-row counter with own-row-only subscription revalidation and `authorization_lost` bound to epoch mismatch; `ADD_CHANNEL_MEMBER` and `RESTORE_AGENT` moved to the authorization-mutation lock class with a subscription-survival fixture; `RESTORE_AGENT` semantics defined (epoch increment, defensive `principal_restored` close reason in both registries, fresh-key same-state rule, zero-session fixture); the three timeline fixtures pinned to exact contents (one max-size event; 100 one-byte events; four max-size committed returning exactly three); `LIST_CHANNELS` `hasMore` defined and the disjunctive capacity fixture replaced with pinned 100/101-channel outcomes; the unreachable Section 4.1 stored-status clause replaced with the mechanism-based statement; Section 9 validation 5 restated inline with both bound branches and a re-added-at-head fixture; the unmapped-scalar fold rule and no-post-fold-normalization rule added; revocation-phase observations apportioned 450/450/100 per mutation kind; Section 16 delegation decision deadlines added at slice-gate reviews.
+
+Linter grew from 132 to 159 checks; every new check verified to FAIL against v0.12 (negative control) and PASS against v0.13. v0.13 pre-gate: PASS 159/159, report `PRD-TCLAW-COLLABORATION-V0.13-CONSISTENCY-REPORT.md`.
+
 ## Cycle 12: pinned v0.12 at `201c972`
 
 Reviewer: `claude-opus-5`. Verdict: Reject — 0 Critical, 2 High, 4 Medium, 3 Low. Receipt: `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-12.md`. Both Highs are latent holes in machinery introduced in v0.5-v0.7 and only now reached by review depth: `membership_epoch` scope was never stated (per-row vs per-channel decides whether adding a member disconnects existing subscribers), and `RESTORE_AGENT`'s epoch/session/lock-class semantics were never pinned.
