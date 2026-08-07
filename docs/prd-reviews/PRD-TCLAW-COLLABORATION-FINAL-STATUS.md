@@ -1,11 +1,12 @@
 # TORQCLAW Collaboration Substrate - Review Status
 
 **Date:** 2026-08-06
-**Canonical candidate:** `PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.13.md`
+**Canonical candidate:** `PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.14.md` (v0.13 plus two G2A-surfaced contract corrections: names-only trimming; ratified `collab_schema_migrations`)
 **Last completed independent review:** Cycle 12, v0.12 at `201c972`, by `claude-opus-5`
 **Last G1R verdict:** `REJECT` (Critical 0, High 2, Medium 4, Low 3) — all nine handoff conditions closed in v0.13
 **Builder handoff:** `AUTHORIZED — operator decision 2026-08-06: Slice 0 pivot; document G1R loop retired in favor of executable gates (builder Haiku 4.5, G2A Opus 4.8)`
-**Consistency pre-gate (current):** `PASS 159/159` (2026-08-06, report: `PRD-TCLAW-COLLABORATION-V0.13-CONSISTENCY-REPORT.md`)
+**Consistency pre-gate (current):** `PASS 163/163` (2026-08-06, report: `PRD-TCLAW-COLLABORATION-V0.14-CONSISTENCY-REPORT.md`)
+**Slice 0 status:** first build (Haiku 4.5) passed 928/928 unit tests but was REJECTED by the G2A audit (Opus 4.8): 4 Critical, 3 High, 2 Low — frame-parser escape handling, non-finite detection, UUID-generator collisions/seed collisions, the Section 7.1/10 trim contradiction (now fixed in v0.14), plus a tautological-test meta-finding. Fix pass in flight; audit receipt: `G2A-OPUS-TCLAW-COLLABORATION-SLICE0-CYCLE-1.md`
 
 Note: Cycle 6 was started by `gpt-5.6-terra`, which terminated on output limits mid-receipt; per operator instruction the cycle was re-run in full by `claude-opus-5`. The receipt is `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-6.md`. Terra's truncated partial output independently identified the same JSON-escape feasibility defect recorded as Critical 1.
 

@@ -1,5 +1,13 @@
 # TORQCLAW Collaboration PRD Synthesis Log
 
+## Slice 0 Cycle 1: build, G2A REJECT, and v0.14 (2026-08-06)
+
+The pivot's first full turn validated the executable-gate thesis in both directions. The Haiku 4.5 builder produced `packages/collab` + `tests/collab` with 928/928 unit tests green and a byte-identical Section 9 DDL — and the Opus 4.8 G2A audit still rejected it with 4 Critical / 3 High / 2 Low, every Critical empirically reproduced twice (receipt: `G2A-OPUS-TCLAW-COLLABORATION-SLICE0-CYCLE-1.md`). The headline findings: an escape-parity bug making the duplicate-key pre-scanner reject 61% of valid JSON frames, non-finite detection that accepts `9e308` as `Infinity`, a deterministic UUID generator with 5 collisions per 100k plus cross-seed sequence collisions, and a tautological test suite that could not catch any of it. The audit run was interrupted once by a session usage limit and resumed with evidence intact.
+
+One finding was a defect in the contract itself, unreachable by twelve document reviews: Section 7.1's uniform trim-then-validate rule contradicts Section 10's pinned all-LF accept fixture (8,192 LF trims to empty). v0.14 resolves it — trimming is names-only, message text is never trimmed — and ratifies the builder's `collab_schema_migrations` version table into the Section 9 DDL with explicit no-op re-run semantics. Nothing else changed. Linter 159 → 163; negative control: v0.13 fails exactly the five new/changed checks. v0.14 pre-gate: PASS 163/163.
+
+Code fix pass (Haiku 4.5) launched against the eight G2A conditions; the build remains uncommitted until re-audit passes.
+
 ## v0.13 and Slice 0 pivot (operator decision 2026-08-06)
 
 Operator decision: option (a) — draft v0.13 closing all nine Cycle-12 conditions, then pivot to Slice 0 with no thirteenth document review. The G1R document loop is retired; verification authority transfers to executable gates (Section 10 fixtures, deterministic tests, Section 14 linter) built by Haiku 4.5 with Opus 4.8 as G2A auditor, per the standing model-role contract. Builders and auditors are instructed to launch subagents for parallelizable work.

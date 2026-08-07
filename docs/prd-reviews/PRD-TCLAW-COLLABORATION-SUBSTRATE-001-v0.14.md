@@ -1,0 +1,952 @@
+﻿# PRD-TCLAW-COLLABORATION-SUBSTRATE-001
+
+**Status:** Gate 1 candidate; Slice 0 start operator-authorized 2026-08-06 with executable gates; Section 19 remains the definition of done
+**Version:** 0.14
+**Date:** 2026-08-06
+**Owner:** TORQCLAW product and engineering
+**Target:** Windows-first, single-process, self-hosted TORQCLAW
+**Repository:** `E:\TorqClaw`
+
+## 1. Decision
+
+Build a minimal governed collaboration substrate inside the TORQCLAW gateway. One human operator and operator-managed agents can share private channels, post immutable text messages, discover authorized channels, and consume ordered replay. TORQCLAW remains the sole authority for identity, execution, approvals, receipts, routing, budgets, privacy, and MCP access.
+
+This document is the sole normative v0.14 source. It replaces v0.1-v0.13 and their addenda. v0.14 exists to resolve one contradiction the Slice 0 executable gate surfaced (message-text trimming versus the all-LF boundary fixture) and to ratify the migration-version table; it changes nothing else. Earlier documents, the commits recorded in the review-status history, and review receipts remain evidence only.
+
+## 2. Problem, user, and outcome
+
+TORQCLAW has durable execution sessions and governed task evidence but no shared-room abstraction with durable actor identity, membership, replay, and immediate revocation.
+
+The v1 user is one technical operator managing local or cloud-backed agent identities on one Windows TORQCLAW installation.
+
+Release requires proof that:
+
+- one operator and two agents are distinct durable principals;
+- hidden channels are indistinguishable from absent channels through the defined API response;
+- authorized agents can discover channels and replay immutable messages in sequence;
+- mutation retries commit once;
+- suspension, principal revocation, credential revocation, membership removal, and channel archive stop prohibited commands and prevent new socket writes after their linearization point;
+- operator revocation locks collaboration and suspends effective agent authority;
+- recovery restores the same operator principal without losing ownership;
+- deliberate offline operator revocation invalidates every collaboration credential;
+- feature-off behavior preserves accepted Phase 1 behavior;
+- all Section 15 benchmarks pass.
+
+A socket write initiated before revocation may complete afterward. The guarantee is that no new socket write begins after the revocation commit.
+
+## 3. Scope
+
+### 3.1 Included
+
+- one operator principal;
+- operator-owned agent principals;
+- suspend, restore, and terminal revoke lifecycle for agents;
+- high-entropy credentials bound to sessions;
+- private channels, owner membership, and agent membership;
+- channel discovery and archive/unarchive;
+- immutable text messages;
+- timeline pagination, durable acknowledged cursors, live subscription, and resume;
+- SQLite migration, doctor checks, backup/recovery, feature flags, minimal accessible UI, and conformance tests.
+
+### 3.2 Excluded
+
+No v1 command, schema, or implied authority exists for:
+
+- tombstones, deletion, edits, reactions, threads, DMs, media, or voice;
+- search/FTS, Git integration, task bridge, workflow triggers, or agent execution;
+- multiple human operators, delegated administrators, federation, Nostr, or hash chains;
+- collaboration export, retention automation, or legal hold;
+- pepper or recovery-secret rotation;
+- new tools, MCP permissions, provider behavior, routing, approval, receipt, budget, privacy, or memory policy.
+
+Each excluded capability requires a separate PRD.
+
+## 4. Authority model
+
+### 4.1 Identity concepts
+
+- Connection role: `operator`, `channel`, or `node`.
+- Principal kind: `operator` or `agent`.
+- Membership role: `owner` or `agent`.
+- Session: authenticated transport state, never an actor identity.
+
+Exactly one operator principal exists after bootstrap. It may be `active` or `revoked`. Every agent's `owner_principal_id` and every channel's `owner_principal_id` is that operator ID. Operator revocation places the gateway in `locked_recovery`. No owned agent can exercise authority after the revocation commit through the defined mechanisms alone: the Section 5.1.1 transaction closes every collaboration session before it commits, and listeners open only in `healthy` (Section 5.1), so no new session can form; stored agent status rows are not consulted while the gateway is outside `healthy` and need no separate effectiveness rule.
+
+Role binding is exact:
+
+- active operator principal connects with role `operator`;
+- active agent principal connects with role `channel`;
+- `node` has no collaboration authority;
+- any principal/role mismatch returns `ROLE_PRINCIPAL_MISMATCH` and closes.
+
+### 4.2 Authorization predicates
+
+Every command first requires `BASE`:
+
+- session open;
+- credential active;
+- principal active;
+- owner active for an agent;
+- session credential/principal IDs match;
+- auth epoch matches.
+
+Additional predicates:
+
+| Predicate | Requirements |
+|---|---|
+| `OPERATOR_GLOBAL` | `BASE` plus operator principal and role `operator` |
+| `CHANNEL_VISIBLE` | `BASE` plus active or archived channel and active membership |
+| `CHANNEL_WRITABLE` | identical to `CHANNEL_VISIBLE`; the active-channel requirement is a Section 7.6 step-8 state check, never part of the predicate |
+| `CHANNEL_OWNER` | `BASE` plus the current principal is the operator principal connected with role `operator` and the target channel's `owner_principal_id` equals the current principal ID; channel may be active or archived |
+| `SUBSCRIPTION_OWNER` | `BASE` plus subscription belongs to current session |
+| `CURSOR_OWNER` | identical to `CHANNEL_VISIBLE`; `ACK_CHANNEL_CURSOR` addresses only the calling principal's own cursor row |
+| `CHANNEL_ENUMERABLE` | `BASE`; results restricted to channels where the calling principal holds an active membership |
+
+Command mapping is exhaustive:
+
+| Command | Predicate | Archived behavior |
+|---|---|---|
+| `CREATE_AGENT` | `OPERATOR_GLOBAL` | N/A |
+| `SUSPEND_AGENT` | `OPERATOR_GLOBAL` | N/A |
+| `RESTORE_AGENT` | `OPERATOR_GLOBAL` | N/A |
+| `REVOKE_AGENT` | `OPERATOR_GLOBAL` | N/A |
+| credential create/rotate/revoke | `OPERATOR_GLOBAL` | N/A |
+| `CREATE_CHANNEL` | `OPERATOR_GLOBAL` | N/A |
+| `ADD_CHANNEL_MEMBER` / `REMOVE_CHANNEL_MEMBER` | `CHANNEL_OWNER` | denied with `CHANNEL_ARCHIVED` |
+| `ARCHIVE_CHANNEL` / `UNARCHIVE_CHANNEL` | `CHANNEL_OWNER` | unarchive allowed; same-state archive/unarchive is a success no-op |
+| `LIST_CHANNELS` | `CHANNEL_ENUMERABLE` | includes authorized archived channels marked read-only |
+| `GET_CHANNEL_TIMELINE` | `CHANNEL_VISIBLE` | allowed read-only |
+| `SUBSCRIBE_CHANNEL` | `CHANNEL_VISIBLE` | allowed read-only |
+| `POST_CHANNEL_MESSAGE` | `CHANNEL_WRITABLE` | denied with `CHANNEL_ARCHIVED` |
+| `ACK_CHANNEL_CURSOR` | `CURSOR_OWNER` | allowed |
+| `UNSUBSCRIBE_CHANNEL` | `SUBSCRIPTION_OWNER` | allowed |
+
+No predicate in this table constrains channel state; archived-state denial is always the Section 7.6 step-8 state error `CHANNEL_ARCHIVED`, observable only by callers that pass their predicate.
+
+Every unmapped operation is denied. Existing TORQCLAW v1 commands retain their existing policy and cannot be invoked through these collaboration commands.
+
+Operator-principal revocation is not a network command. It is the offline procedure in Section 5.1.1.
+
+## 5. State machines
+
+### 5.1 Gateway
+
+- `uninitialized`: no operator/bootstrap record; local bootstrap only.
+- `healthy`: one active operator and valid schema; v2 enabled.
+- `locked_recovery`: operator revoked, zero usable active operator credentials, missing/wrong principal or recovery pepper, or operator invariant failure; health, doctor, secret restore, backup, and offline recovery only.
+- `migration`: migration active or failed; health only.
+
+Listeners open only in `healthy`.
+
+Zero usable active operator credentials places the gateway in `locked_recovery` without changing the operator principal's status; `recover-operator` (Section 6.4) is reachable in that state. Section 5.1.1 is the sole path that changes the operator principal itself to revoked.
+
+### 5.1.1 Operator revocation
+
+The operator can revoke itself only while the gateway is stopped:
+
+`torqclaw collab revoke-operator --database <absolute-path> --kit <path> --passphrase-stdin --confirm REVOKE`
+
+The CLI requires the Windows account owning the database, an exclusive lock, a valid recovery kit with matching checksum and installation ID, the correct kit passphrase, and a successful pre-mutation backup. No operator credential is required: the recovery kit is the revocation authority, so a compromised or lost credential set never blocks deliberate revocation. One `BEGIN IMMEDIATE` transaction changes the operator to revoked, increments every principal auth epoch, revokes every operator and agent credential, closes every collaboration session, records `operator_revoked` without secrets, and commits. The gateway subsequently starts in `locked_recovery`. Failure rolls back completely. This is the sole command that transitions an active operator to revoked.
+
+### 5.2 Agent principal
+
+- absent -> active by `CREATE_AGENT`;
+- active -> suspended by `SUSPEND_AGENT`;
+- suspended -> active by `RESTORE_AGENT`;
+- active/suspended -> revoked by `REVOKE_AGENT`;
+- revoked is terminal.
+
+`auth_epoch` is 1 at creation; every subsequent effective transition — suspend, restore, and revoke — increments it by one. Suspend and revoke close all of the principal's sessions and subscriptions with session close reasons `principal_suspended` and `principal_revoked`. Revoke also revokes every agent credential. An effective `RESTORE_AGENT` increments `auth_epoch` and closes any session bound to the principal with session close reason `principal_restored`; in legal flows zero such sessions exist, because suspension already closed them and a suspended principal fails `BASE`, so the closure rule is defensive totality and a Section 10 fixture asserts an effective restore closes exactly zero sessions. Credentials are untouched by suspend and restore: the restored agent reconnects with its existing active credential, and the new session snapshots the incremented epoch.
+
+A same-state repetition is ineffective regardless of the idempotency key presented: repeating a transition into the state the principal already occupies — whether replayed with the original key (returning the stored result) or submitted with a fresh idempotency key (committing a new success result that records the current state) — increments no epoch, closes no session, emits no audit row, and returns the current `{principalId,status,authEpoch}`. Illegal transitions return `INVALID_PRINCIPAL_TRANSITION`.
+
+### 5.3 Membership
+
+- absent/removed -> active by add;
+- active -> removed by remove;
+- same-state repetition is idempotent.
+
+`membership_epoch` is a per-membership-row counter on `collab_members`: every effective transition of a given `(channel_id, principal_id)` row increments that row's epoch and no other row's. There is no channel-level membership counter; adding or removing one member never changes another member's `membership_epoch`, and Section 8.2 revalidation therefore never closes a subscription because of a membership change affecting a different principal. Owner membership is created with the channel and cannot be removed.
+
+Membership is interval-scoped. On each effective add transition, `collab_members.rejoined_seq` is captured as the channel's greatest committed `channel_seq` immediately before the `member_added` event is inserted, inside the same transaction; the owner membership created with the channel has `rejoined_seq` 0. A principal is authorized for an event only when the event's `channel_seq` is greater than the principal's current `rejoined_seq`, so a member always sees the `member_added` event announcing its own membership. Worked example: `channel_created` commits at `channel_seq` 1; adding agent A inserts `member_added` at `channel_seq` 2 with A's `rejoined_seq` set to 1; A's timeline from `afterCursor` 0 begins at `channel_seq` 2.
+
+Re-add permanently truncates access: after an effective add, the member can reach only events with `channel_seq` greater than its newest `rejoined_seq`, which includes losing access to events from its own earlier membership intervals. Worked example: A added at `channel_seq` 2, reading messages 3 and 4; removed at 5; messages 6-8 commit; A re-added at 9 with `rejoined_seq` 8 — A reaches only 9 and later, and events 2-4 from its earlier interval are permanently out of reach. This is a deliberate v1 simplification (one scalar floor, no interval table). Cursor rows are retained unchanged across membership removal and re-add for unread computation, but a cursor never lowers the replay floor below `rejoined_seq`.
+
+### 5.4 Channel
+
+- absent -> active by create;
+- active -> archived by archive;
+- archived -> active by unarchive.
+
+Every effective transition increments `channel_epoch` after creation. Archived channels remain discoverable, readable, subscribable, and cursor-acknowledgeable by active members, but reject posts and membership mutations.
+
+Archive closes every live subscription on that channel. Under the authorization write lock, the archive transaction commits the state change, epoch increment, and `channel_archived` event; before the lock releases, affected subscriptions close with subscription close reason `channel_archived` and their unsent queues are purged. No socket write for those subscriptions begins after the archive commit. Members may resubscribe read-only and receive the `channel_archived` event and any earlier undelivered committed events through durable backlog from their acknowledged cursor; archive loses no committed event. Unarchive behaves identically with the `channel_unarchived` event and subscription close reason `channel_unarchived`. Cursor rows are retained unchanged across archive and unarchive. Archiving an archived channel and unarchiving an active channel are no-ops that return the current `{channelId,state,channelEpoch}` with success, increment no epoch, and emit no event.
+
+### 5.5 Messages and subscriptions
+
+Messages are immutable. There is no edit, tombstone, or delete state.
+
+Subscriptions move absent -> backlog -> live -> closed. Authorization loss, channel archive or unarchive, slow consumer, unsubscribe, or socket close produces closed. Closed subscriptions never deliver.
+
+## 6. Credentials, bootstrap, and disaster recovery
+
+### 6.1 Credentials
+
+Credential format is `tq1_<credentialId>_<32-byte-base64url-secret>`. Store only `HMAC-SHA-256(principalPepper, complete-token-bytes)`. Compare in constant time. Plaintext is displayed once and never logged or persisted. Credential verification is existence-oblivious: when the parsed credential ID matches no row, the server compares the presented token against a fixed decoy HMAC derived from `principalPepper`, so the hit, miss, and revoked paths execute the same number of HMAC operations before returning `AUTH_FAILED`.
+
+`principalPepper` is 32 random bytes stored outside SQLite in Windows Credential Manager at `TORQCLAW/principal-pepper`.
+
+Credential states are active and revoked; revoked is terminal. Credentials do not expire by time in v1; time-based expiry is excluded scope and requires a follow-on PRD.
+
+`CREATE_PRINCIPAL_CREDENTIAL` issues an additional credential for an active principal without requiring knowledge of an existing credential. It is the recovery path when a one-time credential response is lost.
+
+`ROTATE_PRINCIPAL_CREDENTIAL` body includes `principalId` and `replaceCredentialId`. In one transaction it verifies the replaced credential is active and belongs to the principal, creates the replacement, revokes exactly `replaceCredentialId`, closes sessions bound to the replaced credential, and stores a secret-redacted mutation result. Rotation does **not** increment `auth_epoch`; sessions authenticated by other active credentials remain valid. It never revokes unspecified credentials.
+
+`REVOKE_PRINCIPAL_CREDENTIAL` also leaves `auth_epoch` unchanged and closes only sessions bound to that credential. It returns `LAST_OPERATOR_CREDENTIAL` without mutation if the target is the operator's final active credential. `ROTATE_PRINCIPAL_CREDENTIAL` returns `LAST_OPERATOR_CREDENTIAL` without mutation when `replaceCredentialId` is the operator's only active credential — a dropped first-response frame would otherwise strand the installation. The safe operator sequence is `CREATE_PRINCIPAL_CREDENTIAL`, verify the new secret authenticates, then `REVOKE_PRINCIPAL_CREDENTIAL` the old one. Deliberately removing all operator access requires Section 5.1.1, which enters `locked_recovery`.
+
+### 6.2 Rate limits
+
+Authentication failures use in-memory rolling windows:
+
+- 5 failures per normalized credential ID per 5 minutes;
+- 20 failures per normalized remote address per 5 minutes;
+- 15-minute lockout after either threshold.
+
+IPv4 uses host address; IPv6 uses /64. Restart resets counters by design. Telemetry stores bounded outcome labels and keyed hashes, never raw tokens or addresses. Rate-limit lockout is reported as `AUTH_FAILED` and is indistinguishable from another authentication failure. Loopback source addresses are exempt from the address-level counter — the per-credential-ID counter still applies to loopback, bounding credential guessing while preventing an agent retry loop from locking out the operator on a single-machine install. Doctor reports active lockouts by bounded key class.
+
+### 6.3 Bootstrap and recovery kit
+
+Local bootstrap requires loopback binding, `TORQCLAW_COLLAB_BOOTSTRAP=1`, zero operator rows, and the owning Windows account. It creates the operator, operator credential, principal pepper, 32-byte recovery secret, and independent 32-byte recovery pepper. Recovery material is shown once.
+
+At bootstrap, `collab_installation.principal_pepper_check` is `HMAC-SHA-256(principalPepper, UTF8("torqclaw-principal-pepper-check:" + installation_id))` and `recovery_pepper_check` uses the equivalent domain-separated recovery string. Startup recomputes both checks in constant time before opening listeners. Missing or mismatched checks place the gateway in `locked_recovery`, making wrong-machine pepper restoration detectable before authentication.
+
+The independent recovery pepper is stored outside SQLite in Windows Credential Manager at `TORQCLAW/recovery-pepper`. Before mode becomes healthy, bootstrap MUST create an encrypted offline recovery kit with:
+
+- principal pepper;
+- recovery pepper;
+- recovery secret;
+- database installation ID;
+- schema version;
+- kit creation timestamp.
+
+Command:
+
+`torqclaw collab secrets export --output <removable-or-off-machine-path> --passphrase-stdin`
+
+Encryption is AES-256-GCM with a random 16-byte salt and 12-byte nonce. Key derivation is Argon2id with 64 MiB memory, 3 iterations, parallelism 1, producing 32 bytes, implemented by the pinned native dependency `@node-rs/argon2` (prebuilt Windows binaries, exact version recorded in the lockfile at Slice 2); if the dependency proves unacceptable, the documented fallback is Node core `scrypt` with N=131072, r=8, p=1, and the kit format version increments. The database stores only kit ID, SHA-256 ciphertext checksum, export timestamp, and verification timestamp (`recovery_kit_verified_at`). Bootstrap requires explicit verification before healthy mode:
+
+`torqclaw collab secrets verify --database <absolute-path> --kit <path> --passphrase-stdin`
+
+Verification decrypts the kit with the supplied passphrase — proving the passphrase actually opens it; a checksum-only comparison is insufficient — verifies the recovered installation ID and the ciphertext checksum against the database, writes `recovery_kit_verified_at`, and emits a secret-free `recovery_kit_verified` audit row. Doctor warns when no verified kit record exists. It cannot claim the offline file still exists. Pepper and recovery-secret rotation are excluded from v1 (Section 3.2).
+
+Machine restore command:
+
+`torqclaw collab secrets restore --database <absolute-path> --kit <path> --passphrase-stdin`
+
+With the gateway stopped, this command verifies the kit checksum and installation ID against the database, requires the owning Windows account, and restores the principal and recovery peppers into their named Windows Credential Manager entries. It never prints either pepper or writes them to SQLite. It is permitted in `locked_recovery` and MUST run before operator recovery on a replacement machine.
+
+The database stores only `HMAC-SHA-256(recoveryPepper,recoverySecret)`. A state database backup excludes both peppers and plaintext credentials; the recovery kit is a separately protected backup.
+
+### 6.4 Offline recovery
+
+`torqclaw collab recover-operator --database <absolute-path> --kit <path> --passphrase-stdin`
+
+Requirements: gateway stopped, Windows caller owns database/data directory, exclusive lock, valid kit checksum/installation ID, successful pre-mutation backup, and constant-time recovery-secret validation.
+
+Operator recovery is permitted only in `locked_recovery`. On a replacement machine, `secrets restore` MUST complete first.
+
+One `BEGIN IMMEDIATE` transaction reactivates the same operator, increments every principal auth epoch, revokes all credentials, increments every channel/member epoch, closes all collaboration sessions, records a secret-free recovery audit row, and creates one replacement operator credential hash. Commit precedes one-time plaintext display. Failure rolls back and remains locked. Loss of both machine secrets and offline kit is unrecoverable by design; restore alone is insufficient, and documentation MUST state this.
+
+## 7. Protocol v2
+
+### 7.1 Common constraints
+
+Frames are strict UTF-8 JSON objects, maximum 64 KiB measured as raw UTF-8 bytes of the complete frame. Reject duplicate keys, unknown fields, and non-finite numbers. Duplicate-key rejection requires a raw-text position-aware parser; `JSON.parse` silently keeps the last duplicate and MUST NOT be the sole validator. IDs and mutation idempotency keys are canonical lowercase UUIDs. Timestamps are server-generated RFC 3339 UTC milliseconds.
+
+The server applies NFC normalization first, then — for channel names and agent display names only — trimming, then all length, encoded-size, and character-class validation. Message text is never trimmed: leading and trailing whitespace, including an all-whitespace message, is legal message content, which is what makes the Section 10 all-LF boundary fixture reachable. Every bound in this section is evaluated against the post-normalization text (post-trim for names), and that same text is what is persisted and returned in all frames.
+
+Channel names are NFC-normalized, trimmed, 1-80 Unicode scalar values, and case-insensitively unique among active channels. Uniqueness is defined by the persisted canonical `name_key`: the NFC-normalized name transformed by Unicode Default Case Folding (full folding, pinned to Unicode 15.0), computed by `CollaborationStore` before SQL. The folding implementation is a vendored `CaseFolding.txt` (Unicode 15.0, status C and F mappings) compiled into a lookup table shipped with `CollaborationStore`; the vendored table, not the host ICU or `toLowerCase`, is normative, and startup asserts the fold-table Unicode version equals 15.0. Folding applies independently to each Unicode scalar value in order: a scalar with a status C or F mapping in the vendored table is replaced by its mapping, and any unmapped scalar maps to itself. No second NFC normalization pass follows folding; `name_key` is the concatenated fold output of the already-NFC-normalized name. SQLite's built-in `lower()` is never used for uniqueness. Agent display names are NFC-normalized, trimmed, and 1-80 Unicode scalar values. Channel names and agent display names MUST NOT contain C0 or C1 control characters, U+2028, U+2029, or Unicode bidirectional control characters (U+202A-U+202E, U+2066-U+2069); violations return `INVALID_REQUEST`.
+
+Message text is NFC-normalized and **1-16,384 UTF-8 bytes**, and its encoded JSON string form (excluding the surrounding quotes but including all escapes) MUST be at most **16,384 bytes**; violating either bound returns `INVALID_REQUEST`. Both bounds are reachable and equal: the largest legal message is therefore exactly 16,384 unescaped UTF-8 bytes, while escape-heavy text binds earlier on the encoded form (for example, 8,192 LF characters encode to exactly 16,384 bytes and are the largest legal all-LF message). Message text MUST NOT contain C0 or C1 control characters other than TAB (U+0009), LF (U+000A), and CR (U+000D); violations return `INVALID_REQUEST`. These are the only message-content rules, and together they guarantee any single legal event encodes within the 64 KiB frame.
+
+A paginated result page ends at its limit, or earlier when adding the next item would push the complete encoded `result` frame past the **64 KiB** frame limit; `hasMore` and the next-page token continue pagination. This rule applies to every paginated command, including `GET_CHANNEL_TIMELINE` and `LIST_CHANNELS`. A timeline page ends at **100 events**, or earlier under the same frame rule. There is no separate page byte bound: every server frame obeys the single 64 KiB frame limit. A page always contains at least one item when any authorized item exists after the cursor; the encoded-size and character-class bounds above guarantee any single legal event or channel row fits one frame.
+
+### 7.2 Connect
+
+Client:
+
+`{"type":"connect","protocolVersion":2,"role":"operator|channel","credential":"<secret>","requestId":"<uuid>"}`
+
+Role must match principal kind under Section 4.1. Server derives principal/credential IDs. Non-v2 returns `UNSUPPORTED_PROTOCOL` and closes.
+
+A connect frame with `role:"node"` fails strict frame validation at error-precedence step 3 with `INVALID_REQUEST` and closes. It never reaches principal-role matching.
+
+Success:
+
+`{"type":"connected","protocolVersion":2,"requestId":"<uuid>","sessionId":"<uuid>","principal":{"id":"<uuid>","kind":"operator|agent"},"serverTime":"<timestamp>"}`
+
+Fixtures MUST include operator success, agent success, operator-as-channel mismatch, agent-as-operator mismatch, node denial, and revoked credential.
+
+### 7.3 Envelopes
+
+Request:
+
+`{"type":"command","protocolVersion":2,"requestId":"<uuid>","command":"<name>","idempotencyKey":"<uuid|null>","body":{}}`
+
+Result and error:
+
+`{"type":"result","protocolVersion":2,"requestId":"<uuid>","ok":true,"body":{}}`
+
+`{"type":"result","protocolVersion":2,"requestId":"<uuid>","ok":false,"error":{"code":"<code>","message":"Request could not be completed","retryable":false}}`
+
+Delivery:
+
+`{"type":"channel_event","protocolVersion":2,"subscriptionId":"<uuid>","channelId":"<uuid>","cursor":"<seq>","event":{"id":"<uuid>","kind":"<kind>","actorPrincipalId":"<uuid>","occurredAt":"<timestamp>","payload":{}}}`
+
+Cursor is unsigned base-10 `collab_events.channel_seq` — a per-channel sequence starting at 1 — without leading zeroes; `0` means before the channel's first event. The global `collab_events.seq` is internal storage order and is never exposed in any frame, result, or error; cursors carry no information about activity in other channels.
+
+A timeline event object is `{"cursor":"<seq>","id":"<uuid>","kind":"<kind>","actorPrincipalId":"<uuid>","occurredAt":"<timestamp>","payload":{}}` — the `channel_event` frame's `event` member with `cursor` prepended. `GET_CHANNEL_TIMELINE` returns `events` as an array of these objects in ascending cursor order. `nextCursor` is the cursor of the last element returned, or the request's effective `afterCursor` when `events` is empty; a client resuming with `afterCursor: nextCursor` receives no duplicate and no gap. `hasMore` is true when any authorized event exists after `nextCursor`.
+
+### 7.4 Exhaustive commands
+
+Idempotency classification is exhaustive:
+
+| Class | Commands |
+|---|---|
+| Idempotency-keyed | `CREATE_AGENT`, `CREATE_PRINCIPAL_CREDENTIAL`, `SUSPEND_AGENT`, `RESTORE_AGENT`, `REVOKE_AGENT`, `ROTATE_PRINCIPAL_CREDENTIAL`, `REVOKE_PRINCIPAL_CREDENTIAL`, `CREATE_CHANNEL`, `ADD_CHANNEL_MEMBER`, `REMOVE_CHANNEL_MEMBER`, `ARCHIVE_CHANNEL`, `UNARCHIVE_CHANNEL`, `POST_CHANNEL_MESSAGE` |
+| Naturally idempotent | `ACK_CHANNEL_CURSOR`, `UNSUBSCRIBE_CHANNEL` |
+| No idempotency key | `LIST_CHANNELS`, `GET_CHANNEL_TIMELINE`, `SUBSCRIBE_CHANNEL` |
+
+Idempotency-keyed commands require a UUID. Every other command requires null. Cursor acknowledgement uses `max(existing,submitted)` and unsubscribe returns the same closed result when repeated by its owning session. Naturally idempotent commands do not write `collab_mutation_results`. Failed mutations never write `collab_mutation_results`; after the cause is corrected, retry may execute normally.
+
+For channel-scoped commands, the current Section 4.2 predicate and visible channel state are evaluated **before** any idempotency lookup. Removed members receive `COLLAB_NOT_FOUND`; authorized members retrying a post against an archived channel receive `CHANNEL_ARCHIVED`. Neither same-body nor changed-body retry reveals a stored result until current authorization succeeds. After authorization succeeds, same principal+command+key+canonical body returns the stored redacted result and a changed body returns `IDEMPOTENCY_CONFLICT`.
+
+An authorization change can prevent a client from confirming whether its original channel mutation committed. After authorization is restored, `GET_CHANNEL_TIMELINE` is the sole source of truth for committed channel events; no hidden-resource confirmation side channel exists.
+
+- `CREATE_AGENT {displayName} -> {principalId,credentialId,credential|credentialAvailable:false}`
+- `CREATE_PRINCIPAL_CREDENTIAL {principalId} -> {principalId,credentialId,credential|credentialAvailable:false}`
+- `SUSPEND_AGENT {principalId} -> {principalId,status,authEpoch}`
+- `RESTORE_AGENT {principalId} -> {principalId,status,authEpoch}`
+- `REVOKE_AGENT {principalId} -> {principalId,status,authEpoch,revokedCredentialCount}`
+- `ROTATE_PRINCIPAL_CREDENTIAL {principalId,replaceCredentialId} -> {principalId,credentialId,credential|credentialAvailable:false,replacedCredentialId}`
+- `REVOKE_PRINCIPAL_CREDENTIAL {credentialId} -> {credentialId,revokedAt}`
+- `CREATE_CHANNEL {name} -> {channelId,name}`
+- `ADD_CHANNEL_MEMBER {channelId,principalId} -> {channelId,principalId,membershipEpoch}`
+- `REMOVE_CHANNEL_MEMBER {channelId,principalId} -> {channelId,principalId,membershipEpoch}`
+- `ARCHIVE_CHANNEL {channelId} -> {channelId,state,channelEpoch}`
+- `UNARCHIVE_CHANNEL {channelId} -> {channelId,state,channelEpoch}`
+- `LIST_CHANNELS {afterChannelId:null|uuid,limit:1..100,includeArchived:boolean} -> {channels:[{channelId,name,state,role,lastAcknowledgedCursor}],nextChannelId:null|uuid,hasMore:boolean}`
+- `POST_CHANNEL_MESSAGE {channelId,text} -> {eventId,cursor,occurredAt}`
+- `GET_CHANNEL_TIMELINE {channelId,afterCursor,limit:1..100} -> {events,nextCursor,hasMore}`
+- `ACK_CHANNEL_CURSOR {channelId,cursor} -> {channelId,acknowledgedCursor}`
+- `SUBSCRIBE_CHANNEL {channelId,afterCursor} -> {subscriptionId,highWaterCursor}`
+- `UNSUBSCRIBE_CHANNEL {subscriptionId} -> {subscriptionId,state:"closed"}`
+
+Credential-producing commands persist only `principalId`, `credentialId`, and `credentialAvailable:false` in `collab_mutation_results.result_json`. The plaintext secret exists only in the in-memory first-response envelope after commit and is then zeroed. A replay always returns the credential ID with `credentialAvailable:false`. If delivery fails after commit, the operator uses `CREATE_PRINCIPAL_CREDENTIAL` to issue another credential and may revoke the unavailable credential by its returned ID. Plaintext is never reconstructable or persisted.
+
+The first response of a credential-producing command contains `{principalId,credentialId,credential:"<secret>",credentialAvailable:true}`; every replay contains `{principalId,credentialId,credentialAvailable:false}` with `credential` absent. `ROTATE_PRINCIPAL_CREDENTIAL` additionally includes `replacedCredentialId` in both shapes; no command adds any other field. `credential` is present if and only if `credentialAvailable` is true; both shapes for each of the three credential-producing commands are pinned as byte fixtures in Section 10.
+
+`CREATE_PRINCIPAL_CREDENTIAL` and `ROTATE_PRINCIPAL_CREDENTIAL` are valid for the operator principal and for operator-owned agents; this is how operator credentials are added and replaced. `CREATE_PRINCIPAL_CREDENTIAL` returns `PRINCIPAL_NOT_FOUND` for an unknown `principalId` and `INVALID_PRINCIPAL_STATE` for a suspended or revoked principal. `ROTATE_PRINCIPAL_CREDENTIAL` returns `CREDENTIAL_NOT_FOUND` when `replaceCredentialId` is unknown, not active, or not owned by `principalId`. `REVOKE_PRINCIPAL_CREDENTIAL` returns `CREDENTIAL_NOT_FOUND` for an unknown credential ID and returns the original revocation result for an already-revoked one.
+
+`LIST_CHANNELS` orders by channel ID ascending, filters to active memberships, and includes archived rows only when requested. `ACK_CHANNEL_CURSOR` upserts — a missing cursor row is treated as `acknowledged_seq` 0 — and computes and stores `max(existing,submitted)` in SQL inside its transaction, but rejects a cursor beyond the greatest committed `channel_seq` visible to the calling principal in that channel — the greatest committed `channel_seq` when events above the caller's `rejoined_seq` exist, otherwise the caller's `rejoined_seq`. `SUBSCRIBE_CHANNEL`'s `highWaterCursor` is the greatest committed `channel_seq` visible to the caller in that channel at registration time. `GET_CHANNEL_TIMELINE` and `SUBSCRIBE_CHANNEL` clamp the caller's effective `afterCursor` to `max(afterCursor, rejoined_seq)`; pages and backlog begin at the clamped value, so no event committed outside the caller's membership interval is ever returned. `LIST_CHANNELS`'s `lastAcknowledgedCursor` is the calling principal's own acknowledged cursor for that channel, rendered as an unsigned base-10 string, `"0"` when no cursor row exists; it never reflects another principal's cursor, and the lookup uses the `collab_cursors_principal_channel` index. `nextChannelId` is the `channelId` of the last element returned, or the request's `afterChannelId` when `channels` is empty; whenever `hasMore` is true the token strictly advances. `LIST_CHANNELS`'s `hasMore` is true exactly when at least one channel matching the request's `includeArchived` filter, with an active membership for the calling principal, has a channel ID greater than `nextChannelId`; it is false otherwise.
+
+`CREATE_CHANNEL` returns `CHANNEL_NAME_CONFLICT` when an active channel already has the same canonical `name_key`. `UNARCHIVE_CHANNEL` returns the same code and leaves the target archived if another active channel has claimed its `name_key`; the operator must archive the conflicting channel first. `ACK_CHANNEL_CURSOR` returns `CURSOR_OUT_OF_RANGE` when the submitted cursor exceeds the caller-visible bound defined above. Cursors are absolute per-channel sequence values, and `channel_seq` is dense: a current member can therefore derive the count — never the content — of events committed during its own removal window or before it joined, through cursor arithmetic on any success path. This metadata visibility to current members is accepted v1 behavior, stated here so no stronger guarantee is implied anywhere in this document; event content outside the caller's membership intervals is never delivered, and hidden channels themselves remain undiscoverable (Section 7.6).
+
+`SUSPEND_AGENT`, `RESTORE_AGENT`, and `REVOKE_AGENT` return `INVALID_REQUEST` when `principalId` names the operator. Authentication lockout at connect returns `AUTH_FAILED`. Failed mutations are not cached, including `CHANNEL_NAME_CONFLICT` and `CURSOR_OUT_OF_RANGE`.
+
+### 7.5 Exhaustive collaboration events
+
+Only these event kinds can enter `collab_events`:
+
+- `channel_created {channelId,name}`
+- `member_added {channelId,principalId,membershipEpoch}`
+- `member_removed {channelId,principalId,membershipEpoch}`
+- `message_posted {channelId,text}`
+- `channel_archived {channelId,channelEpoch}`
+- `channel_unarchived {channelId,channelEpoch}`
+
+Payloads have exactly the listed fields. Principal/credential/recovery audit records use `collab_audit` and never appear in channel replay.
+
+### 7.6 Error precedence
+
+Order:
+
+1. frame/JSON limits -> `INVALID_FRAME`;
+2. protocol -> `UNSUPPORTED_PROTOCOL`;
+3. envelope/schema/UUID -> `INVALID_REQUEST`; step 3 covers all channel-state-independent syntactic validation, explicitly including every Section 7.1 size and character-class bound;
+4. connect credential missing, malformed, unknown, or revoked -> `AUTH_FAILED`, then close;
+5. established session/credential/principal/role -> `SESSION_INVALID` or `ROLE_PRINCIPAL_MISMATCH`, then close;
+6. current command predicate and hidden-resource authorization;
+7. idempotency lookup/conflict;
+8. visible resource state and command validation requiring resolved resource state, including the active-channel check behind `CHANNEL_ARCHIVED`.
+
+Absent, hidden, archived-hidden, and non-member channel IDs return identical `COLLAB_NOT_FOUND` status/body/message. `COLLAB_NOT_PERMITTED` is reserved for `OPERATOR_GLOBAL` commands, which carry no channel-scoped target. Every command carrying a `channelId` returns `COLLAB_NOT_FOUND` for every authorization denial cause — absent, hidden, non-member, or owner-only administration invoked by a non-owner — so responses never confirm hidden-channel existence or administrative reach. `CHANNEL_ARCHIVED` remains the state error for authorized members writing to an archived channel. For channel-scoped commands, authorization resolves first and returns `COLLAB_NOT_FOUND` for every denial cause; only a caller that passes its Section 4.2 predicate can observe the state error `CHANNEL_ARCHIVED`.
+
+The exhaustive domain error codes are `AUTH_FAILED`, `ROLE_PRINCIPAL_MISMATCH`, `SESSION_INVALID`, `COLLAB_NOT_FOUND`, `COLLAB_NOT_PERMITTED`, `PRINCIPAL_NOT_FOUND`, `CREDENTIAL_NOT_FOUND`, `INVALID_PRINCIPAL_STATE`, `CHANNEL_ARCHIVED`, `CHANNEL_NAME_CONFLICT`, `CURSOR_OUT_OF_RANGE`, `LAST_OPERATOR_CREDENTIAL`, `INVALID_PRINCIPAL_TRANSITION`, `IDEMPOTENCY_CONFLICT`, and `SLOW_CONSUMER`. Framing codes are `INVALID_FRAME`, `INVALID_REQUEST`, and `UNSUPPORTED_PROTOCOL`. `PRINCIPAL_NOT_FOUND` and `CREDENTIAL_NOT_FOUND` apply only to operator-issued commands; they never disclose hidden resources to agents because all principal/credential commands are operator-only.
+
+### 7.7 Slow consumers
+
+A consumer is slow when queued encoded frames exceed **1 MiB** or the oldest queued frame is older than **10 seconds**. The sole close reason/error code is `SLOW_CONSUMER`. The acknowledged cursor does not advance automatically.
+
+## 8. Revocation and event ordering
+
+### 8.1 Session binding
+
+The exhaustive session close reasons are `credential_revoked`, `principal_suspended`, `principal_restored`, `principal_revoked`, `operator_revoked`, `slow_consumer`, `socket_closed`, and `recovery`. `principal_restored` is reachable only defensively (Section 5.2): an effective restore closes any session carrying a stale auth-epoch snapshot, and legal flows produce zero such sessions.
+
+The exhaustive subscription close reasons are `unsubscribed`, `authorization_lost`, `channel_archived`, `channel_unarchived`, `slow_consumer`, `session_closed`, and `socket_closed`. Subscriptions are in-memory records containing subscription/session/channel IDs, epoch snapshots, state, close reason, and queue metadata. `UNSUBSCRIBE_CHANNEL` closes only the target subscription with `unsubscribed`; it does not close the session or any other subscription. Session closure closes every owned subscription with `session_closed`.
+
+Each collaboration session stores session ID, protocol version, role, principal ID, credential ID, auth epoch snapshot, created/closed timestamps, and close reason. Each subscription stores session/principal/credential IDs plus auth, membership, and channel epoch snapshots. The membership epoch snapshot is the epoch of the subscribing principal's own `collab_members` row for the subscribed channel; no other row's epoch is ever snapshotted or compared.
+
+### 8.2 Authorization coordinator
+
+Revocation, suspension, membership removal, and archive acquire the authorization write lock, commit state/epoch changes, close affected sessions/subscriptions and purge queues before releasing. SQLite commit is the linearization point.
+
+Each command validates only the predicate mapped in Section 4.2. Each socket write independently acquires the authorization read lock, validates `BASE` plus the subscription's current membership/channel visibility and epoch snapshots — comparing the subscription's membership epoch snapshot only against the caller's own membership row, so membership mutations affecting other principals never invalidate it — initiates the write only on success, and releases the lock — the read lock is acquired and released per socket write and is never held across more than one write. This does not require active-channel state for read-only archived subscriptions. A failed per-write revalidation closes the subscription with `authorization_lost` when the caller's own membership row is no longer active or its epoch, the channel epoch, or the auth epoch no longer matches the snapshot; a subscription already closed by a mutation keeps that mutation's registry close reason.
+
+Subscription close notification is exempt from the per-write read-lock rule. Under the authorization write lock, the mutation marks the subscription closed in the registry with its close reason and purges its queue; the close notification frame is enqueued to a post-lock delivery step that runs after the write lock is released and performs no authorization revalidation, because the subscription is already terminally closed. The close frame is the last frame ever sent for that subscription; no `channel_event` may follow it.
+
+### 8.3 Sequencer
+
+One in-process sequencer mutex and one fan-out source exist.
+
+All idempotency-keyed commands, including non-event mutations, use this same sequencer/write path. Commands are partitioned into exactly three lock classes:
+
+- Read-path commands (`LIST_CHANNELS`, `GET_CHANNEL_TIMELINE`, `SUBSCRIBE_CHANNEL`, `ACK_CHANNEL_CURSOR`, `UNSUBSCRIBE_CHANNEL`): authorization read lock first. `SUBSCRIBE_CHANNEL`, `ACK_CHANNEL_CURSOR`, and `UNSUBSCRIBE_CHANNEL` then take the sequencer mutex before any transaction or registry mutation; `LIST_CHANNELS` and `GET_CHANNEL_TIMELINE` never take the sequencer mutex.
+- Non-authorization mutations (`CREATE_AGENT`, `CREATE_PRINCIPAL_CREDENTIAL`, `CREATE_CHANNEL`, `POST_CHANNEL_MESSAGE`): authorization read lock, then sequencer mutex, then SQLite transaction. These four commands mutate no epoch that Section 8.2 revalidation reads.
+- Authorization mutations (`SUSPEND_AGENT`, `RESTORE_AGENT`, `REVOKE_AGENT`, `ROTATE_PRINCIPAL_CREDENTIAL`, `REVOKE_PRINCIPAL_CREDENTIAL`, `ADD_CHANNEL_MEMBER`, `REMOVE_CHANNEL_MEMBER`, `ARCHIVE_CHANNEL`, `UNARCHIVE_CHANNEL`): authorization mutations acquire the authorization write lock instead of the read lock — never both, and never an upgrade — then the sequencer mutex, then the SQLite transaction, holding the write lock through commit, subscription closure, and queue purge. `RESTORE_AGENT` and `ADD_CHANNEL_MEMBER` belong to this class because each mutates an epoch that Section 8.2 revalidation reads — the auth epoch and the added member's own membership epoch — even though in legal flows neither closes an existing subscription; the write lock serializes the epoch change against concurrent per-write revalidation so the outcome is deterministic rather than racy.
+
+The write lock subsumes the read lock; no upgrade path exists, and no code may hold the read lock while requesting the write lock. No code may invert the class orders above. The authorization lock is writer-preferring: once a write-lock acquisition is pending, no new read-lock acquisition is granted until that writer has acquired and released, so revocation cannot be starved by reader arrival rate.
+
+After current authorization succeeds, every keyed command executes this atomic protocol:
+
+1. Acquire the sequencer mutex and execute `BEGIN IMMEDIATE`.
+2. Revalidate the command predicate inside the transaction.
+3. Look up `(principal_id,command,idempotency_key)`.
+4. If found with the same request hash, commit no mutation and return the canonical secret-redacted result.
+5. If found with a different hash, roll back and return `IDEMPOTENCY_CONFLICT`.
+6. Otherwise perform all state/event writes — assigning each event's `channel_seq` as one greater than that channel's greatest committed `channel_seq` — and insert the redacted mutation result in the same transaction.
+7. Commit before fan-out or one-time secret handoff.
+
+No keyed mutation is visible without its canonical result row, and no canonical success row exists without its mutation. Because the sequencer mutex is held from step 1 through commit and `CollaborationStore` is the only writer, unique-key contention on `collab_mutation_results` cannot occur; there is no contention-retry branch. Concurrent same-key requests are serialized by the mutex: the second request observes the canonical committed row at step 3 and returns it without further mutation. Deterministic tests assert this serialization with barriers at mutex entry and after commit for every mutation class.
+
+Lock scope is exact: the sequencer mutex is held from step 1 through commit and in-memory subscription-buffer insertion only — bounded, non-blocking work with no socket I/O. Frame encoding and socket writes occur outside the sequencer mutex and outside any held authorization lock; each socket write follows the per-write read-lock rule in Section 8.2, and a failed revalidation drops the frame and closes the subscription with its registry close reason. Revocation, archive, and removal latency are therefore independent of consumer queue depth.
+
+Subscription registration and high-water capture occur under the mutex. Backlog sends authorized events through high water ascending. Writers hold the mutex through `BEGIN IMMEDIATE`, insert, commit, and buffer insertion. Events above high water buffer during backlog. Under the mutex, buffered events drain ascending with sequence deduplication, then subscription becomes live. Rolled-back rows never fan out.
+
+Barrier tests cover every registration/high-water/commit/buffer/live boundary. Observable output equals authorized database sequence with no gaps or duplicates.
+
+## 9. Exact SQLite v1 migration
+
+Migration ID: `20260806_001_collaboration_v1`. Require SQLite 3.35+, `foreign_keys=ON`, `journal_mode=WAL`, `synchronous=FULL`, and `busy_timeout=5000`. Run under `BEGIN EXCLUSIVE` before listeners. Set schema version last: the final statement of the migration transaction inserts the migration ID into `collab_schema_migrations`, and re-running a migration whose ID is already recorded is a complete no-op that mutates nothing and succeeds. Any error rolls back — including the version row — and keeps listeners closed.
+
+```sql
+CREATE TABLE principals (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK(kind IN ('operator','agent')),
+  display_name TEXT NOT NULL,
+  owner_principal_id TEXT REFERENCES principals(id),
+  status TEXT NOT NULL CHECK(status IN ('active','suspended','revoked')),
+  auth_epoch INTEGER NOT NULL DEFAULT 1 CHECK(auth_epoch > 0),
+  revoked_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (
+    (kind='operator' AND owner_principal_id IS NULL AND status IN ('active','revoked'))
+    OR
+    (kind='agent' AND owner_principal_id IS NOT NULL)
+  )
+);
+
+CREATE UNIQUE INDEX principals_single_operator
+  ON principals(kind) WHERE kind='operator';
+
+CREATE TABLE principal_credentials (
+  id TEXT PRIMARY KEY,
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  secret_hmac BLOB NOT NULL UNIQUE,
+  state TEXT NOT NULL CHECK(state IN ('active','revoked')),
+  revoked_at TEXT,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT
+);
+
+CREATE TABLE collab_channels (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  name_key TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('active','archived')),
+  owner_principal_id TEXT NOT NULL REFERENCES principals(id),
+  channel_epoch INTEGER NOT NULL DEFAULT 1 CHECK(channel_epoch > 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX collab_channels_active_name_key
+  ON collab_channels(name_key) WHERE state='active';
+
+CREATE TABLE collab_members (
+  channel_id TEXT NOT NULL REFERENCES collab_channels(id),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  role TEXT NOT NULL CHECK(role IN ('owner','agent')),
+  state TEXT NOT NULL CHECK(state IN ('active','removed')),
+  membership_epoch INTEGER NOT NULL DEFAULT 1 CHECK(membership_epoch > 0),
+  rejoined_seq INTEGER NOT NULL DEFAULT 0 CHECK(rejoined_seq >= 0),
+  joined_at TEXT NOT NULL,
+  removed_at TEXT,
+  PRIMARY KEY(channel_id, principal_id)
+);
+
+CREATE TABLE collab_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  schema_version INTEGER NOT NULL CHECK(schema_version=1),
+  channel_id TEXT NOT NULL REFERENCES collab_channels(id),
+  channel_seq INTEGER NOT NULL CHECK(channel_seq > 0),
+  actor_principal_id TEXT NOT NULL REFERENCES principals(id),
+  kind TEXT NOT NULL CHECK(kind IN (
+    'channel_created','member_added','member_removed',
+    'message_posted','channel_archived','channel_unarchived'
+  )),
+  content_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(channel_id,channel_seq),
+  UNIQUE(channel_id,id)
+);
+
+CREATE TABLE collab_cursors (
+  channel_id TEXT NOT NULL REFERENCES collab_channels(id),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  acknowledged_seq INTEGER NOT NULL CHECK(acknowledged_seq >= 0),
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(channel_id,principal_id)
+);
+
+CREATE TABLE collab_mutation_results (
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  command TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  request_hash BLOB NOT NULL,
+  result_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(principal_id,command,idempotency_key)
+);
+
+CREATE TABLE collab_session_bindings (
+  session_id TEXT PRIMARY KEY,
+  protocol_version INTEGER NOT NULL CHECK(protocol_version=2),
+  connection_role TEXT NOT NULL CHECK(connection_role IN ('operator','channel')),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  credential_id TEXT NOT NULL REFERENCES principal_credentials(id),
+  auth_epoch_snapshot INTEGER NOT NULL CHECK(auth_epoch_snapshot > 0),
+  created_at TEXT NOT NULL,
+  closed_at TEXT,
+  close_reason TEXT CHECK(close_reason IS NULL OR close_reason IN (
+    'credential_revoked','principal_suspended','principal_restored',
+    'principal_revoked','operator_revoked','slow_consumer',
+    'socket_closed','recovery'
+  ))
+);
+
+CREATE INDEX collab_session_credential_open
+  ON collab_session_bindings(credential_id,closed_at);
+
+CREATE INDEX collab_members_principal_state_channel
+  ON collab_members(principal_id,state,channel_id);
+
+CREATE INDEX collab_cursors_principal_channel
+  ON collab_cursors(principal_id,channel_id);
+
+CREATE INDEX principal_credentials_principal_state
+  ON principal_credentials(principal_id,state);
+
+CREATE TABLE collab_audit (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL CHECK(kind IN (
+    'bootstrap_completed','credential_created','credential_revoked',
+    'agent_suspended','agent_restored','agent_revoked',
+    'operator_revoked','recovery_completed','recovery_kit_exported',
+    'recovery_kit_verified'
+  )),
+  actor_principal_id TEXT REFERENCES principals(id),
+  subject_principal_id TEXT REFERENCES principals(id),
+  content_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX collab_audit_kind_created
+  ON collab_audit(kind, created_at);
+
+CREATE TABLE collab_installation (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  installation_id TEXT NOT NULL UNIQUE,
+  recovery_secret_hmac BLOB NOT NULL,
+  principal_pepper_check BLOB NOT NULL,
+  recovery_pepper_check BLOB NOT NULL,
+  recovery_kit_id TEXT,
+  recovery_kit_checksum TEXT,
+  recovery_kit_verified_at TEXT,
+  schema_version INTEGER NOT NULL CHECK(schema_version=1)
+);
+
+CREATE TABLE collab_schema_migrations (
+  id TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL
+);
+```
+
+Phase 1 rows remain untouched because v1 creates additive tables. `collab_session_bindings.session_id` deliberately has no foreign key to the Phase 1 session table; gateway application code MUST create/close it atomically with the corresponding gateway session and doctor reports orphan bindings. This avoids assuming a Phase 1 column name while keeping exact v1 DDL. Startup closes any binding with a null `closed_at` and no live gateway session, setting `close_reason` to `socket_closed`; doctor reports the count it closed.
+
+The `CollaborationStore` is the only writer to these tables while listeners are open; the Section 5.1.1 and Section 6.4 offline CLI paths write them only with the gateway stopped under an exclusive lock. Every write transaction MUST execute the following validations after `BEGIN IMMEDIATE` and before mutation:
+
+1. Agent creation verifies the owner row is the sole active `operator`.
+2. Channel creation verifies `owner_principal_id` is that operator and creates exactly one active `owner` membership in the same transaction.
+3. Agent membership verifies the principal is kind `agent`, owned by the channel operator, and uses role `agent`; owner-role insertion is rejected.
+4. Owner membership removal or role mutation is rejected.
+5. Cursor insert/update verifies an active membership and that the submitted sequence does not exceed the caller-visible bound, restated here in full: when any committed event in the channel has `channel_seq` greater than the member's current `rejoined_seq`, the bound is the channel's greatest committed `channel_seq`; otherwise the bound is the member's `rejoined_seq`. Both branches match Section 7.4 exactly, and the Section 10 re-added-at-head fixture exercises the boundary.
+6. Event insertion verifies that `actor_principal_id` names an active principal; for `message_posted`, that the actor holds an active membership for `channel_id` and the channel state is active; for `channel_created`, `channel_archived`, `channel_unarchived`, `member_added`, and `member_removed`, that the actor equals the channel's `owner_principal_id` and is kind `operator`; that `kind` is one of the six Section 7.5 values; and that `content_json` contains exactly the fields listed for that kind in Section 7.5. Doctor separately verifies the invariant that every membership's `rejoined_seq` does not exceed the channel's greatest committed `channel_seq`.
+7. Principal, membership, and channel updates validate the Section 5 transition and required epoch increment.
+8. Channel creation and unarchive compute and persist `name_key` with the Section 7.1 algorithm before insert/update; the unique active-`name_key` index is the concurrency backstop, and a constraint violation maps to `CHANNEL_NAME_CONFLICT`.
+9. Channel archive, unarchive, and membership mutation verify the invoking principal equals the channel's `owner_principal_id` and is kind `operator`; otherwise roll back with zero row changes.
+
+Agent-ownership shape (every agent owned by the operator; no self-owned or agent-owned agents) is application-enforced by validations 1 and 3 and doctor-detected by design; the DDL CHECK deliberately does not express it. Any failed validation rolls back and returns the mapped protocol error. Direct storage-level negative fixtures invoke every `CollaborationStore` write method with agent-owned channels, nested agent ownership, forged owner memberships, unauthorized cursors, illegal transitions, and malformed event payloads and prove zero rows change. Raw external SQLite writes are unsupported and detected by doctor invariant checks.
+
+`torqclaw doctor` reports `collab_mutation_results` row count and encoded result bytes. Retention remains outside v1; warning thresholds are 100,000 rows or 256 MiB, and crossing them does not delete records.
+
+## 10. Conformance and acceptance
+
+Conformance fixtures execute against a determinism harness: (a) an injected monotonic clock starting at the pinned instant 2026-01-01T00:00:00.000Z and advancing exactly 1 ms per server-generated timestamp, and (b) a deterministic UUID generator seeded per fixture with the fixture's identifier, producing UUID-shaped values in sequence. Every server-generated field across the Section 7.2, 7.3, and 7.4 shapes — `sessionId`, `principalId`, `credentialId`, `eventId`, `subscriptionId`, `serverTime`, `occurredAt`, and `revokedAt` — and the credential secret bytes in the credential-shape fixtures are produced by these two mechanisms during fixture runs, so two independent implementations produce identical fixture bytes with no substitution table.
+
+Required byte fixtures cover both role connects, mismatches, every command success, every denial class, hidden-resource compound failures, idempotency replay/conflict, agent state transitions, credential replacement, channel discovery pagination, cursor monotonicity, archived reads, backlog/live/resume, `SLOW_CONSUMER`, and recovery.
+
+Required deterministic tests prove:
+
+- suspended/revoked agent cannot authenticate, command, resume, or receive;
+- terminal principal revocation differs from one-credential revocation;
+- every Section 7.5 event inserts into the Section 9 CHECK and no other event does;
+- each idempotency-keyed successful mutation writes one `collab_mutation_results` row and channel-less mutations work;
+- every credential-producing persisted result is secret-redacted and a lost first response can be recovered with `CREATE_PRINCIPAL_CREDENTIAL`;
+- both credential-response shapes (first response with `credentialAvailable:true` and replay with `credentialAvailable:false`) are pinned as byte fixtures;
+- subscription close frames are delivered by the post-lock delivery step, are observable with their registry close reason, and are the final frame on the subscription;
+- same-key concurrent requests for every mutation class are serialized by the sequencer mutex, with barriers at mutex entry and after commit, producing one mutation and one canonical result;
+- encoded-size boundary fixtures accept the largest legal message and reject the smallest illegal one, and prove the worst-case accepted message encodes within 64 KiB in both `channel_event` and single-event timeline frames;
+- control-character message text and bidirectional-override or control-character names are rejected with `INVALID_REQUEST`;
+- a member of one channel observes strictly consecutive `channel_seq` cursors regardless of concurrent activity in channels it cannot see, and no frame ever carries the global `seq`;
+- the re-add truncation is pinned with explicit sequence numbers: a member added at `channel_seq` 2 (reading 3-4), removed at 5, re-added at 9 with `rejoined_seq` 8 receives only events 9 and later through timeline, backlog, and live fan-out — its own `member_added` at 9 first — and cannot reach events 2-4 from its earlier interval; a first-time member's timeline from `afterCursor` 0 begins with its own `member_added` event; cursor rows survive archive and unarchive unchanged;
+- the first `ACK_CHANNEL_CURSOR` on a channel (no existing cursor row) succeeds as an upsert from `acknowledged_seq` 0;
+- rotating the operator's only active credential returns `LAST_OPERATOR_CREDENTIAL` without mutation;
+- "Strasse-form" fixtures prove U+00DF and "SS" names produce an identical `name_key` and conflict at both create and unarchive;
+- oversize message text against a hidden channel returns `INVALID_REQUEST` at step 3, byte-identical whether the channel is absent, hidden, or visible;
+- message boundary fixtures pin exact values: 16,384 unescaped ASCII bytes accepted, 16,385 rejected; 8,192 LF characters accepted (encoded 16,384), 8,193 rejected; 8,192 repetitions of U+0065 U+0301 accepted (post-NFC 16,384 raw and encoded), 8,192 repetitions of U+0344 rejected (post-NFC 32,768);
+- `ACK_CHANNEL_CURSOR` beyond the caller-visible bound returns `CURSOR_OUT_OF_RANGE`, and a re-added member receives no removal-window event content through timeline, backlog, live fan-out, or any error path, while absolute cursor values remain visible per the Section 7.4 metadata rule;
+- same-state archive and unarchive return the current state as a success no-op with no epoch increment and no event;
+- write-lock acquisition wait is bounded under sustained reader arrival (writer preference), not merely under deep consumer queues;
+- an agent invoking `ARCHIVE_CHANNEL`, `UNARCHIVE_CHANNEL`, `ADD_CHANNEL_MEMBER`, or `REMOVE_CHANNEL_MEMBER` against both member and non-member channels receives `COLLAB_NOT_FOUND` with zero row changes;
+- a static or runtime assertion proves no execution path holds the authorization read lock while requesting the write lock;
+- normalization-order fixtures prove the persisted bytes equal the normalized form for every boundary case above;
+- the three timeline byte fixtures are pinned byte-for-byte with exact contents: the single-event fixture holds one maximum-size message of 16,384 unescaped ASCII bytes; the 100-event fixture holds 100 `message_posted` events whose text is the single byte `a`, returned as one full page; the frame-cut fixture commits four maximum-size messages and requests limit 100 from the channel start, and the page returns exactly three events with `hasMore` true, because a fourth maximum-size event cannot fit the 64 KiB result frame;
+- adding member B while member A holds a live subscription leaves A's subscription live with its membership epoch snapshot still valid, delivers B's `member_added` event to A in sequence, and changes no field on A's membership row (subscription survival);
+- an effective `RESTORE_AGENT` increments the agent's auth epoch by exactly one, closes exactly zero sessions, emits one `agent_restored` audit row, and the agent reconnects with its existing credential; a restore submitted with a fresh idempotency key against an already-active agent returns the current status and epoch with no increment, no session closure, and no audit row; a replay with the original key returns the stored result unchanged;
+- a member re-added at the channel head — its `member_added` event being the channel's greatest committed event — can acknowledge exactly that event's cursor, and acknowledging any greater value returns `CURSOR_OUT_OF_RANGE` (re-added-at-head boundary);
+- unarchiving a channel closes its live subscriptions with `channel_unarchived`;
+- a connect-path timing-regression fixture shows unknown-credential-ID, revoked-credential, and wrong-secret attempts within the harness noise floor;
+- `LIST_CHANNELS` returns only the caller's own cursors, with `"0"` for absent rows, and its pagination token strictly advances whenever `hasMore` is true;
+- a frame with a duplicated key is rejected with `INVALID_FRAME`;
+- `secrets verify` decrypts the kit, writes `recovery_kit_verified_at`, and emits its audit row;
+- startup rejects every one of the ten invalid feature-flag combinations and doctor reports it;
+- the `LIST_CHANNELS` capacity fixture provisions exactly 100 channels whose names are exactly 80 ASCII characters for one caller and requests limit 100: all 100 rows return in one frame with `hasMore` false; the same request against 101 such channels returns 100 rows, `hasMore` true, and `nextChannelId` equal to the hundredth channel ID;
+- credential-command negatives return `PRINCIPAL_NOT_FOUND`, `CREDENTIAL_NOT_FOUND`, or `INVALID_PRINCIPAL_STATE` exactly as mapped in Section 7.4;
+- a revocation or archive completes within its Section 15 bound while one consumer is held at the 1 MiB queue limit;
+- membership removal and archive precede idempotency replay and do not leak stored success or conflict;
+- unsubscribing one channel leaves the session and all other subscriptions live;
+- direct storage-level authority-invariant violations roll back with zero row changes;
+- all message validators enforce both Section 7.1 bounds (16,384 raw bytes and 16,384 encoded-form bytes excluding quotes);
+- all timeline paths enforce the 100-event page bound and the 64 KiB result-frame bound;
+- Unicode case-fold fixtures prove `name_key` conflicts for non-ASCII case pairs at create and unarchive;
+- archiving a channel closes its live subscriptions with `channel_archived`, purges unsent queues, and resubscribed members replay the archive event from durable backlog;
+- all slow-consumer paths use one threshold and code;
+- hidden-channel response shape and status are identical to absent;
+- no socket write starts after revocation linearization;
+- no gap/duplicate occurs at subscription boundaries;
+- machine-loss recovery succeeds from database backup plus verified offline kit and fails clearly without the kit.
+- revoking the final active operator credential returns `LAST_OPERATOR_CREDENTIAL` without mutation;
+- operator revocation enters `locked_recovery`, while rotation preserves sessions using non-replaced credentials;
+- secret restore repopulates both Credential Manager entries without exposing their values;
+- create/unarchive name collisions and beyond-range cursor acknowledgements return their sole defined codes.
+
+## 11. Rollout and rollback
+
+Feature flags: `TORQCLAW_COLLAB_IDENTITY`, `TORQCLAW_COLLAB_CHANNELS`, `TORQCLAW_COLLAB_LIVE`, and `TORQCLAW_COLLAB_UI`, default false. The flags are strictly nested and validated at startup: `TORQCLAW_COLLAB_CHANNELS` requires `TORQCLAW_COLLAB_IDENTITY`; `TORQCLAW_COLLAB_LIVE` requires `TORQCLAW_COLLAB_CHANNELS`; `TORQCLAW_COLLAB_UI` requires `TORQCLAW_COLLAB_CHANNELS`. A violated dependency is a startup configuration error that keeps listeners closed and is reported by doctor; the gateway never silently downgrades. Commands belonging to a disabled tier are unmapped and therefore denied per Section 4.2.
+
+Slices:
+
+1. Contract gate: generated schemas, exact migration, Phase 1 fixture, protocol fixtures, consistency linter, recovery fixtures.
+2. Identity: bootstrap, agents, credentials, lifecycle, sessions, recovery kit.
+3. Channels: membership, discovery, archive, immutable messages, cursor.
+4. Live: sequencer, backlog/live transition, revocation races, slow consumers.
+5. UI/pilot: accessible operator UI, metrics, benchmark, rollback rehearsal.
+
+Slices are cumulative and sequentially gated: each slice has its own gate, and slice N+1 does not begin until slice N's gate passes. Migration takes a mandatory pre-migration backup.
+
+Normal rollback is non-destructive: stop new v2 connections, drain/close subscriptions, disable all collaboration flags, retain additive tables, and restart Phase 1 behavior. Destructive restoration of the pre-migration backup is a last-resort offline operation because it discards **all** post-backup Phase 1 and collaboration data. It requires gateway shutdown, a new current full-state backup, typed confirmation `RESTORE PRE-MIGRATION BACKUP AND DISCARD LATER DATA`, display of the exact time/data-loss boundary, and an operator-selected backup ID. Completion writes a secret-free external restore receipt containing old/new database checksums, backup IDs, timestamps, operator acknowledgement, and doctor results. Rollback rehearsal proves normal feature-off preserves Phase 1 changes and destructive restore loses only the explicitly acknowledged interval. No downgrade migration exists.
+
+## 12. Security and privacy
+
+- TLS is mandatory beyond loopback.
+- Secrets never enter logs, events, receipts, exports, URLs, or analytics.
+- Channel lookup uses parameterized queries and authorization before content access.
+- Caches key by gateway, principal, and channel and purge on identity change/revocation.
+- Channel text is private local data and is not sent to models unless a separately governed execution action is approved.
+- Metrics use bounded labels only; no principal, channel, token, address, or message text labels.
+- Accessibility target: keyboard operation, visible focus, semantic controls, WCAG 2.2 AA contrast, and screen-reader announcements for new messages without focus theft.
+
+## 13. Observability
+
+Metrics:
+
+- connect outcomes by bounded reason;
+- authorization denials by command class;
+- active/backlog/closed subscriptions;
+- revocation-to-last-write-boundary latency;
+- timeline, commit, and fan-out latency;
+- queue bytes/age and `SLOW_CONSUMER` closes;
+- migration/recovery/doctor outcomes;
+- verified recovery-kit age.
+
+Alerts: invariant failure, migration failure, any post-linearization write detected, recovery failure, or benchmark regression.
+
+## 14. Consistency pre-gate
+
+Before model review, a deterministic documentation linter MUST extract and compare:
+
+- command names;
+- event kinds;
+- error/close codes;
+- numeric byte, event, time, rate, and benchmark limits;
+- state names and transitions;
+- DDL CHECK enum values;
+- protocol fixture enum values.
+
+It fails if an identifier is referenced but not defined, if a definition has multiple values, if a protocol event is rejected by DDL, or if an excluded feature appears in commands/events/schema/acceptance criteria. Generated schema and fixture drift is also a failure.
+
+It also fails when an error code appears outside the exhaustive Section 7.6 registry, a state-changing command lacks an explicit idempotency classification, or a command references an unindexed mandatory access path.
+
+It also enforces cross-constraint feasibility: any declared encoded response or payload byte bound that exceeds the 64 KiB frame bound is a failure. It also verifies the caller-scoped owner predicate, the membership replay floor, the cursor lookup index, the timeline event object shape, and the normalization-ordering rule as required literals. It also verifies that the raw and encoded message bounds are equal, so the largest-legal-message pin is unambiguous, and that the Section 10 boundary fixtures state exact byte counts consistent with both bounds. It also fails when any Section 4.2 predicate references channel state, and when a server-generated field named in any command result is missing from the Section 10 harness enumeration. It also verifies the per-membership-row epoch scoping rule, the presence of `principal_restored` in both the Section 8.1 registry and the Section 9 CHECK, the exact three-class lock partition with `RESTORE_AGENT` and `ADD_CHANNEL_MEMBER` in the authorization-mutation class, the inline two-branch cursor bound in Section 9 validation 5, the unmapped-scalar fold rule, the `LIST_CHANNELS` `hasMore` definition, the pinned timeline and discovery fixture contents, and the per-kind revocation-phase observation floors.
+
+The required implementation is `scripts/lint_collaboration_prd.py`. It exits 0 only on PASS, exits nonzero on findings or parse failure, and can write the review artifact with `--report`.
+
+## 15. Authoritative benchmark
+
+Reference: Windows 11; 4 logical CPUs; 8 GiB RAM; SSD local NTFS database; Node.js 22 LTS pinned at 22.11.0 for gate measurements; Section 9 SQLite pragmas; 100,000 collaboration events; 30-minute harness; 60-second warm-up; nearest-rank percentiles. The four measurement phases run sequentially. Timeline, commit, and fan-out phases require at least 10,000 observations each; the revocation phase requires at least 1,000 observations, proportionate to its serialized throughput ceiling. Revocation-phase observations are supplied by repeatable authorization mutations against a pre-provisioned pool of 100 agents, apportioned per mutation kind so no single kind can satisfy the floor alone: at least 450 `SUSPEND_AGENT`/`RESTORE_AGENT` pair observations, at least 450 `ARCHIVE_CHANNEL`/`UNARCHIVE_CHANNEL` pair observations, and exactly 100 terminal `REVOKE_AGENT` observations sampled once per pooled agent at phase end. Every kind's observations enter the same percentile computation. Load phases: 10 concurrent clients for the baseline timeline, commit, and fan-out measurements; 25 concurrent readers continuously subscribing and reading plus one held slow consumer for the revocation writer-preference measurement.
+
+Pass conditions:
+
+- warm 100-event timeline query: p95 <= 100 ms;
+- message commit: p95 <= 75 ms;
+- commit-to-last-authorized-client socket-write initiation: p95 <= 150 ms;
+- revocation-commit-to-last-write-boundary: p95 <= 150 ms, measured both with one deliberately slow consumer held at the 1 MiB queue limit (queue-depth independence) and under sustained reader arrival from 25 concurrent clients continuously subscribing and reading (writer-preference verification). The measurement starts at the SQLite commit return of the authorization mutation and ends at the authorization write-lock release after subscription closure and queue purge; socket writes initiated before the commit are excluded, consistent with Section 2;
+- zero lost or duplicate event sequences;
+- zero socket-write initiations after revocation linearization.
+
+These values supersede every earlier draft/status-memo benchmark.
+
+## 16. Risks and ownership
+
+| Risk | Owner | Mitigation |
+|---|---|---|
+| authorization race | gateway lead | coordinator lock, epochs, instrumented boundaries |
+| replay gap | gateway lead | one sequencer/fan-out source, barrier tests |
+| hidden-channel leak | security lead | denial precedence, response/timing regression |
+| machine-loss lockout | security lead | mandatory verified offline recovery kit |
+| migration damage | storage lead | additive DDL, fixture, backup, rollback rehearsal |
+| contract drift | contracts lead | generated schemas plus consistency linter |
+| cache identity leak | frontend lead | scoped keys and purge tests |
+| scope creep into execution | product owner | explicit exclusions and follow-on PRDs |
+
+Accountable owner for every risk above: King Flowers (operator), assigned 2026-08-06. The role labels are retained per-risk for future delegation; any delegation must name the individual in this table before the affected slice starts. Delegation decision deadline: at each slice's gate review, every risk row whose mitigation lands in the next slice is either delegated to a named individual or explicitly retained by the accountable owner, with the decision date recorded in this table; a slice does not begin while its decision is unrecorded. The first decision point is the Slice 1 contract-gate review for the storage and contract rows; Slice 2 does not begin until the security-lead rows are decided.
+
+## 17. Finding traceability
+
+| Finding | v0.14 closure |
+|---|---|
+| message trimming contradicted the all-LF boundary fixture (G2A Slice 0 audit) | Section 7.1 (names-only trimming) |
+| migration-version table unratified across implementations (G2A Slice 0 audit) | Section 9 |
+| channel-level reading of the membership epoch could kill healthy subscriptions | Sections 5.3, 8.1-8.3, and 10 |
+| agent-restore epoch and session semantics undefined | Sections 5.2, 8.1, 8.3, 9, and 10 |
+| timeline fixture contents unpinned against the frame bound | Section 10 |
+| discovery pagination continuation flag undefined | Sections 7.4 and 10 |
+| unreachable stored-status effectiveness clause | Section 4.1 |
+| storage cursor validation cited its bound by reference only | Section 9 |
+| fold behavior for unmapped scalars unstated | Section 7.1 |
+| revocation-phase floor satisfiable by one mutation kind | Section 15 |
+| risk delegation had no decision deadline | Section 16 |
+| channel state folded into `CHANNEL_WRITABLE` predicate | Sections 4.2, 7.6, and 14 |
+| re-add truncates own prior intervals, undocumented | Sections 5.3 and 10 |
+| `CURSOR_OWNER` unsatisfiable on first acknowledgement | Sections 4.2, 7.4, and 10 |
+| sole-credential rotation strands installation | Sections 6.1 and 10 |
+| unimplementable `name_key` folding source | Sections 7.1 and 10 |
+| conflicting rotation result shapes | Section 7.4 |
+| `revokedAt` outside determinism harness | Sections 10 and 14 |
+| unnamed Argon2id dependency | Sections 3.2, 6.3, and 16 |
+| body-validation step ambiguity | Sections 7.6 and 10 |
+| tautological validation-6 conjunct; dangling pepper rotation | Sections 3.2, 6.3, and 9 |
+| no fixture determinism harness | Section 10 (injected clock, seeded UUIDs) |
+| undefined revocation-boundary measurement | Section 15 |
+| infeasible revocation observation floor | Section 15 load phases |
+| undefined `nextChannelId` | Sections 7.4 and 10 |
+| unspecified `secrets verify` semantics | Sections 6.3, 9, and 10 |
+| duplicate-key rejection platform trap | Sections 7.1 and 10 |
+| unstated frame measurement basis | Section 7.1 |
+| DDL-permitted self/agent-owned agents | Section 9 (documented as application-enforced) |
+| unpinned Node.js version | Section 15 |
+| removal-window count oracle on success paths | Section 7.4 (metadata visibility documented; over-claim removed) and Section 10 |
+| close-frame delivery under the write lock | Sections 8.2 and 10 |
+| `LIST_CHANNELS` filter outside the predicate table | Section 4.2 (`CHANNEL_ENUMERABLE`) |
+| benchmark client-count contradiction | Section 15 load phases |
+| loopback lockout of the operator | Section 6.2 |
+| ambiguous credential-response shape | Sections 7.4 and 10 |
+| self-contradictory epoch phrasing | Section 5.2 |
+| unstated archived-error precedence | Section 7.6 |
+| orphan-binding remediation | Section 9 |
+| unsatisfiable normalization fixture and unreachable raw ceiling | Sections 7.1 and 10 |
+| undefined `rejoined_seq` capture point | Sections 5.3 and 10 |
+| channel-scoped ack range oracle | Sections 7.4, 9, and 10 |
+| undefined no-op archive/unarchive | Sections 4.2, 5.4, and 10 |
+| undefined read-path mutex requirement | Section 8.3 |
+| unspecified lock fairness | Sections 8.3, 10, and 15 |
+| flag-configuration undercount | Sections 10 and 19 |
+| only-writer overclaim versus offline CLIs | Section 9 |
+| missing bound-interaction linter check | Section 14 |
+| caller-unscoped `CHANNEL_OWNER` grants agents channel administration | Sections 4.2, 7.6, 9, and 10 |
+| removal-window replay via retained cursor | Sections 5.3, 7.4, 9, and 10 |
+| self-contradictory lock order for write-lock keyed commands | Sections 8.3 and 10 |
+| NFC normalization unordered relative to bounds | Sections 7.1 and 10 |
+| unindexed `LIST_CHANNELS` cursor access path | Sections 7.4, 9, and 14 |
+| undefined timeline event object shape | Sections 7.3 and 10 |
+| missing `channel_unarchived` close reason | Sections 5.4, 8.1, and 10 |
+| credential-existence timing oracle | Sections 6.1 and 10 |
+| undefined storage-layer actor authorization | Section 9 |
+| undefined feature-flag matrix | Sections 11 and 19 |
+| `COLLAB_NOT_PERMITTED` scope overlap | Section 7.6 |
+| unqualified `lastAcknowledgedCursor` | Section 7.4 |
+| misleading slice-independence wording | Section 11 |
+| JSON escape expansion admits undeliverable committed messages | Sections 7.1 and 10 |
+| global `seq` exposed as cursor forms hidden-channel oracle | Sections 7.3, 8.3, 9, and 10 |
+| fan-out lock discipline underdetermined | Sections 8.2, 8.3, and 15 |
+| unreachable contention branch and unconstructible barrier tests | Sections 8.3 and 10 |
+| `expired` state without setter defeats last-credential guard | Sections 4.2, 6.1, 7.2, 7.6, and 9 |
+| missing credential-command error codes | Sections 7.4 and 7.6 |
+| `revoke-operator` credential-precondition deadlock | Sections 5.1 and 5.1.1 |
+| pagination frame rule limited to timelines | Sections 7.1 and 10 |
+| `highWaterCursor` scope undefined | Section 7.4 |
+| cursor-row lifecycle undefined | Sections 5.3, 5.4, and 10 |
+| no name character-class restriction | Sections 7.1 and 10 |
+| unnamed risk owners | Section 16 |
+| missing `collab_audit` index | Section 9 |
+| timeline page exceeds frame limit | Sections 7.1 and 10 |
+| unenforceable Unicode name uniqueness | Sections 7.1, 7.4, 9, and 10 |
+| ambiguous archive delivery semantics | Sections 5.4, 5.5, 8.1, and 10 |
+| stale v0.4 pre-gate evidence | final status document (historical labels) |
+| idempotency evaluated before channel authorization | Sections 7.4, 7.6, and 8.3 |
+| credential plaintext persistence and stranded issuance | Sections 6.1, 7.4, and 10 |
+| missing atomic keyed-mutation protocol | Sections 8.3 and 10 |
+| unenforced authority invariants in storage | Sections 9 and 10 |
+| session/subscription close-reason conflation | Sections 8.1, 9, and 10 |
+| destructive rollback without safety contract | Section 11 |
+| nondeterministic `node` connect outcome | Section 7.2 |
+| universal validator | Sections 4.2 and 8.2 |
+| operator cannot connect | Sections 4.1 and 7.2 |
+| missing discovery/cursor commands | Sections 4.2 and 7.4 |
+| ambiguous rotation | Sections 6.1 and 7.4 |
+| non-executable migration/session binding | Section 9 |
+| missing agent suspend/restore/revoke | Sections 5.2 and 7.4 |
+| event kind/DDL contradiction | Sections 7.5, 9, and 10 |
+| dual-pepper machine-loss lockout | Sections 6.3-6.4 |
+| undefined operator revocation | Section 5.1.1 |
+| final operator credential lockout | Sections 5.1 and 6.1 |
+| rotation/epoch contradiction | Sections 6.1 and 8.2 |
+| missing protocol error codes | Sections 7.4 and 7.6 |
+| cursor idempotency ambiguity | Sections 7.3-7.4 |
+| recovery secret restore gap | Sections 6.3-6.4 |
+| channel-name reuse on unarchive | Sections 7.4 and 9 |
+| undetectable wrong pepper | Sections 6.1 and 9 |
+| undefined close reasons | Sections 8.1 and 9 |
+| unsubscribe idempotency ambiguity | Section 7.4 |
+| failed mutation replay ambiguity | Section 7.4 |
+| unbounded mutation-result observability | Sections 9 and 13 |
+| benchmark conflict | Section 15 |
+| tombstone/rename remnants | Sections 3.2, 5.5, 7.5, and 9 |
+| message/page/slow/rate conflicts | Sections 6.2, 7.1, 7.4, and 7.7 |
+| idempotency scope conflict | Sections 7.4 and 9 |
+
+## 18. Superseded-clause map
+
+| Prior source | Disposition in v0.14 |
+|---|---|
+| v0.13 uniform trim-before-validation rule | superseded by Section 7.1 names-only trimming |
+| v0.12 read-lock classification of member-add and agent-restore | superseded by Section 8.3 |
+| v0.12 seven-reason session close registry | superseded by Sections 8.1 and 9 |
+| v0.12 disjunctive discovery capacity fixture | superseded by Section 10 |
+| v0.12 stored-status effectiveness clause | superseded by Section 4.1 |
+| v0.11 state-bearing `CHANNEL_WRITABLE` and `CURSOR_OWNER` predicates | superseded by Section 4.2 |
+| v0.11 dead acknowledged-cursor floor formula | replaced by the Section 5.3 truncation rule |
+| v0.11 pepper-rotation doctor clause | removed; excluded by Section 3.2 |
+| v0.10 nondeterministic fixture requirement | superseded by the Section 10 determinism harness |
+| v0.10 uniform 10,000-observation floor | superseded by Section 15 per-phase floors |
+| v0.10 undefined `secrets verify` | superseded by Section 6.3 |
+| v0.9 count-non-disclosure claim on ack responses | removed as unsatisfiable; Section 7.4 documents metadata visibility |
+| v0.9 unqualified close-frame socket-write rule | superseded by the Section 8.2 post-lock delivery step |
+| v0.9 `LIST_CHANNELS` mapped to bare `BASE` | superseded by `CHANNEL_ENUMERABLE` |
+| v0.8 quotes-inclusive encoded message bound | superseded by Section 7.1 |
+| v0.8 half-open re-add interval test | superseded by Section 10 |
+| v0.8 channel-scoped ack range check | superseded by Sections 7.4 and 9 |
+| v0.8 five-configuration flag gate | superseded by Section 19 |
+| v0.7 channel-property owner predicate | superseded by Section 4.2 |
+| v0.7 boolean (non-interval) membership authorization | superseded by Sections 5.3, 7.4, and 9 |
+| v0.7 single-sentence lock order | superseded by Section 8.3 lock classes |
+| v0.7 retained-cursor replay test | superseded by the Section 10 interval test |
+| v0.7 two-configuration feature-flag gate | superseded by Sections 11 and 19 |
+| v0.6 raw-byte-only message size rule | superseded by Section 7.1 |
+| v0.6 global-sequence wire cursor | superseded by Sections 7.3 and 9 |
+| v0.6 step-8 contention-retry branch | removed; Section 8.3 |
+| v0.6 time-based credential expiry (column and state) | removed; Sections 6.1 and 9 |
+| v0.6 credential-authenticated `revoke-operator` | superseded by Section 5.1.1 |
+| v0.5 separate timeline page byte bound | superseded by Section 7.1 |
+| v0.5 ASCII-fold channel-name uniqueness index | superseded by Sections 7.1 and 9 |
+| v0.5 archive delivery ambiguity | superseded by Sections 5.4 and 8.1 |
+| v0.4 Section 7.6 idempotency-before-authorization precedence | superseded by Sections 7.4 and 7.6 |
+| v0.4 credential-bearing mutation results | superseded by Sections 6.1 and 7.4 |
+| v0.4 Section 11 restore-only destructive rollback | superseded by Section 11 |
+| v0.4 `unsubscribed` session close reason | superseded by Section 8.1 |
+| v0.2 Sections 3/14/20 benchmark values | superseded by Section 15 |
+| v0.2 Sections 5/7.4/10/11/12/16 tombstones | removed; Sections 3.2 and 5.5 |
+| v0.2 Section 6 rate limits/recovery | superseded by Section 6 |
+| v0.2 Section 9 replay/page/slow-consumer rules | superseded by Sections 7.4, 7.7, and 8.3 |
+| v0.2 Section 10 schema/idempotency | superseded by Section 9 |
+| v0.3 Addendum universal validator | superseded by Section 4.2 |
+| v0.3 Addendum protocol/allowlists | superseded by Section 7 |
+| final-status benchmark memo | superseded by Section 15 |
+
+### 18.1 Explicit implementation supersession
+
+No prior rule for operator revocation, credential exhaustion, rotation epoch increments, connect authentication errors, channel-name collisions, cursor-range errors, secret restoration, or cursor idempotency remains normative. Sections 5-9 are exhaustive for those behaviors.
+
+## 19. Definition of done
+
+- consistency pre-gate passes;
+- independent G1R reports no Critical or High finding;
+- exact migration and Phase 1 fixture pass;
+- all authorization cells, state transitions, protocol fixtures, recovery, concurrency, privacy, accessibility, rollback, and benchmark gates pass;
+- existing TORQCLAW gates pass in each of the six valid flag configurations (all-off; IDENTITY; IDENTITY+CHANNELS; IDENTITY+CHANNELS+LIVE; IDENTITY+CHANNELS+UI; all four);
+- no execution or governance authority changes.
+
+## 20. Research basis
+
+Checked 2026-08-06:
+
+- `E:\TorqClaw\README.md`
+- `E:\TorqClaw\packages\gateway\db\schema.sql`
+- gateway sessions, events, authorization, storage, receipts, contracts, and HTTP-channel adapter;
+- Block Buzz README, architecture, CLI, and project-vision documents.
+
+Buzz contributes the shared-room and replay concepts. TORQCLAW retains its stricter execution and governance authority. Known Buzz risks around tenant cache scope, stale refresh failures, owner revocation, workflow approvals, host-wide developer paths, and media quotas are not imported.

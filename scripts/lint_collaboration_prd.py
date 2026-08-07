@@ -213,7 +213,11 @@ def run(prd: Path) -> tuple[Gate, str]:
             "authorization mutations acquire the authorization write lock instead of the read lock",
         "no lock upgrade": "no upgrade path exists",
         "nfc ordering":
-            "NFC normalization first, then trimming, then all length",
+            "NFC normalization first, then — for channel names and agent display names only — trimming",
+        "message text never trimmed": "Message text is never trimmed",
+        "migration version table": "collab_schema_migrations",
+        "migration rerun no-op":
+            "re-running a migration whose ID is already recorded is a complete no-op",
         "cursor lookup index": "collab_cursors_principal_channel",
         "timeline event object": "A timeline event object is",
         "next-cursor convention": "cursor of the last element returned",
@@ -388,6 +392,8 @@ def run(prd: Path) -> tuple[Gate, str]:
             "`RESTORE_AGENT`, `CREATE_CHANNEL`",
         "removed restore-less authorization class":
             "`SUSPEND_AGENT`, `REVOKE_AGENT`",
+        "removed uniform trim rule":
+            "then trimming, then all length",
     }
     for name, literal in forbidden.items():
         # Boundary-aware: "4 MiB" must not match inside "64 MiB".
