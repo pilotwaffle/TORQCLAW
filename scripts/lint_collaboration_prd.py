@@ -260,6 +260,19 @@ def run(prd: Path) -> tuple[Gate, str]:
         "duplicate-key parser note": "raw-text position-aware parser",
         "frame byte basis": "raw UTF-8 bytes of the complete frame",
         "node version pin": "pinned at 22.11.0",
+        "predicate state purity":
+            "No predicate in this table constrains channel state",
+        "re-add truncation": "Re-add permanently truncates access",
+        "ack upsert": "a missing cursor row is treated as `acknowledged_seq` 0",
+        "rotation last-credential guard":
+            "`ROTATE_PRINCIPAL_CREDENTIAL` returns `LAST_OPERATOR_CREDENTIAL` without mutation",
+        "vendored fold table": "vendored `CaseFolding.txt`",
+        "rotation shape rule":
+            "additionally includes `replacedCredentialId` in both shapes",
+        "harness covers revokedAt": "and `revokedAt`",
+        "argon2 dependency": "@node-rs/argon2",
+        "step-3 syntactic scope":
+            "channel-state-independent syntactic validation",
         "name-key algorithm": "Unicode Default Case Folding",
         "name-key index": "collab_channels_active_name_key",
         "archive delivery contract":
@@ -317,6 +330,10 @@ def run(prd: Path) -> tuple[Gate, str]:
         "removed count-non-disclosure claim": "never discloses committed counts",
         "removed unsatisfiable oracle test": "cannot learn committed counts",
         "removed uniform observation floor": "10,000 observations per phase",
+        "removed state-bearing writable predicate": "plus active channel |",
+        "removed dead cursor floor": "max(acknowledged_seq, rejoined_seq)",
+        "removed row-bound cursor predicate": "cursor principal is current principal",
+        "removed pepper-rotation clause": "predates a pepper rotation",
         "removed quote-inclusive bound": "including surrounding quotes and all escapes",
         "removed five-config gate": "five valid cumulative flag configurations",
         "stale section reference": "every D.2 event",

@@ -1,5 +1,13 @@
 # TORQCLAW Collaboration PRD Synthesis Log
 
+## Cycle 12 draft: v0.11 -> v0.12 (and Cycle 11 verdict)
+
+Cycle 11 (opus-5, pinned `fe20293`): Reject — 1 Critical, 4 High, 4 Medium, 2 Low. The count regressed from Cycle 10's 0C/1H because most findings live in text added by v0.10/v0.11 itself: the v0.10 "only predicate-passers observe CHANNEL_ARCHIVED" precedence sentence turned the long-standing state-bearing `CHANNEL_WRITABLE` predicate into a hard contradiction (Critical); the v0.9-v0.11 `rejoined_seq`/cursor machinery carried an undocumented own-history truncation, an unsatisfiable first-ack predicate, and a dead floor formula. Receipt: `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-11.md`, including an extensive verified-sound list (all byte fixtures exact, no deadlocks across lock classes, no content or hidden-channel leaks).
+
+All 10 conditions closed in v0.12: state-free `CHANNEL_WRITABLE`/`CURSOR_OWNER` predicates with the archived check at step 8 and a predicate state-purity rule; re-add truncation documented as a deliberate v1 simplification with pinned sequence-number fixtures; ack upsert-from-zero; `LAST_OPERATOR_CREDENTIAL` extended to sole-credential rotation with the create-verify-revoke sequence; vendored Unicode 15.0 `CaseFolding.txt` as the normative fold source with conflict fixtures and a startup version assertion; rotation result shapes pinned for both responses; `revokedAt` added to the determinism-harness enumeration; `@node-rs/argon2` named with a scrypt fallback and slice-2/risk-table entries; all Section 7.1 bounds assigned to precedence step 3 with the oversize-versus-hidden fixture; tautological validation-6 conjunct dropped (restated as a doctor invariant) and pepper rotation explicitly excluded from v1.
+
+Linter grew from 119 to 132 checks. v0.12 pre-gate: PASS 132/132.
+
 ## Cycle 11 draft: v0.10 -> v0.11 (and Cycle 10 verdict)
 
 Cycle 10 (opus-5, pinned `9fdc95b`): Reject — 0 Critical, 1 High, 4 Medium, 4 Low. The sole High is purely additive: byte-for-byte fixtures need a determinism harness for server-generated UUIDs and timestamps. The receipt also explicitly tested and refuted six hostile readings (lock ordering, rejoined_seq consistency, all byte-fixture arithmetic, flag matrix, SQLite index coverage) rather than padding severity. Receipt: `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-10.md`.
