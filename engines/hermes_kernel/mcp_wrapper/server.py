@@ -381,8 +381,19 @@ async def cancel_task(task_id: str, reason: str = "cancelled") -> dict:
 @mcp.tool()
 async def draft_and_queue_skill(proposed_name: str, skill_markdown: str,
                                 source_task_id: str | None = None) -> dict:
-    """Overrides Hermes auto-deploy: drafts land in the approval queue, only
-    a human decision writes to the skills directory."""
+    """Operator/console-invoked skill drafting: queues a proposed skill for
+    human review (skill_queue), and only an explicit decide_skill APPROVE
+    writes it to the skills directory.
+
+    This does NOT override or intercept any autonomous Hermes skill-creation
+    path — there is no autonomous caller of this tool. Hermes's own
+    skill-creation/nudge loop (vendor/hermes-agent tools/skill_manager_tool.py
+    + agent/turn_finalizer.py) is a separate mechanism, kept unreachable by
+    TORQCLAW's toolset allowlist and the agent._skill_nudge_interval=0
+    suppression in mcp_wrapper.hermes_runner (P2-0). TORQCLAW does not yet
+    wire a governed replacement into the Hermes-loadable skill tree that
+    upstream's autonomous loop would consult — that is tracked as P2-1 and is
+    explicitly out of scope here."""
     queue_id = skill_queue.queue_skill(proposed_name, skill_markdown, source_task_id)
     if source_task_id:
         # Surfaces in the console as an approval row with allow/deny buttons.
