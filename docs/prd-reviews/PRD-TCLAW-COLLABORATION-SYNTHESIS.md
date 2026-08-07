@@ -1,5 +1,11 @@
 # TORQCLAW Collaboration PRD Synthesis Log
 
+## Cycle 12: pinned v0.12 at `201c972`
+
+Reviewer: `claude-opus-5`. Verdict: Reject — 0 Critical, 2 High, 4 Medium, 3 Low. Receipt: `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-12.md`. Both Highs are latent holes in machinery introduced in v0.5-v0.7 and only now reached by review depth: `membership_epoch` scope was never stated (per-row vs per-channel decides whether adding a member disconnects existing subscribers), and `RESTORE_AGENT`'s epoch/session/lock-class semantics were never pinned.
+
+Program trajectory across the Opus era: 2C/5H, 2C/4H, 0C/4H, 0C/2H, 0C/1H, 1C/4H, 0C/2H. The verdict has oscillated in the 1-4 High band for four consecutive cycles. Every remaining finding class — lock-class assignment, epoch scoping, byte-fixture pinning, benchmark apportionment — is a question that Slice 0 executable artifacts answer mechanically on first implementation. Recorded for the operator's decision: draft v0.13 closing the 9 Cycle-12 conditions and continue cycling, or close them and pivot to Slice 0 with the G1R loop retired in favor of executable gates plus G2A audit.
+
 ## Cycle 12 draft: v0.11 -> v0.12 (and Cycle 11 verdict)
 
 Cycle 11 (opus-5, pinned `fe20293`): Reject — 1 Critical, 4 High, 4 Medium, 2 Low. The count regressed from Cycle 10's 0C/1H because most findings live in text added by v0.10/v0.11 itself: the v0.10 "only predicate-passers observe CHANNEL_ARCHIVED" precedence sentence turned the long-standing state-bearing `CHANNEL_WRITABLE` predicate into a hard contradiction (Critical); the v0.9-v0.11 `rejoined_seq`/cursor machinery carried an undocumented own-history truncation, an unsatisfiable first-ack predicate, and a dead floor formula. Receipt: `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-11.md`, including an extensive verified-sound list (all byte fixtures exact, no deadlocks across lock classes, no content or hidden-channel leaks).

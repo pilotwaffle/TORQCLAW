@@ -2,9 +2,9 @@
 
 **Date:** 2026-08-06
 **Canonical candidate:** `PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.12.md`
-**Last completed independent review:** Cycle 11, v0.11 at `fe20293`, by `claude-opus-5`
-**Last G1R verdict:** `REJECT` (Critical 1, High 4, Medium 4, Low 2)
-**Builder handoff:** `BLOCKED pending v0.12 G1R`
+**Last completed independent review:** Cycle 12, v0.12 at `201c972`, by `claude-opus-5`
+**Last G1R verdict:** `REJECT` (Critical 0, High 2, Medium 4, Low 3)
+**Builder handoff:** `BLOCKED pending operator decision: v0.13 cycle or Slice 0 pivot`
 **Consistency pre-gate (current):** `PASS 132/132` (2026-08-06, report: `PRD-TCLAW-COLLABORATION-V0.12-CONSISTENCY-REPORT.md`)
 
 Note: Cycle 6 was started by `gpt-5.6-terra`, which terminated on output limits mid-receipt; per operator instruction the cycle was re-run in full by `claude-opus-5`. The receipt is `G1R-OPUS5-TCLAW-COLLABORATION-CYCLE-6.md`. Terra's truncated partial output independently identified the same JSON-escape feasibility defect recorded as Critical 1.
@@ -37,7 +37,8 @@ The consistency linter gained cross-constraint feasibility checks (no encoded bo
 | 9 | v0.9 (`8348ae2`) | Reject | 0 | 2 | count oracle on success paths, close-frame lock delivery; rubric 5 Pass / 2 Partial / 0 Fail |
 | 10 | v0.10 (`9fdc95b`) | Reject | 0 | 1 | sole High: fixture determinism harness (additive); reviewer refuted six hostile readings |
 | 11 | v0.11 (`fe20293`) | Reject | 1 | 4 | regressions in new text: state-bearing WRITABLE predicate vs v0.10 precedence rule, re-add truncation, first-ack, rotation guard, fold-table sourcing |
-| next | v0.12 | Pre-gate PASS 132/132; G1R pending | unknown | unknown | closes all 10 Cycle 11 conditions |
+| 12 | v0.12 (`201c972`) | Reject | 0 | 2 | latent epoch/lock-class holes: membership_epoch scope, RESTORE_AGENT semantics |
+| next | v0.13 or Slice 0 | Operator decision pending | unknown | unknown | High-band oscillation for four cycles; remaining classes are implementation-adjacent |
 
 ## Historical evidence
 
