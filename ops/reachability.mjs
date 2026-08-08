@@ -1,0 +1,249 @@
+#!/usr/bin/env node
+/**
+ * TORQCLAW reachability gate.
+ *
+ * Fails when a substantial source module cannot be reached from any real
+ * program entry point.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * The recurring defect in this repo is not weak code -- it is strong code
+ * wired to nothing. A module gets designed, reviewed, implemented, tested,
+ * adversarially verified, and merged, and then no running program can reach
+ * it. The tests pass because they test the MODULE; nothing tests the CLAIM
+ * that the module is part of the system. Four separate subsystems reached
+ * production in that state (~9,200 lines).
+ *
+ * A plain "is anything importing this?" check is not enough: two orphaned
+ * modules that import each other would both look reachable. So this walks
+ * the import graph TRANSITIVELY from declared entry points. A module counts
+ * as live only if a real program can actually get to it.
+ *
+ * WHAT IT DOES NOT DO
+ * -------------------
+ * It does not judge quality, coverage, or whether the wiring is correct --
+ * only whether a path exists. Dormant-by-design code is legitimate; it just
+ * has to say so out loud in DORMANT below, which is the point: the decision
+ * becomes explicit and reviewable instead of silent.
+ *
+ * Usage:  node ops/reachability.mjs [--json]
+ * Exit:   0 all reachable (or dormant-and-declared), 1 orphans found.
+ */
+import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
+import { join, resolve, dirname, relative } from 'node:path';
+
+const ROOT = resolve(dirname(new URL(import.meta.url).pathname).replace(/^\/([A-Za-z]:)/, '$1'), '..');
+const rel = (p) => relative(ROOT, p).split('\\').join('/');
+
+/** Real program entry points. Everything live must be reachable from one. */
+const ENTRY_POINTS = [
+  // Long-running programs
+  'packages/gateway/src/server.ts',
+  'packages/channel-http/src/server.ts',
+  'apps/console/src/app/page.tsx',
+  'engines/hermes_kernel/mcp_wrapper/server.py',
+  // Build/CI scripts invoked directly by package.json scripts. These are
+  // real entry points -- `pnpm contracts:check` runs check-schemas.ts -- so
+  // omitting them would report CI tooling as dead code.
+  'packages/contracts/scripts/check-schemas.ts',
+  'packages/contracts/scripts/emit-schemas.ts',
+];
+
+/**
+ * Modules that are deliberately not wired yet, with the reason and the
+ * ticket that will wire them. This list is the feature, not a workaround:
+ * an orphan must be a stated decision rather than an accident.
+ *
+ * Adding an entry here should be a reviewed act. Removing one when the
+ * module gets wired is how the debt actually gets paid down.
+ */
+const DORMANT = {
+  'packages/collab': 'Slices 0-3 merged and G2A-approved; integration deferred to the Slice 5 UI work. OPERATOR DECISION PENDING: integrate or formally retire.',
+  'packages/gateway/src/skillTrust.ts': 'Ed25519 skill signing, pre-loaded for Phase 4 remote skill sources. No consumer until remote sources are enabled.',
+  'engines/hermes_kernel/mcp_wrapper/verified_skill_store.py': 'Governed skill lifecycle. Live path is still the legacy skill_queue; wiring is Phase 1 of the integration program.',
+  'engines/hermes_kernel/mcp_wrapper/skill_publisher.py': 'P2-1a publication adapter. Wired by the governed activation caller (Phase 1).',
+  'engines/hermes_kernel/mcp_wrapper/runtime_quiescence.py': 'PARTIAL: hermes_run_admission() is live from hermes_runner; ActivationCoordinator has no constructor until Phase 1.',
+};
+
+/** Only flag modules with real substance; tiny helpers are noise. */
+const MIN_LINES = 150;
+
+const SKIP_DIRS = new Set([
+  'node_modules', 'dist', '.next', '__pycache__', '.git', 'vendor',
+  'coverage', '.turbo', 'scratchpad', 'graphify-out', 'graphify-product',
+  'graphify-vendor', '.torq-console-publish', '.torq-console-worktree',
+]);
+
+function walk(dir, out = []) {
+  let entries;
+  try { entries = readdirSync(dir); } catch { return out; }
+  for (const name of entries) {
+    if (SKIP_DIRS.has(name)) continue;
+    const full = join(dir, name);
+    let st;
+    try { st = statSync(full); } catch { continue; }
+    if (st.isDirectory()) walk(full, out);
+    else if (/\.(ts|tsx|mjs|js|py)$/.test(name) && !/\.d\.ts$/.test(name)) out.push(full);
+  }
+  return out;
+}
+
+/** Extract import targets from TS/JS source. */
+function tsImports(src) {
+  const out = [];
+  const patterns = [
+    /(?:^|\n)\s*import\s+[^'"]*from\s*['"]([^'"]+)['"]/g,
+    /(?:^|\n)\s*import\s*['"]([^'"]+)['"]/g,
+    /(?:^|\n)\s*export\s+[^'"]*from\s*['"]([^'"]+)['"]/g,
+    /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g,   // dynamic import (failover.ts uses these)
+    /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
+  ];
+  for (const re of patterns) {
+    let m;
+    while ((m = re.exec(src)) !== null) out.push(m[1]);
+  }
+  return out;
+}
+
+/** Extract relative import targets from Python source. */
+function pyImports(src) {
+  const out = [];
+  let m;
+  const fromRe = /(?:^|\n)\s*from\s+\.(\w+)\s+import/g;
+  while ((m = fromRe.exec(src)) !== null) out.push(m[1]);
+  const impRe = /(?:^|\n)\s*from\s+\.\s+import\s+([^\n#]+)/g;
+  while ((m = impRe.exec(src)) !== null) {
+    for (const part of m[1].split(',')) {
+      const nm = part.trim().split(/\s+as\s+/)[0].trim();
+      if (nm) out.push(nm);
+    }
+  }
+  const modRe = /(?:^|\n)\s*(?:import|from)\s+mcp_wrapper\.(\w+)/g;
+  while ((m = modRe.exec(src)) !== null) out.push(m[1]);
+  return out;
+}
+
+/** Map a workspace package name to the file that is its public surface. */
+function packageEntry(pkgName) {
+  const dir = pkgName.replace('@torqclaw/', 'packages/');
+  for (const cand of ['src/index.ts', 'src/server.ts', 'src/engine.ts']) {
+    const p = join(ROOT, dir, cand);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+/** Next.js path aliases (apps/console/tsconfig.json: "@/*" -> "./src/*").
+ *  Without this the console's entire component tree looks unreachable, which
+ *  would make the gate cry wolf -- worse than having no gate. */
+function resolveAlias(spec) {
+  if (!spec.startsWith('@/')) return null;
+  const base = join(ROOT, 'apps/console/src', spec.slice(2));
+  for (const cand of [`${base}.ts`, `${base}.tsx`, join(base, 'index.ts'), join(base, 'index.tsx')]) {
+    if (existsSync(cand)) return cand;
+  }
+  return null;
+}
+
+function resolveTs(spec, fromFile) {
+  if (spec.startsWith('@torqclaw/')) return packageEntry(spec);
+  if (spec.startsWith('@/')) return resolveAlias(spec);
+  if (!spec.startsWith('.')) return null;                 // external dep
+  const base = resolve(dirname(fromFile), spec.replace(/\.js$/, ''));
+  for (const cand of [`${base}.ts`, `${base}.tsx`, join(base, 'index.ts'), `${base}.mjs`, `${base}.js`]) {
+    if (existsSync(cand)) return cand;
+  }
+  return null;
+}
+
+function resolvePy(mod, fromFile) {
+  const p = join(dirname(fromFile), `${mod}.py`);
+  return existsSync(p) ? p : null;
+}
+
+// ── Walk the graph from every entry point ────────────────────────────────
+const reachable = new Set();
+const queue = [];
+
+for (const ep of ENTRY_POINTS) {
+  const full = join(ROOT, ep);
+  if (existsSync(full)) queue.push(full);
+  else console.warn(`[reachability] WARNING entry point missing: ${ep}`);
+}
+
+while (queue.length) {
+  const file = queue.pop();
+  const key = rel(file);
+  if (reachable.has(key)) continue;
+  reachable.add(key);
+
+  let src;
+  try { src = readFileSync(file, 'utf8'); } catch { continue; }
+
+  const isPy = file.endsWith('.py');
+  const specs = isPy ? pyImports(src) : tsImports(src);
+  for (const spec of specs) {
+    const target = isPy ? resolvePy(spec, file) : resolveTs(spec, file);
+    if (target && !reachable.has(rel(target))) queue.push(target);
+  }
+}
+
+// ── Find substantial modules that never got reached ──────────────────────
+const SCAN_ROOTS = ['packages', 'apps/console/src', 'engines/hermes_kernel/mcp_wrapper'];
+const orphans = [];
+
+for (const root of SCAN_ROOTS) {
+  const dir = join(ROOT, root);
+  if (!existsSync(dir)) continue;
+  for (const file of walk(dir)) {
+    const key = rel(file);
+    if (reachable.has(key)) continue;
+    if (/[.\-](test|spec)\.[tj]sx?$/.test(key) || /(^|\/)tests?\//.test(key)) continue;
+    if (/(^|\/)test_[^/]+\.py$/.test(key)) continue;
+
+    let lines = 0;
+    try { lines = readFileSync(file, 'utf8').split('\n').length; } catch { continue; }
+    if (lines < MIN_LINES) continue;
+
+    const declared = Object.keys(DORMANT).find((d) => key === d || key.startsWith(`${d}/`));
+    orphans.push({ file: key, lines, dormant: declared ?? null, reason: declared ? DORMANT[declared] : null });
+  }
+}
+
+const undeclared = orphans.filter((o) => !o.dormant);
+const declared = orphans.filter((o) => o.dormant);
+
+if (process.argv.includes('--json')) {
+  console.log(JSON.stringify({ reachable: reachable.size, undeclared, declared }, null, 2));
+} else {
+  console.log(`[reachability] ${reachable.size} modules reachable from ${ENTRY_POINTS.length} entry points\n`);
+  if (declared.length) {
+    const byGroup = new Map();
+    for (const o of declared) {
+      if (!byGroup.has(o.dormant)) byGroup.set(o.dormant, { lines: 0, files: 0 });
+      const g = byGroup.get(o.dormant);
+      g.lines += o.lines; g.files += 1;
+    }
+    console.log(`Dormant by declaration (${declared.length} files):`);
+    for (const [name, g] of byGroup) {
+      console.log(`  - ${name}  (${g.files} file(s), ${g.lines} lines)`);
+      console.log(`      ${DORMANT[name]}`);
+    }
+    console.log('');
+  }
+  if (undeclared.length) {
+    console.error(`FAIL: ${undeclared.length} substantial module(s) unreachable and NOT declared dormant:\n`);
+    for (const o of undeclared.sort((a, b) => b.lines - a.lines)) {
+      console.error(`  ${o.file}  (${o.lines} lines)`);
+    }
+    console.error(
+      '\nA module no program can reach is not shipped, however well tested.\n' +
+      'Either wire it to an entry point, or add it to DORMANT in ops/reachability.mjs\n' +
+      'with the reason and the ticket that will wire it.',
+    );
+  } else {
+    console.log('PASS: every substantial module is reachable or declared dormant.');
+  }
+}
+
+process.exit(undeclared.length ? 1 : 0);

@@ -19,6 +19,7 @@
     "model:setup": "ollama create torq-local -f ops/Modelfile",
     "stats": "node ops/stats.mjs",
     "contracts:check": "pnpm --filter @torqclaw/contracts check",
+    "reachability": "node ops/reachability.mjs",
     "bench": "node --env-file-if-exists=.env ops/bench.mjs",
     "bench:quick": "node --env-file-if-exists=.env ops/bench.mjs --quick --no-score",
     "test": "vitest run",

@@ -40,6 +40,13 @@ jobs:
 
       - run: pnpm contracts:check
 
+      # Fails when a substantial module cannot be reached from any real entry
+      # point. This repo's recurring defect is strong code wired to nothing:
+      # tests pass because they test the module, never the claim that it is
+      # part of the system. Dormant-by-design is allowed but must be declared.
+      - name: reachability - no undeclared orphan modules
+        run: pnpm reachability
+
       - run: pnpm typecheck
 
       - run: pnpm test
