@@ -1,4 +1,5 @@
 import Fastify from 'fastify';
+import { pathToFileURL } from 'node:url';
 import { submitToGateway, resolveGatewayToken } from './gatewayClient.js';
 
 /**
@@ -30,11 +31,67 @@ const TASK_TIMEOUT_MS = Number(process.env.CHANNEL_HTTP_TIMEOUT_MS || 300_000);
 
 const app = Fastify({ logger: true });
 
+/** Hosts on which an unauthenticated front door is reachable only from this
+ *  machine. Mirrors ops/launcher-config.mjs LOOPBACK_HOSTS. */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+/** Tokens that are present but provide no security -- worse than an unset
+ *  token, because they read as "auth is configured". Mirrors the
+ *  PLACEHOLDER_TOKENS check in ops/launcher-config.mjs. */
+const PLACEHOLDER_TOKENS = new Set([
+  'dev', 'test', 'token', 'secret', 'changeme', 'change-me', 'placeholder',
+  'password', 'admin', 'example', 'todo', 'xxx',
+]);
+
+/**
+ * Refuse to boot in a configuration where the front door is open to the
+ * network.
+ *
+ * `frontDoorOk` treats an unset CHANNEL_HTTP_TOKEN as loopback dev mode and
+ * accepts every caller. That is fine bound to 127.0.0.1 and a serious hole
+ * bound to 0.0.0.0 -- but previously nothing connected those two facts, so a
+ * deploy that set CHANNEL_HTTP_HOST and forgot the token exposed an
+ * unauthenticated path to the gateway with only a log line as mitigation.
+ *
+ * This applies the convention the repo already uses in
+ * ops/launcher-config.mjs (requireLoopbackHost / requireProductionTokens):
+ * fail closed at boot rather than warn and continue.
+ *
+ * Exported for test; called at boot below.
+ */
+export function assertFrontDoorSafe(
+  { host, token }: { host: string; token: string },
+): void {
+  const bind = String(host ?? '').trim();
+  const secret = String(token ?? '').trim();
+  const loopbackBound = LOOPBACK_HOSTS.has(bind);
+
+  if (secret && PLACEHOLDER_TOKENS.has(secret.toLowerCase())) {
+    throw new Error(
+      `CHANNEL_HTTP_TOKEN is a placeholder value (${secret.toLowerCase()}); ` +
+      'set a real secret or unset it entirely and bind to loopback.',
+    );
+  }
+  if (!secret && !loopbackBound) {
+    throw new Error(
+      `CHANNEL_HTTP_TOKEN is unset while binding to ${bind || '(empty)'}, which is not a ` +
+      'loopback host. An unset token accepts every caller, so this would expose an ' +
+      'unauthenticated front door to the gateway. Set CHANNEL_HTTP_TOKEN, or bind to 127.0.0.1.',
+    );
+  }
+}
+
 /** Front-door auth: constant-time compare so we don't leak the token by timing.
- *  Unset token = loopback dev mode (warn once at boot, accept all). */
-function frontDoorOk(authHeader: string | undefined): boolean {
-  if (!FRONT_TOKEN) return true;
-  const expected = `Bearer ${FRONT_TOKEN}`;
+ *  Unset token = loopback dev mode (accept all) -- safe only because
+ *  assertFrontDoorSafe() refuses that combination off-loopback at boot.
+ *  `expectedToken` is a parameter (not the module constant) so this is
+ *  testable without process-env mutation. */
+export function frontDoorOk(
+  authHeader: string | undefined,
+  expectedToken: string = FRONT_TOKEN,
+): boolean {
+  if (!expectedToken) return true;
+  const expected = `Bearer ${expectedToken}`;
   if (!authHeader || authHeader.length !== expected.length) return false;
   // length-checked above; char-xor compare avoids early-exit timing leak
   let diff = 0;
@@ -44,9 +101,6 @@ function frontDoorOk(authHeader: string | undefined): boolean {
   return diff === 0;
 }
 
-if (!FRONT_TOKEN) {
-  app.log.warn('CHANNEL_HTTP_TOKEN unset — accepting all callers (dev only)');
-}
 
 app.get('/health', async () => ({ ok: true, gateway: GW_URL }));
 
@@ -122,11 +176,27 @@ function tierLabel(tier: unknown): string {
 }
 
 const start = async () => {
+  // Fail closed BEFORE binding a socket: an unset token off-loopback, or a
+  // placeholder token anywhere, is a configuration error rather than something
+  // to warn about and continue past. (TCLAW-CH-AUTH)
+  assertFrontDoorSafe({ host: HOST, token: FRONT_TOKEN });
+  if (!FRONT_TOKEN) {
+    app.log.warn('CHANNEL_HTTP_TOKEN unset — accepting all callers (loopback dev only)');
+  }
   await app.listen({ port: PORT, host: HOST });
   app.log.info(`[channel-http] listening on http://${HOST}:${PORT}  →  gateway ${GW_URL}`);
 };
 
-start().catch((err) => {
-  app.log.error(err);
-  process.exit(1);
-});
+// Only boot when executed as a program. Importing this module (e.g. to unit
+// test assertFrontDoorSafe/frontDoorOk) must not bind a port -- vitest.config
+// scopes the suite to pure-logic tests with no network.
+const isMain = process.argv[1]
+  ? import.meta.url === pathToFileURL(process.argv[1]).href
+  : false;
+
+if (isMain) {
+  start().catch((err) => {
+    app.log.error(err);
+    process.exit(1);
+  });
+}

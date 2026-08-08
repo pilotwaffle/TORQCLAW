@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { isTerminal, TERMINAL_TYPES, resolveGatewayToken } from '../packages/channel-http/src/gatewayClient.js';
+import { assertFrontDoorSafe, frontDoorOk } from '../packages/channel-http/src/server.js';
 
 describe('channel-http terminal-event detection', () => {
   it('treats the three invariant-7 terminal types as terminal', () => {
@@ -47,5 +48,54 @@ describe('resolveGatewayToken — upstream token hygiene (TCLAW-0F)', () => {
       expect(t).toBe('');
       expect(['dev', 'default', 'token', 'changeme']).not.toContain(t);
     }
+  });
+});
+
+describe('channel-http front-door auth binding (TCLAW-CH-AUTH)', () => {
+  // The defect this pins: frontDoorOk() returned `true` for EVERY caller when
+  // CHANNEL_HTTP_TOKEN was unset, and the only mitigation was a log line. That
+  // is tolerable bound to loopback and unsafe bound to a routable interface --
+  // but nothing in the module coupled those two facts, so a deploy that set
+  // CHANNEL_HTTP_HOST=0.0.0.0 and forgot the token silently exposed an
+  // unauthenticated front door onto the gateway.
+  //
+  // The repo's own convention (ops/launcher-config.mjs requireLoopbackHost /
+  // requireProductionTokens) is to THROW rather than warn. assertFrontDoorSafe
+  // applies that convention here.
+
+  it('accepts an unset token when bound to loopback (dev mode preserved)', () => {
+    expect(() => assertFrontDoorSafe({ host: '127.0.0.1', token: '' })).not.toThrow();
+    expect(() => assertFrontDoorSafe({ host: 'localhost', token: '' })).not.toThrow();
+    expect(() => assertFrontDoorSafe({ host: '::1', token: '' })).not.toThrow();
+  });
+
+  it('REFUSES to boot on a routable bind with no token', () => {
+    expect(() => assertFrontDoorSafe({ host: '0.0.0.0', token: '' })).toThrow(/CHANNEL_HTTP_TOKEN/);
+    expect(() => assertFrontDoorSafe({ host: '::', token: '' })).toThrow(/CHANNEL_HTTP_TOKEN/);
+    expect(() => assertFrontDoorSafe({ host: '10.0.0.5', token: '' })).toThrow(/CHANNEL_HTTP_TOKEN/);
+    expect(() => assertFrontDoorSafe({ host: '192.168.1.20', token: '' })).toThrow(/CHANNEL_HTTP_TOKEN/);
+  });
+
+  it('allows a routable bind once a real token is set', () => {
+    expect(() => assertFrontDoorSafe({ host: '0.0.0.0', token: 's3cret' })).not.toThrow();
+  });
+
+  it('rejects placeholder tokens, which are worse than none (false confidence)', () => {
+    for (const weak of ['dev', 'DEV', 'changeme', 'placeholder', 'token', 'secret']) {
+      expect(() => assertFrontDoorSafe({ host: '0.0.0.0', token: weak })).toThrow(/placeholder/i);
+    }
+  });
+
+  it('treats whitespace-only as unset rather than as a token', () => {
+    expect(() => assertFrontDoorSafe({ host: '0.0.0.0', token: '   ' })).toThrow(/CHANNEL_HTTP_TOKEN/);
+  });
+
+  it('frontDoorOk still rejects a wrong token and accepts the right one', () => {
+    expect(frontDoorOk('Bearer right', 'right')).toBe(true);
+    expect(frontDoorOk('Bearer wrong', 'right')).toBe(false);
+    expect(frontDoorOk(undefined, 'right')).toBe(false);
+    // Unset token keeps the documented loopback-dev behaviour: open door.
+    // Safety comes from assertFrontDoorSafe refusing that combination off-loopback.
+    expect(frontDoorOk(undefined, '')).toBe(true);
   });
 });
