@@ -327,7 +327,7 @@ export interface CallerContext {
  * exclusivity guarantee for BEGIN IMMEDIATE ordering). Since Node.js is
  * single-threaded, a promise chain is a correct, simple mutex.
  */
-class Mutex {
+export class Mutex {
   private tail: Promise<void> = Promise.resolve();
 
   async withLock<T>(fn: () => T): Promise<T> {

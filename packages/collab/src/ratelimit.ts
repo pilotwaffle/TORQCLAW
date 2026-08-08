@@ -45,6 +45,19 @@
  * expired entries are still eventually reclaimed, just on the throttled
  * cadence instead of every insertion) while making the common case O(1).
  *
+ * (M1, Slice 5 debt item) `addressBuckets` mirrors this exact design: a
+ * second independent cap `MAX_ADDRESS_BUCKETS`, its own throttled sweep
+ * (own `lastAddressSweepMs`, same WINDOW_MS cadence), and the same
+ * two-phase eviction (expired-and-unlocked sweep, then oldest-non-locked-out
+ * LRU victim) via `evictAddressBuckets`/`getOrCreateAddressBucket`, which
+ * replace the previous unconditional `getOrCreateBucket` call for the
+ * address map. A locked-out address bucket is NEVER evicted before its
+ * lockout expires, for the identical reason as the credential map: evicting
+ * it would let an attacker who just tripped an address lockout immediately
+ * clear it by flooding fresh distinct addresses. `bucketVisitCount` is
+ * shared across both maps' sweep/prune instrumentation so a single
+ * cost-regression assertion bounds total work across both.
+ *
  * (F5, fixed) Per-bucket failure-window pruning (`recordFailure`) used to
  * rescan the bucket's entire `failures` array with `Array.filter` on every
  * single failure, which is quadratic in the number of failures against one
@@ -88,6 +101,15 @@ const ADDRESS_THRESHOLD = 20;
  * lockout entirely.
  */
 const MAX_CREDENTIAL_BUCKETS = 50_000;
+
+/**
+ * (M1) Upper bound on the number of distinct address buckets held at once,
+ * mirroring MAX_CREDENTIAL_BUCKETS's rationale exactly: a flood of distinct
+ * source addresses (e.g. many /64 IPv6 prefixes, or a large legitimate
+ * fleet) would otherwise grow this map forever. Same eviction algorithm as
+ * the credential map (see `evictAddressBuckets`).
+ */
+const MAX_ADDRESS_BUCKETS = 50_000;
 
 const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -232,6 +254,9 @@ export class AuthRateLimiter {
   /** (NEW-1) Timestamp of the last full Phase-1 sweep, or null if none has run yet. */
   private lastSweepMs: number | null = null;
 
+  /** (M1) Timestamp of the last full address-bucket Phase-1 sweep, independent of the credential map's throttle. */
+  private lastAddressSweepMs: number | null = null;
+
   /**
    * (NEW-1 / F5 cost-regression instrumentation) Count of buckets visited
    * during Phase-1 sweeps plus per-failure prune-advance steps. This is an
@@ -328,19 +353,10 @@ export class AuthRateLimiter {
     if (!isLoopbackAddress(rawAddress)) {
       const normalizedAddress = normalizeAddress(rawAddress);
       if (normalizedAddress !== null) {
-        const bucket = this.getOrCreateBucket(this.addressBuckets, normalizedAddress);
+        const bucket = this.getOrCreateAddressBucket(normalizedAddress, now);
         this.recordFailure(bucket, now, ADDRESS_THRESHOLD);
       }
     }
-  }
-
-  private getOrCreateBucket(map: Map<string, Bucket>, key: string): Bucket {
-    let bucket = map.get(key);
-    if (!bucket) {
-      bucket = newBucket();
-      map.set(key, bucket);
-    }
-    return bucket;
   }
 
   /**
@@ -435,6 +451,70 @@ export class AuthRateLimiter {
     // MAX_CREDENTIAL_BUCKETS distinct credential IDs to simultaneously hold
     // an active 15-minute lockout, which is itself already bounded by the
     // 5-failure threshold per ID.
+  }
+
+  /**
+   * (M1) Address-bucket-specific get-or-create, mirroring
+   * `getOrCreateCredentialBucket` exactly: same delete-then-reinsert-on-touch
+   * discipline (keeps Map iteration order least-recently-touched-first for
+   * the LRU eviction phase), same MAX_ADDRESS_BUCKETS enforcement.
+   */
+  private getOrCreateAddressBucket(key: string, now: number): Bucket {
+    const existing = this.addressBuckets.get(key);
+    if (existing) {
+      this.addressBuckets.delete(key);
+      this.addressBuckets.set(key, existing);
+      return existing;
+    }
+
+    if (this.addressBuckets.size >= MAX_ADDRESS_BUCKETS) {
+      this.evictAddressBuckets(now);
+    }
+
+    const bucket = newBucket();
+    this.addressBuckets.set(key, bucket);
+    return bucket;
+  }
+
+  /**
+   * (M1) Free at least one slot in `addressBuckets`, mirroring
+   * `evictCredentialBuckets`'s two-phase algorithm and throttled-sweep
+   * rationale exactly, against its own independent `lastAddressSweepMs`
+   * throttle (so a credential-bucket flood and an address-bucket flood
+   * never contend for the same throttle window). A locked-out address
+   * bucket is never evicted before its lockout expires.
+   */
+  private evictAddressBuckets(now: number): void {
+    const sweepDue = this.lastAddressSweepMs === null || now - this.lastAddressSweepMs >= WINDOW_MS;
+
+    if (sweepDue) {
+      const windowStart = now - WINDOW_MS;
+      for (const [key, bucket] of this.addressBuckets) {
+        this._bucketVisitCount++;
+        const hasLiveFailures = liveFailureCount(bucket) > 0 && bucket.failures[bucket.failures.length - 1]! > windowStart;
+        const isLocked = bucket.lockedUntil !== null && now < bucket.lockedUntil;
+        if (!hasLiveFailures && !isLocked) {
+          this.addressBuckets.delete(key);
+        }
+      }
+      this.lastAddressSweepMs = now;
+    }
+
+    if (this.addressBuckets.size < MAX_ADDRESS_BUCKETS) {
+      return;
+    }
+
+    for (const [key, bucket] of this.addressBuckets) {
+      this._bucketVisitCount++;
+      const isLocked = bucket.lockedUntil !== null && now < bucket.lockedUntil;
+      if (!isLocked) {
+        this.addressBuckets.delete(key);
+        return;
+      }
+    }
+    // Every remaining address bucket is locked out: allowed to exceed the
+    // nominal cap rather than ever evict a live lockout, mirroring the
+    // credential map's identical final-fallback comment above.
   }
 
   private isLockedOut(bucket: Bucket, now: number): boolean {

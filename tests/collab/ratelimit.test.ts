@@ -332,6 +332,118 @@ describe('F4 gating fixture: bounded credential-bucket map under a flood of DIST
   });
 });
 
+// ---------------------------------------------------------------------------
+// (M1, Slice 5 debt item) addressBuckets mirrors the credential-bucket
+// bounded-map design: same MAX cap, throttled sweep + LRU eviction, never
+// evicts a live lockout.
+// ---------------------------------------------------------------------------
+
+function addressForIndex(i: number): string {
+  // Distinct, well-formed IPv4 addresses, spread across the octet space so
+  // each is a genuinely distinct bucket key (normalizeAddress keeps IPv4
+  // as-is). First octet is pinned to 203 (TEST-NET-3, RFC 5737) so no
+  // generated address can ever land in 127.0.0.0/8 (loopback), which
+  // isLoopbackAddress exempts from the address counter entirely — that
+  // exemption would otherwise silently shrink the distinct-bucket count
+  // below what the test expects.
+  const b = Math.floor(i / (256 * 254)) % 256;
+  const c = Math.floor(i / 254) % 256;
+  const d = 1 + (i % 254);
+  return `203.${b}.${c}.${d}`;
+}
+
+const MAX_ADDRESS_BUCKETS_FOR_TEST = 50_000;
+
+describe('M1 gating fixture: bounded address-bucket map under a flood of DISTINCT addresses', () => {
+  it('map size stays <= MAX_ADDRESS_BUCKETS (50,000) under 60,000 distinct addresses', () => {
+    const clock = new FakeClock();
+    const limiter = new AuthRateLimiter(clock);
+
+    for (let i = 0; i < 60_000; i++) {
+      // Spread credential IDs too, so the credential bucket cap/threshold
+      // never confounds this address-bucket-focused measurement.
+      limiter.recordAttempt(uuidForIndex(i), addressForIndex(i), 'failure');
+    }
+
+    expect(limiter.addressBucketCount).toBeLessThanOrEqual(50_000);
+  });
+
+  it('a locked-out address inserted early still rejects after a flood of 60,000 distinct fresh addresses (eviction never drops an active lockout)', () => {
+    const clock = new FakeClock();
+    const limiter = new AuthRateLimiter(clock);
+    const earlyAddr = '203.0.113.250';
+
+    // Trip the early address's lockout FIRST (20 failures, distinct
+    // credential ID per failure so the credential bucket doesn't itself
+    // confound the address-bucket read).
+    for (let i = 0; i < 20; i++) {
+      limiter.recordAttempt(uuidForIndex(5_000_000 + i), earlyAddr, 'failure');
+    }
+    expect(limiter.check(null, earlyAddr).lockedOut).toBe(true);
+
+    // Flood far past the cap with distinct fresh addresses from a
+    // different range, forcing repeated eviction passes.
+    for (let i = 0; i < 60_000; i++) {
+      limiter.recordAttempt(uuidForIndex(6_000_000 + i), addressForIndex(i + 500_000), 'failure');
+    }
+
+    // The early lockout must still be active and must not have been
+    // evicted to make room for the flood.
+    expect(limiter.check(null, earlyAddr).lockedOut).toBe(true);
+    expect(limiter.addressBucketCount).toBeLessThanOrEqual(50_000);
+  });
+
+  it('idle period then one attempt reclaims expired address buckets once the throttle window has passed, independent of the credential sweep throttle', () => {
+    const clock = new FakeClock();
+    const limiter = new AuthRateLimiter(clock);
+
+    // Fill to capacity with address buckets that will all expire together.
+    for (let i = 0; i < MAX_ADDRESS_BUCKETS_FOR_TEST; i++) {
+      limiter.recordAttempt(uuidForIndex(7_000_000 + i), addressForIndex(i + 1_000_000), 'failure');
+    }
+    expect(limiter.addressBucketCount).toBe(MAX_ADDRESS_BUCKETS_FOR_TEST);
+
+    clock.advance(60 * 60 * 1000);
+
+    limiter.recordAttempt(uuidForIndex(8_999_999), '198.51.100.250', 'failure');
+
+    expect(limiter.addressBucketCount).toBeLessThanOrEqual(MAX_ADDRESS_BUCKETS_FOR_TEST);
+    expect(limiter.check(null, '198.51.100.250').lockedOut).toBe(false);
+  });
+
+  it('bucketVisitCount cost-regression: address-bucket eviction sweeps stay amortized O(1) per insertion at capacity, mirroring the credential-map bound', () => {
+    const clock = new FakeClock();
+    const limiter = new AuthRateLimiter(clock);
+
+    // Fill the ADDRESS map to capacity while keeping the CREDENTIAL map
+    // small (reuse a handful of distinct credential IDs, cycling through
+    // them) — otherwise a fresh distinct credential ID per insertion would
+    // ALSO fill the credential map to its own 50,000 cap at the same time,
+    // confounding this address-bucket-focused measurement with a second,
+    // simultaneous credential-bucket sweep.
+    const smallCredPool = Array.from({ length: 50 }, (_, i) => uuidForIndex(9_000_000 + i));
+    for (let i = 0; i < MAX_ADDRESS_BUCKETS_FOR_TEST; i++) {
+      limiter.recordAttempt(smallCredPool[i % smallCredPool.length]!, addressForIndex(i + 2_000_000), 'failure');
+    }
+    expect(limiter.addressBucketCount).toBe(MAX_ADDRESS_BUCKETS_FOR_TEST);
+    expect(limiter.credentialBucketCount).toBeLessThanOrEqual(smallCredPool.length);
+
+    const visitsBeforeMeasured = limiter.bucketVisitCount;
+
+    // 200 more insertions at capacity, all within the same throttle window
+    // (no clock advance), so only Phase-2 single-victim LRU eviction runs
+    // per insertion — no full-map sweep.
+    for (let i = 0; i < 200; i++) {
+      limiter.recordAttempt(smallCredPool[i % smallCredPool.length]!, addressForIndex(i + 3_000_000), 'failure');
+    }
+
+    const visitsMeasured = limiter.bucketVisitCount - visitsBeforeMeasured;
+    const K = 5; // small constant per insertion for Phase 2 LRU-victim scanning
+    expect(visitsMeasured).toBeLessThanOrEqual(200 * K + 50_000);
+    expect(visitsMeasured).toBeLessThan(200 * 50_000);
+  });
+});
+
 const MAX_CREDENTIAL_BUCKETS_FOR_TEST = 50_000;
 
 describe('NEW-1 / F5 cost-regression fixture (operation-count, deterministic — no wall-clock assertions)', () => {

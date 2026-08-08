@@ -18,6 +18,26 @@ export type AuthorizationDenialClass =
   | 'subscription_owner'
   | 'channel_enumerable';
 
+/**
+ * (L2, Slice 5 debt item) Section 13's "migration/recovery/doctor outcomes"
+ * metric — bounded labels only, matching the module's existing discipline.
+ * `migration_applied`/`migration_noop` distinguish a fresh apply from the
+ * documented re-run no-op (migration.ts); `recovery_*` cover
+ * verifyRecoveryKit's outcome classes; `doctor_healthy`/`doctor_unhealthy`
+ * cover doctor.ts's structured result.
+ */
+export type MigrationRecoveryDoctorOutcome =
+  | 'migration_applied'
+  | 'migration_noop'
+  | 'migration_failed'
+  | 'recovery_kit_verified'
+  | 'recovery_kit_wrong_passphrase'
+  | 'recovery_kit_wrong_installation'
+  | 'recovery_kit_corrupted'
+  | 'recovery_kit_invalid_format'
+  | 'doctor_healthy'
+  | 'doctor_unhealthy';
+
 export interface LatencySample {
   ms: number;
 }
@@ -80,8 +100,26 @@ export class CollabObservability {
   private lastQueueBytesObserved = 0;
   private lastQueueAgeMsObserved = 0;
 
+  // (L2) migration/recovery/doctor outcomes by bounded label.
+  private readonly migrationRecoveryDoctorOutcomes = new Map<MigrationRecoveryDoctorOutcome, number>();
+
+  // (L2) verified recovery-kit age (ms), most-recently-observed — Section
+  // 13: "verified recovery-kit age". Set only when a kit is actually
+  // verified (recordRecoveryKitVerifiedAge); undefined until then.
+  private lastRecoveryKitAgeMsObserved: number | undefined;
+
   recordConnectOutcome(outcome: ConnectOutcome): void {
     this.connectOutcomes.set(outcome, (this.connectOutcomes.get(outcome) ?? 0) + 1);
+  }
+
+  /** (L2) Record one migration/recovery/doctor outcome occurrence. */
+  recordMigrationRecoveryDoctorOutcome(outcome: MigrationRecoveryDoctorOutcome): void {
+    this.migrationRecoveryDoctorOutcomes.set(outcome, (this.migrationRecoveryDoctorOutcomes.get(outcome) ?? 0) + 1);
+  }
+
+  /** (L2) Record the age (ms, verifiedAt - kitCreatedAt) of a just-verified recovery kit. */
+  recordRecoveryKitVerifiedAge(ageMs: number): void {
+    this.lastRecoveryKitAgeMsObserved = ageMs;
   }
 
   recordAuthorizationDenial(cls: AuthorizationDenialClass): void {
@@ -136,6 +174,8 @@ export class CollabObservability {
     timelineLatencyP95: number | undefined;
     commitLatencyP95: number | undefined;
     fanoutLatencyP95: number | undefined;
+    migrationRecoveryDoctorOutcomes: Record<string, number>;
+    lastRecoveryKitAgeMsObserved: number | undefined;
   } {
     return {
       connectOutcomes: Object.fromEntries(this.connectOutcomes),
@@ -152,6 +192,8 @@ export class CollabObservability {
       timelineLatencyP95: this.timelineLatency.percentile(95),
       commitLatencyP95: this.commitLatency.percentile(95),
       fanoutLatencyP95: this.fanoutLatency.percentile(95),
+      migrationRecoveryDoctorOutcomes: Object.fromEntries(this.migrationRecoveryDoctorOutcomes),
+      lastRecoveryKitAgeMsObserved: this.lastRecoveryKitAgeMsObserved,
     };
   }
 }

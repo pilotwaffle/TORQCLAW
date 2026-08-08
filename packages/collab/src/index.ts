@@ -74,6 +74,7 @@ export {
 // Collaboration store (identity + channel layer)
 export {
   CollaborationStore,
+  Mutex,
   CollabError,
   CredentialHmacCollisionError,
   credentialLookupFromDb,
@@ -172,3 +173,74 @@ export {
   type StartupResult,
   performStartup,
 } from './sessions.js';
+
+// Headless doctor (Section 13, G1R L1)
+export {
+  doctor,
+  COLLABORATION_MIGRATION_ID,
+  type DoctorResult,
+  type DoctorPeppers,
+} from './doctor.js';
+
+// Rollback / rollout (Section 11, G1R C1/C2/H1/M2/M3)
+export {
+  performNormalRollback,
+  performDestructiveRestore,
+  checksumRowSet,
+  checksumBytes,
+  checksumLiveDb,
+  RESTORE_CONFIRMATION_STRING,
+  type CollabFeatureFlags,
+  type GatewayLivenessProbe,
+  type BackupRecord,
+  type BackupTaker,
+  type PreMigrationManifest,
+  type ReceiptSink,
+  type RestoreIntentReceipt,
+  type RestoreCompletionReceipt,
+  type RestoreBoundary,
+  type RollbackEnv,
+  type NormalRollbackFixtureRowSet,
+  type NormalRollbackResult,
+  type DestructiveRestorePreconditionFailure,
+  type DestructiveRestoreInput,
+  type DestructiveRestoreDeps,
+  type DestructiveRestoreResult,
+} from './rollback.js';
+
+// Benchmark (Section 15, G1R H2/H3/H4/L3)
+export {
+  nearestRankPercentile,
+  assertObservationFloors,
+  BenchmarkFloorError,
+  measureRevocationWindow,
+  assertExactlyTwoNowMsCalls,
+  NowMsCallCountError,
+  checkSequenceIntegrity,
+  checkNoPostLinearizationWrites,
+  buildRevocationPlan,
+  countRevocationKinds,
+  buildBenchmarkReportArtifact,
+  TIMELINE_OBSERVATION_FLOOR,
+  COMMIT_OBSERVATION_FLOOR,
+  FANOUT_OBSERVATION_FLOOR,
+  REVOCATION_OBSERVATION_FLOOR,
+  REVOCATION_SUSPEND_RESTORE_PAIR_FLOOR,
+  REVOCATION_ARCHIVE_UNARCHIVE_PAIR_FLOOR,
+  REVOCATION_REVOKE_AGENT_EXACT_COUNT,
+  REPORT_THRESHOLDS_MS,
+  REFERENCE_NODE_VERSION,
+  type RevocationWindowMeasurement,
+  type SequenceIntegrityResult,
+  type PostLinearizationWriteCheck,
+  type RevocationMutationKind,
+  type RevocationPlanEntry,
+  type BenchmarkReportArtifact,
+} from './benchmark.js';
+
+// Note: the no-await guard mechanism (noawaitguard.ts, G1R H6) is a TEST/DEV
+// tool, not a production export. It imports `typescript` at load time; if
+// it were re-exported here, that pulls `typescript` into this package's
+// production runtime import closure. It is imported directly by
+// tests/collab/noawaitguard.test.ts instead, keeping `typescript` a
+// devDependency (see package.json).
