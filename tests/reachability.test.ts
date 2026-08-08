@@ -86,7 +86,16 @@ describe('reachability gate', () => {
     const { out } = runGate();
     expect(out).toContain('packages/collab');
     expect(out).toContain('skillTrust.ts');
-    expect(out).toContain('skill_publisher.py');
     expect(out).toMatch(/OPERATOR DECISION PENDING/);
+  });
+
+  it('no longer lists the skill pipeline as dormant (Phase 1 wired it)', () => {
+    // skill_publisher.py / verified_skill_store.py / runtime_quiescence.py were
+    // declared dormant until governed_skills.py wired them into
+    // skill_queue.decide(). The gate now reaches them from server.py on its
+    // own. If they reappear here, the wiring regressed.
+    const { out } = runGate();
+    expect(out).not.toContain('skill_publisher.py');
+    expect(out).not.toContain('verified_skill_store.py');
   });
 });

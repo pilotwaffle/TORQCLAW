@@ -60,9 +60,11 @@ const ENTRY_POINTS = [
 const DORMANT = {
   'packages/collab': 'Slices 0-3 merged and G2A-approved; integration deferred to the Slice 5 UI work. OPERATOR DECISION PENDING: integrate or formally retire.',
   'packages/gateway/src/skillTrust.ts': 'Ed25519 skill signing, pre-loaded for Phase 4 remote skill sources. No consumer until remote sources are enabled.',
-  'engines/hermes_kernel/mcp_wrapper/verified_skill_store.py': 'Governed skill lifecycle. Live path is still the legacy skill_queue; wiring is Phase 1 of the integration program.',
-  'engines/hermes_kernel/mcp_wrapper/skill_publisher.py': 'P2-1a publication adapter. Wired by the governed activation caller (Phase 1).',
-  'engines/hermes_kernel/mcp_wrapper/runtime_quiescence.py': 'PARTIAL: hermes_run_admission() is live from hermes_runner; ActivationCoordinator has no constructor until Phase 1.',
+  // verified_skill_store.py, skill_publisher.py and runtime_quiescence.py were
+  // listed here until Phase 1 wired them through governed_skills.py into
+  // skill_queue.decide(). They are now transitively reachable from
+  // mcp_wrapper/server.py, so the gate finds them on its own -- which is the
+  // intended lifecycle for every entry in this map.
 };
 
 /** Only flag modules with real substance; tiny helpers are noise. */

@@ -77,6 +77,29 @@ def decide(queue_id: str, decision: str, edited_markdown: str | None = None) -> 
     if new_status in ("approved", "approved_edited"):
         # Only an approved skill ever touches the Hermes skills directory.
         content = edited_markdown if new_status == "approved_edited" else markdown
+
+        # Governed path (opt-in via TORQCLAW_GOVERNED_SKILLS): stage -> approve
+        # -> activate -> publish through VerifiedSkillStore + skill_publisher,
+        # producing a digest-bound, audited, rollback-capable artifact whose
+        # discoverability is verified against the real Hermes loader.
+        #
+        # The legacy branch below is a bare write: no digest, no manifest, no
+        # audit, and no validation of `name` (so "../escape" writes outside the
+        # skills tree). It remains the default so enabling governance stays an
+        # explicit operator decision rather than a behaviour change shipped as
+        # a refactor.
+        from . import governed_skills
+
+        if governed_skills.enabled():
+            installed = governed_skills.install_approved_skill(name, content)
+            return {
+                "ok": True,
+                "status": new_status,
+                "governed": True,
+                "digest": installed["digest"],
+                "path": installed["publishedPath"],
+            }
+
         skill_dir = SKILLS_DIR / name
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(content)
