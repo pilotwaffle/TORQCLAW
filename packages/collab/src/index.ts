@@ -94,7 +94,66 @@ export {
   type GetChannelTimelineResult,
   type AckChannelCursorResult,
   type PostChannelMessageResult,
+  type SubscribeChannelResult,
+  type UnsubscribeChannelResult,
 } from './store.js';
+
+// Live slice: authorization RW-lock (Section 8.3, G1R C2)
+export { AuthLock, AuthLockUpgradeError } from './authlock.js';
+
+// Live slice: in-memory subscription registry (Sections 5.5, 8.1-8.3)
+export {
+  Subscription,
+  SubscriptionRegistry,
+  SUBSCRIPTION_CLOSE_REASONS,
+  type SubscriptionCloseReason,
+  type SubscriptionState,
+  type ChannelEventFrame,
+  type SubscriptionCloseFrame,
+  type DeliveryFrame,
+  type QueuedFrame,
+  type DeliverySink,
+  type EpochSnapshot,
+  type SubscriptionParams,
+} from './subscriptions.js';
+
+// Live slice: per-write revalidation + fan-out (Sections 8.2, 8.3, G1R C1/H1/H4)
+export {
+  fanoutOne,
+  fanoutToChannel,
+  readRevalidationSnapshot,
+  revalidationPasses,
+  type CommittedChannelEvent,
+  type FanoutDeps,
+  type RevalidationRowsSnapshot,
+} from './fanout.js';
+
+// Live slice: authorization coordinator (Section 8.2, G1R C2/C4)
+export {
+  runAuthorizationMutation,
+  affectedByChannel,
+  affectedByPrincipal,
+  affectedBySession,
+  type CoordinatorDeps,
+  type AffectedSet,
+} from './coordinator.js';
+
+// Live slice: slow-consumer detection (Section 7.7, G1R H3)
+export {
+  checkSlowConsumer,
+  checkAndCloseSlowConsumer,
+  tickSlowConsumers,
+  SLOW_CONSUMER_BYTE_LIMIT,
+  SLOW_CONSUMER_AGE_MS,
+  type SlowConsumerCheckResult,
+} from './slowconsumer.js';
+
+// Live slice: observability counters (Section 13)
+export {
+  CollabObservability,
+  type ConnectOutcome,
+  type AuthorizationDenialClass,
+} from './observability.js';
 
 // Sessions
 export {

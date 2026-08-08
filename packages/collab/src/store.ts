@@ -62,6 +62,17 @@ import { issueCredential, type CredentialLookup } from './credentials.js';
 import { normalizeName, normalizeMessageText } from './text.js';
 import { nameKey } from './fold.js';
 import type { RandomSource, Clock, UuidSource, BootstrapDb } from './bootstrap.js';
+import { AuthLock } from './authlock.js';
+import { SubscriptionRegistry, type Subscription, type EpochSnapshot } from './subscriptions.js';
+import {
+  runAuthorizationMutation,
+  affectedByChannel,
+  affectedByPrincipal,
+  affectedBySession,
+  type AffectedSet,
+} from './coordinator.js';
+import { fanoutToChannel, type CommittedChannelEvent } from './fanout.js';
+import { CollabObservability } from './observability.js';
 
 // ---------------------------------------------------------------------------
 // Errors / result codes (Section 7.4 / 7.6 subset relevant to Slice 1 + 2)
@@ -275,6 +286,32 @@ export interface CollaborationStoreEnv {
   uuids: UuidSource;
   rng: RandomSource;
   principalPepper: Buffer;
+  /**
+   * (C2) The writer-preferring authorization RW-lock (Section 8.3). Optional
+   * for backward compatibility with Slice 1/2 callers that construct a
+   * CollaborationStore without live-slice concerns — when omitted, a fresh
+   * per-store AuthLock is created, which is always correct for a single
+   * store instance (the lock only needs to be shared across concurrent
+   * commands against the SAME store, which happens automatically since it
+   * lives on `this`).
+   */
+  lock?: AuthLock;
+  /** In-memory subscription registry (Section 5.5, 8.1-8.3). Optional; defaults to a fresh empty registry. */
+  registry?: SubscriptionRegistry;
+  /** Section 13 in-memory counters. Optional; defaults to a fresh instance. */
+  observability?: CollabObservability;
+  /** Injected wall-clock-ms source for lock/latency accounting; defaults to Date.now. Deterministic tests inject a controllable clock. */
+  nowMs?: () => number;
+}
+
+export interface SubscribeChannelResult {
+  subscriptionId: string;
+  highWaterCursor: string;
+}
+
+export interface UnsubscribeChannelResult {
+  subscriptionId: string;
+  state: 'closed';
 }
 
 /** Minimal caller identity, established by the (not-yet-built) session layer. */
@@ -312,6 +349,19 @@ export class CollaborationStore {
   private readonly mutex = new Mutex();
 
   /**
+   * (C2) The writer-preferring authorization RW-lock, layered ABOVE
+   * `this.mutex` (the sequencer mutex, retained unchanged beneath it).
+   * Every keyed command acquires this lock (read for non-authorization
+   * mutations + naturally-idempotent + read-path commands, write for
+   * authorization mutations) BEFORE `this.mutex.withLock`, per Section 8.3's
+   * three-class lock partition.
+   */
+  private readonly lock: AuthLock;
+  private readonly registry: SubscriptionRegistry;
+  private readonly observability: CollabObservability;
+  private readonly nowMs: () => number;
+
+  /**
    * (F1) Holds the currently-live, not-yet-zeroed credential secret Buffer
    * for the command in flight, if any. Set the instant `issueCredentialRow`
    * allocates the secret — BEFORE the INSERT, BEFORE the mutation-result
@@ -327,6 +377,46 @@ export class CollaborationStore {
 
   constructor(env: CollaborationStoreEnv) {
     this.env = env;
+    this.lock = env.lock ?? new AuthLock();
+    this.registry = env.registry ?? new SubscriptionRegistry();
+    this.observability = env.observability ?? new CollabObservability();
+    this.nowMs = env.nowMs ?? (() => Date.now());
+  }
+
+  // -------------------------------------------------------------------
+  // Lock-class combinators (Section 8.3 / L1 driver re-slotting)
+  //
+  //  - withReadThenSequencer: read lock, then this.mutex (sequencer),
+  //    for non-authorization mutations AND naturally-idempotent commands
+  //    (SUBSCRIBE_CHANNEL, ACK_CHANNEL_CURSOR, UNSUBSCRIBE_CHANNEL).
+  //  - withReadOnly: read lock only, no sequencer — LIST_CHANNELS,
+  //    GET_CHANNEL_TIMELINE.
+  //  - withWriteThenSequencer (coordinator.ts's runAuthorizationMutation):
+  //    write lock, then this.mutex, then post-commit sync close+purge,
+  //    for the nine authorization mutations (H2: including ADD_CHANNEL_
+  //    MEMBER and RESTORE_AGENT — never demoted to read lock).
+  // -------------------------------------------------------------------
+
+  private async withReadThenSequencer<T>(fn: () => Promise<T> | T): Promise<T> {
+    await this.lock.acquireRead();
+    try {
+      return await fn();
+    } finally {
+      this.lock.releaseRead();
+    }
+  }
+
+  private async withReadOnly<T>(fn: () => T): Promise<T> {
+    await this.lock.acquireRead();
+    try {
+      return fn();
+    } finally {
+      this.lock.releaseRead();
+    }
+  }
+
+  private coordinatorDeps() {
+    return { lock: this.lock, registry: this.registry, observability: this.observability, nowMs: this.nowMs };
   }
 
   // -------------------------------------------------------------------
@@ -351,7 +441,8 @@ export class CollaborationStore {
     }
     const normalizedBody = { displayName: normalized.name };
 
-    return this.mutex.withLock(() =>
+    return this.withReadThenSequencer(() =>
+      this.mutex.withLock(() =>
       this.runKeyedCommand(
         caller.principalId,
         'CREATE_AGENT',
@@ -388,6 +479,7 @@ export class CollaborationStore {
         };
         return { result, redacted, secretBytes: cred.secretBytes };
       })
+      )
     );
   }
 
@@ -396,7 +488,8 @@ export class CollaborationStore {
     body: { principalId: string },
     idempotencyKey: string
   ): Promise<CredentialProducingResult> {
-    return this.mutex.withLock(() =>
+    return this.withReadThenSequencer(() =>
+      this.mutex.withLock(() =>
       this.runKeyedCommand(
         caller.principalId,
         'CREATE_PRINCIPAL_CREDENTIAL',
@@ -429,6 +522,7 @@ export class CollaborationStore {
         };
         return { result, redacted, secretBytes: cred.secretBytes };
       })
+      )
     );
   }
 
@@ -437,52 +531,69 @@ export class CollaborationStore {
     body: { principalId: string },
     idempotencyKey: string
   ): Promise<AgentLifecycleResult> {
-    return this.mutex.withLock(() =>
-      this.runKeyedCommand(
-        caller.principalId,
-        'SUSPEND_AGENT',
-        idempotencyKey,
-        body,
-        (tx) => this.assertOperatorCaller(tx, caller),
-        (tx) => {
-        const target = this.getAgentTargetOrThrow(tx, body.principalId);
+    let effective = false;
+    const result = await runAuthorizationMutation(
+      this.coordinatorDeps(),
+      () =>
+        this.mutex.withLock(() =>
+          this.runKeyedCommand(
+            caller.principalId,
+            'SUSPEND_AGENT',
+            idempotencyKey,
+            body,
+            (tx) => this.assertOperatorCaller(tx, caller),
+            (tx) => {
+              const target = this.getAgentTargetOrThrow(tx, body.principalId);
 
-        if (target.status === 'suspended') {
-          // (H3) same-state fresh-key rule: no epoch increment, no session
-          // closure, no audit row — just a fresh success result recording
-          // current state.
-          return {
-            result: { principalId: target.id, status: 'suspended', authEpoch: target.auth_epoch },
-            redacted: { principalId: target.id, status: 'suspended', authEpoch: target.auth_epoch },
-          };
-        }
-        if (target.status !== 'active') {
-          throw new CollabError('INVALID_PRINCIPAL_TRANSITION', `Cannot suspend principal in state ${target.status}`);
-        }
+              if (target.status === 'suspended') {
+                // (H3) same-state fresh-key rule: no epoch increment, no session
+                // closure, no audit row — just a fresh success result recording
+                // current state.
+                const sameState: AgentLifecycleResult = {
+                  principalId: target.id,
+                  status: 'suspended',
+                  authEpoch: target.auth_epoch,
+                };
+                return { result: sameState, redacted: sameState };
+              }
+              if (target.status !== 'active') {
+                throw new CollabError(
+                  'INVALID_PRINCIPAL_TRANSITION',
+                  `Cannot suspend principal in state ${target.status}`
+                );
+              }
 
-        const now = this.env.clock.next();
-        const newEpoch = target.auth_epoch + 1;
-        tx
-          .prepare('UPDATE principals SET status = ?, auth_epoch = ?, updated_at = ? WHERE id = ?')
-          .run('suspended', newEpoch, now, target.id);
+              const now = this.env.clock.next();
+              const newEpoch = target.auth_epoch + 1;
+              tx
+                .prepare('UPDATE principals SET status = ?, auth_epoch = ?, updated_at = ? WHERE id = ?')
+                .run('suspended', newEpoch, now, target.id);
 
-        // Section 5.2: suspend closes all sessions/subscriptions with
-        // principal_suspended. Slice 1 has no live session registry yet
-        // (that lands with sessions.ts / the Live slice's socket layer);
-        // collab_session_bindings rows (if any exist from a prior slice)
-        // are closed here at the storage level so the invariant holds for
-        // whatever session rows exist by the time this runs.
-        this.closeSessionsForPrincipal(tx, target.id, 'principal_suspended', now);
+              // Section 5.2: suspend closes all sessions/subscriptions with
+              // principal_suspended.
+              this.closeSessionsForPrincipal(tx, target.id, 'principal_suspended', now);
 
-        this.insertAudit(tx, 'agent_suspended', caller.principalId, target.id, {
-          principalId: target.id,
-          authEpoch: newEpoch,
-        });
+              this.insertAudit(tx, 'agent_suspended', caller.principalId, target.id, {
+                principalId: target.id,
+                authEpoch: newEpoch,
+              });
 
-        const result: AgentLifecycleResult = { principalId: target.id, status: 'suspended', authEpoch: newEpoch };
-        return { result, redacted: result };
-      })
+              effective = true;
+              const result: AgentLifecycleResult = {
+                principalId: target.id,
+                status: 'suspended',
+                authEpoch: newEpoch,
+              };
+              return { result, redacted: result };
+            }
+          )
+        ),
+      (r) =>
+        effective
+          ? affectedByPrincipal(this.registry, r.principalId, 'authorization_lost')
+          : { subscriptions: [] }
     );
+    return result;
   }
 
   async restoreAgent(
@@ -490,48 +601,71 @@ export class CollaborationStore {
     body: { principalId: string },
     idempotencyKey: string
   ): Promise<AgentLifecycleResult> {
-    return this.mutex.withLock(() =>
-      this.runKeyedCommand(
-        caller.principalId,
-        'RESTORE_AGENT',
-        idempotencyKey,
-        body,
-        (tx) => this.assertOperatorCaller(tx, caller),
-        (tx) => {
-        const target = this.getAgentTargetOrThrow(tx, body.principalId);
+    // (H2) RESTORE_AGENT stays write-lock class: it mutates auth_epoch,
+    // which per-write revalidation reads, even though in legal flows it
+    // closes zero existing subscriptions (suspension already closed them).
+    // No demotion to read lock.
+    let effective = false;
+    const result = await runAuthorizationMutation(
+      this.coordinatorDeps(),
+      () =>
+        this.mutex.withLock(() =>
+          this.runKeyedCommand(
+            caller.principalId,
+            'RESTORE_AGENT',
+            idempotencyKey,
+            body,
+            (tx) => this.assertOperatorCaller(tx, caller),
+            (tx) => {
+              const target = this.getAgentTargetOrThrow(tx, body.principalId);
 
-        if (target.status === 'active') {
-          // (H3) same-state fresh-key rule.
-          return {
-            result: { principalId: target.id, status: 'active', authEpoch: target.auth_epoch },
-            redacted: { principalId: target.id, status: 'active', authEpoch: target.auth_epoch },
-          };
-        }
-        if (target.status !== 'suspended') {
-          throw new CollabError('INVALID_PRINCIPAL_TRANSITION', `Cannot restore principal in state ${target.status}`);
-        }
+              if (target.status === 'active') {
+                // (H3) same-state fresh-key rule.
+                const sameState: AgentLifecycleResult = {
+                  principalId: target.id,
+                  status: 'active',
+                  authEpoch: target.auth_epoch,
+                };
+                return { result: sameState, redacted: sameState };
+              }
+              if (target.status !== 'suspended') {
+                throw new CollabError(
+                  'INVALID_PRINCIPAL_TRANSITION',
+                  `Cannot restore principal in state ${target.status}`
+                );
+              }
 
-        const now = this.env.clock.next();
-        const newEpoch = target.auth_epoch + 1;
-        tx
-          .prepare('UPDATE principals SET status = ?, auth_epoch = ?, updated_at = ? WHERE id = ?')
-          .run('active', newEpoch, now, target.id);
+              const now = this.env.clock.next();
+              const newEpoch = target.auth_epoch + 1;
+              tx
+                .prepare('UPDATE principals SET status = ?, auth_epoch = ?, updated_at = ? WHERE id = ?')
+                .run('active', newEpoch, now, target.id);
 
-        // Section 5.2: an effective restore closes any session bound to
-        // the principal (defensive totality — legal flows produce zero
-        // such sessions because suspension already closed them and a
-        // suspended principal fails BASE) with reason principal_restored.
-        this.closeSessionsForPrincipal(tx, target.id, 'principal_restored', now);
+              // Section 5.2: an effective restore closes any session bound to
+              // the principal (defensive totality — legal flows produce zero
+              // such sessions because suspension already closed them and a
+              // suspended principal fails BASE) with reason principal_restored.
+              this.closeSessionsForPrincipal(tx, target.id, 'principal_restored', now);
 
-        this.insertAudit(tx, 'agent_restored', caller.principalId, target.id, {
-          principalId: target.id,
-          authEpoch: newEpoch,
-        });
+              this.insertAudit(tx, 'agent_restored', caller.principalId, target.id, {
+                principalId: target.id,
+                authEpoch: newEpoch,
+              });
 
-        const result: AgentLifecycleResult = { principalId: target.id, status: 'active', authEpoch: newEpoch };
-        return { result, redacted: result };
-      })
+              effective = true;
+              const result: AgentLifecycleResult = { principalId: target.id, status: 'active', authEpoch: newEpoch };
+              return { result, redacted: result };
+            }
+          )
+        ),
+      (r) =>
+        // Legal flows close zero subscriptions on restore (defensive
+        // totality only — see docstring above), so this always resolves to
+        // an empty affected set today, but the write lock still serializes
+        // this epoch change against any concurrent per-write revalidation.
+        effective ? affectedByPrincipal(this.registry, r.principalId, 'authorization_lost') : { subscriptions: [] }
     );
+    return result;
   }
 
   async revokeAgent(
@@ -539,63 +673,75 @@ export class CollaborationStore {
     body: { principalId: string },
     idempotencyKey: string
   ): Promise<RevokeAgentResult> {
-    return this.mutex.withLock(() =>
-      this.runKeyedCommand(
-        caller.principalId,
-        'REVOKE_AGENT',
-        idempotencyKey,
-        body,
-        (tx) => this.assertOperatorCaller(tx, caller),
-        (tx) => {
-        const target = this.getAgentTargetOrThrow(tx, body.principalId);
+    let effective = false;
+    const result = await runAuthorizationMutation(
+      this.coordinatorDeps(),
+      () =>
+        this.mutex.withLock(() =>
+          this.runKeyedCommand(
+            caller.principalId,
+            'REVOKE_AGENT',
+            idempotencyKey,
+            body,
+            (tx) => this.assertOperatorCaller(tx, caller),
+            (tx) => {
+              const target = this.getAgentTargetOrThrow(tx, body.principalId);
 
-        if (target.status === 'revoked') {
-          // (H3) same-state fresh-key rule, extended to REVOKE per G1R H3:
-          // no epoch increment, no session closure, no audit row;
-          // revokedCredentialCount pinned to 0 on the repeat.
-          const result: RevokeAgentResult = {
-            principalId: target.id,
-            status: 'revoked',
-            authEpoch: target.auth_epoch,
-            revokedCredentialCount: 0,
-          };
-          return { result, redacted: result };
-        }
+              if (target.status === 'revoked') {
+                // (H3) same-state fresh-key rule, extended to REVOKE per G1R H3:
+                // no epoch increment, no session closure, no audit row;
+                // revokedCredentialCount pinned to 0 on the repeat.
+                const result: RevokeAgentResult = {
+                  principalId: target.id,
+                  status: 'revoked',
+                  authEpoch: target.auth_epoch,
+                  revokedCredentialCount: 0,
+                };
+                return { result, redacted: result };
+              }
 
-        const now = this.env.clock.next();
-        const newEpoch = target.auth_epoch + 1;
-        tx
-          .prepare('UPDATE principals SET status = ?, auth_epoch = ?, revoked_at = ?, updated_at = ? WHERE id = ?')
-          .run('revoked', newEpoch, now, now, target.id);
+              const now = this.env.clock.next();
+              const newEpoch = target.auth_epoch + 1;
+              tx
+                .prepare(
+                  'UPDATE principals SET status = ?, auth_epoch = ?, revoked_at = ?, updated_at = ? WHERE id = ?'
+                )
+                .run('revoked', newEpoch, now, now, target.id);
 
-        // Revoke also revokes every agent credential (terminal revoke
-        // differs from single-credential revoke).
-        const activeCreds = tx
-          .prepare('SELECT id FROM principal_credentials WHERE principal_id = ? AND state = ?')
-          .all(target.id, 'active') as Array<{ id: string }>;
-        for (const c of activeCreds) {
-          tx
-            .prepare('UPDATE principal_credentials SET state = ?, revoked_at = ? WHERE id = ?')
-            .run('revoked', now, c.id);
-        }
+              // Revoke also revokes every agent credential (terminal revoke
+              // differs from single-credential revoke).
+              const activeCreds = tx
+                .prepare('SELECT id FROM principal_credentials WHERE principal_id = ? AND state = ?')
+                .all(target.id, 'active') as Array<{ id: string }>;
+              for (const c of activeCreds) {
+                tx
+                  .prepare('UPDATE principal_credentials SET state = ?, revoked_at = ? WHERE id = ?')
+                  .run('revoked', now, c.id);
+              }
 
-        this.closeSessionsForPrincipal(tx, target.id, 'principal_revoked', now);
+              this.closeSessionsForPrincipal(tx, target.id, 'principal_revoked', now);
 
-        this.insertAudit(tx, 'agent_revoked', caller.principalId, target.id, {
-          principalId: target.id,
-          authEpoch: newEpoch,
-          revokedCredentialCount: activeCreds.length,
-        });
+              this.insertAudit(tx, 'agent_revoked', caller.principalId, target.id, {
+                principalId: target.id,
+                authEpoch: newEpoch,
+                revokedCredentialCount: activeCreds.length,
+              });
 
-        const result: RevokeAgentResult = {
-          principalId: target.id,
-          status: 'revoked',
-          authEpoch: newEpoch,
-          revokedCredentialCount: activeCreds.length,
-        };
-        return { result, redacted: result };
-      })
+              effective = true;
+              const result: RevokeAgentResult = {
+                principalId: target.id,
+                status: 'revoked',
+                authEpoch: newEpoch,
+                revokedCredentialCount: activeCreds.length,
+              };
+              return { result, redacted: result };
+            }
+          )
+        ),
+      (r) =>
+        effective ? affectedByPrincipal(this.registry, r.principalId, 'authorization_lost') : { subscriptions: [] }
     );
+    return result;
   }
 
   async rotatePrincipalCredential(
@@ -603,73 +749,87 @@ export class CollaborationStore {
     body: { principalId: string; replaceCredentialId: string },
     idempotencyKey: string
   ): Promise<RotateCredentialResult> {
-    return this.mutex.withLock(() =>
-      this.runKeyedCommand(
-        caller.principalId,
-        'ROTATE_PRINCIPAL_CREDENTIAL',
-        idempotencyKey,
-        body,
-        (tx) => this.assertOperatorCaller(tx, caller),
-        (tx) => {
-        const target = this.getPrincipalOrThrow(tx, body.principalId);
+    let closedSessionIds: string[] = [];
+    const result = await runAuthorizationMutation(
+      this.coordinatorDeps(),
+      () =>
+        this.mutex.withLock(() =>
+          this.runKeyedCommand(
+            caller.principalId,
+            'ROTATE_PRINCIPAL_CREDENTIAL',
+            idempotencyKey,
+            body,
+            (tx) => this.assertOperatorCaller(tx, caller),
+            (tx) => {
+              const target = this.getPrincipalOrThrow(tx, body.principalId);
 
-        const replaced = tx
-          .prepare('SELECT * FROM principal_credentials WHERE id = ?')
-          .get(body.replaceCredentialId) as CredentialRow | undefined;
-        if (!replaced || replaced.principal_id !== target.id || replaced.state !== 'active') {
-          throw new CollabError(
-            'CREDENTIAL_NOT_FOUND',
-            `Credential ${body.replaceCredentialId} is unknown, not active, or not owned by ${target.id}`
-          );
+              const replaced = tx
+                .prepare('SELECT * FROM principal_credentials WHERE id = ?')
+                .get(body.replaceCredentialId) as CredentialRow | undefined;
+              if (!replaced || replaced.principal_id !== target.id || replaced.state !== 'active') {
+                throw new CollabError(
+                  'CREDENTIAL_NOT_FOUND',
+                  `Credential ${body.replaceCredentialId} is unknown, not active, or not owned by ${target.id}`
+                );
+              }
+
+              // (L2) LAST_OPERATOR_CREDENTIAL guard for ROTATE when
+              // replaceCredentialId is the operator's only active credential —
+              // counted INSIDE the transaction after BEGIN IMMEDIATE.
+              if (target.kind === 'operator') {
+                const activeCount = this.countActiveCredentials(tx, target.id);
+                if (activeCount <= 1) {
+                  throw new CollabError(
+                    'LAST_OPERATOR_CREDENTIAL',
+                    "Cannot rotate the operator's only active credential without mutation"
+                  );
+                }
+              }
+
+              const now = this.env.clock.next();
+              const cred = this.issueCredentialRow(tx, target.id, now);
+
+              tx
+                .prepare('UPDATE principal_credentials SET state = ?, revoked_at = ? WHERE id = ?')
+                .run('revoked', now, replaced.id);
+
+              closedSessionIds = this.closeSessionsForCredential(tx, replaced.id, 'credential_revoked', now);
+
+              this.insertAudit(tx, 'credential_created', caller.principalId, target.id, {
+                principalId: target.id,
+                credentialId: cred.credentialId,
+              });
+              this.insertAudit(tx, 'credential_revoked', caller.principalId, target.id, {
+                principalId: target.id,
+                credentialId: replaced.id,
+              });
+
+              const result: RotateCredentialResult = {
+                principalId: target.id,
+                credentialId: cred.credentialId,
+                credential: cred.token,
+                credentialAvailable: true,
+                replacedCredentialId: replaced.id,
+              };
+              const redacted: RotateCredentialResult = {
+                principalId: target.id,
+                credentialId: cred.credentialId,
+                credentialAvailable: false,
+                replacedCredentialId: replaced.id,
+              };
+              return { result, redacted, secretBytes: cred.secretBytes };
+            }
+          )
+        ),
+      () => {
+        const subs: AffectedSet['subscriptions'] = [];
+        for (const sid of closedSessionIds) {
+          subs.push(...affectedBySession(this.registry, sid, 'authorization_lost').subscriptions);
         }
-
-        // (L2) LAST_OPERATOR_CREDENTIAL guard for ROTATE when
-        // replaceCredentialId is the operator's only active credential —
-        // counted INSIDE the transaction after BEGIN IMMEDIATE.
-        if (target.kind === 'operator') {
-          const activeCount = this.countActiveCredentials(tx, target.id);
-          if (activeCount <= 1) {
-            throw new CollabError(
-              'LAST_OPERATOR_CREDENTIAL',
-              'Cannot rotate the operator\'s only active credential without mutation'
-            );
-          }
-        }
-
-        const now = this.env.clock.next();
-        const cred = this.issueCredentialRow(tx, target.id, now);
-
-        tx
-          .prepare('UPDATE principal_credentials SET state = ?, revoked_at = ? WHERE id = ?')
-          .run('revoked', now, replaced.id);
-
-        this.closeSessionsForCredential(tx, replaced.id, 'credential_revoked', now);
-
-        this.insertAudit(tx, 'credential_created', caller.principalId, target.id, {
-          principalId: target.id,
-          credentialId: cred.credentialId,
-        });
-        this.insertAudit(tx, 'credential_revoked', caller.principalId, target.id, {
-          principalId: target.id,
-          credentialId: replaced.id,
-        });
-
-        const result: RotateCredentialResult = {
-          principalId: target.id,
-          credentialId: cred.credentialId,
-          credential: cred.token,
-          credentialAvailable: true,
-          replacedCredentialId: replaced.id,
-        };
-        const redacted: RotateCredentialResult = {
-          principalId: target.id,
-          credentialId: cred.credentialId,
-          credentialAvailable: false,
-          replacedCredentialId: replaced.id,
-        };
-        return { result, redacted, secretBytes: cred.secretBytes };
-      })
+        return { subscriptions: subs };
+      }
     );
+    return result;
   }
 
   async revokePrincipalCredential(
@@ -677,64 +837,78 @@ export class CollaborationStore {
     body: { credentialId: string },
     idempotencyKey: string
   ): Promise<RevokeCredentialResult> {
-    return this.mutex.withLock(() =>
-      this.runKeyedCommand(
-        caller.principalId,
-        'REVOKE_PRINCIPAL_CREDENTIAL',
-        idempotencyKey,
-        body,
-        (tx) => this.assertOperatorCaller(tx, caller),
-        (tx) => {
-        const cred = tx.prepare('SELECT * FROM principal_credentials WHERE id = ?').get(body.credentialId) as
-          | CredentialRow
-          | undefined;
-        if (!cred) {
-          throw new CollabError('CREDENTIAL_NOT_FOUND', `Credential ${body.credentialId} not found`);
+    let closedSessionIds: string[] = [];
+    const result = await runAuthorizationMutation(
+      this.coordinatorDeps(),
+      () =>
+        this.mutex.withLock(() =>
+          this.runKeyedCommand(
+            caller.principalId,
+            'REVOKE_PRINCIPAL_CREDENTIAL',
+            idempotencyKey,
+            body,
+            (tx) => this.assertOperatorCaller(tx, caller),
+            (tx) => {
+              const cred = tx.prepare('SELECT * FROM principal_credentials WHERE id = ?').get(body.credentialId) as
+                | CredentialRow
+                | undefined;
+              if (!cred) {
+                throw new CollabError('CREDENTIAL_NOT_FOUND', `Credential ${body.credentialId} not found`);
+              }
+
+              const owner = this.getPrincipalOrThrow(tx, cred.principal_id);
+
+              if (cred.state === 'revoked') {
+                // "returns the original revocation result for an already-revoked
+                // one" — a fresh success result reflecting current state, no
+                // further mutation.
+                const result: RevokeCredentialResult = {
+                  credentialId: cred.id,
+                  revokedAt: cred.revoked_at ?? this.env.clock.next(),
+                };
+                return { result, redacted: result };
+              }
+
+              // (L2) LAST_OPERATOR_CREDENTIAL guard for REVOKE, counted inside
+              // the transaction after BEGIN IMMEDIATE.
+              if (owner.kind === 'operator') {
+                const activeCount = this.countActiveCredentials(tx, owner.id);
+                if (activeCount <= 1) {
+                  throw new CollabError(
+                    'LAST_OPERATOR_CREDENTIAL',
+                    "Cannot revoke the operator's final active credential without mutation"
+                  );
+                }
+              }
+
+              const now = this.env.clock.next();
+              tx.prepare('UPDATE principal_credentials SET state = ?, revoked_at = ? WHERE id = ?').run(
+                'revoked',
+                now,
+                cred.id
+              );
+
+              closedSessionIds = this.closeSessionsForCredential(tx, cred.id, 'credential_revoked', now);
+
+              this.insertAudit(tx, 'credential_revoked', caller.principalId, owner.id, {
+                principalId: owner.id,
+                credentialId: cred.id,
+              });
+
+              const result: RevokeCredentialResult = { credentialId: cred.id, revokedAt: now };
+              return { result, redacted: result };
+            }
+          )
+        ),
+      () => {
+        const subs: AffectedSet['subscriptions'] = [];
+        for (const sid of closedSessionIds) {
+          subs.push(...affectedBySession(this.registry, sid, 'authorization_lost').subscriptions);
         }
-
-        const owner = this.getPrincipalOrThrow(tx, cred.principal_id);
-
-        if (cred.state === 'revoked') {
-          // "returns the original revocation result for an already-revoked
-          // one" — a fresh success result reflecting current state, no
-          // further mutation.
-          const result: RevokeCredentialResult = {
-            credentialId: cred.id,
-            revokedAt: cred.revoked_at ?? this.env.clock.next(),
-          };
-          return { result, redacted: result };
-        }
-
-        // (L2) LAST_OPERATOR_CREDENTIAL guard for REVOKE, counted inside
-        // the transaction after BEGIN IMMEDIATE.
-        if (owner.kind === 'operator') {
-          const activeCount = this.countActiveCredentials(tx, owner.id);
-          if (activeCount <= 1) {
-            throw new CollabError(
-              'LAST_OPERATOR_CREDENTIAL',
-              'Cannot revoke the operator\'s final active credential without mutation'
-            );
-          }
-        }
-
-        const now = this.env.clock.next();
-        tx.prepare('UPDATE principal_credentials SET state = ?, revoked_at = ? WHERE id = ?').run(
-          'revoked',
-          now,
-          cred.id
-        );
-
-        this.closeSessionsForCredential(tx, cred.id, 'credential_revoked', now);
-
-        this.insertAudit(tx, 'credential_revoked', caller.principalId, owner.id, {
-          principalId: owner.id,
-          credentialId: cred.id,
-        });
-
-        const result: RevokeCredentialResult = { credentialId: cred.id, revokedAt: now };
-        return { result, redacted: result };
-      })
+        return { subscriptions: subs };
+      }
     );
+    return result;
   }
 
   // -------------------------------------------------------------------
@@ -770,7 +944,8 @@ export class CollaborationStore {
     }
     const normalizedBody = { name: normalized.name };
 
-    return this.mutex.withLock(() =>
+    return this.withReadThenSequencer(() =>
+      this.mutex.withLock(() =>
       this.runKeyedCommand(
         caller.principalId,
         'CREATE_CHANNEL',
@@ -823,6 +998,7 @@ export class CollaborationStore {
           return { result, redacted: result };
         }
       )
+      )
     );
   }
 
@@ -831,98 +1007,147 @@ export class CollaborationStore {
     body: { channelId: string; principalId: string },
     idempotencyKey: string
   ): Promise<ChannelMemberResult> {
-    return this.mutex.withLock(() =>
-      this.runKeyedCommand(
-        caller.principalId,
-        'ADD_CHANNEL_MEMBER',
-        idempotencyKey,
-        body,
-        // (C2) CHANNEL_OWNER predicate: resolved entirely inside the tx.
-        (tx) => this.assertChannelOwner(tx, caller, body.channelId),
-        (tx) => {
-          const channel = this.getChannelOrThrow(tx, body.channelId);
-          if (channel.state === 'archived') {
-            throw new CollabError('CHANNEL_ARCHIVED', 'Channel is archived');
-          }
+    // (H2) ADD_CHANNEL_MEMBER stays write-lock class: it mutates the added
+    // member's own membership_epoch, which per-write revalidation reads
+    // (their OWN row — H1). No demotion to read lock even though a fresh
+    // add closes nothing.
+    let committed: { eventId: string; channelSeq: number; occurredAt: string } | undefined;
+    const result = await runAuthorizationMutation(
+      this.coordinatorDeps(),
+      () =>
+        this.mutex.withLock(() =>
+          this.runKeyedCommand(
+            caller.principalId,
+            'ADD_CHANNEL_MEMBER',
+            idempotencyKey,
+            body,
+            // (C2) CHANNEL_OWNER predicate: resolved entirely inside the tx.
+            (tx) => this.assertChannelOwner(tx, caller, body.channelId),
+            (tx) => {
+              const channel = this.getChannelOrThrow(tx, body.channelId);
+              if (channel.state === 'archived') {
+                throw new CollabError('CHANNEL_ARCHIVED', 'Channel is archived');
+              }
 
-          // Validation 3: target is kind agent, owned by the channel
-          // operator, role agent; owner-role insert rejected (there is no
-          // caller-supplied role — this command only ever inserts role
-          // 'agent', so "owner-role insert rejected" is enforced by never
-          // accepting a role parameter here).
-          const target = tx.prepare('SELECT * FROM principals WHERE id = ?').get(body.principalId) as
-            | PrincipalRow
-            | undefined;
-          if (!target || target.kind !== 'agent' || target.owner_principal_id !== channel.owner_principal_id) {
-            throw notFound();
-          }
+              // Validation 3: target is kind agent, owned by the channel
+              // operator, role agent; owner-role insert rejected (there is no
+              // caller-supplied role — this command only ever inserts role
+              // 'agent', so "owner-role insert rejected" is enforced by never
+              // accepting a role parameter here).
+              const target = tx.prepare('SELECT * FROM principals WHERE id = ?').get(body.principalId) as
+                | PrincipalRow
+                | undefined;
+              if (!target || target.kind !== 'agent' || target.owner_principal_id !== channel.owner_principal_id) {
+                throw notFound();
+              }
 
-          const existing = tx
-            .prepare('SELECT * FROM collab_members WHERE channel_id = ? AND principal_id = ?')
-            .get(channel.id, target.id) as MemberRow | undefined;
+              const existing = tx
+                .prepare('SELECT * FROM collab_members WHERE channel_id = ? AND principal_id = ?')
+                .get(channel.id, target.id) as MemberRow | undefined;
 
-          if (existing && existing.role === 'owner') {
-            // Owner membership cannot be re-added/mutated via this path.
-            throw notFound();
-          }
+              if (existing && existing.role === 'owner') {
+                // Owner membership cannot be re-added/mutated via this path.
+                throw notFound();
+              }
 
-          if (existing && existing.state === 'active') {
-            // Idempotent-at-storage same-state: Section 5.3 "same-state
-            // repetition is idempotent" — return current epoch, no mutation.
-            const result: ChannelMemberResult = {
-              channelId: channel.id,
-              principalId: target.id,
-              membershipEpoch: existing.membership_epoch,
-            };
-            return { result, redacted: result };
-          }
+              if (existing && existing.state === 'active') {
+                // Idempotent-at-storage same-state: Section 5.3 "same-state
+                // repetition is idempotent" — return current epoch, no mutation.
+                const result: ChannelMemberResult = {
+                  channelId: channel.id,
+                  principalId: target.id,
+                  membershipEpoch: existing.membership_epoch,
+                };
+                return { result, redacted: result };
+              }
 
-          // (H1) rejoined_seq = MAX(channel_seq) for the channel, captured
-          // BEFORE inserting the member_added event, same transaction.
-          const rejoinedSeq = this.getMaxChannelSeq(tx, channel.id);
-          const nextSeq = rejoinedSeq + 1;
-          const now = this.env.clock.next();
+              // (H1) rejoined_seq = MAX(channel_seq) for the channel, captured
+              // BEFORE inserting the member_added event, same transaction.
+              const rejoinedSeq = this.getMaxChannelSeq(tx, channel.id);
+              const nextSeq = rejoinedSeq + 1;
+              const now = this.env.clock.next();
 
-          let newEpoch: number;
-          if (existing) {
-            // Re-add: existing removed row -> active again, own epoch bump.
-            newEpoch = existing.membership_epoch + 1;
-            tx
-              .prepare(
-                'UPDATE collab_members SET state = ?, membership_epoch = ?, rejoined_seq = ?, joined_at = ?, removed_at = ? WHERE channel_id = ? AND principal_id = ?'
-              )
-              .run('active', newEpoch, rejoinedSeq, now, null, channel.id, target.id);
-          } else {
-            newEpoch = 1;
-            tx
-              .prepare(
-                'INSERT INTO collab_members(channel_id, principal_id, role, state, membership_epoch, rejoined_seq, joined_at, removed_at) VALUES(?,?,?,?,?,?,?,?)'
-              )
-              .run(channel.id, target.id, 'agent', 'active', newEpoch, rejoinedSeq, now, null);
-          }
+              let newEpoch: number;
+              if (existing) {
+                // Re-add: existing removed row -> active again, own epoch bump.
+                newEpoch = existing.membership_epoch + 1;
+                tx
+                  .prepare(
+                    'UPDATE collab_members SET state = ?, membership_epoch = ?, rejoined_seq = ?, joined_at = ?, removed_at = ? WHERE channel_id = ? AND principal_id = ?'
+                  )
+                  .run('active', newEpoch, rejoinedSeq, now, null, channel.id, target.id);
+              } else {
+                newEpoch = 1;
+                tx
+                  .prepare(
+                    'INSERT INTO collab_members(channel_id, principal_id, role, state, membership_epoch, rejoined_seq, joined_at, removed_at) VALUES(?,?,?,?,?,?,?,?)'
+                  )
+                  .run(channel.id, target.id, 'agent', 'active', newEpoch, rejoinedSeq, now, null);
+              }
 
-          const eventId = this.env.uuids.next();
-          const eventNow = this.env.clock.next();
-          tx
-            .prepare(
-              'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)'
-            )
-            .run(
-              eventId,
-              1,
-              channel.id,
-              nextSeq,
-              caller.principalId,
-              'member_added',
-              canonicalJson({ channelId: channel.id, principalId: target.id, membershipEpoch: newEpoch }),
-              eventNow
-            );
+              const eventId = this.env.uuids.next();
+              const eventNow = this.env.clock.next();
+              tx
+                .prepare(
+                  'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)'
+                )
+                .run(
+                  eventId,
+                  1,
+                  channel.id,
+                  nextSeq,
+                  caller.principalId,
+                  'member_added',
+                  canonicalJson({ channelId: channel.id, principalId: target.id, membershipEpoch: newEpoch }),
+                  eventNow
+                );
 
-          const result: ChannelMemberResult = { channelId: channel.id, principalId: target.id, membershipEpoch: newEpoch };
-          return { result, redacted: result };
-        }
-      )
+              committed = { eventId, channelSeq: nextSeq, occurredAt: eventNow };
+              const result: ChannelMemberResult = {
+                channelId: channel.id,
+                principalId: target.id,
+                membershipEpoch: newEpoch,
+              };
+              return { result, redacted: result };
+            }
+          )
+        ),
+      // ADD never closes an existing subscription in legal flows (the added
+      // principal has no pre-existing live subscription on this channel by
+      // definition — it just became a member). Empty affected set; the
+      // write lock still serializes this epoch change against concurrent
+      // per-write revalidation for any OTHER subscription this principal
+      // might hold elsewhere (H2).
+      () => ({ subscriptions: [] })
     );
+
+    // Fan out member_added to every OTHER already-live subscription on this
+    // channel (Section 10: "adding member B while member A holds a live
+    // subscription... delivers B's member_added event to A in sequence").
+    // Runs AFTER the write lock releases — each candidate delivery
+    // acquires its own per-write read lock (fanoutOne/C1).
+    if (committed) {
+      await fanoutToChannel(
+        {
+          lock: this.lock,
+          registry: this.registry,
+          db: this.env.db,
+          observability: this.observability,
+          nowMs: this.nowMs,
+        },
+        {
+          channelId: result.channelId,
+          channelSeq: committed.channelSeq,
+          eventId: committed.eventId,
+          kind: 'member_added',
+          actorPrincipalId: caller.principalId,
+          occurredAt: committed.occurredAt,
+          payload: { channelId: result.channelId, principalId: result.principalId, membershipEpoch: result.membershipEpoch },
+        }
+      );
+    }
+
+    return result;
   }
 
   async removeChannelMember(
@@ -930,78 +1155,121 @@ export class CollaborationStore {
     body: { channelId: string; principalId: string },
     idempotencyKey: string
   ): Promise<ChannelMemberResult> {
-    return this.mutex.withLock(() =>
-      this.runKeyedCommand(
-        caller.principalId,
-        'REMOVE_CHANNEL_MEMBER',
-        idempotencyKey,
-        body,
-        (tx) => this.assertChannelOwner(tx, caller, body.channelId),
-        (tx) => {
-          const channel = this.getChannelOrThrow(tx, body.channelId);
-          if (channel.state === 'archived') {
-            throw new CollabError('CHANNEL_ARCHIVED', 'Channel is archived');
-          }
+    let effective = false;
+    let committed: { eventId: string; channelSeq: number; occurredAt: string } | undefined;
+    const result = await runAuthorizationMutation(
+      this.coordinatorDeps(),
+      () =>
+        this.mutex.withLock(() =>
+          this.runKeyedCommand(
+            caller.principalId,
+            'REMOVE_CHANNEL_MEMBER',
+            idempotencyKey,
+            body,
+            (tx) => this.assertChannelOwner(tx, caller, body.channelId),
+            (tx) => {
+              const channel = this.getChannelOrThrow(tx, body.channelId);
+              if (channel.state === 'archived') {
+                throw new CollabError('CHANNEL_ARCHIVED', 'Channel is archived');
+              }
 
-          const existing = tx
-            .prepare('SELECT * FROM collab_members WHERE channel_id = ? AND principal_id = ?')
-            .get(channel.id, body.principalId) as MemberRow | undefined;
+              const existing = tx
+                .prepare('SELECT * FROM collab_members WHERE channel_id = ? AND principal_id = ?')
+                .get(channel.id, body.principalId) as MemberRow | undefined;
 
-          if (!existing) {
-            throw notFound();
-          }
+              if (!existing) {
+                throw notFound();
+              }
 
-          // Validation 4: owner membership removal is rejected.
-          if (existing.role === 'owner') {
-            throw notFound();
-          }
+              // Validation 4: owner membership removal is rejected.
+              if (existing.role === 'owner') {
+                throw notFound();
+              }
 
-          if (existing.state === 'removed') {
-            // Same-state repetition is idempotent.
-            const result: ChannelMemberResult = {
-              channelId: channel.id,
-              principalId: existing.principal_id,
-              membershipEpoch: existing.membership_epoch,
-            };
-            return { result, redacted: result };
-          }
+              if (existing.state === 'removed') {
+                // Same-state repetition is idempotent.
+                const result: ChannelMemberResult = {
+                  channelId: channel.id,
+                  principalId: existing.principal_id,
+                  membershipEpoch: existing.membership_epoch,
+                };
+                return { result, redacted: result };
+              }
 
-          const nextSeq = this.getMaxChannelSeq(tx, channel.id) + 1;
-          const now = this.env.clock.next();
-          const newEpoch = existing.membership_epoch + 1;
+              const nextSeq = this.getMaxChannelSeq(tx, channel.id) + 1;
+              const now = this.env.clock.next();
+              const newEpoch = existing.membership_epoch + 1;
 
-          tx
-            .prepare(
-              'UPDATE collab_members SET state = ?, membership_epoch = ?, removed_at = ? WHERE channel_id = ? AND principal_id = ?'
-            )
-            .run('removed', newEpoch, now, channel.id, existing.principal_id);
+              tx
+                .prepare(
+                  'UPDATE collab_members SET state = ?, membership_epoch = ?, removed_at = ? WHERE channel_id = ? AND principal_id = ?'
+                )
+                .run('removed', newEpoch, now, channel.id, existing.principal_id);
 
-          const eventId = this.env.uuids.next();
-          const eventNow = this.env.clock.next();
-          tx
-            .prepare(
-              'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)'
-            )
-            .run(
-              eventId,
-              1,
-              channel.id,
-              nextSeq,
-              caller.principalId,
-              'member_removed',
-              canonicalJson({ channelId: channel.id, principalId: existing.principal_id, membershipEpoch: newEpoch }),
-              eventNow
-            );
+              const eventId = this.env.uuids.next();
+              const eventNow = this.env.clock.next();
+              tx
+                .prepare(
+                  'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)'
+                )
+                .run(
+                  eventId,
+                  1,
+                  channel.id,
+                  nextSeq,
+                  caller.principalId,
+                  'member_removed',
+                  canonicalJson({
+                    channelId: channel.id,
+                    principalId: existing.principal_id,
+                    membershipEpoch: newEpoch,
+                  }),
+                  eventNow
+                );
 
-          const result: ChannelMemberResult = {
-            channelId: channel.id,
-            principalId: existing.principal_id,
-            membershipEpoch: newEpoch,
-          };
-          return { result, redacted: result };
-        }
-      )
+              committed = { eventId, channelSeq: nextSeq, occurredAt: eventNow };
+              effective = true;
+              const result: ChannelMemberResult = {
+                channelId: channel.id,
+                principalId: existing.principal_id,
+                membershipEpoch: newEpoch,
+              };
+              return { result, redacted: result };
+            }
+          )
+        ),
+      (r) =>
+        effective
+          ? affectedByPrincipal(this.registry, r.principalId, 'authorization_lost', r.channelId)
+          : { subscriptions: [] }
     );
+
+    // Fan out member_removed to every remaining live subscription on this
+    // channel (the removed principal's own subscription was already closed
+    // above by the coordinator, before this point — fanoutOne's C4 closed
+    // check will correctly skip it here as a no-op).
+    if (committed) {
+      await fanoutToChannel(
+        {
+          lock: this.lock,
+          registry: this.registry,
+          db: this.env.db,
+          observability: this.observability,
+          nowMs: this.nowMs,
+        },
+        {
+          channelId: result.channelId,
+          channelSeq: committed.channelSeq,
+          eventId: committed.eventId,
+          kind: 'member_removed',
+          actorPrincipalId: caller.principalId,
+          occurredAt: committed.occurredAt,
+          payload: { channelId: result.channelId, principalId: result.principalId, membershipEpoch: result.membershipEpoch },
+        }
+      );
+    }
+
+    return result;
   }
 
   async archiveChannel(
@@ -1009,55 +1277,67 @@ export class CollaborationStore {
     body: { channelId: string },
     idempotencyKey: string
   ): Promise<ChannelArchiveResult> {
-    return this.mutex.withLock(() =>
-      this.runKeyedCommand(
-        caller.principalId,
-        'ARCHIVE_CHANNEL',
-        idempotencyKey,
-        body,
-        (tx) => this.assertChannelOwner(tx, caller, body.channelId),
-        (tx) => {
-          const channel = this.getChannelOrThrow(tx, body.channelId);
+    let effective = false;
+    const result = await runAuthorizationMutation(
+      this.coordinatorDeps(),
+      () =>
+        this.mutex.withLock(() =>
+          this.runKeyedCommand(
+            caller.principalId,
+            'ARCHIVE_CHANNEL',
+            idempotencyKey,
+            body,
+            (tx) => this.assertChannelOwner(tx, caller, body.channelId),
+            (tx) => {
+              const channel = this.getChannelOrThrow(tx, body.channelId);
 
-          if (channel.state === 'archived') {
-            // Same-state no-op: return current state, no epoch, no event.
-            const result: ChannelArchiveResult = {
-              channelId: channel.id,
-              state: 'archived',
-              channelEpoch: channel.channel_epoch,
-            };
-            return { result, redacted: result };
-          }
+              if (channel.state === 'archived') {
+                // Same-state no-op: return current state, no epoch, no event.
+                const result: ChannelArchiveResult = {
+                  channelId: channel.id,
+                  state: 'archived',
+                  channelEpoch: channel.channel_epoch,
+                };
+                return { result, redacted: result };
+              }
 
-          const now = this.env.clock.next();
-          const newEpoch = channel.channel_epoch + 1;
-          tx
-            .prepare('UPDATE collab_channels SET state = ?, channel_epoch = ?, updated_at = ? WHERE id = ?')
-            .run('archived', newEpoch, now, channel.id);
+              const now = this.env.clock.next();
+              const newEpoch = channel.channel_epoch + 1;
+              tx
+                .prepare('UPDATE collab_channels SET state = ?, channel_epoch = ?, updated_at = ? WHERE id = ?')
+                .run('archived', newEpoch, now, channel.id);
 
-          const nextSeq = this.getMaxChannelSeq(tx, channel.id) + 1;
-          const eventId = this.env.uuids.next();
-          const eventNow = this.env.clock.next();
-          tx
-            .prepare(
-              'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)'
-            )
-            .run(
-              eventId,
-              1,
-              channel.id,
-              nextSeq,
-              caller.principalId,
-              'channel_archived',
-              canonicalJson({ channelId: channel.id, channelEpoch: newEpoch }),
-              eventNow
-            );
+              const nextSeq = this.getMaxChannelSeq(tx, channel.id) + 1;
+              const eventId = this.env.uuids.next();
+              const eventNow = this.env.clock.next();
+              tx
+                .prepare(
+                  'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)'
+                )
+                .run(
+                  eventId,
+                  1,
+                  channel.id,
+                  nextSeq,
+                  caller.principalId,
+                  'channel_archived',
+                  canonicalJson({ channelId: channel.id, channelEpoch: newEpoch }),
+                  eventNow
+                );
 
-          const result: ChannelArchiveResult = { channelId: channel.id, state: 'archived', channelEpoch: newEpoch };
-          return { result, redacted: result };
-        }
-      )
+              effective = true;
+              const result: ChannelArchiveResult = {
+                channelId: channel.id,
+                state: 'archived',
+                channelEpoch: newEpoch,
+              };
+              return { result, redacted: result };
+            }
+          )
+        ),
+      (r) => (effective ? affectedByChannel(this.registry, r.channelId, 'channel_archived') : { subscriptions: [] })
     );
+    return result;
   }
 
   async unarchiveChannel(
@@ -1065,70 +1345,78 @@ export class CollaborationStore {
     body: { channelId: string },
     idempotencyKey: string
   ): Promise<ChannelArchiveResult> {
-    return this.mutex.withLock(() =>
-      this.runKeyedCommand(
-        caller.principalId,
-        'UNARCHIVE_CHANNEL',
-        idempotencyKey,
-        body,
-        (tx) => this.assertChannelOwner(tx, caller, body.channelId),
-        (tx) => {
-          const channel = this.getChannelOrThrow(tx, body.channelId);
+    let effective = false;
+    const result = await runAuthorizationMutation(
+      this.coordinatorDeps(),
+      () =>
+        this.mutex.withLock(() =>
+          this.runKeyedCommand(
+            caller.principalId,
+            'UNARCHIVE_CHANNEL',
+            idempotencyKey,
+            body,
+            (tx) => this.assertChannelOwner(tx, caller, body.channelId),
+            (tx) => {
+              const channel = this.getChannelOrThrow(tx, body.channelId);
 
-          if (channel.state === 'active') {
-            // Same-state no-op.
-            const result: ChannelArchiveResult = {
-              channelId: channel.id,
-              state: 'active',
-              channelEpoch: channel.channel_epoch,
-            };
-            return { result, redacted: result };
-          }
+              if (channel.state === 'active') {
+                // Same-state no-op.
+                const result: ChannelArchiveResult = {
+                  channelId: channel.id,
+                  state: 'active',
+                  channelEpoch: channel.channel_epoch,
+                };
+                return { result, redacted: result };
+              }
 
-          // (M2) recompute name_key on unarchive; on active-name collision,
-          // roll back leaving the target archived, CHANNEL_NAME_CONFLICT,
-          // no epoch bump. The unique active-name_key index is the
-          // concurrency backstop; catching its violation maps to
-          // CHANNEL_NAME_CONFLICT and the whole transaction (including this
-          // UPDATE) rolls back, so the channel is left exactly as it was
-          // (archived, prior name_key, prior epoch).
-          const key = nameKey(channel.name);
-          const now = this.env.clock.next();
-          const newEpoch = channel.channel_epoch + 1;
+              // (M2) recompute name_key on unarchive; on active-name collision,
+              // roll back leaving the target archived, CHANNEL_NAME_CONFLICT,
+              // no epoch bump. The unique active-name_key index is the
+              // concurrency backstop; catching its violation maps to
+              // CHANNEL_NAME_CONFLICT and the whole transaction (including this
+              // UPDATE) rolls back, so the channel is left exactly as it was
+              // (archived, prior name_key, prior epoch).
+              const key = nameKey(channel.name);
+              const now = this.env.clock.next();
+              const newEpoch = channel.channel_epoch + 1;
 
-          try {
-            tx
-              .prepare(
-                'UPDATE collab_channels SET state = ?, name_key = ?, channel_epoch = ?, updated_at = ? WHERE id = ?'
-              )
-              .run('active', key, newEpoch, now, channel.id);
-          } catch (err) {
-            throw this.mapChannelNameConflict(err);
-          }
+              try {
+                tx
+                  .prepare(
+                    'UPDATE collab_channels SET state = ?, name_key = ?, channel_epoch = ?, updated_at = ? WHERE id = ?'
+                  )
+                  .run('active', key, newEpoch, now, channel.id);
+              } catch (err) {
+                throw this.mapChannelNameConflict(err);
+              }
 
-          const nextSeq = this.getMaxChannelSeq(tx, channel.id) + 1;
-          const eventId = this.env.uuids.next();
-          const eventNow = this.env.clock.next();
-          tx
-            .prepare(
-              'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)'
-            )
-            .run(
-              eventId,
-              1,
-              channel.id,
-              nextSeq,
-              caller.principalId,
-              'channel_unarchived',
-              canonicalJson({ channelId: channel.id, channelEpoch: newEpoch }),
-              eventNow
-            );
+              const nextSeq = this.getMaxChannelSeq(tx, channel.id) + 1;
+              const eventId = this.env.uuids.next();
+              const eventNow = this.env.clock.next();
+              tx
+                .prepare(
+                  'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)'
+                )
+                .run(
+                  eventId,
+                  1,
+                  channel.id,
+                  nextSeq,
+                  caller.principalId,
+                  'channel_unarchived',
+                  canonicalJson({ channelId: channel.id, channelEpoch: newEpoch }),
+                  eventNow
+                );
 
-          const result: ChannelArchiveResult = { channelId: channel.id, state: 'active', channelEpoch: newEpoch };
-          return { result, redacted: result };
-        }
-      )
+              effective = true;
+              const result: ChannelArchiveResult = { channelId: channel.id, state: 'active', channelEpoch: newEpoch };
+              return { result, redacted: result };
+            }
+          )
+        ),
+      (r) => (effective ? affectedByChannel(this.registry, r.channelId, 'channel_unarchived') : { subscriptions: [] })
     );
+    return result;
   }
 
   async postChannelMessage(
@@ -1143,54 +1431,84 @@ export class CollaborationStore {
     }
     const normalizedBody = { channelId: body.channelId, text: normalized.text };
 
-    return this.mutex.withLock(() =>
-      this.runKeyedCommand(
-        caller.principalId,
-        'POST_CHANNEL_MESSAGE',
-        idempotencyKey,
-        normalizedBody,
-        // (M3) CHANNEL_WRITABLE == CHANNEL_VISIBLE, state-free: the
-        // predicate slot checks ONLY visibility/membership, never state. A
-        // non-member (predicate fails) throws COLLAB_NOT_FOUND here and
-        // NEVER reaches the state check below.
-        (tx) => this.assertChannelVisible(tx, caller, normalizedBody.channelId),
-        (tx) => {
-          // (M3) Evaluation order: predicate already passed (caller is an
-          // active/passing member) -> THEN the active-channel state check.
-          // A member posting to an archived channel gets CHANNEL_ARCHIVED,
-          // never COLLAB_NOT_FOUND.
-          const channel = this.getChannelOrThrow(tx, normalizedBody.channelId);
-          if (channel.state === 'archived') {
-            throw new CollabError('CHANNEL_ARCHIVED', 'Channel is archived');
-          }
+    let committedSeq: number | undefined;
 
-          const nextSeq = this.getMaxChannelSeq(tx, channel.id) + 1;
-          const eventId = this.env.uuids.next();
-          const occurredAt = this.env.clock.next();
-          tx
-            .prepare(
-              'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)'
-            )
-            .run(
+    const result = await this.withReadThenSequencer(() =>
+      this.mutex.withLock(() =>
+        this.runKeyedCommand(
+          caller.principalId,
+          'POST_CHANNEL_MESSAGE',
+          idempotencyKey,
+          normalizedBody,
+          // (M3) CHANNEL_WRITABLE == CHANNEL_VISIBLE, state-free: the
+          // predicate slot checks ONLY visibility/membership, never state. A
+          // non-member (predicate fails) throws COLLAB_NOT_FOUND here and
+          // NEVER reaches the state check below.
+          (tx) => this.assertChannelVisible(tx, caller, normalizedBody.channelId),
+          (tx) => {
+            // (M3) Evaluation order: predicate already passed (caller is an
+            // active/passing member) -> THEN the active-channel state check.
+            // A member posting to an archived channel gets CHANNEL_ARCHIVED,
+            // never COLLAB_NOT_FOUND.
+            const channel = this.getChannelOrThrow(tx, normalizedBody.channelId);
+            if (channel.state === 'archived') {
+              throw new CollabError('CHANNEL_ARCHIVED', 'Channel is archived');
+            }
+
+            const nextSeq = this.getMaxChannelSeq(tx, channel.id) + 1;
+            const eventId = this.env.uuids.next();
+            const occurredAt = this.env.clock.next();
+            tx
+              .prepare(
+                'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)'
+              )
+              .run(
+                eventId,
+                1,
+                channel.id,
+                nextSeq,
+                caller.principalId,
+                'message_posted',
+                canonicalJson({ channelId: channel.id, text: normalizedBody.text }),
+                occurredAt
+              );
+
+            committedSeq = nextSeq;
+            const result: PostChannelMessageResult = {
               eventId,
-              1,
-              channel.id,
-              nextSeq,
-              caller.principalId,
-              'message_posted',
-              canonicalJson({ channelId: channel.id, text: normalizedBody.text }),
-              occurredAt
-            );
-
-          const result: PostChannelMessageResult = {
-            eventId,
-            cursor: String(nextSeq),
-            occurredAt,
-          };
-          return { result, redacted: result };
-        }
+              cursor: String(nextSeq),
+              occurredAt,
+            };
+            return { result, redacted: result };
+          }
+        )
       )
     );
+
+    // Fan-out happens OUTSIDE the read-lock hold used for the sequencer/tx
+    // above (that lock has already released by the time withReadThenSequencer
+    // resolves) — each candidate subscription's delivery acquires its OWN
+    // per-write read-lock hold via fanoutOne (Section 8.3: "the read lock is
+    // acquired and released per socket write and is never held across more
+    // than one write"). Only fires for a NEWLY committed message (not an
+    // idempotent replay, where committedSeq stays undefined because fn()
+    // never ran).
+    if (committedSeq !== undefined) {
+      await fanoutToChannel(
+        { lock: this.lock, registry: this.registry, db: this.env.db, observability: this.observability, nowMs: this.nowMs },
+        {
+          channelId: normalizedBody.channelId,
+          channelSeq: committedSeq,
+          eventId: result.eventId,
+          kind: 'message_posted',
+          actorPrincipalId: caller.principalId,
+          occurredAt: result.occurredAt,
+          payload: { channelId: normalizedBody.channelId, text: normalizedBody.text },
+        }
+      );
+    }
+
+    return result;
   }
 
   /**
@@ -1204,41 +1522,182 @@ export class CollaborationStore {
     caller: CallerContext,
     body: { channelId: string; cursor: string }
   ): Promise<AckChannelCursorResult> {
-    return this.mutex.withLock(() =>
-      this.runNaturallyIdempotentCommand(caller.principalId, 'ACK_CHANNEL_CURSOR', (tx) => {
-        // (C2) CURSOR_OWNER == CHANNEL_VISIBLE, resolved inside the tx.
-        const member = this.assertChannelVisible(tx, caller, body.channelId);
-        const channel = this.getChannelOrThrow(tx, body.channelId);
+    return this.withReadThenSequencer(() =>
+      this.mutex.withLock(() =>
+        this.runNaturallyIdempotentCommand(caller.principalId, 'ACK_CHANNEL_CURSOR', (tx) => {
+          // (C2) CURSOR_OWNER == CHANNEL_VISIBLE, resolved inside the tx.
+          const member = this.assertChannelVisible(tx, caller, body.channelId);
+          const channel = this.getChannelOrThrow(tx, body.channelId);
 
-        const submitted = this.parseCursor(body.cursor);
+          const submitted = this.parseCursor(body.cursor);
 
-        // (H3 / two-branch bound) caller-visible bound: greatest committed
-        // channel_seq when events above rejoined_seq exist, otherwise
-        // rejoined_seq.
-        const bound = this.callerVisibleBound(tx, channel.id, member.rejoined_seq);
-        if (submitted > bound) {
-          throw new CollabError('CURSOR_OUT_OF_RANGE', `Cursor ${submitted} exceeds caller-visible bound ${bound}`);
-        }
+          // (H3 / two-branch bound) caller-visible bound: greatest committed
+          // channel_seq when events above rejoined_seq exist, otherwise
+          // rejoined_seq.
+          const bound = this.callerVisibleBound(tx, channel.id, member.rejoined_seq);
+          if (submitted > bound) {
+            throw new CollabError('CURSOR_OUT_OF_RANGE', `Cursor ${submitted} exceeds caller-visible bound ${bound}`);
+          }
 
-        // (L2) upsert-from-zero, max(existing,submitted) computed in SQL.
-        const now = this.env.clock.next();
-        tx
-          .prepare(
-            `INSERT INTO collab_cursors(channel_id, principal_id, acknowledged_seq, updated_at)
+          // (L2) upsert-from-zero, max(existing,submitted) computed in SQL.
+          const now = this.env.clock.next();
+          tx
+            .prepare(
+              `INSERT INTO collab_cursors(channel_id, principal_id, acknowledged_seq, updated_at)
              VALUES(?,?,?,?)
              ON CONFLICT(channel_id, principal_id) DO UPDATE SET
                acknowledged_seq = MAX(acknowledged_seq, excluded.acknowledged_seq),
                updated_at = excluded.updated_at`
-          )
-          .run(channel.id, caller.principalId, submitted, now);
+            )
+            .run(channel.id, caller.principalId, submitted, now);
 
-        const row = tx
-          .prepare('SELECT acknowledged_seq FROM collab_cursors WHERE channel_id = ? AND principal_id = ?')
-          .get(channel.id, caller.principalId) as { acknowledged_seq: number };
+          const row = tx
+            .prepare('SELECT acknowledged_seq FROM collab_cursors WHERE channel_id = ? AND principal_id = ?')
+            .get(channel.id, caller.principalId) as { acknowledged_seq: number };
 
-        return { channelId: channel.id, acknowledgedCursor: String(row.acknowledged_seq) };
+          return { channelId: channel.id, acknowledgedCursor: String(row.acknowledged_seq) };
+        })
+      )
+    );
+  }
+
+  /**
+   * SUBSCRIBE_CHANNEL: naturally-idempotent-class path (read lock then
+   * sequencer mutex — Section 8.3 L1). (C3) Registry insertion +
+   * `buffering` flag + high-water capture happen as ONE atomic step, inside
+   * the sequencer-mutex-guarded transaction, via `this.registry.register`
+   * — so any commit that happens after this call (even the very next
+   * microtask) sees this subscription already registered and buffers or
+   * (for backlog-covered seqs) is simply covered by the backlog read that
+   * follows, outside the lock. After registering, backlog is read (outside
+   * the locks, per Section 8.3: "Backlog sends authorized events through
+   * high water ascending" as a step distinct from the mutex-held
+   * registration), delivered ascending, then the subscription transitions
+   * to live UNDER THE MUTEX, draining any events that committed and
+   * buffered during the backlog read.
+   */
+  async subscribeChannel(
+    caller: CallerContext,
+    body: { channelId: string; afterCursor: string; sessionId: string; credentialId: string; sink: import('./subscriptions.js').DeliverySink },
+    subscriptionId: string
+  ): Promise<SubscribeChannelResult> {
+    let registered: Subscription | undefined;
+    let effectiveAfter = 0;
+
+    await this.withReadThenSequencer(() =>
+      this.mutex.withLock(() => {
+        // (C2) CHANNEL_VISIBLE predicate + epoch snapshot capture, inside
+        // the mutex-guarded critical section.
+        const member = this.assertChannelVisible(this.env.db, caller, body.channelId);
+        const channel = this.getChannelOrThrow(this.env.db, body.channelId);
+        const principal = this.getPrincipalOrThrow(this.env.db, caller.principalId);
+
+        const requested = this.parseCursor(body.afterCursor);
+        effectiveAfter = Math.max(requested, member.rejoined_seq);
+
+        const highWaterCursor = this.getMaxChannelSeq(this.env.db, channel.id);
+
+        const epochSnapshot: EpochSnapshot = {
+          authEpoch: principal.auth_epoch,
+          membershipEpoch: member.membership_epoch,
+          channelEpoch: channel.channel_epoch,
+        };
+
+        // (C3) Atomic: register + buffering=true + highWater capture, all
+        // synchronous, still holding the sequencer mutex.
+        registered = this.registry.register({
+          subscriptionId,
+          sessionId: body.sessionId,
+          channelId: channel.id,
+          principalId: caller.principalId,
+          credentialId: body.credentialId,
+          rejoinedSeq: member.rejoined_seq,
+          epochSnapshot,
+          highWaterCursor,
+          sink: body.sink,
+          nowMs: this.nowMs,
+        });
+        this.observability.markSubscriptionBacklog();
       })
     );
+
+    const sub = registered!;
+
+    // Backlog replay: max(afterCursor,rejoined_seq) < seq <= highWater,
+    // delivered ascending, OUTSIDE the locks (Section 8.3).
+    const backlogRows = this.env.db
+      .prepare(
+        `SELECT * FROM collab_events WHERE channel_id = ? AND channel_seq > ? AND channel_seq <= ? ORDER BY channel_seq ASC`
+      )
+      .all(body.channelId, effectiveAfter, sub.highWaterCursor) as EventRow[];
+
+    for (const row of backlogRows) {
+      const payload = JSON.parse(row.content_json) as Record<string, unknown>;
+      sub.deliverBacklogEvent({
+        type: 'channel_event',
+        protocolVersion: 2,
+        subscriptionId,
+        channelId: body.channelId,
+        cursor: String(row.channel_seq),
+        event: {
+          id: row.id,
+          kind: row.kind,
+          actorPrincipalId: row.actor_principal_id,
+          occurredAt: row.created_at,
+          payload,
+        },
+      });
+    }
+
+    // Transition to live UNDER THE MUTEX: drains anything that committed
+    // and buffered (seq > highWater) during the backlog read above.
+    await this.mutex.withLock(() => {
+      sub.transitionToLive();
+      this.observability.markSubscriptionLive();
+    });
+
+    return { subscriptionId, highWaterCursor: String(sub.highWaterCursor) };
+  }
+
+  /**
+   * UNSUBSCRIBE_CHANNEL: naturally-idempotent path (read lock then
+   * sequencer mutex). Closes ONLY the target subscription with
+   * `unsubscribed` — never the session or any other subscription. Repeated
+   * calls by the owning session return the same closed result
+   * (SUBSCRIPTION_OWNER predicate + idempotent `close()`).
+   */
+  async unsubscribeChannel(
+    caller: CallerContext,
+    body: { subscriptionId: string; sessionId: string }
+  ): Promise<UnsubscribeChannelResult> {
+    let didClose = false;
+    const sub = await this.withReadThenSequencer(() =>
+      this.mutex.withLock(() => {
+        const sub = this.registry.get(body.subscriptionId);
+        // (SUBSCRIPTION_OWNER) belongs to current session; absent or
+        // foreign subscription -> COLLAB_NOT_FOUND, byte-identical to every
+        // other denial cause.
+        if (!sub || sub.sessionId !== body.sessionId) {
+          throw notFound();
+        }
+        if (!sub.closed) {
+          const wasActive = sub.state !== 'backlog';
+          sub.close('unsubscribed');
+          this.observability.markSubscriptionClosed(wasActive);
+          didClose = true;
+        }
+        return sub;
+      })
+    );
+
+    // Post-lock delivery step: deliver the close frame only on the call
+    // that actually performed the transition to closed — a repeat
+    // UNSUBSCRIBE (or one racing a mutation that closed it first) returns
+    // the same closed result without re-delivering a second close frame.
+    if (didClose) {
+      sub.deliverCloseFrame();
+    }
+    return { subscriptionId: body.subscriptionId, state: 'closed' as const };
   }
 
   /**
@@ -1252,7 +1711,7 @@ export class CollaborationStore {
     caller: CallerContext,
     body: { afterChannelId: string | null; limit: number; includeArchived: boolean }
   ): Promise<ListChannelsResult> {
-    return this.runReadCommand(() => {
+    return this.withReadOnly(() => this.runReadCommand(() => {
       if (body.limit < 1 || body.limit > 100) {
         throw new CollabError('INVALID_REQUEST', 'limit must be between 1 and 100');
       }
@@ -1321,7 +1780,7 @@ export class CollaborationStore {
       const nextChannelId = channels.length > 0 ? channels[channels.length - 1]!.channelId : body.afterChannelId;
 
       return { channels, nextChannelId, hasMore };
-    });
+    }));
   }
 
   /**
@@ -1331,7 +1790,8 @@ export class CollaborationStore {
     caller: CallerContext,
     body: { channelId: string; afterCursor: string; limit: number }
   ): Promise<GetChannelTimelineResult> {
-    return this.runReadCommand(() => {
+    const start = this.nowMs();
+    const out = await this.withReadOnly(() => this.runReadCommand(() => {
       if (body.limit < 1 || body.limit > 100) {
         throw new CollabError('INVALID_REQUEST', 'limit must be between 1 and 100');
       }
@@ -1389,7 +1849,9 @@ export class CollaborationStore {
       const nextCursor = events.length > 0 ? events[events.length - 1]!.cursor : String(effectiveAfter);
 
       return { events, nextCursor, hasMore };
-    });
+    }));
+    this.observability.timelineLatency.record(this.nowMs() - start);
+    return out;
   }
 
   // -------------------------------------------------------------------
@@ -1641,12 +2103,13 @@ export class CollaborationStore {
       .run(kind, actorPrincipalId, subjectPrincipalId, canonicalJson(content), now);
   }
 
+  /** Returns the closed session IDs, so callers can derive affected subscriptions (Section 8.2). */
   private closeSessionsForPrincipal(
     tx: BootstrapDb,
     principalId: string,
     closeReason: string,
     now: string
-  ): number {
+  ): string[] {
     const openSessions = tx
       .prepare('SELECT session_id FROM collab_session_bindings WHERE principal_id = ? AND closed_at IS NULL')
       .all(principalId) as Array<{ session_id: string }>;
@@ -1655,15 +2118,16 @@ export class CollaborationStore {
         .prepare('UPDATE collab_session_bindings SET closed_at = ?, close_reason = ? WHERE session_id = ?')
         .run(now, closeReason, s.session_id);
     }
-    return openSessions.length;
+    return openSessions.map((s) => s.session_id);
   }
 
+  /** Returns the closed session IDs, so callers can derive affected subscriptions (Section 8.2). */
   private closeSessionsForCredential(
     tx: BootstrapDb,
     credentialId: string,
     closeReason: string,
     now: string
-  ): number {
+  ): string[] {
     const openSessions = tx
       .prepare('SELECT session_id FROM collab_session_bindings WHERE credential_id = ? AND closed_at IS NULL')
       .all(credentialId) as Array<{ session_id: string }>;
@@ -1672,7 +2136,7 @@ export class CollaborationStore {
         .prepare('UPDATE collab_session_bindings SET closed_at = ?, close_reason = ? WHERE session_id = ?')
         .run(now, closeReason, s.session_id);
     }
-    return openSessions.length;
+    return openSessions.map((s) => s.session_id);
   }
 
   /**
