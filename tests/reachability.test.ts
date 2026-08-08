@@ -86,7 +86,11 @@ describe('reachability gate', () => {
     const { out } = runGate();
     expect(out).toContain('packages/collab');
     expect(out).toContain('skillTrust.ts');
-    expect(out).toMatch(/OPERATOR DECISION PENDING/);
+    // Operator ruling 2026-08-08: collab moved from "DORMANT — decision
+    // pending" to INCUBATING, absorbed slice by slice behind
+    // TORQCLAW_COLLAB_ENABLED rather than wired wholesale.
+    expect(out).toMatch(/INCUBATING/);
+    expect(out).toMatch(/TORQCLAW_COLLAB_ENABLED/);
   });
 
   it('no longer lists the skill pipeline as dormant (Phase 1 wired it)', () => {

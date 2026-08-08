@@ -99,6 +99,17 @@ export interface GatewayProjectionEvent {
   createdAtMs?: number;
 }
 
+// C0 principal bridge: sessions gains principal/surface identity so a resume
+// can be authorized (SEC-1). Additive and idempotent -- `sessions` is created
+// with IF NOT EXISTS, so an existing dev/production DB never re-runs the
+// CREATE and would otherwise never see these columns. Both are nullable:
+// sessions predating the bridge have no owner and must stay resumable.
+{
+  const columns = db.prepare(`PRAGMA table_info(sessions)`).all() as { name: string }[];
+  if (!columns.some((c) => c.name === 'principal_id')) db.exec(`ALTER TABLE sessions ADD COLUMN principal_id TEXT`);
+  if (!columns.some((c) => c.name === 'surface_id')) db.exec(`ALTER TABLE sessions ADD COLUMN surface_id TEXT`);
+}
+
 export function ensureResilienceProjection(): void {
   const present = db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='resilience_projection_cursor'`).get();
   if (!present) db.exec(resilienceSchemaText);

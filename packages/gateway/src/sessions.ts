@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { db } from './storage.js';
+import { resolvePrincipalBinding, assertResumeAllowed } from './principalBridge.js';
 import type { ConnectFrame, GatewayEvent } from '@torqclaw/contracts';
 
 const PER_EVENT_CHAR_CAP = 1_200;   // one giant RESULT must not eat the window
@@ -23,19 +24,37 @@ export const sessions = {
   /** Resume if the client presented a known sessionId; create otherwise.
    *  Sessions are durable identity — sockets are ephemeral plumbing. */
   resolve(frame: ConnectFrame): { sessionId: string; resumed: boolean; role: string } {
+    // C0 principal bridge (TORQCLAW_COLLAB_ENABLED, default off). With the
+    // flag off this is null and every path below behaves exactly as before.
+    const caller = resolvePrincipalBinding(frame as any);
+
     if (frame.sessionId) {
-      const row = db.prepare('SELECT id, role FROM sessions WHERE id = ?').get(frame.sessionId) as
-        | { id: string; role: string }
+      const row = db.prepare(
+        'SELECT id, role, principal_id, surface_id FROM sessions WHERE id = ?',
+      ).get(frame.sessionId) as
+        | { id: string; role: string; principal_id: string | null; surface_id: string | null }
         | undefined;
       if (row) {
+        // SEC-1: previously ANY caller holding a session id resumed it. A
+        // session bound to a principal now only resumes for that principal.
+        // Sessions predating the bridge have no owner and stay resumable.
+        const owner = row.principal_id
+          ? { principalId: row.principal_id, surfaceId: row.surface_id ?? '' }
+          : null;
+        assertResumeAllowed(owner, caller);
+
         db.prepare('UPDATE sessions SET last_active_at = CURRENT_TIMESTAMP WHERE id = ?')
           .run(frame.sessionId);
         return { sessionId: frame.sessionId, resumed: true, role: row.role };
       }
     }
     const sessionId = randomUUID();
-    db.prepare('INSERT INTO sessions (id, role, client_name) VALUES (?, ?, ?)')
-      .run(sessionId, frame.role, frame.clientInfo.name);
+    db.prepare(
+      'INSERT INTO sessions (id, role, client_name, principal_id, surface_id) VALUES (?, ?, ?, ?, ?)',
+    ).run(
+      sessionId, frame.role, frame.clientInfo.name,
+      caller?.principalId ?? null, caller?.surfaceId ?? null,
+    );
     return { sessionId, resumed: false, role: frame.role };
   },
 

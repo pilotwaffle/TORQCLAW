@@ -3,10 +3,16 @@ PRAGMA foreign_keys = ON;
 
 -- 1. Sessions outlive sockets. A session is resumed by passing its id in the
 --    ConnectFrame; a new WebSocket does NOT mean a new session.
+--    C0: principal_id/surface_id bind a session to the identity that created
+--    it, so a resume can be authorized instead of trusting whoever holds the
+--    id (SEC-1). Nullable: sessions predating the bridge have no owner and
+--    stay resumable. See packages/gateway/src/principalBridge.ts.
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     role TEXT NOT NULL,
     client_name TEXT,
+    principal_id TEXT,
+    surface_id TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     last_active_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
