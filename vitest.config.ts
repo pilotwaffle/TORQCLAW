@@ -9,6 +9,17 @@ const contractsDist = fileURLToPath(
   new URL('./packages/contracts/dist/index.js', import.meta.url),
 );
 
+// C0.1: collabIdentity.ts (packages/gateway/src) imports verifyCredential
+// etc. from '@torqclaw/collab', which resolves to packages/collab/dist/.
+// Tests that assert HMAC-operation-count equality on the SAME module
+// instance collabIdentity.ts actually uses (packages/collab/src/credentials.ts's
+// module-scoped counter) must resolve '@torqclaw/collab' identically, or
+// they silently observe a different counter instance and pass vacuously.
+// Same mechanism as the @torqclaw/contracts alias above.
+const collabDist = fileURLToPath(
+  new URL('./packages/collab/dist/index.js', import.meta.url),
+);
+
 // TCLAW-QA-1: react/react-dom are a dependency of apps/console only (not the
 // workspace root), so under pnpm's strict node_modules isolation they have no
 // top-level symlink at the repo root — Vite's resolver can't find them for
@@ -23,6 +34,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@torqclaw/contracts': contractsDist,
+      '@torqclaw/collab': collabDist,
       react: consoleReact,
       'react-dom': consoleReactDom,
     },

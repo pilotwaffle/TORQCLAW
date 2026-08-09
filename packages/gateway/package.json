@@ -12,6 +12,7 @@
     "@torqclaw/router": "workspace:*",
     "@torqclaw/inference": "workspace:*",
     "@torqclaw/bridge": "workspace:*",
+    "@torqclaw/collab": "workspace:*",
     "fastify": "^5.0.0",
     "@fastify/websocket": "^11.0.0",
     "better-sqlite3": "^11.0.0"
