@@ -126,11 +126,24 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
 export type ClientCommand = z.infer<typeof ClientCommandSchema>;
 
 /** First frame on every connection — no anonymous sockets.
- *  sessionId present = resume; absent = create. Sessions outlive sockets. */
+ *  sessionId present = resume; absent = create. Sessions outlive sockets.
+ *
+ *  C0.1: `auth` is an OPTIONAL discriminated carrier for a collab surface
+ *  credential (packages/collab tq1_... token), additive to the legacy
+ *  `token` field so an existing client's exact frame bytes still parse
+ *  identically (z.object strips unknown keys but never requires new ones).
+ *  A frame with no `auth` is legacy_gateway: the server treats it exactly as
+ *  before (verifyToken(token) only). Deliberately NO client-supplied
+ *  principalId/surfaceId — identity is always server-derived from the
+ *  verified credential, never trusted from the wire (H-1). */
 export const ConnectFrameSchema = z.object({
   role: z.enum(['operator', 'channel', 'node']),
   token: z.string(),
   sessionId: z.uuid().optional(),
   clientInfo: z.object({ name: z.string(), version: z.string() }),
+  auth: z.object({
+    kind: z.literal('surface'),
+    credential: z.string(),
+  }).optional(),
 });
 export type ConnectFrame = z.infer<typeof ConnectFrameSchema>;

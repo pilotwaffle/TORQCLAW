@@ -84,13 +84,7 @@ describe('reachability gate', () => {
     // Dormancy must stay visible. If someone silently drops an entry from
     // DORMANT to make the gate green, that is the defect returning.
     const { out } = runGate();
-    expect(out).toContain('packages/collab');
     expect(out).toContain('skillTrust.ts');
-    // Operator ruling 2026-08-08: collab moved from "DORMANT — decision
-    // pending" to INCUBATING, absorbed slice by slice behind
-    // TORQCLAW_COLLAB_ENABLED rather than wired wholesale.
-    expect(out).toMatch(/INCUBATING/);
-    expect(out).toMatch(/TORQCLAW_COLLAB_ENABLED/);
   });
 
   it('no longer lists the skill pipeline as dormant (Phase 1 wired it)', () => {
@@ -101,5 +95,21 @@ describe('reachability gate', () => {
     const { out } = runGate();
     expect(out).not.toContain('skill_publisher.py');
     expect(out).not.toContain('verified_skill_store.py');
+  });
+
+  it('no longer lists packages/collab as dormant (C0.1 gave it a real entry point)', () => {
+    // packages/collab was DORMANT ("INCUBATING — SELECTIVE INTEGRATION
+    // REQUIRED", operator ruling 2026-08-08) until slice C0.1: server.ts now
+    // transitively imports it via collabIdentity.ts's
+    // verifySurfaceCredential (connect-path identity derivation from a
+    // verified surface credential). The gate reaches it from server.ts on
+    // its own now -- the same lifecycle already pinned above for the skill
+    // pipeline. If 'packages/collab' or 'INCUBATING' reappear here, the
+    // connect-path wiring this slice added regressed (e.g. collabIdentity.ts
+    // stopped being imported by server.ts, or reverted to a stub).
+    const { out } = runGate();
+    expect(out).not.toContain('packages/collab');
+    expect(out).not.toContain('INCUBATING');
+    expect(out).toContain('PASS');
   });
 });

@@ -23,6 +23,8 @@ import { handleListReceipts, handleGetReceipt } from './receipts.js';
 import { handleGetCostSummary } from './spend.js';
 import { handlePreviewRoute } from './preview.js';
 import { handleGetSafeExport } from './export.js';
+import { collabEnabled, PrincipalBindingError } from './principalBridge.js';
+import { verifySurfaceCredential } from './collabIdentity.js';
 
 // Read helper for authz's task-ownership check. Kept inline here (not in
 // events.ts taskStore) per scope: this ticket may only touch authz.ts,
@@ -78,11 +80,51 @@ app.get('/ws', { websocket: true }, (socket) => {
     // ── Gate 1: first frame must authenticate ──
     if (!authed) {
       const conn = ConnectFrameSchema.safeParse(frame);
-      if (!conn.success || !verifyToken(conn.data.token)) {
+      if (!conn.success) {
         sendErr('AUTH_FAILED');
         return socket.close(4001, 'auth failed');
       }
-      const resolved = sessions.resolve(conn.data);
+
+      // C0.1: a surface credential is only ever consulted when the collab
+      // flag is on AND the frame actually carries one. Flag-off, or a
+      // legacy frame with no `auth` carrier, takes EXACTLY today's
+      // verifyToken(token)-only path -- byte-identical (H-2). The binding
+      // is ALWAYS server-derived from the verified credential itself, NEVER
+      // read off the frame (H-1) -- see collabIdentity.ts.
+      let callerBinding = null as ReturnType<typeof verifySurfaceCredential>;
+      let ok: boolean;
+      if (collabEnabled() && conn.data.auth?.kind === 'surface') {
+        callerBinding = verifySurfaceCredential(conn.data.auth.credential);
+        ok = callerBinding !== null;
+      } else {
+        ok = verifyToken(conn.data.token);
+      }
+      if (!ok) {
+        // Indistinguishable from a bad root token at the client-visible
+        // level (M-1): same code, same close. Which verifier failed is
+        // never surfaced here.
+        sendErr('AUTH_FAILED');
+        return socket.close(4001, 'auth failed');
+      }
+      // sessions.resolve() throws PrincipalBindingError (via
+      // assertResumeAllowed) on a cross-principal resume attempt -- this is
+      // SEC-1 actually refusing on the wire, not a bug. It MUST NOT crash
+      // the connection handler (an uncaught throw inside this async
+      // WebSocket message handler would become an unhandled rejection and
+      // could take the whole gateway process down -- a one-line DoS against
+      // every other live session). Same posture as a bad root token: same
+      // AUTH_FAILED code, same close(4001), no detail about which check
+      // failed (M-1).
+      let resolved: ReturnType<typeof sessions.resolve>;
+      try {
+        resolved = sessions.resolve(conn.data, callerBinding);
+      } catch (err) {
+        if (err instanceof PrincipalBindingError) {
+          sendErr('AUTH_FAILED');
+          return socket.close(4001, 'auth failed');
+        }
+        throw err;
+      }
 
       // A RESUME (sessionId matched an existing row) whose frame.role disagrees
       // with the stored role is rejected outright — never mint a fresh session

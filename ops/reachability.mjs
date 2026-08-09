@@ -58,20 +58,24 @@ const ENTRY_POINTS = [
  * module gets wired is how the debt actually gets paid down.
  */
 const DORMANT = {
-  'packages/collab': 'INCUBATING — SELECTIVE INTEGRATION REQUIRED (operator ruling 2026-08-08). '
-    + 'Absorbed slice by slice behind TORQCLAW_COLLAB_ENABLED (default off), NOT wired wholesale: '
-    + 'it carries its own sessions/events/audit/channel model, and switching all 7.7k lines on at '
-    + 'once would stand up a second authority alongside the gateway — the very outcome this gate '
-    + 'exists to prevent. The gateway remains the execution authority; collab supplies identity, '
-    + 'membership and collaboration primitives. Order: C0 principal bridge, C1 surface identity, '
-    + 'C2 approval broker, C3 channels, C4 task rooms. Each slice removes its modules from this '
-    + 'entry as it gains a real runtime entry point.',
   'packages/gateway/src/skillTrust.ts': 'Ed25519 skill signing, pre-loaded for Phase 4 remote skill sources. No consumer until remote sources are enabled.',
   // verified_skill_store.py, skill_publisher.py and runtime_quiescence.py were
   // listed here until Phase 1 wired them through governed_skills.py into
   // skill_queue.decide(). They are now transitively reachable from
   // mcp_wrapper/server.py, so the gate finds them on its own -- which is the
   // intended lifecycle for every entry in this map.
+  //
+  // packages/collab was listed here (INCUBATING — SELECTIVE INTEGRATION
+  // REQUIRED, operator ruling 2026-08-08) until slice C0.1 gave it a real
+  // runtime entry point: packages/gateway/src/server.ts now transitively
+  // imports it via collabIdentity.ts's verifySurfaceCredential (connect-path
+  // identity derivation from a verified surface credential). The gate finds
+  // it reachable on its own now -- exactly the intended lifecycle this
+  // comment block describes for every entry here. This does NOT mean collab
+  // is fully wired: TORQCLAW_COLLAB_ENABLED still defaults off, and only the
+  // credential-verification slice (collabIdentity.ts/credentials.ts) is
+  // actually exercised on the connect path; C1 surface identity, C2 approval
+  // broker, C3 channels, and C4 task rooms remain future slices.
 };
 
 /** Only flag modules with real substance; tiny helpers are noise. */

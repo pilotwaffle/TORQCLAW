@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { db } from './storage.js';
-import { resolvePrincipalBinding, assertResumeAllowed } from './principalBridge.js';
+import { assertResumeAllowed, type PrincipalBinding } from './principalBridge.js';
 import type { ConnectFrame, GatewayEvent } from '@torqclaw/contracts';
 
 const PER_EVENT_CHAR_CAP = 1_200;   // one giant RESULT must not eat the window
@@ -22,11 +22,23 @@ function toFtsQuery(prompt: string): string | null {
 
 export const sessions = {
   /** Resume if the client presented a known sessionId; create otherwise.
-   *  Sessions are durable identity — sockets are ephemeral plumbing. */
-  resolve(frame: ConnectFrame): { sessionId: string; resumed: boolean; role: string } {
-    // C0 principal bridge (TORQCLAW_COLLAB_ENABLED, default off). With the
-    // flag off this is null and every path below behaves exactly as before.
-    const caller = resolvePrincipalBinding(frame as any);
+   *  Sessions are durable identity — sockets are ephemeral plumbing.
+   *
+   *  C0.1: `callerBinding` is the SERVER-DERIVED identity for this
+   *  connection (from a verified surface credential -- see
+   *  collabIdentity.ts's `verifySurfaceCredential`), passed in explicitly by
+   *  server.ts. It replaces the old `resolvePrincipalBinding(frame as any)`
+   *  dead cast, which read (and trusted) principalId/surfaceId directly off
+   *  the client frame -- exactly the H-1 hole this slice closes. Legacy
+   *  callers (no collab credential, or collabEnabled() off) pass no binding
+   *  (defaults to null), which is byte-identical to today: `owner == null`
+   *  on resume always allows (legacy-allow), and a fresh session is created
+   *  with principal_id/surface_id both NULL, exactly as before. */
+  resolve(
+    frame: ConnectFrame,
+    callerBinding: PrincipalBinding | null = null,
+  ): { sessionId: string; resumed: boolean; role: string } {
+    const caller = callerBinding;
 
     if (frame.sessionId) {
       const row = db.prepare(
