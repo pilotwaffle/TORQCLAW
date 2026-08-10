@@ -43,3 +43,11 @@ dev = ["pytest>=8"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# GS-ACCEPT boots a real AIAgent and renders a real system prompt; it is slower
+# and needs the vendored hermes-agent importable. Excluded from the default run
+# so `pytest tests` stays the fast unit/integration gate.
+# Run it with: pytest tests/acceptance -m acceptance
+addopts = "-m 'not acceptance'"
+markers = [
+    "acceptance: GS-ACCEPT live acceptance -- real AIAgent boot, real rendered prompt",
+]
