@@ -57,16 +57,48 @@ _Last updated: 2026-08-09 (GS-COORD merged and pushed; GS-ACCEPT is next)._
 - Standing rule, unchanged: G2A approval is verification authority, **not** publication
   authority. Merging and pushing each require explicit operator approval.
 
-## ACTIVE (resume here): GS-ACCEPT — 15-step live acceptance
+## RUN: GS-ACCEPT — CONDITIONAL PASS, 13 of 15 steps
 
-**Unblocked.** GS-COORD is merged and pushed, so the live acceptance can run against the
-shipped code. Boots a real `AIAgent` and tests the shipped behavior rather than the
-modules, per the standing rule that reachability proves code is live but only
-invariant-path tests prove the correct control is live on the correct operation.
+**Ran 2026-08-10 against merged master. 8 passed, 2 xfailed** (both xfails are recorded
+findings, not hidden failures). Unit gate unaffected: 303 passed, 1 skipped, 10
+deselected. Harness: `engines/hermes_kernel/tests/acceptance/test_gs_accept.py`.
+Report: `.torq/artifacts/03_verifier/gs_accept_r1.md`.
 
-Plan: `~/.claude/projects/E--TorqClaw/memory/gs-accept-live-acceptance.md`. Governed
-skills stay **default-off** (`TORQCLAW_GOVERNED_SKILLS`) until GS-ACCEPT passes and a
-soak follows.
+**Steps 7–8 and 12–13 — the ones no unit test substitutes for — PASS.** A real `AIAgent`
+boots, publication lands in the real resolved `external_dirs` path with the exact
+approved bytes, the skill appears in the **real rendered system prompt**
+(`build_skills_system_prompt()`, the function the model's turn consumes), and governed
+state survives a full restart because it is durable rather than memoised.
+
+> **F-1 — BLOCKING. Governed rollback does not exist end to end.**
+> `store.rollback()` moves governance to the prior digest but does **not** re-publish the
+> prior projection. Measured: governed-active is v1 while the rendered prompt still
+> carries the v2 body. The operator sees "rolled back"; the model keeps reading the
+> reverted content.
+>
+> And `store.rollback()` has **no production caller** — not `governed_skills`, not the
+> gateway, not the console. `governed_skills.py:328` calls the governed path
+> "rollback-capable". That is the [[unenforced-claim-pattern]] again: the capability
+> exists as a method and is reachable from no operator surface. Step 9 is not satisfiable
+> today.
+
+> **F-2 — minor.** An empty skill body publishes as a 0-byte `SKILL.md`; validation bounds
+> package size from above but has no lower bound. Pinned with `xfail(strict=True)` so
+> fixing it forces the gap to be closed deliberately.
+
+**Governed skills stay default-off.** F-1 means an operator cannot undo a bad skill
+through any shipped surface, and the failure is silent because governance reports success.
+That is a worse failure mode than the activation defects GS-COORD fixed.
+
+## ACTIVE (resume here): GS-ROLLBACK — proposed, not yet scoped
+
+Governed rollback routed through `ActivationCoordinator` with the same transactional
+guarantees as activation — publish the prior projection, invalidate, commit, verify —
+plus an operator surface that actually calls it. Scope it the way GS-COORD was scoped:
+G1R before build, G2A after, deletion probes for every control.
+
+Revised sequence: **GS-COORD ✅ → GS-ACCEPT ✅(conditional) → GS-ROLLBACK → re-run
+GS-ACCEPT → soak → default-on → C1 runtime → Phase 4.**
 
 ## SHIPPED: C0.1 - Authenticated Identity Transport
 
