@@ -2,17 +2,33 @@
 
 Single-file program state, updated only after meaningful progress with tests + independent verifier passing. Detailed history lives in `docs/prd-reviews/*` and the per-project memory index.
 
-_Last updated: 2026-08-09 (GS-COORD G2A-APPROVED round 3, committed locally, awaiting operator publication)._
+_Last updated: 2026-08-09 (GS-COORD merged and pushed; GS-ACCEPT is next)._
 
-## ACTIVE (resume here): GS-COORD — coordinated governed skill activation
+## SHIPPED: GS-COORD — coordinated governed skill activation
 
-**Status: G2A-APPROVED (round 3). COMMITTED LOCALLY as `eaa6632` on `gs-coord-work`.
-NOT pushed, NOT merged. Awaiting operator publication authorization.**
+**Status: G2A-APPROVED (round 3), MERGED (`c824bcd`, `--no-ff`) and PUSHED to
+`origin/master` on operator authorization 2026-08-09.** Merged tree verified at
+**303 passed / 1 skipped** with `pnpm reachability` PASS before the push.
 
-- Worktree `E:/TorqClaw-worktrees/gs-coord`, branch `gs-coord-work`, base `da688c0`.
-  10 modified + `test_activation_coordinator_wiring.py` (new, 917). Nothing outside
-  `engines/hermes_kernel/`; `vendor/` untouched; submodule pin identical to master.
-- Python suite in that worktree: **302 passed, 2 skipped** (master baseline 277/1).
+> **Pre-push deletion audit — a real hazard was caught.** `gs-coord-work` branched
+> from `da688c0`, which predates the docs commits on master. Merging it unrebased
+> would have **deleted 4,769 lines**, including `tests/reachability.test.ts` and the
+> collab gateway harness. Rebased first (`eaa6632` → `57a65d9`), after which the
+> merge deleted **zero files**: 11 touched (10 modified, 1 added), vendor and the
+> submodule pin untouched, 0 deletions versus `origin/master`.
+>
+> Three test functions showed as removed lines. They are the four re-specified
+> tests G1R cleared in round 1, **renamed to invert their assertions toward the
+> frozen ruling** (reconcile "recovers"/"resumes" → "discards"). The audit-capacity
+> guard was independently re-verified as still pinned by
+> `pytest.raises(SkillAuditCapacityError)`, and the replacement asserts strictly
+> more than the test it replaced. Rising test counts would have masked a genuine
+> loss here — check names, not totals.
+
+- 10 modified + `test_activation_coordinator_wiring.py` (new, 917). Nothing outside
+  `engines/hermes_kernel/`; `vendor/` and the submodule pin untouched.
+- Python suite: **303 passed, 1 skipped** on merged master (302/2 in the worktree,
+  where one environment-conditional test skips; master baseline was 277/1).
 - **Three adversarial rounds.** G1R round 1 REJECTED (3 blockers + 2 gaps beyond the nine
   original defects); G2A round 2 REJECTED (3 blockers); G2A round 3 **APPROVED**. Every
   verdict was reproduced independently by the orchestrator before routing onward — twice
@@ -36,16 +52,21 @@ NOT pushed, NOT merged. Awaiting operator publication authorization.**
   **`docs/HANDOFF-GS-COORD.md`** (committed `5963426`).
 - Harness state: `.torq/artifacts/status/harness_status.json`. Verdicts:
   `.torq/artifacts/03_verifier/g2a_gs_coord_r3.md` (+ r1, r2, and the G1D r2/r3 probes).
-- Sequence: **GS-COORD → GS-ACCEPT → soak → C1 runtime.** C1/C2 *design* may proceed in
+- Sequence: **GS-COORD ✅ → GS-ACCEPT → soak → C1 runtime.** C1/C2 *design* may proceed in
   parallel (PRD-004); the C1/C2 **runtime build remains unauthorized**.
-- `push_authorized` is **`false`**. G2A approval is not publication authority — merging to
-  `master` and pushing to `origin` each require explicit operator approval.
+- Standing rule, unchanged: G2A approval is verification authority, **not** publication
+  authority. Merging and pushing each require explicit operator approval.
 
-### Next: GS-ACCEPT — 15-step live acceptance
+## ACTIVE (resume here): GS-ACCEPT — 15-step live acceptance
 
-Unblocked once GS-COORD merges. Boots a real `AIAgent` and tests the shipped behavior
-rather than the modules, per the standing rule that reachability proves code is live but
-only invariant-path tests prove the correct control is live on the correct operation.
+**Unblocked.** GS-COORD is merged and pushed, so the live acceptance can run against the
+shipped code. Boots a real `AIAgent` and tests the shipped behavior rather than the
+modules, per the standing rule that reachability proves code is live but only
+invariant-path tests prove the correct control is live on the correct operation.
+
+Plan: `~/.claude/projects/E--TorqClaw/memory/gs-accept-live-acceptance.md`. Governed
+skills stay **default-off** (`TORQCLAW_GOVERNED_SKILLS`) until GS-ACCEPT passes and a
+soak follows.
 
 ## SHIPPED: C0.1 - Authenticated Identity Transport
 

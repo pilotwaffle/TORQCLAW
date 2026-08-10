@@ -1,16 +1,20 @@
 {
   "task": "GS-COORD",
   "title": "Coordinated governed skill activation",
-  "state": "awaiting_operator_publication",
-  "current_owner": "operator",
+  "state": "shipped",
+  "current_owner": null,
   "verdict": "APPROVED",
   "spec_verdict": "APPROVED",
   "send_back_to": null,
-  "push_authorized": false,
-  "commits_verified": ["eaa6632"],
+  "push_authorized": true,
+  "commits_verified": [
+    "57a65d9",
+    "c824bcd",
+    "75737e2"
+  ],
   "commit_branch": "gs-coord-work",
   "commit_worktree": "E:/TorqClaw-worktrees/gs-coord",
-  "merge_target": "master (currently 5963426)",
+  "merge_target": "master (merged; origin/master now c824bcd, was 5963426)",
   "revision_cycle": 3,
   "last_updated": "2026-08-09",
   "reports": {
@@ -20,7 +24,7 @@
     "g1d_r3": ".torq/artifacts/02_builder/g1d_verification_r3.md",
     "g2a_r3": ".torq/artifacts/03_verifier/g2a_gs_coord_r3.md"
   },
-  "tests": "302 passed, 2 skipped (round 2: 300/2; master baseline 277/1)",
+  "tests": "303 passed, 1 skipped on merged master (302/2 in worktree; baseline 277/1)",
   "notes": [
     "G2A round 3: APPROVED. All three round-2 blockers CLOSED, reproduced by G2A's own sabotages, matching G1D's independent probes exactly.",
     "Decisive measurement: reachability instrumentation on the distinct-error raise went 0 hits (round 2) -> 2 hits (round 3), with all three revert_activation calls returning reverted:True and non-None previous. Governance is genuinely moved and moved back.",
@@ -29,7 +33,12 @@
     "Suite re-verified at 302 passed / 2 skipped after the comment fix.",
     "G2A hunted for a fourth vacuous assertion on the assumption round 3 shipped one; found none. Three exception arms provably disjoint, no MRO shadowing.",
     "Scope clean: 10 modified + 1 new test file, all inside engines/hermes_kernel/. vendor/ untouched, submodule pin identical to master, no stray temp/bak/orig files, no SABOTAGE or if-False markers.",
-    "COMMITTED LOCALLY as eaa6632 on gs-coord-work. NOT pushed, NOT merged to master.",
-    "push_authorized stays FALSE. G2A never authorizes publication; the operator authorizes it separately. Merge to master and push to origin both require explicit operator approval."
-  ]
+    "HISTORICAL (superseded below): committed locally as eaa6632 on gs-coord-work, then rebased onto master as 57a65d9. G2A never authorizes publication; the operator authorized it separately.",
+    "MERGED (--no-ff c824bcd) and PUSHED to origin/master on explicit operator authorization 2026-08-09.",
+    "PRE-PUSH DELETION AUDIT: rebase onto master was REQUIRED first -- gs-coord-work branched from da688c0, and merging unrebased would have deleted 4,769 lines including tests/reachability.test.ts and the collab harness. After rebase: 0 files deleted, 11 touched (10 M + 1 A), vendor/submodule pin untouched, 0 deletions vs origin/master.",
+    "Three test functions appeared as removed lines: they are the four re-specified tests G1R cleared in round 1, renamed to invert assertions TOWARD the frozen ruling (reconcile 'recovers/resumes' -> 'discards'). Audit-capacity guard independently re-verified still pinned via pytest.raises(SkillAuditCapacityError), asserting strictly more than the old test.",
+    "Merged tree verified green (303/1) and pnpm reachability PASS before push."
+  ],
+  "merge_commit": "c824bcd",
+  "pushed_to": "origin/master @ c824bcd (2026-08-09)"
 }
