@@ -138,15 +138,35 @@ Default profile by task type: `DATA_EXTRACTION` and `SUMMARIZATION` →
 `read_only`; `ROUTINE_AUTOMATION` → `workspace_write`; `AUTONOMOUS_RESEARCH` →
 `browser_research`; `COMPLEX_CODING` → `terminal_power`.
 
-### Verified skills — not a usable feature yet
+### Verified skills — wired, gated, default off
 
 `engines/hermes_kernel/mcp_wrapper/verified_skill_store.py` implements atomic
-staging, digest-bound approval, activation, rollback, journal recovery, and
-Ed25519 origin trust bundles, and it is covered by tests. **It is not imported
-by the engine server and is not reachable at runtime.** Remote skill
-distribution — downloader, HTTPS bounds, pinned upgrades, revocation refresh,
-and gateway/engine integration — is not implemented. Treat this slice as
-verified library code awaiting integration, not as an installed-skill pipeline.
+staging, digest-bound approval, activation, rollback, and journal recovery. As
+of GS-COORD it **is** reachable at runtime: the live
+`skill_queue.decide()` → `governed_skills.install_approved_skill()` path drives
+it through `ActivationCoordinator`, under
+`LOCK → quiescence → publish → invalidate → commit → verify → unlock` with
+restore-before-unlock. Activation is transactional — on failure the prior
+projection is restored, the new digest is not active, the approval is not
+falsely consumed, and no retained journal can later complete it silently.
+
+It stays **off** unless `TORQCLAW_GOVERNED_SKILLS` is set. It remains off until
+a live acceptance run (GS-ACCEPT) boots a real agent against the shipped binary
+and a soak follows — unit and integration tests alone are not treated as
+sufficient evidence that a control is live.
+
+Skills reach the queue by operator paste and digest-bound review. **Remote skill
+distribution is not implemented**: no downloader, no HTTPS bounds, no pinned
+upgrades, no revocation refresh. `skill.json` accepts optional Ed25519 signature
+metadata and the store validates its *shape only* — it performs no cryptographic
+verification, and signatures are not required.
+
+Ed25519 origin trust bundles live in `packages/gateway/src/skillTrust.ts`. That
+module is **dormant by declaration** — 662 lines with no consumer until remote
+sources exist, recorded in `ops/reachability.mjs` and enforced by
+`pnpm reachability`, which fails CI on any substantial module that is neither
+reachable nor explicitly declared. Nothing in TORQCLAW verifies a skill
+signature today.
 
 Two further caveats recorded with the checkpoint: Phase-1 failover evidence
 rests on a deterministic loopback/fake-provider fixture rather than a live
