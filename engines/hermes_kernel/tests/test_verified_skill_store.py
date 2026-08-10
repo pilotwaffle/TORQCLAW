@@ -174,7 +174,23 @@ def test_rollback_requires_exact_previously_installed_digest(tmp_path: Path):
         store.rollback("rollback", "0" * 64)
 
 
-def test_reconcile_recovers_after_version_install_before_state_commit(tmp_path: Path):
+def test_reconcile_discards_a_journal_whose_save_state_never_landed(tmp_path: Path):
+    """RE-SPECIFIED (GS-COORD): this used to assert that reconcile()
+    COMPLETED the activation after a crash inside ``_save_state`` (the
+    governed commit itself never ran -- ``_save_state`` was monkeypatched to
+    raise unconditionally, so state.json was never durably written). That
+    was defect GS-COORD #5: ``_reconcile_transaction`` never read
+    ``tx['phase']`` and unconditionally finished any retained journal,
+    meaning merely CONSTRUCTING the store completed a mutation the original
+    caller's ``activate()`` call had already reported as a failure via the
+    raised ``RuntimeError``.
+
+    Under the phase-aware protocol, the journal was written in phase
+    ``committing`` immediately before the (raising) ``_save_state`` call, so
+    ``active`` still matches the tx's recorded ``previous`` (None here) and
+    the approval is still unconsumed -- recovery must discard, not complete.
+    The skill must stay inactive and the approval must remain usable for an
+    explicit retry."""
     store = VerifiedSkillStore(tmp_path / "store")
     staged = store.stage(write_package(tmp_path, skill_id="recover"))
     approval = store.approve(staged, confirm_permission_delta=True)
@@ -187,11 +203,27 @@ def test_reconcile_recovers_after_version_install_before_state_commit(tmp_path: 
         store.activate(staged, approval)
 
     recovered = VerifiedSkillStore(tmp_path / "store")
-    assert recovered.get_active("recover")["digest"] == staged["digest"]
+    assert recovered.get_active("recover") is None
     assert list((tmp_path / "store" / "transactions").glob("*.json")) == []
 
+    # The approval survives discard and a real retry succeeds through the
+    # normal path -- proving discard did not corrupt or consume it. `store`
+    # (not `recovered`) still carries the crashing `_save_state` instance
+    # override, so retry against the freshly constructed `recovered` handle,
+    # which has the real method.
+    recovered.activate(staged, approval)
+    assert recovered.get_active("recover")["digest"] == staged["digest"]
 
-def test_reconcile_resumes_when_install_copy_interrupted(tmp_path: Path, monkeypatch):
+
+def test_reconcile_discards_a_journal_interrupted_during_install_copy(tmp_path: Path, monkeypatch):
+    """RE-SPECIFIED (GS-COORD): this used to assert reconcile() RESUMED and
+    completed an activation interrupted mid-``_install_version`` (phase
+    ``prepared`` -- no governed commit was ever attempted, since the crash
+    happens before the code even reaches the state-mutation block). Per the
+    ticket's frozen protocol, a `prepared`-phase journal represents nothing
+    committed and recovery must DISCARD it unconditionally, never resume or
+    replay it. See ``test_reconcile_discards_a_journal_whose_save_state_never_landed``
+    for why blind replay at constructor time is itself a hazard."""
     store = VerifiedSkillStore(tmp_path / "store")
     staged = store.stage(write_package(tmp_path, skill_id="recover-copy"))
     approval = store.approve(staged, confirm_permission_delta=True)
@@ -209,8 +241,45 @@ def test_reconcile_resumes_when_install_copy_interrupted(tmp_path: Path, monkeyp
     monkeypatch.setattr(store, "_install_version", original_install)
 
     recovered = VerifiedSkillStore(tmp_path / "store")
-    assert recovered.get_active("recover-copy")["digest"] == staged["digest"]
+    assert recovered.get_active("recover-copy") is None
+    assert list((tmp_path / "store" / "transactions").glob("*.json")) == []
+    # The interrupted partial install directory is orphaned harmlessly (it
+    # was never a candidate for governed state); reconcile()'s existing
+    # `.install-*` sweep (independent of journal phase handling) still
+    # cleans it up.
     assert not list((tmp_path / "store" / "versions" / "recover-copy").glob(".install-*"))
+
+    # Approval remains usable for an explicit retry.
+    recovered.activate(staged, approval)
+    assert recovered.get_active("recover-copy")["digest"] == staged["digest"]
+
+
+def test_activate_abort_during_prepared_phase_deletes_journal_immediately(
+    tmp_path: Path, monkeypatch
+):
+    """GS-COORD round 2 (non-blocking cleanup): 'abort deletes the journal'
+    per the frozen ruling -- a synchronous failure while the journal is still
+    in phase 'prepared' (nothing durable happened yet) must delete the
+    journal file immediately, in the SAME activate() call that raised, not
+    merely leave it for a future reconcile() to clean up. This is distinct
+    from test_reconcile_discards_a_journal_interrupted_during_install_copy,
+    which only proves the eventual state after a fresh store construction;
+    this test asserts the journal is gone WITHOUT ever constructing a second
+    store."""
+    store = VerifiedSkillStore(tmp_path / "store")
+    staged = store.stage(write_package(tmp_path, skill_id="immediate-abort"))
+    approval = store.approve(staged, confirm_permission_delta=True)
+
+    def crash_install(artifact, target):
+        raise RuntimeError("simulated prepared-phase abort")
+
+    monkeypatch.setattr(store, "_install_version", crash_install)
+    with pytest.raises(RuntimeError):
+        store.activate(staged, approval)
+
+    # No fresh VerifiedSkillStore construction here -- the SAME store handle
+    # that raised must have already deleted its own journal.
+    assert list((tmp_path / "store" / "transactions").glob("*.json")) == []
 
 
 def test_reconcile_recovers_after_state_commit_before_journal_cleanup(tmp_path: Path, monkeypatch):
@@ -401,11 +470,32 @@ def test_audit_capacity_blocks_activation_and_disable_and_rollback(tmp_path: Pat
     assert store.get_active("capacity-ops") == active_before
 
 
-def test_audit_capacity_guard_is_not_bypassed_by_recovery(tmp_path: Path, monkeypatch):
-    """Operator condition 7: the recovery path (``recovered`` audit action,
-    reached via reconcile()) must not bypass the capacity guard, and must
-    not silently launder the capacity error into a reconcile() warning
-    while leaving the in-progress transaction's state mutations persisted."""
+def test_recovery_of_a_never_committed_transaction_discards_and_does_not_touch_audit(
+    tmp_path: Path, monkeypatch
+):
+    """RE-SPECIFIED (GS-COORD): under the phase-aware journal protocol,
+    ``_reconcile_transaction`` never itself performs a governed mutation --
+    it only CONFIRMS an already-landed commit or DISCARDS one that never
+    landed (see ``activate()``/``_reconcile_transaction`` docstrings). A
+    journal whose ``_save_state`` call raised (so state.json was never
+    written) is, by construction, indistinguishable from one that crashed
+    before ``_save_state`` was ever entered: both leave ``active`` matching
+    the journal's recorded ``previous`` value and the approval unconsumed.
+    Recovery must discard such a journal outright rather than replay the
+    mutation -- replaying at constructor time would mean an operator's
+    ``VerifiedSkillStore(...)`` call could non-deterministically fail (e.g.
+    on audit capacity, exactly the old defect this test used to pin) for a
+    mutation the caller never asked to retry.
+
+    The old version of this test asserted the OPPOSITE: that reconcile()
+    replayed the mutation and could hit the audit-capacity guard during
+    recovery. That was exactly defect GS-COORD #5/#6 (``_reconcile_transaction``
+    unconditionally completing any retained journal regardless of whether it
+    had ever reached ``_save_state``). The re-specified behaviour below is
+    the correct one: recovery is inert on an unlanded journal, and a retry
+    goes through the normal ``activate()`` path (which still enforces the
+    capacity guard exactly as it always did -- proven at the end of this
+    test)."""
 
     store = VerifiedSkillStore(tmp_path / "store")
     staged = store.stage(write_package(tmp_path, skill_id="capacity-recover"))
@@ -419,22 +509,27 @@ def test_audit_capacity_guard_is_not_bypassed_by_recovery(tmp_path: Path, monkey
         store.activate(staged, approval)
     monkeypatch.undo()
 
-    # The activation is now only durable as a pending transaction journal;
-    # saturate the audit log so the eventual recovery-time _append_audit
-    # ("recovered") call hits capacity.
+    # The activation is now only durable as a `committing`-phase transaction
+    # journal that never reached _save_state. Saturate the audit log to
+    # prove recovery does NOT attempt (and therefore cannot fail on) any
+    # audit append of its own.
     _fill_audit_to_capacity(store)
     assert list((tmp_path / "store" / "transactions").glob("*.json"))
 
-    with pytest.raises(SkillAuditCapacityError):
-        VerifiedSkillStore(tmp_path / "store")
-
-    # The journal must still be present (not consumed by a swallowed error)
-    # and the skill must still not be active, because reconcile() must not
-    # have reached its final _save_state with the partially-applied mutation.
-    assert list((tmp_path / "store" / "transactions").glob("*.json"))
+    # Construction must succeed: recovery discards the unlanded journal
+    # instead of replaying it.
+    recovered_store = VerifiedSkillStore(tmp_path / "store")
+    assert list((tmp_path / "store" / "transactions").glob("*.json")) == []
     state_on_disk = json.loads((tmp_path / "store" / "state.json").read_text(encoding="utf-8"))
     assert "capacity-recover" not in state_on_disk["active"]
-    assert len(state_on_disk["audit"]) == MAX_AUDIT_ENTRIES
+    assert len(state_on_disk["audit"]) == MAX_AUDIT_ENTRIES  # untouched by recovery
+
+    # The approval must remain usable for an explicit retry -- discard must
+    # not have consumed it. That explicit retry still hits the ordinary
+    # capacity guard, proving the guard was never bypassed, merely not
+    # invoked *during recovery itself*.
+    with pytest.raises(SkillAuditCapacityError):
+        recovered_store.activate(staged, approval)
 
 
 def test_sabotage_regression_del_truncation_reintroduces_silent_history_loss(tmp_path: Path):

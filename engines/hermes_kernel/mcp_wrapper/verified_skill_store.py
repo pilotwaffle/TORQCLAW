@@ -230,7 +230,25 @@ class VerifiedSkillStore:
         *,
         active_profile: str | None = None,
     ) -> dict[str, Any]:
-        """Install a staged package and atomically make its digest active."""
+        """Install a staged package and atomically make its digest active.
+
+        Journal protocol (phase markers are written BEFORE the action they
+        guard -- an intent log, not a completion log):
+
+          ``prepared``   -- written before any disk mutation. Nothing
+                             committed yet; a crash here (or during
+                             ``_install_version``) is recovered by DISCARDING
+                             the journal -- see ``_reconcile_transaction``.
+          ``committing`` -- written immediately BEFORE ``_save_state``. A
+                             crash here is ambiguous from the journal alone:
+                             ``_save_state`` may or may not have landed.
+                             Recovery inspects ``state.json`` itself rather
+                             than blindly replaying or blindly discarding.
+
+        The journal is deleted only after ``_save_state`` returns and the tx
+        file itself is removed -- that deletion is the durable "done" signal,
+        not any phase value.
+        """
 
         with self._lock:
             state = self._load_state()
@@ -261,9 +279,11 @@ class VerifiedSkillStore:
             tx_path = self.transactions_dir / f"{tx_id}.json"
             _atomic_write_json(tx_path, tx)
             try:
+                # `prepared`: nothing on disk has changed yet beyond the
+                # journal itself. A crash anywhere before the `committing`
+                # write below (including mid-`_install_version`) must be
+                # discarded on recovery, never replayed.
                 self._install_version(artifact, target_dir)
-                tx["phase"] = "version_installed"
-                _atomic_write_json(tx_path, tx)
 
                 state = self._load_state()
                 self._check_approval(state, artifact, approval)
@@ -275,12 +295,28 @@ class VerifiedSkillStore:
                 }
                 state["approvals"][approval["token"]]["consumed"] = True
                 self._append_audit(state, "activated", artifact)
-                self._save_state(state)
-                tx["phase"] = "state_committed"
+
+                # `committing`: written BEFORE _save_state, per the intent-log
+                # protocol. A crash between this write and _save_state
+                # returning is exactly the ambiguous window recovery must
+                # resolve by inspecting state.json, never by replaying blind.
+                tx["phase"] = "committing"
                 _atomic_write_json(tx_path, tx)
+                self._save_state(state)
             except Exception:
-                # The journal is intentionally retained for constructor-time
-                # reconciliation.  Do not remove a possibly recoverable write.
+                # Abort DELETES the journal -- but ONLY while `tx["phase"]`
+                # (mutated in place above) is still `"prepared"`: nothing
+                # durable happened yet (the "prepared" contract -- see the
+                # comment above), so this is an unambiguous synchronous
+                # failure, not the crash-window `reconcile()` exists for.
+                # Once `tx["phase"]` has been flipped to `"committing"`, the
+                # exception can only have come from `_save_state` itself, and
+                # whether that write actually landed on disk before raising
+                # is exactly the ambiguity `reconcile()`'s `state.json`
+                # inspection resolves -- the journal MUST be retained for
+                # that, never deleted here on a guess.
+                if tx["phase"] == "prepared":
+                    _remove_file_if_safe(tx_path, self.transactions_dir)
                 raise
 
             _remove_file_if_safe(tx_path, self.transactions_dir)
@@ -291,6 +327,104 @@ class VerifiedSkillStore:
                 "digest": digest,
                 "enabled": True,
             }
+
+    def revert_activation(
+        self, skill_id: str, digest: str, approval_token: str, previous: Mapping[str, Any] | None
+    ) -> dict[str, Any]:
+        """Undo exactly what a single prior ``activate()`` call committed,
+        using the ``previous`` active-state snapshot ``activate()`` itself
+        captured before it ran.
+
+        GS-COORD: this exists because ``ActivationCoordinator``'s ``verify``
+        step runs AFTER ``commit()`` (per the ticket's frozen ordering:
+        "governed commit -> verify governed AND published state"). If
+        ``verify`` fails, the coordinator's ``restore`` callback must be able
+        to undo BOTH the external projection (``skill_publisher``'s restore)
+        AND this store's governed commit -- otherwise a verify failure would
+        leave governance claiming the NEW digest while the published bytes
+        were restored to the OLD version, exactly the governed/published
+        mismatch this whole ticket exists to eliminate.
+
+        Unlike ``rollback()`` (which activates a *different*, previously
+        installed digest and is a general-purpose operator operation), this
+        method exists ONLY to undo a specific, identified ``activate()``
+        call: it requires the exact ``digest`` and ``approval_token`` that
+        call used, and the exact ``previous`` value it captured, so it
+        cannot be misused to jump to an arbitrary state. It does not delete
+        the installed ``versions/<skill_id>/<digest>`` directory (that
+        directory is immutable, content-addressed, and orphaning it is
+        harmless -- exactly the same reasoning ``_reconcile_transaction``
+        applies to a discarded `prepared` journal).
+
+        Restores ``state["active"][skill_id]`` to exactly ``previous``
+        (deleting the key entirely if ``previous`` is ``None``, i.e. this
+        was a first-time activation with nothing active before it), and
+        un-consumes the approval so an operator retry can reuse it. Uses the
+        same journaled, atomic ``_save_state`` protocol as ``activate()`` so
+        an interruption mid-revert is recoverable identically.
+
+        No-ops (returns without error) if the active state no longer shows
+        this exact digest for this skill -- e.g. because a later, unrelated
+        mutation already superseded it, or a previous revert attempt already
+        completed. This makes the operation safe to retry.
+        """
+        _validate_id(skill_id)
+        digest = _normalize_digest(digest)
+        with self._lock:
+            state = self._load_state()
+            current = state["active"].get(skill_id)
+            if current is None or current.get("digest") != digest:
+                # Already not showing this digest as active -- nothing to
+                # revert (either a prior revert already ran, or an unrelated
+                # mutation already moved active state elsewhere).
+                return {"ok": True, "skillId": skill_id, "reverted": False}
+
+            tx_id = uuid.uuid4().hex
+            tx_path = self.transactions_dir / f"{tx_id}.json"
+            tx = {
+                "schemaVersion": 1,
+                "txId": tx_id,
+                "kind": "revert_activation",
+                "skillId": skill_id,
+                "digest": digest,
+                "approvalToken": approval_token,
+                "previous": previous,
+                "phase": "prepared",
+            }
+            _atomic_write_json(tx_path, tx)
+            try:
+                if previous is None:
+                    del state["active"][skill_id]
+                else:
+                    state["active"][skill_id] = dict(previous)
+                stored_approval = state.get("approvals", {}).get(approval_token)
+                if isinstance(stored_approval, dict):
+                    stored_approval["consumed"] = False
+                audit = state.setdefault("audit", [])
+                if isinstance(audit, list) and len(audit) < MAX_AUDIT_ENTRIES:
+                    audit.append({
+                        "action": "activation_reverted",
+                        "skillId": skill_id,
+                        "digest": digest,
+                        "at": time.time_ns(),
+                    })
+                # `committing`: written BEFORE _save_state, matching
+                # activate()'s protocol exactly.
+                tx["phase"] = "committing"
+                _atomic_write_json(tx_path, tx)
+                self._save_state(state)
+            except Exception:
+                # Abort DELETES the journal -- see activate()'s matching
+                # except-block comment for the full rationale. Only safe
+                # while still `"prepared"`: nothing durable happened yet.
+                # Once flipped to `"committing"`, whether `_save_state`
+                # actually landed is exactly the ambiguity `reconcile()`'s
+                # `state.json` inspection exists to resolve.
+                if tx["phase"] == "prepared":
+                    _remove_file_if_safe(tx_path, self.transactions_dir)
+                raise
+            _remove_file_if_safe(tx_path, self.transactions_dir)
+            return {"ok": True, "skillId": skill_id, "reverted": True}
 
     def disable(self, skill_id: str) -> dict[str, Any]:
         """Disable activation without deleting the installed digest history."""
@@ -357,6 +491,8 @@ class VerifiedSkillStore:
             }
             _atomic_write_json(tx_path, tx)
             try:
+                # `prepared`: nothing on disk has changed yet. A crash before
+                # the `committing` write below must be discarded on recovery.
                 _read_package(target_dir, self.root, expected_id=skill_id, expected_digest=digest)
                 state = self._load_state()
                 state["active"][skill_id] = {
@@ -368,10 +504,21 @@ class VerifiedSkillStore:
                     self._check_approval(state, artifact, approval)
                     state["approvals"][approval["token"]]["consumed"] = True
                 self._append_audit(state, "rolled_back", artifact)
-                self._save_state(state)
-                tx["phase"] = "state_committed"
+
+                # `committing`: written BEFORE _save_state -- see activate()'s
+                # docstring for the full protocol rationale.
+                tx["phase"] = "committing"
                 _atomic_write_json(tx_path, tx)
+                self._save_state(state)
             except Exception:
+                # Abort DELETES the journal -- see activate()'s matching
+                # except-block comment for the full rationale. Only safe
+                # while still `"prepared"`: nothing durable happened yet.
+                # Once flipped to `"committing"`, whether `_save_state`
+                # actually landed is exactly the ambiguity `reconcile()`'s
+                # `state.json` inspection exists to resolve.
+                if tx["phase"] == "prepared":
+                    _remove_file_if_safe(tx_path, self.transactions_dir)
                 raise
             _remove_file_if_safe(tx_path, self.transactions_dir)
             return {"ok": True, "skillId": skill_id, "digest": digest, "enabled": True}
@@ -482,46 +629,132 @@ class VerifiedSkillStore:
             return report
 
     def _reconcile_transaction(self, state: dict[str, Any], tx: Mapping[str, Any]) -> bool:
+        """Recover (or discard) one retained transaction journal.
+
+        This is the phase-aware recovery contract: the phase marker in ``tx``
+        is an INTENT log, not a completion log (see ``activate()``'s
+        docstring). A retained journal in phase ``prepared`` means nothing
+        was ever committed to ``state.json`` -- recovery DISCARDS it
+        unconditionally, regardless of whether ``_install_version`` happened
+        to finish (that directory write is independently atomic and content
+        addressed, so an orphaned install is harmless and never replayed
+        into governed state).
+
+        A journal in phase ``committing`` is the genuinely ambiguous crash
+        window: ``_save_state`` may or may not have landed before the
+        process died. Recovery NEVER blindly replays or blindly discards --
+        it inspects ``state.json`` itself:
+
+          - active digest already equals this tx's digest AND the approval
+            is already consumed -> the commit landed; nothing to do but drop
+            the journal.
+          - active still shows the tx's recorded ``previous`` value AND the
+            approval is still unconsumed -> the commit never landed; discard
+            the journal and leave the approval reusable for a retry.
+          - anything else (partial: only one of the two moved, or the
+            recorded ``previous`` no longer matches) -> the on-disk state is
+            in a shape this journal cannot explain; raise SkillRecoveryError
+            rather than guess.
+
+        Any phase value other than ``prepared``/``committing`` (e.g. a
+        journal from a future schema, or one that reached the legacy
+        ``version_installed``/``state_committed`` markers a prior build used)
+        is likewise inspected via the ``committing`` rule rather than
+        assumed -- committed-or-not is always decided from ``state.json``,
+        never from an unrecognised phase string alone, EXCEPT ``prepared``
+        which is unambiguous (no _save_state attempt could have begun yet).
+
+        Returns True if governed state was already correctly committed
+        (whether by this call finding it already landed, or -- there is no
+        other case: this method never itself calls ``_save_state`` anymore),
+        False if the journal was discarded as never-committed.
+        """
         skill_id = tx.get("skillId")
         digest = tx.get("digest")
         if not isinstance(skill_id, str) or not isinstance(digest, str):
             raise SkillRecoveryError("transaction identity is malformed")
         _validate_id(skill_id)
         _validate_digest(digest)
-        artifact_path = self.versions_dir / skill_id / digest
-        _ensure_contained(self.versions_dir, artifact_path)
         token = tx.get("approvalToken")
-        if tx.get("kind") == "activate":
-            stored_approval = state.get("approvals", {}).get(token)
-            if not isinstance(stored_approval, Mapping):
-                raise SkillRecoveryError("activation journal has no matching approval")
-            if stored_approval.get("skillId") != skill_id or stored_approval.get("digest") != digest:
-                raise SkillRecoveryError("activation journal approval binding mismatch")
-        if not artifact_path.exists():
-            stage_id = tx.get("stageId")
-            stage_path = self.staging_dir / stage_id if isinstance(stage_id, str) else None
-            if stage_path is None or not stage_path.exists():
+        phase = tx.get("phase")
+        kind = tx.get("kind")
+
+        if phase == "prepared":
+            # Nothing was ever committed to state.json. Discard: the journal
+            # is simply removed by the caller (reconcile()); no state
+            # mutation happens here. An approval bound to this tx, if any,
+            # remains exactly as it was (untouched, so still consumable if
+            # it was never marked consumed by a *different*, successful
+            # attempt).
+            return False
+
+        # phase is "committing" (or an unrecognised/legacy value) -- inspect
+        # state.json rather than assume either outcome. `revert_activation`
+        # moves state in the OPPOSITE direction of `activate`/`rollback`
+        # (FROM `digest` back TO `previous`, un-consuming the approval
+        # rather than consuming it), so its landed/did-not-land shapes are
+        # each other's mirror image and must be checked separately.
+        current_active = state["active"].get(skill_id)
+        approval_entry = state.get("approvals", {}).get(token) if isinstance(token, str) else None
+        previous = tx.get("previous")
+
+        if kind == "revert_activation":
+            reverted_landed = bool(current_active == previous) and (
+                approval_entry is None or approval_entry.get("consumed") is not True
+            )
+            if reverted_landed:
+                return True
+            revert_did_not_land = bool(
+                current_active is not None
+                and current_active.get("digest") == digest
+                and (approval_entry is None or approval_entry.get("consumed") is True)
+            )
+            if revert_did_not_land:
+                # The revert never reached state.json -- state.json still
+                # shows the digest the revert was trying to undo. Discard
+                # this journal; the caller (ActivationCoordinator, still
+                # holding its lock at the time this could occur) is
+                # responsible for retrying the revert, not this reconciler.
                 return False
-            artifact = _read_package(stage_path, self.root, expected_id=skill_id, expected_digest=digest)
-            self._install_version(artifact, artifact_path)
-        artifact = _read_package(artifact_path, self.root, expected_id=skill_id, expected_digest=digest)
-        if tx.get("kind") == "activate":
-            stored_approval = state["approvals"][tx["approvalToken"]]
-            if stored_approval.get("permissions") != list(artifact["manifest"]["requiredCapabilities"]):
-                raise SkillRecoveryError("activation journal permission binding mismatch")
-            if stored_approval.get("consumed") and state["active"].get(skill_id, {}).get("digest") != digest:
-                raise SkillRecoveryError("consumed approval is not reflected in active state")
-        state["installed"].setdefault(skill_id, {})[digest] = _installed_record(artifact)
-        state["active"][skill_id] = {
-            "digest": digest,
-            "enabled": True,
-            "permissions": list(artifact["manifest"]["requiredCapabilities"]),
-        }
-        if isinstance(token, str) and token in state["approvals"]:
-            state["approvals"][token]["consumed"] = True
-        self._append_audit(state, "recovered", artifact)
-        self._save_state(state)
-        return True
+            raise SkillRecoveryError(
+                f"revert transaction {tx.get('txId')!r} for {skill_id!r} is "
+                "in an unrecoverable partial state: state.json neither "
+                "matches the reverted shape nor the pre-revert shape this "
+                "journal recorded. Refusing to guess."
+            )
+
+        landed = bool(
+            current_active is not None
+            and current_active.get("digest") == digest
+            and (approval_entry is None or approval_entry.get("consumed") is True)
+        )
+        if landed:
+            # The commit already reached state.json (the crash happened
+            # between _save_state returning and the journal file being
+            # removed). Validate the installed artifact is actually present
+            # and intact before declaring victory -- a landed governed claim
+            # backed by missing/corrupt bytes is a recovery error, not a
+            # silent success.
+            artifact_path = self.versions_dir / skill_id / digest
+            _ensure_contained(self.versions_dir, artifact_path)
+            _read_package(artifact_path, self.root, expected_id=skill_id, expected_digest=digest)
+            return True
+
+        did_not_land = bool(
+            current_active == previous
+            and (approval_entry is None or approval_entry.get("consumed") is not True)
+        )
+        if did_not_land:
+            # The commit never reached state.json. Discard exactly like a
+            # `prepared` journal: no state mutation, approval stays usable.
+            return False
+
+        raise SkillRecoveryError(
+            f"transaction {tx.get('txId')!r} for {skill_id!r} is in an "
+            "unrecoverable partial state: state.json neither matches the "
+            "committed shape nor the pre-transaction shape this journal "
+            "recorded. Refusing to guess."
+        )
 
     def _install_version(self, artifact: Mapping[str, Any], target_dir: Path) -> None:
         _reject_reparse_components(self.versions_dir)

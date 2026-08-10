@@ -135,9 +135,12 @@ __all__ = [
     "SkillPublicationIntegrityError",
     "PROVENANCE_FILENAME",
     "published_skills_dir",
+    "published_skills_retained_root",
     "publish_skill",
     "unpublish_skill",
     "is_published",
+    "discard_retained_projection",
+    "restore_retained_projection",
 ]
 
 
@@ -205,6 +208,23 @@ def published_skills_dir() -> Path:
     """
     data_dir = Path(os.environ.get("TORQCLAW_DATA_DIR") or Path.home() / ".torqclaw")
     return data_dir / "published_skills"
+
+
+def published_skills_retained_root() -> Path:
+    """The TORQCLAW-owned directory an :class:`ActivationCoordinator` retains
+    a replaced skill projection under during a transaction (GS-COORD).
+
+    A SIBLING of :func:`published_skills_dir`, never a child of it and never
+    a dotfile sibling INSIDE it -- see ``publish_skill``'s
+    ``retain_replaced_into`` docstring for why a retained projection must
+    live entirely outside any directory the real Hermes loader scans. Same
+    volume as ``published_skills_dir()`` (both derive from the same
+    ``TORQCLAW_DATA_DIR``), so moving a projection in or out is always one
+    ``os.replace``, matching the existing ``dir=_data_dir()`` precedent in
+    ``governed_skills.py``.
+    """
+    data_dir = Path(os.environ.get("TORQCLAW_DATA_DIR") or Path.home() / ".torqclaw")
+    return data_dir / "published_skills_retained"
 
 
 def _invalidate_upstream_external_dirs_cache() -> None:
@@ -403,6 +423,7 @@ def publish_skill(
     *,
     digest: str,
     source: str = "verified_skill_store",
+    retain_replaced_into: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
     """Publish an installed single-file skill package into TORQCLAW's
     external skills directory, verified loadable by the REAL Hermes loader.
@@ -432,6 +453,29 @@ def publish_skill(
        ``DESCRIPTION.md``).
     6. Re-read the published bytes and verify the digest again post-write.
 
+    ``retain_replaced_into`` (GS-COORD): by default (``None``), any prior
+    published version of this exact ``skill_id`` is retired to a
+    ``.torqclaw-doomed-*`` name and deleted immediately on success -- the
+    original P2-1a behaviour, preserved byte-for-byte for every caller that
+    does not pass this argument. Passing a directory instead moves the
+    retired prior version (if any existed) into
+    ``<retain_replaced_into>/<uuid>/`` -- OUTSIDE the loadable
+    ``published_skills`` tree entirely, never merely renamed in place --
+    and returns its path as ``result["retainedPath"]`` (``None`` if there
+    was nothing to retain, i.e. a first-time publish). This exists because a
+    ``.torqclaw-doomed-*`` directory left inside ``published_skills`` IS
+    still scanned by the real Hermes loader (``EXCLUDED_SKILL_DIRS`` is a
+    fixed-name frozenset with no dot-prefix rule -- see
+    ``agent/skill_utils.py``): a coordinator that needs to actually restore
+    the exact prior version on a later failure cannot leave it (even
+    temporarily) anywhere under a member of ``get_all_skills_dirs()``, or a
+    concurrent loader scan mid-transaction could observe it and, because
+    ``.`` sorts before alphanumerics in the sorted-match order
+    ``iter_skill_index_files`` yields, has it silently WIN over the new
+    version via prompt_builder's first-wins dedup. The caller is responsible
+    for actually deleting a no-longer-needed retained directory once it is
+    sure it will never restore it (see ``discard_retained_projection``).
+
     Returns a dict describing what was published. Raises a typed
     :class:`SkillPublicationError` subclass on any failure, with nothing
     left behind on disk beyond what existed before the call.
@@ -447,8 +491,15 @@ def publish_skill(
     target_root = _resolve_and_verify_external_dir(published_skills_dir())
     final_dir = target_root / skill_id
 
+    retain_root: Path | None = None
+    if retain_replaced_into is not None:
+        retain_root = Path(retain_replaced_into)
+        _assert_retention_root_outside_loadable_tree(retain_root)
+        retain_root.mkdir(parents=True, exist_ok=True)
+
     temp_dir = target_root / f".torqclaw-publish-{uuid.uuid4().hex}"
     temp_dir.mkdir()
+    retained_path: Path | None = None
     try:
         _write_bytes_exclusive(temp_dir / "skill.json", source_artifact["manifest_bytes"])
         _write_bytes_exclusive(temp_dir / "SKILL.md", source_artifact["skill_bytes"])
@@ -485,7 +536,18 @@ def publish_skill(
                 os.replace(doomed_dir, final_dir)
             raise
         if doomed_dir is not None:
-            _remove_tree(doomed_dir)
+            if retain_root is not None:
+                # Move OUT of the loadable tree entirely -- never leave it
+                # renamed in place, even under a dot-prefixed name, because
+                # the real loader does not honour dot-prefix exclusion (see
+                # docstring above). One os.replace, same-volume-safe because
+                # the caller is expected to pass a sibling under the same
+                # TORQCLAW_DATA_DIR (mirroring governed_skills.py's existing
+                # `dir=_data_dir()` precedent for tempfile placement).
+                retained_path = retain_root / uuid.uuid4().hex
+                os.replace(doomed_dir, retained_path)
+            else:
+                _remove_tree(doomed_dir)
     except Exception:
         _remove_tree(temp_dir)
         raise
@@ -498,7 +560,124 @@ def publish_skill(
         "digest": digest,
         "path": str(final_dir),
         "externalDir": str(target_root),
+        "retainedPath": str(retained_path) if retained_path is not None else None,
     }
+
+
+def _assert_retention_root_outside_loadable_tree(retain_root: Path) -> None:
+    """Fail closed if ``retain_root`` resolves to, or sits under, any member
+    of the REAL upstream ``get_all_skills_dirs()`` result.
+
+    This is the inverse of :func:`_resolve_and_verify_external_dir`'s
+    membership check: that function proves a publish target IS loadable;
+    this one proves a retention target is NOT. Both matter for the same
+    reason -- a directory the real Hermes loader can scan must never
+    silently hold a stale governed skill (see the module docstring's "cache
+    trap" section and ``skill_publisher.py``'s ``retain_replaced_into``
+    docstring for the concrete mechanism: dot-prefixed dirs are NOT excluded
+    by ``EXCLUDED_SKILL_DIRS`` and can win a first-wins dedup against the
+    real skill).
+    """
+    resolved_retain = retain_root.resolve() if retain_root.exists() else Path(os.path.abspath(retain_root))
+
+    try:
+        from agent.skill_utils import get_all_skills_dirs  # type: ignore
+    except Exception as exc:
+        raise SkillNotExternallyLoadableError(
+            "could not import agent.skill_utils.get_all_skills_dirs from the "
+            "vendored Hermes agent; refusing to use a retention root without "
+            "proof it is NOT inside a loadable skills directory"
+        ) from exc
+
+    try:
+        loadable_dirs = get_all_skills_dirs()
+    except Exception as exc:
+        raise SkillNotExternallyLoadableError(
+            "agent.skill_utils.get_all_skills_dirs raised; refusing to use a "
+            "retention root without proof it is NOT inside a loadable "
+            "skills directory"
+        ) from exc
+
+    for entry in loadable_dirs:
+        try:
+            resolved_member = Path(entry).resolve()
+        except OSError:
+            continue
+        if resolved_retain == resolved_member:
+            raise SkillPublicationError(
+                f"retention root {resolved_retain} IS a loadable skills "
+                "directory; refusing to retain a replaced skill projection "
+                "there -- it would remain scanned by the real Hermes loader"
+            )
+        try:
+            resolved_retain.relative_to(resolved_member)
+        except ValueError:
+            continue
+        raise SkillPublicationError(
+            f"retention root {resolved_retain} is INSIDE the loadable "
+            f"skills directory {resolved_member}; refusing -- a retained "
+            "projection must be a sibling of published_skills, never a "
+            "child of it or of any other loadable directory"
+        )
+
+
+def discard_retained_projection(retained_path: str | os.PathLike[str] | None) -> None:
+    """Permanently delete a retained projection produced by
+    ``publish_skill(..., retain_replaced_into=...)``. Idempotent: a ``None``
+    or already-missing path is a successful no-op, so a coordinator's
+    "finalize" step can call this unconditionally after a verified success.
+    """
+    if retained_path is None:
+        return
+    _remove_tree(Path(retained_path))
+
+
+def restore_retained_projection(
+    *, skill_id: str, retained_path: str | os.PathLike[str] | None
+) -> dict[str, Any]:
+    """Restore a retained prior projection back into ``published_skills`` as
+    the current published version of ``skill_id``, undoing exactly what the
+    ``retain_replaced_into`` branch of ``publish_skill`` moved out.
+
+    If ``retained_path`` is ``None`` (the publish that is being undone was a
+    first-time publish with nothing previously published), this instead
+    removes whatever ``publish_skill`` just wrote for ``skill_id`` -- i.e.
+    restoring to "nothing published", the correct prior state.
+
+    Uses the same atomic doomed-then-replace two-step ``publish_skill``
+    itself uses, so a failure partway through never leaves ``published_skills``
+    without a directory for ``skill_id`` when one should exist, or with two.
+    """
+    target_root = published_skills_dir()
+    final_dir = target_root / skill_id
+
+    if retained_path is None:
+        # Nothing was previously published: restoring means removing what
+        # the failed publish attempt just wrote.
+        return unpublish_skill(skill_id)
+
+    retained = Path(retained_path)
+    if not retained.is_dir():
+        raise SkillPublicationIntegrityError(
+            f"cannot restore {skill_id}: retained projection {retained} is "
+            "missing or not a directory -- TORQCLAW cannot prove which "
+            "projection is live"
+        )
+
+    doomed_dir = None
+    if final_dir.exists():
+        doomed_dir = target_root / f".torqclaw-doomed-{uuid.uuid4().hex}"
+        os.replace(final_dir, doomed_dir)
+    try:
+        os.replace(retained, final_dir)
+    except Exception:
+        if doomed_dir is not None and doomed_dir.exists():
+            os.replace(doomed_dir, final_dir)
+        raise
+    if doomed_dir is not None:
+        _remove_tree(doomed_dir)
+
+    return {"ok": True, "skillId": skill_id, "path": str(final_dir)}
 
 
 def _verify_published_digest(final_dir: Path, *, expected_digest: str, skill_id: str) -> None:

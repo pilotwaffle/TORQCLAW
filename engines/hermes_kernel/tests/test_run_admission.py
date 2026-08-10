@@ -27,6 +27,7 @@ from mcp_wrapper import hermes_runner, task_store
 from mcp_wrapper.runtime_quiescence import (
     ActivationCoordinator,
     SkillActivationCoordinationError,
+    SkillActivationRestoredButCacheUnprovenError,
     SkillRuntimeBusyError,
     assert_skill_runtime_quiescent,
     hermes_run_admission,
@@ -323,12 +324,31 @@ def test_mutation_fails_busy_when_real_run_hermes_sync_registers_first(monkeypat
 # projection is restored and governed active state is unchanged.
 # ---------------------------------------------------------------------------
 def test_invalidation_failure_after_publish_restores_projection_and_leaves_active_state_unchanged(monkeypatch):
+    """RE-SPECIFIED (GS-COORD): the coordinator now performs a MANDATORY
+    second cache invalidation after restore() (see ActivationCoordinator.run
+    -- defect GS-COORD #8: leaving the disk projection restored without
+    proving the cache was cleared again is itself a defect, since a live
+    Hermes agent's cache could still reflect the failed new version even
+    after disk reverts). This test's mock previously failed unconditionally,
+    so both the first AND the mandatory second invalidation attempt would
+    fail -- that is now a DIFFERENT, more specific outcome
+    (SkillActivationRestoredButCacheUnprovenError, covered by
+    test_double_invalidation_failure_after_restore_raises_the_distinct_error
+    below), not SkillActivationCoordinationError. Re-specified here so the
+    mock fails only the FIRST invalidation (the one immediately after
+    publish()) and succeeds on the second (the mandatory post-restore one),
+    isolating exactly the scenario this test's name describes."""
     import mcp_wrapper.runtime_quiescence as rq
 
-    monkeypatch.setattr(
-        rq, "invalidate_skill_prompt_cache",
-        lambda: (_ for _ in ()).throw(RuntimeError("simulated cache-clear failure")),
-    )
+    calls_to_invalidate = {"n": 0}
+
+    def flaky_invalidate():
+        calls_to_invalidate["n"] += 1
+        if calls_to_invalidate["n"] == 1:
+            raise RuntimeError("simulated cache-clear failure")
+        # Second call (the mandatory post-restore invalidation) succeeds.
+
+    monkeypatch.setattr(rq, "invalidate_skill_prompt_cache", flaky_invalidate)
 
     projection = {"active_version": "v1"}
     calls: list[str] = []
@@ -360,6 +380,60 @@ def test_invalidation_failure_after_publish_restores_projection_and_leaves_activ
     )
     assert projection == {"active_version": "v1"}, (
         "external projection must be restored to its pre-publish state"
+    )
+    assert calls_to_invalidate["n"] == 2, (
+        "the mandatory post-restore invalidation must have been attempted"
+    )
+
+
+def test_double_invalidation_failure_after_restore_raises_the_distinct_error(monkeypatch):
+    """GS-COORD defect #8: if BOTH the first invalidation (right after
+    publish()) AND the mandatory second one (right after restore()) fail,
+    the coordinator must raise SkillActivationRestoredButCacheUnprovenError
+    -- a DISTINCT type from SkillActivationCoordinationError, whose message
+    asserts "no governed state was changed" as if nothing at all happened.
+    That claim would be misleading here: the external projection genuinely
+    moved twice (publish, then restore) even though governed state was
+    never committed, and the cache's relationship to either version is
+    unproven."""
+    import mcp_wrapper.runtime_quiescence as rq
+
+    monkeypatch.setattr(
+        rq, "invalidate_skill_prompt_cache",
+        lambda: (_ for _ in ()).throw(RuntimeError("simulated cache-clear failure")),
+    )
+
+    projection = {"active_version": "v1"}
+    calls: list[str] = []
+
+    def publish():
+        calls.append("publish")
+        previous = dict(projection)
+        projection["active_version"] = "v2"
+        return previous
+
+    def restore(previous):
+        calls.append("restore")
+        projection.clear()
+        projection.update(previous)
+
+    def commit():
+        calls.append("commit")  # pragma: no cover - must never run
+        return {"active": "v2"}
+
+    def verify(_result):
+        calls.append("verify")  # pragma: no cover - must never run
+
+    with pytest.raises(SkillActivationRestoredButCacheUnprovenError):
+        run_activation_transaction(publish=publish, restore=restore, commit=commit, verify=verify)
+
+    assert calls == ["publish", "restore"], (
+        "commit/verify must not run, and restore must still run exactly "
+        "once even though both invalidation attempts failed"
+    )
+    assert projection == {"active_version": "v1"}, (
+        "the disk projection restore itself must still succeed and be "
+        "visible even though the cache proof failed"
     )
 
 
