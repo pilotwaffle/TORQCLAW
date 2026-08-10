@@ -19,3 +19,13 @@ graphify-out/
 # Graphify profile graphs (rebuild: pnpm graphify:build:product / :vendor)
 graphify-product/
 graphify-vendor/
+
+# torq-console working copies (132MB combined; separate project at E:\torq-console)
+.torq-console-publish/
+.torq-console-worktree/
+
+# scratch and local run artifacts
+scratchpad/
+packages/gateway/.playwright-mcp/
+tests/resilience/p0-report-correction*.json
+torq-live-current.png
