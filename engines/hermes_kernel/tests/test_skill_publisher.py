@@ -35,7 +35,9 @@ from mcp_wrapper.skill_publisher import (  # noqa: E402
     PROVENANCE_FILENAME,
     SkillNotExternallyLoadableError,
     SkillPackageShapeError,
+    SkillPublicationError,
     SkillPublicationIntegrityError,
+    _assert_retention_root_outside_loadable_tree,
     is_published,
     publish_skill,
     published_skills_dir,
@@ -633,3 +635,106 @@ def test_private_upstream_cache_clear_hook_still_exists(tmp_path, monkeypatch):
         "the publisher's invalidate-and-retry can no longer recover a "
         "poisoned negative."
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 13 (GS-COORD round 2, defect closure): the retention-root assertion
+# has real coverage in both directions. G1R found this deletable with a
+# green suite -- it is the sole structural defence against the ticket's
+# defect #4 (a stale `.torqclaw-doomed-*`/retained copy inside a loadable
+# tree silently winning the real loader's first-wins dedup).
+# ---------------------------------------------------------------------------
+
+def test_retention_root_outside_loadable_tree_is_accepted(tmp_path, monkeypatch):
+    """A true sibling of the published-skills tree (not a member of, and not
+    nested under, any real loadable skills directory) must be accepted."""
+    target = published_skills_dir()
+    _configure_external_dir(monkeypatch, tmp_path, target)
+
+    sibling_retain_root = target.parent / "published_skills_retained"
+    # Must not raise.
+    _assert_retention_root_outside_loadable_tree(sibling_retain_root)
+
+
+def test_retention_root_inside_loadable_tree_is_rejected(tmp_path, monkeypatch):
+    """A retention root nested inside the loadable `published_skills` tree
+    (the exact `.torqclaw-doomed-*`-inside-a-loadable-dir trap defect #4
+    describes) must be refused, not silently accepted."""
+    target = published_skills_dir()
+    _configure_external_dir(monkeypatch, tmp_path, target)
+    target.mkdir(parents=True, exist_ok=True)
+
+    dotfile_inside_published = target / ".torqclaw-retained-inside"
+    with pytest.raises(SkillPublicationError):
+        _assert_retention_root_outside_loadable_tree(dotfile_inside_published)
+
+
+def test_retention_root_that_IS_a_loadable_dir_is_rejected(tmp_path, monkeypatch):
+    """A retention root that resolves to exactly a loadable skills directory
+    itself (not merely nested under one) must also be refused."""
+    target = published_skills_dir()
+    _configure_external_dir(monkeypatch, tmp_path, target)
+    target.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(SkillPublicationError):
+        _assert_retention_root_outside_loadable_tree(target)
+
+
+# ---------------------------------------------------------------------------
+# Test 14 (GS-COORD round 3, item C): the retention-root assertion must be
+# reached through the REAL publish_skill() call site, not merely invoked
+# standalone. G2A independently reproduced that deleting the call at
+# skill_publisher.py:497 (`_assert_retention_root_outside_loadable_tree(retain_root)`
+# inside publish_skill) leaves the full suite green -- the three tests above
+# only ever call the helper directly, so they cannot detect its invocation
+# being removed. This test drives publish_skill(..., retain_replaced_into=...)
+# itself with a retain root INSIDE the loadable published_skills tree (the
+# defect #4 trap) and must fail if the call site is deleted.
+# ---------------------------------------------------------------------------
+
+def test_publish_skill_rejects_retain_root_inside_loadable_tree_via_real_call(
+    tmp_path, monkeypatch
+):
+    """Drive the real publish_skill() entry point (not the standalone helper)
+    with a `retain_replaced_into` path that sits INSIDE the loadable
+    `published_skills` tree. This must raise SkillPublicationError and must
+    write nothing -- proving the assertion at the publish_skill call site is
+    load-bearing, not merely present as dead code the standalone-helper tests
+    could not catch being removed.
+
+    Verified by deletion: removing the
+    `_assert_retention_root_outside_loadable_tree(retain_root)` call at
+    skill_publisher.py:497 makes this test fail (publish_skill would instead
+    succeed, or fail later for an unrelated reason), which is the whole point
+    -- see the round-3 deletion-probe table in the builder's report.
+    """
+    target = published_skills_dir()
+    _configure_external_dir(monkeypatch, tmp_path, target)
+
+    package = write_package(tmp_path, skill_id="doomed-trap.skill")
+    installed = install_via_store(
+        tmp_path,
+        VerifiedSkillStore(tmp_path / "store_root"),
+        package,
+    )
+
+    # retain_replaced_into points INSIDE the loadable published_skills tree
+    # -- exactly the defect #4 trap (a dot-prefixed retained dir that the
+    # real loader's EXCLUDED_SKILL_DIRS does NOT exclude, and which sorts
+    # before alphanumeric names in iter_skill_index_files's first-wins dedup).
+    bad_retain_root = target / ".torqclaw-retained-inside-real-call"
+
+    with pytest.raises(SkillPublicationError):
+        publish_skill(
+            installed["path"],
+            digest=installed["digest"],
+            source="test:round3-item-c",
+            retain_replaced_into=bad_retain_root,
+        )
+
+    # Nothing must have been written: neither the final published directory
+    # nor the rejected retention root nor any temp/doomed artifact.
+    assert not (target / "doomed-trap.skill").exists()
+    assert not bad_retain_root.exists()
+    assert list(target.glob(".torqclaw-publish-*")) == []
+    assert list(target.glob(".torqclaw-doomed-*")) == []

@@ -125,6 +125,38 @@ def test_reinstalling_the_same_name_with_new_content_supersedes_it(monkeypatch):
     assert Path(second["publishedPath"], "SKILL.md").read_text(encoding="utf-8") == "v2\n"
 
 
+def test_idempotency_check_rehashes_published_bytes_not_just_the_sidecar(monkeypatch):
+    """GS-COORD round 2, item 4: _already_active_and_published must not trust
+    the provenance sidecar's claimed digest alone. G1R's exact probe:
+    activate real content, then tamper with the published SKILL.md bytes
+    out-of-band while leaving the (now-stale) sidecar claiming a match. A
+    retry with the same (skill_id, markdown) pair must NOT report
+    reconciledFromPriorSuccess -- that would serve the tampered bytes as if
+    they were a verified prior success. It must instead fall through to a
+    real (re-)activation attempt, which republishes the correct content."""
+    monkeypatch.setenv("TORQCLAW_GOVERNED_SKILLS", "1")
+    first = governed_skills.install_approved_skill("tamper.skill", "GOOD\n")
+    assert first["ok"] is True
+
+    published_path = Path(first["publishedPath"], "SKILL.md")
+    assert published_path.read_text(encoding="utf-8") == "GOOD\n"
+
+    # Tamper: overwrite the published bytes out-of-band. The provenance
+    # sidecar (.torqclaw-provenance.json) is left untouched, so it still
+    # claims the ORIGINAL digest -- exactly the "sidecar lies" scenario.
+    published_path.write_text("EVIL\n", encoding="utf-8")
+
+    retried = governed_skills.install_approved_skill("tamper.skill", "GOOD\n")
+
+    assert retried.get("reconciledFromPriorSuccess") is not True, (
+        "must not reconcile against corrupted published bytes just because "
+        "the provenance sidecar still claims the correct digest"
+    )
+    assert retried["ok"] is True
+    # A real (re-)activation must have run and restored the correct bytes.
+    assert published_path.read_text(encoding="utf-8") == "GOOD\n"
+
+
 def test_failure_leaves_nothing_published(monkeypatch):
     """Fail closed: a mid-install failure must not leave a partially governed
     skill that Hermes could load."""

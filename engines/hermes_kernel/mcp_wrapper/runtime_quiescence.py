@@ -125,6 +125,7 @@ __all__ = [
     "SkillRuntimeBusyError",
     "SkillPromptInvalidationError",
     "SkillActivationCoordinationError",
+    "SkillActivationRestoredButCacheUnprovenError",
     "assert_skill_runtime_quiescent",
     "invalidate_skill_prompt_cache",
     "skill_mutation_transaction",
@@ -162,13 +163,34 @@ class SkillActivationCoordinationError(SkillStoreError):
 
     This always means: the governed active state was NOT changed, no
     approval was consumed, and (if ``publish`` had already run)
-    ``restore`` was called and completed under the same lock before
-    admission of new Hermes runs could resume. The original underlying
-    exception is chained via ``__cause__``. If ``restore`` itself also
-    failed, that is re-raised directly instead (see
+    ``restore`` was called and completed AND the prompt cache was proven
+    invalidated a second time (see :func:`invalidate_skill_prompt_cache`)
+    under the same lock before admission of new Hermes runs could resume.
+    The original underlying exception is chained via ``__cause__``. If
+    ``restore`` itself also failed, that is re-raised directly instead (see
     :class:`ActivationCoordinator.run`) precisely because at that point
     TORQCLAW can no longer prove which projection is live, which is a more
     severe condition than an ordinary coordination failure.
+    """
+
+
+class SkillActivationRestoredButCacheUnprovenError(SkillStoreError):
+    """``restore()`` completed and TORQCLAW believes the prior external
+    projection is back on disk exactly as it was, but the MANDATORY
+    post-restore cache invalidation could not be proven (see
+    :func:`invalidate_skill_prompt_cache`'s fail-closed contract).
+
+    This is deliberately a DISTINCT exception from
+    :class:`SkillActivationCoordinationError`, whose message asserts "no
+    governed state was changed" as if the whole transaction were a clean
+    no-op -- that claim would be false here: the on-disk projection was
+    changed twice (publish, then restore) even though governed state was
+    never committed, and an in-process Hermes agent's cached prompt could
+    still reflect either the failed new version or be unprovably stale
+    relative to the restored one. Raised WITHOUT restore/rollback of any
+    kind (there is nothing left to roll back to) but WHILE still holding
+    the coordination lock, so no new Hermes run is admitted against a
+    projection whose cache state cannot be proven.
     """
 
 
@@ -393,8 +415,24 @@ class ActivationCoordinator:
     On any exception from ``invalidate_skill_prompt_cache()`` onward::
 
         publish() already ran -> restore(publish_result)
+             -> invalidate_skill_prompt_cache() AGAIN (mandatory)
              -> UNLOCK, then raise SkillActivationCoordinationError
                (original exception chained as __cause__)
+
+    The second invalidation is not optional. ``restore()`` changes the
+    on-disk external projection back to the prior version; if the first
+    ``invalidate_skill_prompt_cache()`` call (right after ``publish()``)
+    already succeeded, any live Hermes prompt cache now reflects the NEW
+    (failed) version, not the just-restored prior one -- restoring the disk
+    without clearing the cache a second time would leave a currently-running
+    Hermes agent able to keep serving the failed version's prompt content
+    even though governance and disk both now agree on the prior version. If
+    this second invalidation itself fails, that is raised as the DISTINCT
+    :class:`SkillActivationRestoredButCacheUnprovenError` -- never folded
+    into :class:`SkillActivationCoordinationError`, whose message claims "no
+    governed state was changed" as if this were a clean no-op transaction;
+    it was not, precisely because the disk projection was proven restored
+    but the cache was not.
 
     If ``publish()`` itself raises, there is nothing to restore (the
     external projection was never touched), so the lock releases
@@ -410,6 +448,18 @@ class ActivationCoordinator:
     while TORQCLAW cannot prove which projection is actually live. See
     :meth:`run` for exactly how the lock's release is sequenced after
     restoration.
+
+    The mandatory second cache invalidation is STILL attempted even on this
+    ``restore()``-raises path (G1R round-2 fix -- there is no carve-out: a
+    failed ``restore()`` means disk state is UNKNOWN, which is exactly when
+    a stale cache pointing at the failed new version is most dangerous, so a
+    best-effort invalidation attempt is strictly better than skipping it).
+    If that best-effort attempt also fails, both failures are chained (the
+    invalidation failure as the raised exception, ``restore()``'s failure as
+    its ``__cause__``, with a note recording that a restore failure preceded
+    it) rather than masking either one. Either way, the original
+    ``restore()`` failure (or the chained invalidation failure) still
+    propagates unwrapped, never folded into ``SkillActivationCoordinationError``.
     """
 
     publish: Callable[[], Any]
@@ -425,9 +475,17 @@ class ActivationCoordinator:
         return value is deliberately discarded: it is a check, not a product.
         Raises :class:`SkillActivationCoordinationError` if any
         step from ``publish`` onward fails and restoration (when
-        attempted) completed; re-raises a raw exception if ``publish``
-        itself failed (nothing to restore) or if ``restore`` itself failed
-        (unknown projection state -- see class docstring).
+        attempted) completed AND the mandatory post-restore cache
+        invalidation succeeded; raises
+        :class:`SkillActivationRestoredButCacheUnprovenError` if restoration
+        completed but that second invalidation did not; re-raises a raw
+        exception if ``publish`` itself failed (nothing to restore). If
+        ``restore`` itself failed, the mandatory cache invalidation is still
+        ATTEMPTED (best-effort, no carve-out) before the original
+        ``restore`` failure propagates unwrapped (unknown projection state
+        -- see class docstring); if that attempt also fails, the
+        invalidation failure propagates instead, chained onto the
+        ``restore`` failure via ``__cause__``, so neither is silently lost.
         """
         with _MUTATION_LOCK:
             assert_skill_runtime_quiescent()
@@ -455,12 +513,62 @@ class ActivationCoordinator:
                 try:
                     self.restore(publish_result)
                 except Exception as restore_exc:
+                    # G1R round-2 fix: the mandatory second invalidation
+                    # MUST still be attempted here, even though restore()
+                    # itself failed (frozen architect ruling: "mandatory"
+                    # with no carve-out). If restore() failed, disk state is
+                    # UNKNOWN -- that is exactly when a stale cache pointing
+                    # at the failed new version is most dangerous, so a
+                    # best-effort invalidation attempt is strictly better
+                    # than skipping it. Still inside the lock.
+                    try:
+                        invalidate_skill_prompt_cache()
+                    except Exception as second_invalidate_exc:
+                        # Both restore() and the second invalidation failed.
+                        # Chain BOTH onto the final exception rather than
+                        # masking either: `restore_exc` is preserved as
+                        # `__cause__` (the original failure that triggered
+                        # restoration in the first place, `exc`, is already
+                        # chained onto `restore_exc` by Python's implicit
+                        # exception-context tracking below), and the second
+                        # invalidation failure is surfaced as an explicit
+                        # note so neither failure is silently dropped.
+                        second_invalidate_exc.add_note(
+                            "also failed while attempting the mandatory "
+                            "post-restore-failure cache invalidation after "
+                            f"restore() itself raised: {restore_exc!r}"
+                        )
+                        raise second_invalidate_exc from restore_exc
+                    # The invalidation attempt succeeded even though
+                    # restore() did not -- disk state is still unknown (that
+                    # is what restore() failing means), but at least no
+                    # cache is left pointing at a version TORQCLAW cannot
+                    # currently prove is on disk. restore_exc is the more
+                    # severe, unresolved condition, so it still propagates
+                    # as-is (not wrapped), per the class docstring: TORQCLAW
+                    # cannot prove which projection is live.
                     raise restore_exc from exc
+                # Mandatory second invalidation: the disk projection just
+                # moved again (new -> prior), so any cache primed by the
+                # first invalidation (right after publish()) must be cleared
+                # again before this transaction can claim the prior
+                # projection is genuinely live end-to-end. Still inside the
+                # lock -- see class docstring.
+                try:
+                    invalidate_skill_prompt_cache()
+                except Exception as second_invalidate_exc:
+                    raise SkillActivationRestoredButCacheUnprovenError(
+                        "skill activation failed and the prior external "
+                        "projection was restored on disk, but the mandatory "
+                        "post-restore cache invalidation could not be "
+                        "proven; a live Hermes agent may still be serving a "
+                        "stale prompt cache"
+                    ) from second_invalidate_exc
                 raise SkillActivationCoordinationError(
                     "skill activation could not be committed after its "
                     "external projection was published; the prior "
-                    "projection was restored and no governed state was "
-                    "changed"
+                    "projection was restored and the prompt cache was "
+                    "invalidated again, so no governed state was changed"
                 ) from exc
             return commit_result
 

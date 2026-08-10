@@ -468,3 +468,103 @@ def test_busy_error_is_typed_and_outside_recovery_and_valueerror_families():
         assert not issubclass(exc_type, SkillRecoveryError)
         assert not issubclass(exc_type, SkillValidationError)
         assert not issubclass(exc_type, ValueError)
+
+
+# ---------------------------------------------------------------------------
+# GS-COORD round 2, item 3: the mandatory second invalidation must still be
+# ATTEMPTED even when restore() itself raises. Frozen architect ruling: no
+# carve-out. Unit-level (fake callbacks, no vendor/Hermes needed) so this
+# runs unconditionally, unlike test_activation_coordinator_wiring.py which
+# skips without the vendored agent.
+# ---------------------------------------------------------------------------
+
+
+def test_second_invalidation_is_attempted_even_when_restore_raises(monkeypatch):
+    """Force commit() to fail (triggering restore()) and restore() itself to
+    raise. The mandatory post-restore-failure invalidation attempt must
+    still happen -- G1R round-1 found `raise restore_exc from exc` skipped
+    it entirely. Assert invalidation was attempted exactly twice: once right
+    after publish() (per the normal LOCK -> QUIESCENCE -> publish ->
+    invalidate ordering), once more as the best-effort attempt after
+    restore() fails."""
+    from mcp_wrapper import runtime_quiescence as rq
+
+    invalidate_calls = {"n": 0}
+
+    def counting_invalidate():
+        invalidate_calls["n"] += 1
+
+    monkeypatch.setattr(rq, "invalidate_skill_prompt_cache", counting_invalidate)
+
+    class _CommitFailed(RuntimeError):
+        pass
+
+    class _RestoreFailed(RuntimeError):
+        pass
+
+    restore_calls = []
+
+    def fake_restore(publish_result):
+        restore_calls.append(publish_result)
+        raise _RestoreFailed("simulated restore failure")
+
+    coordinator = rq.ActivationCoordinator(
+        publish=lambda: {"published": True},
+        restore=fake_restore,
+        commit=lambda: (_ for _ in ()).throw(_CommitFailed("simulated commit failure")),
+        verify=lambda commit_result: None,
+    )
+
+    with pytest.raises(_RestoreFailed):
+        coordinator.run()
+
+    assert restore_calls == [{"published": True}]
+    assert invalidate_calls["n"] == 2, (
+        "the second (post-restore-failure) invalidation attempt must still "
+        f"happen; observed {invalidate_calls['n']} total invalidation calls"
+    )
+
+
+def test_second_invalidation_failure_after_restore_failure_chains_both(monkeypatch):
+    """If restore() AND the best-effort post-restore-failure invalidation
+    both fail, neither failure may be silently dropped: the invalidation
+    failure propagates (it is the more actionable, most-recent signal) with
+    the restore() failure chained on as its __cause__."""
+    from mcp_wrapper import runtime_quiescence as rq
+
+    invalidate_calls = {"n": 0}
+
+    class _InvalidateFailed(RuntimeError):
+        pass
+
+    def flaky_invalidate():
+        invalidate_calls["n"] += 1
+        if invalidate_calls["n"] == 2:
+            raise _InvalidateFailed("simulated second invalidation failure")
+
+    monkeypatch.setattr(rq, "invalidate_skill_prompt_cache", flaky_invalidate)
+
+    class _CommitFailed(RuntimeError):
+        pass
+
+    class _RestoreFailed(RuntimeError):
+        pass
+
+    def fake_restore(publish_result):
+        raise _RestoreFailed("simulated restore failure")
+
+    coordinator = rq.ActivationCoordinator(
+        publish=lambda: {"published": True},
+        restore=fake_restore,
+        commit=lambda: (_ for _ in ()).throw(_CommitFailed("simulated commit failure")),
+        verify=lambda commit_result: None,
+    )
+
+    with pytest.raises(_InvalidateFailed) as excinfo:
+        coordinator.run()
+
+    assert invalidate_calls["n"] == 2
+    assert isinstance(excinfo.value.__cause__, _RestoreFailed), (
+        "the restore() failure must be chained as __cause__, not dropped, "
+        "when the post-restore-failure invalidation attempt also fails"
+    )
