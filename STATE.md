@@ -2,13 +2,66 @@
 
 Single-file program state, updated only after meaningful progress with tests + independent verifier passing. Detailed history lives in `docs/prd-reviews/*` and the per-project memory index.
 
-_Last updated: 2026-08-09 (C0.1 final G2A; operator-gated)._
+_Last updated: 2026-08-09 (GS-COORD G2A-APPROVED round 3, committed locally, awaiting operator publication)._
 
-## ACTIVE (resume here): C0.1 - Authenticated Identity Transport
+## ACTIVE (resume here): GS-COORD — coordinated governed skill activation
 
-**Status: COMPLETED, VERIFIED, G2A-APPROVED by GPT-5.6 Sol High, operator-gated, and UNCOMMITTED. No operator-controlled action is authorized.**
+**Status: G2A-APPROVED (round 3). COMMITTED LOCALLY as `eaa6632` on `gs-coord-work`.
+NOT pushed, NOT merged. Awaiting operator publication authorization.**
 
-- Local branch: `master`. Before the final uncommitted candidate, local HEAD and fetched `origin/master` remained `da688c0a6ca72f14e554e6fa09af7b75e4f565cb`, ahead/behind `0/0`. GitHub contains baseline only; C0.1 is local worktree.
+- Worktree `E:/TorqClaw-worktrees/gs-coord`, branch `gs-coord-work`, base `da688c0`.
+  10 modified + `test_activation_coordinator_wiring.py` (new, 917). Nothing outside
+  `engines/hermes_kernel/`; `vendor/` untouched; submodule pin identical to master.
+- Python suite in that worktree: **302 passed, 2 skipped** (master baseline 277/1).
+- **Three adversarial rounds.** G1R round 1 REJECTED (3 blockers + 2 gaps beyond the nine
+  original defects); G2A round 2 REJECTED (3 blockers); G2A round 3 **APPROVED**. Every
+  verdict was reproduced independently by the orchestrator before routing onward — twice
+  the Builder's sabotage table asserted coverage that deletion disproved.
+- **Every control closed by deletion probe**, not by assertion. Six gates enforced as hard
+  aborts: exactly-once mutation, green ≥302 baseline, nonzero exit after deletion, the
+  failing test named, trap-based restore on abort, byte-exact restore asserted by md5 plus
+  a final suite equal to baseline. Probe harness distinguishes CLOSED / OPEN / **INVALID**
+  (red without a named test) so a structural break cannot bank as a caught deletion.
+- **The decisive measurement:** reachability instrumentation on the distinct-error raise
+  went **0 hits → 2 hits** between rounds 2 and 3, with all three `revert_activation` calls
+  returning `reverted: True` and non-`None` `previous`.
+- **Adjudicated, recorded, deliberately unenforced:** the `_commit()` ordering change
+  (`commit_holder["previous"]` now assigned *after* `activate()` returns) is correct but
+  reverting it leaves the suite green. G2A's differential harness measured the observable
+  end state **identical** under both orderings — round 2's extra `revert_activation` was a
+  genuine no-op against a commit that never landed. Round 2's ordering was a test-vacuity
+  defect, **not** a correctness defect. The code comment records the negative result and
+  warns against pinning it with an end-state assertion, which would pass either way.
+- Full spec, all nine defects, frozen operator rulings, and the environment traps:
+  **`docs/HANDOFF-GS-COORD.md`** (committed `5963426`).
+- Harness state: `.torq/artifacts/status/harness_status.json`. Verdicts:
+  `.torq/artifacts/03_verifier/g2a_gs_coord_r3.md` (+ r1, r2, and the G1D r2/r3 probes).
+- Sequence: **GS-COORD → GS-ACCEPT → soak → C1 runtime.** C1/C2 *design* may proceed in
+  parallel (PRD-004); the C1/C2 **runtime build remains unauthorized**.
+- `push_authorized` is **`false`**. G2A approval is not publication authority — merging to
+  `master` and pushing to `origin` each require explicit operator approval.
+
+### Next: GS-ACCEPT — 15-step live acceptance
+
+Unblocked once GS-COORD merges. Boots a real `AIAgent` and tests the shipped behavior
+rather than the modules, per the standing rule that reachability proves code is live but
+only invariant-path tests prove the correct control is live on the correct operation.
+
+## SHIPPED: C0.1 - Authenticated Identity Transport
+
+**Status: COMPLETED, VERIFIED, G2A-APPROVED by GPT-5.6 Sol High — and now MERGED AND PUSHED.**
+
+> **CORRECTION 2026-08-09.** This block previously read "operator-gated, and UNCOMMITTED.
+> No operator-controlled action is authorized" and stated "GitHub contains baseline only;
+> C0.1 is local worktree." Both were true when written and are now false: the operator
+> merged C0.1 via **PR #44**, landing as **`af52430`** on `origin/master`
+> (`846e691 feat(gateway): add authenticated identity transport`). Anyone resuming from
+> the previous text would plan against a false premise, so it is corrected rather than
+> appended to. The G2A record and the accepted residual risks below are unchanged and
+> still apply.
+
+- Local branch: `master`. `origin/master` is now `5963426` = `af52430` (C0.1 merge) + a
+  docs-only commit. C0.1 is on GitHub, not a local worktree.
 - Controlling invariant: resume binding is gateway-derived only from a successfully verified surface credential; client `principalId`/`surfaceId` cannot influence it.
 - Predecessor truth: the earlier Claude/Fable/Sonnet/Opus G1R/Builder checkpoint was accepted as predecessor evidence. It is not OpenAI Terra/Luna/Sol evidence.
 - Actual OpenAI threads:
@@ -24,6 +77,51 @@ _Last updated: 2026-08-09 (C0.1 final G2A; operator-gated)._
 - PRD-004 prior `APPROVE` remains void due C0-1 false-baseline discovery. Next product step is an operator-authorized decision on committing C0.1, then resume PRD-004 `REVISE-PRD #3`; C1/C2 build remains unauthorized.
 - Operator retains commit, push, merge, deploy, flag enablement, secret provisioning, provider configuration, release, and PRD resumption decisions.
 - Preserve unrelated operator files and existing history.
+## Governed-learning / integration program — SHIPPED (2026-08-07..09)
+
+All on public `origin/master`. Verified SHAs and subjects:
+
+| Commit | What |
+|---|---|
+| `22cadca` | `feat(skills)`: external_dirs publication adapter (P2-1a) |
+| `1fda702` | `fix(channel-http)`: fail closed on an unauthenticated network bind |
+| `97cacaa` | `ci(reachability)`: fail the build on undeclared orphan modules |
+| `39098a8` | `feat(skills)`: wire the governed pipeline to the live approval path (Phase 1) |
+| `da688c0` | `feat(gateway)`: C0 principal identity bridge (`TORQCLAW_COLLAB_ENABLED`) |
+| `5963426` | `docs`: GS-COORD handoff, the C1/C2 PRD, and its linter |
+
+**What drove this program.** An inventory found ~9,200 lines that had passed design
+review, implementation, adversarial verification and a merge gate while being reachable
+by **no running program**: `packages/collab` (6,956), `verified_skill_store.py` (998),
+`skillTrust.ts` (661), `skill_publisher.py` (557). The process was working at every step
+except the last, and nothing in CI noticed.
+
+**The structural fix is `ops/reachability.mjs`** (`pnpm reachability`, wired into CI
+before `typecheck`). It walks the import graph *transitively* from real entry points and
+fails the build when a module ≥150 lines is unreachable and not explicitly declared
+dormant. Dormancy stays legal but must be declared with a reason. Phase 1 then wired
+1,555 lines of the skill pipeline in, and the gate confirmed it by dropping those modules
+from `DORMANT` on its own.
+
+**Two defects were found in this program's own output**, both recorded because the
+pattern recurs:
+- P2-1a shipped that morning was itself a new instance — its publish-time check was
+  verified against the real loader *function* while the live server used `skill_queue.py`
+  (83 lines, no digests).
+- The channel-http fix **passed 14 unit tests while the real binary still served
+  unauthenticated traffic on a routable address** — `dist/` was stale and `tsc` had
+  exited 0 without emitting. Caught only by booting the actual binary.
+
+**Standing principle:** *Reachability proves code is live. Invariant-path tests prove the
+correct control is live on the correct operation.* Green units alone are insufficient —
+now normative in PRD-004 §13 as well.
+
+**Operator ruling 2026-08-08** — `packages/collab` is **INCUBATING**, absorbed slice by
+slice behind `TORQCLAW_COLLAB_ENABLED` (default off), never wired wholesale: it carries
+its own sessions/events/audit/channel model and a one-step switch-on would stand up a
+second authority beside the gateway. **The gateway remains the execution authority.**
+Order: C0 (done) → C1 → C2 → C3 → C4.
+
 ## Collaboration program
 
 ### Substrate (PRD-TCLAW-COLLABORATION-SUBSTRATE-001, v0.14 normative) — SHIPPED

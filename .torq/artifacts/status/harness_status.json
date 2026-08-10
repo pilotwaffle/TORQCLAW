@@ -1,0 +1,35 @@
+{
+  "task": "GS-COORD",
+  "title": "Coordinated governed skill activation",
+  "state": "awaiting_operator_publication",
+  "current_owner": "operator",
+  "verdict": "APPROVED",
+  "spec_verdict": "APPROVED",
+  "send_back_to": null,
+  "push_authorized": false,
+  "commits_verified": ["eaa6632"],
+  "commit_branch": "gs-coord-work",
+  "commit_worktree": "E:/TorqClaw-worktrees/gs-coord",
+  "merge_target": "master (currently 5963426)",
+  "revision_cycle": 3,
+  "last_updated": "2026-08-09",
+  "reports": {
+    "g1r_r1": ".torq/artifacts/03_verifier/g1r_gs_coord_r1.md",
+    "g1d_r2": ".torq/artifacts/02_builder/g1d_verification_r2.md",
+    "g2a_r2": ".torq/artifacts/03_verifier/g2a_gs_coord_r2.md",
+    "g1d_r3": ".torq/artifacts/02_builder/g1d_verification_r3.md",
+    "g2a_r3": ".torq/artifacts/03_verifier/g2a_gs_coord_r3.md"
+  },
+  "tests": "302 passed, 2 skipped (round 2: 300/2; master baseline 277/1)",
+  "notes": [
+    "G2A round 3: APPROVED. All three round-2 blockers CLOSED, reproduced by G2A's own sabotages, matching G1D's independent probes exactly.",
+    "Decisive measurement: reachability instrumentation on the distinct-error raise went 0 hits (round 2) -> 2 hits (round 3), with all three revert_activation calls returning reverted:True and non-None previous. Governance is genuinely moved and moved back.",
+    "commit_holder ordering change adjudicated: correct but UNENFORCED - reverting it leaves the suite green at 302. G2A's differential harness measured the externally observable end state IDENTICAL under both orderings, because round 2's extra revert_activation was a genuine no-op against a commit that never landed. Round 2's ordering was a test-vacuity defect, NOT a correctness defect. Not a blocker.",
+    "G2A's non-blocking finding FIXED before commit: test_activation_coordinator_wiring.py comment claimed reverting the ordering fix fails two tests - measured false. Replaced with the measured negative result plus an explicit warning not to pin the ordering with an end-state assertion, which would pass under both orderings and be exactly the vacuous assertion that caused two rejections.",
+    "Suite re-verified at 302 passed / 2 skipped after the comment fix.",
+    "G2A hunted for a fourth vacuous assertion on the assumption round 3 shipped one; found none. Three exception arms provably disjoint, no MRO shadowing.",
+    "Scope clean: 10 modified + 1 new test file, all inside engines/hermes_kernel/. vendor/ untouched, submodule pin identical to master, no stray temp/bak/orig files, no SABOTAGE or if-False markers.",
+    "COMMITTED LOCALLY as eaa6632 on gs-coord-work. NOT pushed, NOT merged to master.",
+    "push_authorized stays FALSE. G2A never authorizes publication; the operator authorizes it separately. Merge to master and push to origin both require explicit operator approval."
+  ]
+}
