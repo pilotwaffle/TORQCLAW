@@ -12,14 +12,14 @@ docs/prd-reviews/PRD-TCLAW-COLLAB-GATEWAY-004.md §10 — no more, no less.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
-import os
 import re
 import sqlite3
 import subprocess
 import sys
-import tempfile
+from contextlib import closing
 
 # Determinism: this gate must produce the same verdict regardless of the
 # invoking shell's locale. On Windows the default stdio codec is cp1252, which
@@ -42,6 +42,103 @@ BASELINE_REF = "af52430a0d719c449a9379866b84c154fc3c3b8a"
 GATEWAY_SCHEMA_PATH = "packages/gateway/db/schema.sql"
 COLLAB_MIGRATION_PATH = "packages/collab/src/migration.ts"
 LEGACY_CHECK_COUNT = 67
+
+GOVERNED_SOURCE_PATHS = {
+    "mapper": "engines/hermes_kernel/mcp_wrapper/governed_skills.py",
+    "queue": "engines/hermes_kernel/mcp_wrapper/skill_queue.py",
+    "rollback": "engines/hermes_kernel/mcp_wrapper/skill_rollback.py",
+    "server": "engines/hermes_kernel/mcp_wrapper/server.py",
+}
+SHARED_MAPPER_CODES = {
+    "SKILL_RUNTIME_BUSY",
+    "SKILL_PROJECTION_UNPROVEN_AFTER_REVERT",
+    "SKILL_ACTIVATION_CACHE_UNPROVEN",
+    "SKILL_ACTIVATION_FAILED",
+}
+UNPROVEN_CODES = {
+    "SKILL_PROJECTION_UNPROVEN_AFTER_REVERT",
+    "SKILL_ACTIVATION_CACHE_UNPROVEN",
+}
+DIRECT_ROLLBACK_CODES = {
+    "SKILL_ROLLBACK_TARGET_NEVER_ACTIVE",
+    "SKILL_ROLLBACK_INVALID_TARGET",
+}
+GS_ACCEPT_RECEIPT_PATH = ".torq/artifacts/03_verifier/gs_accept_r1.md"
+APPROVAL_EXPIRY_INDEX = "idx_tool_approvals_status_expires"
+DELIVERY_INDEXES = {
+    "idx_approval_deliveries_approval": ("approval_id",),
+    "idx_approval_deliveries_target_state": (
+        "target_surface_id",
+        "delivery_state",
+    ),
+}
+
+ACTIONHASH_VECTOR_FIELDS = (
+    "11111111-1111-4111-8111-111111111111",
+    "filesystem__write_file",
+    '{"a":"é","z":1}',
+)
+ACTIONHASH_VECTOR_LENGTH = 99
+ACTIONHASH_VECTOR_DIGEST = (
+    "c3db5267496d68d9edea579e0bd43c1e397364026e281401e30fa0bc596af6bb"
+)
+
+CTXHASH_FRAMING_FIELDS = (
+    "prn_operator_01",
+    "srf_desktop_01",
+    "11111111-1111-4111-8111-111111111111",
+    "desktop",
+    "workspace_write",
+    "filesystem__write_file",
+    '{"a":"é","z":1}',
+    "privacy-v1:sensitive",
+    "routing-v1:OLLAMA_LOCAL",
+    "c" * 64,
+)
+CTXHASH_FRAMING_LENGTHS = (15, 14, 36, 7, 15, 22, 16, 20, 23, 64)
+CTXHASH_FRAMING_TOTAL = 282
+CTXHASH_FRAMING_DIGEST = (
+    "96424e5e9f3bb595e74408a9e1fe07b1b7f981d3f04c427e1af1ac5fa3ff2c2a"
+)
+CTXHASH_SEMANTIC_OBJECTS = {
+    "privacy": {
+        "schemaVersion": "torqclaw.approval-privacy/v1",
+        "containsSensitiveData": True,
+        "redactionPolicyRevision": "torqclaw.redaction/v1",
+    },
+    "routing": {
+        "schemaVersion": "torqclaw.approval-routing/v1",
+        "executionMode": "AUTO",
+        "selectedTier": "OLLAMA_LOCAL",
+        "ruleId": "LOCAL_TOOL_INTENT",
+        "routerPolicyRevision": "torqclaw.router/v1",
+    },
+    "security": {
+        "schemaVersion": "torqclaw.approval-policy/v1",
+        "effectiveProfile": {
+            "schemaVersion": "torqclaw.effective-profile/v1",
+            "profileId": "workspace_write",
+            "profileVersion": 1,
+            "toolRegistryVersion": "torqclaw.tools/v1",
+            "effectiveProfilePolicyHash": (
+                "e67951376789e1ae88b2388f22351fc8bc5a5c93dcbce7f1d412926f8bfc0b7e"
+            ),
+        },
+        "capabilityRevision": 7,
+        "profileDelegationRevision": 11,
+        "registryEnforcementHash": "d" * 64,
+    },
+}
+CTXHASH_SEMANTIC_HASHES = {
+    "privacy": "b503e9e4eb94c4c3ef34481efced486596a270955036a961f8fd02682156ad16",
+    "routing": "944af7d5cf70a7ba35a48d1eba0255e61dda8718e9b2b11017d4c0f70cce3e25",
+    "security": "4ddc3aa9ad1d6a905fba67ca74183cf28cbf1141a340eee6aaf56a71c0157310",
+}
+CTXHASH_SEMANTIC_LENGTHS = (15, 14, 36, 7, 15, 22, 16, 64, 64, 64)
+CTXHASH_SEMANTIC_TOTAL = 367
+CTXHASH_SEMANTIC_DIGEST = (
+    "d7bf709cf2ee293b854e77f7aa649cc18c3195e52870b2e8e01066e270556626"
+)
 
 R4_BLOCKS = (
     "BASELINE_STATE_DB_AF52430",
@@ -107,8 +204,9 @@ TOOL_APPROVAL_ADDITION_TYPES = {
 }
 STATE_ADDITIVE_OBJECTS = {
     "gateway_surface_security", "surface_authorities",
-    "gateway_approval_bindings", "gateway_approval_payloads",
-    "gateway_action_grants", "approval_deliveries",
+    "gateway_approval_bindings", "gateway_action_grants",
+    "gateway_task_origins", "gateway_profile_delegations",
+    "approval_deliveries",
 }
 COLLAB_ADDITIVE_OBJECTS = {"surfaces", "surface_credentials"}
 CTXHASH_FIELDS = (
@@ -230,6 +328,30 @@ def _stable_repr(value: Any) -> str:
     )
 
 
+def _canonical_json_bytes(value: Any) -> bytes:
+    """Independent canonicalizer for the frozen plain-JSON golden fixtures."""
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _framed_sha256(tag: str, fields: tuple[str, ...]) -> tuple[tuple[int, ...], int, str]:
+    encoded = tuple(field.encode("utf-8") for field in fields)
+    framed = tag.encode("ascii") + b"".join(
+        len(field).to_bytes(4, "big") + field
+        for field in encoded
+    )
+    return (
+        tuple(len(field) for field in encoded),
+        len(framed),
+        hashlib.sha256(framed).hexdigest(),
+    )
+
+
 def _same(gate: Gate, name: str, actual: Any, expected: Any) -> bool:
     return gate.require(
         name,
@@ -297,12 +419,20 @@ def _git_bytes(repo: Path, path: str) -> bytes:
 
 
 def _collab_ddl(source: bytes) -> bytes:
-    # The spaces before the closing backtick are real template bytes and are
-    # intentionally part of the pin even though SQLite ignores them.
+    # Pin the SQL payload, not the TypeScript source indentation before the
+    # closing backtick.  migration.ts formats that delimiter as ``    `);``;
+    # those four bytes are outside the authored DDL boundary even though a
+    # JavaScript template technically includes them as trailing whitespace.
     match = re.search(rb"db\.exec\(`(.*?)`\);", source, re.DOTALL)
     if not match:
         raise ValueError("collaboration migration db.exec template was not found")
-    return match.group(1)
+    payload = match.group(1)
+    if not payload.endswith(b"    "):
+        raise ValueError(
+            "collaboration migration closing template indentation changed; "
+            "expected four spaces"
+        )
+    return payload[:-4]
 
 
 def _remove_marker_separator(data: bytes) -> bytes:
@@ -493,8 +623,9 @@ def _validate_physical_map(gate: Gate, value: dict[str, Any] | None) -> None:
             "args_json", "status",
         ]
         and approvals.get("guarded_nullable_columns") == list(TOOL_APPROVAL_ADDITIONS)
+        and approvals.get("new_index") == APPROVAL_EXPIRY_INDEX
         and approvals.get("canonical_approval_state") is True,
-        "tool_approvals must be extended additively with exact row/value/rowid preservation and six nullable columns",
+        "tool_approvals must preserve rows/values/rowids and declare six nullable columns plus the expiry index",
     )
     _same(
         gate,
@@ -506,6 +637,16 @@ def _validate_physical_map(gate: Gate, value: dict[str, Any] | None) -> None:
         "R4 map: no gateway_approval_events reducer",
         "gateway_approval_events" not in state.get("new_additive_objects", []),
         "gateway_approval_events must not be a state/reducer sidecar",
+    )
+    gate.require(
+        "R4 map: no durable session-auth snapshot",
+        "gateway_session_auth" not in state.get("new_additive_objects", []),
+        "ConnectionAuthContext is connection-scoped; it must not be snapshotted per durable session",
+    )
+    gate.require(
+        "R4 map: protected payload store remains uncreated",
+        "gateway_approval_payloads" not in state.get("new_additive_objects", []),
+        "protected payload persistence is a reserved future option pending operator approval",
     )
 
     collab = value.get("collab.db")
@@ -549,6 +690,10 @@ def _validate_physical_map(gate: Gate, value: dict[str, Any] | None) -> None:
             "revoke_order": "state deny or epoch commit then collab identity revocation",
             "failure_bias": "deny",
             "automatic_reverse_copy": "forbidden",
+            "automatic_grant_completion": "forbidden",
+            "recovery": "revoke-side-only",
+            "cross_database_fk": "forbidden",
+            "cross_database_atomicity_claim": "forbidden",
         },
     )
     _same(gate, "R4 map: unrelated objects preserved", value.get("unrelated_objects"), {
@@ -612,9 +757,18 @@ def _validate_migration_contract(
     )
     gate.require(
         "R4 migration: PRAGMA table_info guard",
-        bool(re.search(r"PRAGMA\s+table_info\(tool_approvals\)", text, re.IGNORECASE))
-        and bool(re.search(r"!\s*cols\.some\s*\(", text))
-        and bool(re.search(r"db\.exec\(ddl\)", text)),
+        bool(re.search(
+            r"const\s+cols\s*=\s*db\.prepare\s*\(\s*`PRAGMA\s+"
+            r"table_info\(tool_approvals\)`\s*\)\.all\s*\(\s*\)",
+            text,
+            re.IGNORECASE,
+        ))
+        and bool(re.search(
+            r"const\s+add\s*=.*?if\s*\(\s*!\s*cols\.some\s*\(.*?"
+            r"c\.name\s*===\s*name.*?\)\s*\)\s*db\.exec\(ddl\)",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )),
         "the six ALTERs need a per-column PRAGMA table_info absence guard",
     )
 
@@ -645,7 +799,145 @@ def _validate_migration_contract(
         ),
         "gateway_approval_events would be a second lifecycle reducer",
     )
+    gate.require(
+        "R4 migration: no gateway_session_auth table",
+        not re.search(
+            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?gateway_session_auth\b",
+            text,
+            re.IGNORECASE,
+        ),
+        "a durable session-auth snapshot is invalid when one session has concurrent presenting surfaces",
+    )
+    gate.require(
+        "R4 migration: no gateway_approval_payloads table",
+        not re.search(
+            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?gateway_approval_payloads\b",
+            text,
+            re.IGNORECASE,
+        ),
+        "protected payload persistence needs a future protection/retention decision and operator approval",
+    )
     return additions
+
+
+def _proposed_statement(text: str, pattern: str) -> str:
+    match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+    return match.group(0) if match else ""
+
+
+def _validate_delivery_and_expiry_ddl(
+    gate: Gate,
+    text: str,
+    gateway_ddl: bytes | None,
+    additions: list[dict[str, str]],
+) -> None:
+    delivery_table = _proposed_statement(
+        text,
+        r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+approval_deliveries\s*\(.*?\n\);",
+    )
+    expiry_index = _proposed_statement(
+        text,
+        rf"CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+{APPROVAL_EXPIRY_INDEX}\s*"
+        r"ON\s+tool_approvals\s*\(\s*status\s*,\s*expires_at\s*\)\s*(?=;|`)",
+    )
+    delivery_indexes: dict[str, str] = {}
+    for name, columns in DELIVERY_INDEXES.items():
+        column_pattern = r"\s*,\s*".join(map(re.escape, columns))
+        delivery_indexes[name] = _proposed_statement(
+            text,
+            rf"CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+{re.escape(name)}\s*"
+            rf"ON\s+approval_deliveries\s*\(\s*{column_pattern}\s*\)\s*;",
+        )
+    body = _table_body(text, "approval_deliveries")
+    delivery_shape = (
+        bool(delivery_table)
+        and bool(re.search(r"(?m)^\s*id\s+TEXT\s+PRIMARY\s+KEY", body, re.IGNORECASE))
+        and bool(re.search(r"(?m)^\s*approval_id\s+TEXT\s+NOT\s+NULL", body, re.IGNORECASE))
+        and bool(re.search(r"(?m)^\s*target_surface_id\s+TEXT\s+NOT\s+NULL", body, re.IGNORECASE))
+        and bool(re.search(
+            r"delivery_state\s+TEXT\s+NOT\s+NULL\s+DEFAULT\s+['\"]pending['\"]",
+            body,
+            re.IGNORECASE,
+        ))
+        and bool(re.search(
+            r"FOREIGN\s+KEY\s*\(\s*approval_id\s*\)\s*REFERENCES\s+"
+            r"tool_approvals\s*\(\s*approval_id\s*\)",
+            body,
+            re.IGNORECASE,
+        ))
+    )
+    gate.require(
+        "R4 additive DDL: approval delivery table/indexes are guarded",
+        delivery_shape and all(delivery_indexes.values()),
+        "approval_deliveries and both declared indexes need exact IF NOT EXISTS DDL",
+    )
+    gate.require(
+        "R4 additive DDL: approval expiry index is guarded",
+        bool(expiry_index),
+        f"missing exact CREATE INDEX IF NOT EXISTS {APPROVAL_EXPIRY_INDEX}(status, expires_at)",
+    )
+
+    statements = [
+        delivery_table,
+        *delivery_indexes.values(),
+        expiry_index,
+    ]
+    if gateway_ddl is None or not all(statements) or not delivery_shape:
+        gate.require(
+            "R4 SQLite: proposed delivery/expiry DDL executes and repeats",
+            False,
+            "skipped because source-pinned gateway DDL or exact proposal DDL was unavailable",
+        )
+        return
+    try:
+        with closing(sqlite3.connect(":memory:")) as state:
+            state.executescript(gateway_ddl.decode("utf-8"))
+            for item in additions:
+                if item.get("name") not in _columns(state, "tool_approvals"):
+                    state.execute(item["sql"])
+            proposal = ";\n".join(
+                statement.rstrip().rstrip(";")
+                for statement in statements
+            ) + ";"
+            state.executescript(proposal)
+            first = _sqlite_objects(state)
+            state.executescript(proposal)
+            second = _sqlite_objects(state)
+            installed = {
+                name: tuple(
+                    str(row[2])
+                    for row in state.execute(f'PRAGMA index_info("{name}")')
+                )
+                for name in set(DELIVERY_INDEXES) | {APPROVAL_EXPIRY_INDEX}
+            }
+            expected_indexes = {
+                **DELIVERY_INDEXES,
+                APPROVAL_EXPIRY_INDEX: ("status", "expires_at"),
+            }
+            delivery_fks = {
+                f"{row[3]} -> {row[2]}({row[4]})"
+                for row in state.execute(
+                    'PRAGMA foreign_key_list("approval_deliveries")'
+                )
+            }
+            condition = (
+                first == second
+                and first.get("approval_deliveries") == "table"
+                and installed == expected_indexes
+                and delivery_fks == {"approval_id -> tool_approvals(approval_id)"}
+            )
+            detail = (
+                f"indexes={_stable_repr(installed)} "
+                f"fks={_stable_repr(delivery_fks)} repeat_equal={first == second}"
+            )
+    except (UnicodeDecodeError, sqlite3.Error) as exc:
+        condition = False
+        detail = str(exc)
+    gate.require(
+        "R4 SQLite: proposed delivery/expiry DDL executes and repeats",
+        condition,
+        detail,
+    )
 
 
 def _validate_sqlite_fixtures(
@@ -655,17 +947,21 @@ def _validate_sqlite_fixtures(
     expectations: dict[str, Any],
     additions: list[dict[str, str]],
 ) -> None:
-    """Execute source-pinned DDL in two real, disposable SQLite files.
+    """Execute source-pinned DDL in two separate, disposable SQLite databases.
 
     The target ALTER model is applied only to the gateway fixture.  A seeded
     approval and skill draft make row/value/rowid preservation observable
     instead of merely asserted in prose.
     """
     try:
-        with tempfile.TemporaryDirectory(prefix="torqclaw-prd004-r4-") as tmp:
-            state_path = Path(tmp) / "state.db"
-            collab_path = Path(tmp) / "collab.db"
-            with sqlite3.connect(state_path) as state, sqlite3.connect(collab_path) as collab:
+        # Independent in-memory connections are distinct temporary SQLite
+        # databases.  They avoid filesystem cleanup/locking affecting the
+        # deterministic verdict while still proving the two schemas are never
+        # concatenated into one connection.
+        with (
+            closing(sqlite3.connect(":memory:")) as state,
+            closing(sqlite3.connect(":memory:")) as collab,
+        ):
                 state.executescript(gateway_ddl.decode("utf-8"))
                 collab.executescript(collab_ddl.decode("utf-8"))
 
@@ -685,7 +981,7 @@ def _validate_sqlite_fixtures(
                     "R4 SQLite: physical database separation",
                     "principals" not in state_objects
                     and "sessions" not in collab_objects
-                    and state_path != collab_path,
+                    and state is not collab,
                     "collab principals or gateway sessions appeared in the wrong physical database",
                 )
 
@@ -849,6 +1145,7 @@ def _validate_sqlite_fixtures(
 def _validate_identity_and_authority(gate: Gate, text: str) -> None:
     surfaces = _table_body(text, "surfaces")
     credentials = _table_body(text, "surface_credentials")
+    surface_security = _table_body(text, "gateway_surface_security")
     gate.require(
         "R4 identity: globally unique surface_id",
         bool(re.search(r"(?m)^\s*surface_id\s+TEXT\s+PRIMARY\s+KEY\b", surfaces, re.IGNORECASE))
@@ -892,9 +1189,47 @@ def _validate_identity_and_authority(gate: Gate, text: str) -> None:
         "state.db must own the effective capability/profile revision used at decision/dispatch",
     )
     gate.require(
+        "R4 identity: ConnectionAuthContext remains connection-scoped",
+        _paragraph_with(text, ("ConnectionAuthContext", "server-derived", "connection-scoped"))
+        and _paragraph_with(text, ("session", "multiple", "concurrent", "surfaces")),
+        "the current presenting connection, not a durable session row, owns ConnectionAuthContext",
+    )
+    gate.require(
+        "R4 identity: immutable request-keyed task origin",
+        _paragraph_with(text, ("gateway_task_origins", "immutable", "request_id")),
+        "gateway_task_origins must key the immutable ingress snapshot by request_id",
+    )
+    delegations = _table_body(text, "gateway_profile_delegations")
+    gate.require(
+        "R4 profile: live delegation keyed by surface and profile",
+        bool(delegations)
+        and bool(re.search(r"(?m)^\s*surface_id\s+TEXT\s+NOT\s+NULL", delegations, re.IGNORECASE))
+        and bool(re.search(r"(?m)^\s*profile_id\s+TEXT\s+NOT\s+NULL", delegations, re.IGNORECASE))
+        and bool(re.search(
+            r"UNIQUE\s+INDEX[\s\S]{0,180}\(\s*surface_id\s*,\s*profile_id\s*\)[\s\S]{0,80}revoked_at\s+IS\s+NULL",
+            text,
+            re.IGNORECASE,
+        ))
+        and _paragraph_with(text, ("gateway_profile_delegations", "multiple", "profiles", "per surface")),
+        "one profile per surface is invalid; live delegation uniqueness is (surface_id, profile_id)",
+    )
+    gate.require(
+        "R4 profile: source-owned EffectiveProfile revisions rechecked",
+        "EffectiveProfile.policyHash" in text
+        and "toolRegistryVersion" in text
+        and _paragraph_with(text, ("EffectiveProfile", "source-owned"))
+        and any(
+            "recheck" in paragraph.casefold()
+            and "policy" in paragraph.casefold()
+            and "registry" in paragraph.casefold()
+            and "delegation" in paragraph.casefold()
+            for paragraph in re.split(r"\n\s*\n", text)
+        ),
+        "source-owned EffectiveProfile policyHash/toolRegistryVersion and live delegation must be rechecked",
+    )
+    gate.require(
         "R4 authority: Origin independent of Authority",
-        "Origin independent of Authority" in text
-        or _paragraph_with(text, ("origin", "not", "decision authority")),
+        "Origin independent of Authority" in text,
         "origin evidence must be explicitly independent from decision authority",
     )
     gate.require(
@@ -925,13 +1260,207 @@ def _validate_identity_and_authority(gate: Gate, text: str) -> None:
         ),
         "channel/automation surfaces must have no approval decision path",
     )
+    configured_role = bool(re.search(
+        r"(?m)^\s*surface_role\s+TEXT\s+NOT\s+NULL\s+DEFAULT\s+['\"]agent['\"]"
+        r"[\s\S]{0,160}CHECK\s*\(\s*surface_role\s+IN\s*"
+        r"\(\s*['\"]operator['\"]\s*,\s*['\"]agent['\"]\s*,\s*"
+        r"['\"]automation['\"]\s*\)\s*\)",
+        surfaces,
+        re.IGNORECASE,
+    ))
+    effective_role = bool(re.search(
+        r"(?m)^\s*surface_role\s+TEXT\s+NOT\s+NULL\s*"
+        r"[\s\S]{0,160}CHECK\s*\(\s*surface_role\s+IN\s*"
+        r"\(\s*['\"]operator['\"]\s*,\s*['\"]agent['\"]\s*,\s*"
+        r"['\"]automation['\"]\s*\)\s*\)",
+        surface_security,
+        re.IGNORECASE,
+    ))
+    gate.require(
+        "R4 CT-2: configured and effective role columns pinned",
+        configured_role and effective_role,
+        "surfaces and gateway_surface_security need the exact three-role CT-2 discriminator",
+    )
+    try:
+        ct2 = section(
+            text,
+            "3.14 CT-2 — `approve` authority provisioning rule (FROZEN, normative)",
+            level=3,
+        )
+    except ValueError:
+        ct2 = ""
+    gate.require(
+        "R4 CT-2: configured truth projects grant-last to state enforcement",
+        _paragraph_with(ct2, (
+            "surfaces.surface_role = 'operator'",
+            "configured truth",
+            "gateway_surface_security.surface_role",
+            "grant-last",
+            "epoch-current",
+        )),
+        "CT-2 must distinguish configured collab truth from epoch-current state enforcement",
+    )
+    gate.require(
+        "R4 CT-2: decision is state-only and fail-closed on projection drift",
+        _paragraph_with(ct2, (
+            "reads only `state.db`",
+            "gateway_surface_security.surface_role='operator'",
+            "current live auth epoch/source revision",
+            "holdsAuthority",
+        ))
+        and _paragraph_with(ct2, (
+            "decision never performs a cross-WAL read",
+            "missing",
+            "stale",
+            "revoked",
+            "observed-divergent",
+            "denies",
+        )),
+        "decision must use only live state projection and deny missing/stale/revoked/divergent evidence",
+    )
+    property_detail = next(
+        (
+            paragraph for paragraph in re.split(r"\n\s*\n", text)
+            if "3.5 (prop 1 detail)" in paragraph
+        ),
+        "",
+    )
+    gate.require(
+        "R4 authority: same-origin authorized operator positive path",
+        bool(property_detail)
+        and "same-origin operator path" in property_detail.casefold()
+        and "operator-role surface" in property_detail.casefold()
+        and "live current-epoch `approve` grant" in property_detail
+        and "MAY approve a task it originated" in property_detail
+        and "resource/task authz" in property_detail.casefold(),
+        "same-origin is allowed only for an operator-role surface with live authority and task authz",
+    )
+    gate.require(
+        "R4 authority: channel self-approval structurally denied",
+        bool(property_detail)
+        and "self-approve" in property_detail.casefold()
+        and "equals `origin_surface_id`" in property_detail
+        and "channel/automation" in property_detail.casefold()
+        and "refused" in property_detail.casefold()
+        and "fail both the kind/role gate" in property_detail.casefold(),
+        "a channel/automation deciding surface equal to origin_surface_id must be refused",
+    )
+
+
+def _validate_profile_registry_contract(gate: Gate, text: str) -> None:
+    expected_columns = {
+        "gateway_profile_delegations": "registry_enforcement_hash",
+        "gateway_task_origins": "registry_enforcement_hash",
+        "gateway_approval_bindings": "registered_registry_enforcement_hash",
+        "gateway_action_grants": "registry_enforcement_hash",
+    }
+    missing_columns = []
+    for table, column in expected_columns.items():
+        body = _table_body(text, table)
+        if not re.search(
+            rf"(?m)^\s*{re.escape(column)}\s+TEXT\s+NOT\s+NULL\b",
+            body,
+            re.IGNORECASE,
+        ):
+            missing_columns.append(f"{table}.{column}")
+    gate.require(
+        "R4 profile: registry enforcement hash bound through all state stages",
+        not missing_columns,
+        f"missing={missing_columns}",
+    )
+    deprecated = sorted({
+        token
+        for token in (
+            "effective_profile_hash",
+            "path_policy_revision",
+            "registered_path_policy_revision",
+        )
+        if re.search(rf"\b{re.escape(token)}\b", text)
+    })
+    gate.require(
+        "R4 profile: duplicate/vague profile hashes absent",
+        not deprecated,
+        f"deprecated profile fields present: {deprecated}",
+    )
+    gate.require(
+        "R4 profile: policy hash is byte-identical source copy",
+        _paragraph_with(text, (
+            "effective_profile_policy_hash",
+            "byte-identical",
+            "EffectiveProfile.policyHash",
+            "never a second hash definition",
+        )),
+        "effective_profile_policy_hash must be copied byte-identically from EffectiveProfile.policyHash",
+    )
+    formula = next(
+        (
+            paragraph for paragraph in re.split(r"\n\s*\n", text)
+            if "registry_enforcement_hash :=" in paragraph
+        ),
+        "",
+    )
+    exact_entry_keys = (
+        "name",
+        "sourceServerId",
+        "rawName",
+        "inputSchema",
+        "capability",
+        "requiresApproval",
+        "pathScope",
+        "pathArgKeys",
+    )
+    gate.require(
+        "R4 profile: registry enforcement formula and exact material pinned",
+        bool(formula)
+        and 'schemaVersion:"torqclaw.registry-enforcement/v1"' in formula
+        and "pathPolicyVersion:PATH_POLICY_VERSION" in formula
+        and "sorted by namespaced `name`" in formula
+        and all(f"`{key}`" in formula for key in exact_entry_keys)
+        and "resolved sorted explicit-or-fallback" in formula
+        and "tool.pathScope === undefined ? null" in formula
+        and "read: sortedNormalizedRead" in formula
+        and "write: sortedNormalizedWrite" in formula
+        and "deny: sortedNormalizedDeny" in formula
+        and "null absent scope remains distinct" in formula
+        and "present `{read:[],write:[],deny:[]}`" in formula
+        and "No `undefined` reaches `canonicalJson`" in formula
+        and "equates null with empty MUST change" in formula
+        and "Descriptions are excluded" in formula
+        and "PATH_POLICY_VERSION" in formula
+        and "semantics change" in formula,
+        "registry hash must pin version, sorted tool set, exact enforcement keys, path normalization, and exclusions",
+    )
+    gate.require(
+        "R4 profile: delegations are immutable and revisioned on change",
+        _paragraph_with(text, (
+            "delegation row is immutable",
+            "material change",
+            "revokes",
+            "new row",
+            "profile_delegation_revision",
+            "never updated in place",
+        )),
+        "effective/profile/registry changes must revoke and replace the delegation at a new revision",
+    )
+    gate.require(
+        "R4 profile: security hash binds registry enforcement",
+        "registryEnforcementHash: gateway_profile_delegations.registry_enforcement_hash" in text
+        and _paragraph_with(text, (
+            "registration",
+            "decision",
+            "pre-execution",
+            "registry-enforcement hash",
+        )),
+        "security context and every admission stage must bind the registry enforcement hash",
+    )
 
 
 def _validate_approval_state(gate: Gate, text: str) -> None:
     gate.require(
         "R4 approval: canonical state and one centralized writer",
-        _paragraph_with(text, ("tool_approvals", "canonical", "one centralized writer"))
-        or _paragraph_with(text, ("tool_approvals", "canonical", "one gateway transition writer")),
+        _paragraph_with(text, ("tool_approvals", "canonical", "approval state"))
+        and _paragraph_with(text, ("Single-writer requirement", "one centralized writer"))
+        and _paragraph_with(text, ("No other module", "approval status")),
         "tool_approvals.status must remain canonical under one centralized transition writer",
     )
     gate.require(
@@ -977,6 +1506,154 @@ def _validate_approval_state(gate: Gate, text: str) -> None:
         _paragraph_with(text, ("exact", "grant", "consum", "state.db", "dispatch")),
         "one exact grant must be consumed with the state.db dispatch admission check",
     )
+    gate.require(
+        "R4 approval: canonicalJson hash checked against regenerated actual args",
+        any(
+            "canonicaljson" in paragraph.casefold()
+            and "hash" in paragraph.casefold()
+            and "registration" in paragraph.casefold()
+            and "regenerated" in paragraph.casefold()
+            and "actual" in paragraph.casefold()
+            and ("pre-execute" in paragraph.casefold() or "before execution" in paragraph.casefold())
+            for paragraph in re.split(r"\n\s*\n", text)
+        ),
+        "register the canonicalJson hash and compare regenerated actual tool args at the pre-execute seam",
+    )
+    registration_args = next(
+        (
+            paragraph for paragraph in re.split(r"\n\s*\n", text)
+            if "new flag-on C2 registration" in paragraph
+        ),
+        "",
+    )
+    gate.require(
+        "R4 action args: present plain object with explicit empty-object no-arg",
+        bool(registration_args)
+        and "requires a present acyclic plain JSON object" in registration_args
+        and "a no-argument tool supplies `{}`" in registration_args
+        and "root arrays/scalars" in registration_args
+        and "canonicalJson(args)" in registration_args
+        and "canonicalJson(args ?? null)" not in registration_args
+        and "no null/falsey coercion" in registration_args,
+        "new C2 args must be a present plain object; no-arg is {}, never null/falsey coercion",
+    )
+    action_formula = next(
+        (
+            paragraph for paragraph in re.split(r"\n\s*\n", text)
+            if "`ACTIONHASH_V1` is SHA-256" in paragraph
+        ),
+        "",
+    )
+    gate.require(
+        "R4 ACTIONHASH_V1: exact formula and pre-execute comparison",
+        bool(action_formula)
+        and "ASCII version tag" in action_formula
+        and "three required U32BE-length-prefixed UTF-8 fields in order" in action_formula
+        and "exact stored `request_id`" in action_formula
+        and "exact namespaced `tool_name`" in action_formula
+        and "canonicalJson(args)" in action_formula
+        and "no NULL encoding" in action_formula
+        and "true pre-execute hook" in action_formula,
+        "ACTIONHASH_V1 must frame source request, namespaced tool, and canonical object args",
+    )
+    action_vector = next(
+        (
+            paragraph for paragraph in re.split(r"\n\s*\n", text)
+            if "Frozen `ACTIONHASH_V1` vector" in paragraph
+        ),
+        "",
+    )
+    action_match = re.search(
+        r"source request `([^`]+)`, canonical operation `([^`]+)`, and "
+        r"canonical args `([^`]+)` produce a (\d+)-byte framed stream and "
+        r"lowercase SHA-256 `([0-9a-f]{64})`",
+        action_vector,
+    )
+    observed_action = _framed_sha256("ACTIONHASH_V1", ACTIONHASH_VECTOR_FIELDS)
+    action_declared = (
+        (*action_match.groups()[:3], int(action_match.group(4)), action_match.group(5))
+        if action_match else None
+    )
+    action_expected = (
+        *ACTIONHASH_VECTOR_FIELDS,
+        ACTIONHASH_VECTOR_LENGTH,
+        ACTIONHASH_VECTOR_DIGEST,
+    )
+    gate.require(
+        "R4 ACTIONHASH_V1: independently reproduced golden vector",
+        action_declared == action_expected
+        and observed_action == (
+            (36, 22, 16),
+            ACTIONHASH_VECTOR_LENGTH,
+            ACTIONHASH_VECTOR_DIGEST,
+        ),
+        f"declared={_stable_repr(action_declared)} observed={_stable_repr(observed_action)}",
+    )
+    gate.require(
+        "R4 approval: payload persistence reserved for future approval",
+        _paragraph_with(text, ("payload", "reserved", "future", "operator", "retention")),
+        "no protected payload store ships until protection/retention receives operator approval",
+    )
+    for table in (
+        "gateway_task_origins",
+        "gateway_approval_bindings",
+        "gateway_action_grants",
+    ):
+        body = _table_body(text, table)
+        gate.require(
+            f"R4 profile: {table} binds delegation id and revision",
+            bool(body)
+            and bool(re.search(r"(?m)^\s*\w*delegation_id\s+TEXT\s+NOT\s+NULL", body, re.IGNORECASE))
+            and bool(re.search(r"(?m)^\s*\w*delegation_revision\s+INTEGER\s+NOT\s+NULL", body, re.IGNORECASE)),
+            f"{table} must carry the exact task-selected delegation id and revision",
+        )
+    grants = _table_body(text, "gateway_action_grants")
+    gate.require(
+        "R4 grant: dispatch task is FK-backed and unique",
+        bool(re.search(
+            r"(?m)^\s*dispatch_request_id\s+TEXT\s+NOT\s+NULL\s+UNIQUE\b",
+            grants,
+            re.IGNORECASE,
+        ))
+        and bool(re.search(
+            r"FOREIGN\s+KEY\s*\(\s*dispatch_request_id\s*\)\s*"
+            r"REFERENCES\s+tasks\s*\(\s*request_id\s*\)",
+            grants,
+            re.IGNORECASE,
+        )),
+        "gateway_action_grants.dispatch_request_id must uniquely reference tasks(request_id)",
+    )
+    lifecycle = next(
+        (
+            paragraph for paragraph in re.split(r"\n\s*\n", text)
+            if "dispatch_request_id is not a free-standing nonce" in paragraph
+            or "`dispatch_request_id` is not a free-standing nonce" in paragraph
+        ),
+        "",
+    )
+    gate.require(
+        "R4 grant: re-mint task, decision, and grant share one transaction",
+        bool(lifecycle)
+        and "winning `state.db` decision transaction" in lifecycle
+        and "creates the corresponding re-minted `tasks` row" in lifecycle
+        and "grant that references both source and dispatch tasks" in lifecycle
+        and "whole transaction rolls back" in lifecycle,
+        "the dispatch task must be created atomically with canonical decision evidence and grant",
+    )
+    gate.require(
+        "R4 grant: committed crash residue never auto-dispatches",
+        bool(lifecycle)
+        and "process crashes before admission" in lifecycle
+        and "recovery revokes the grant" in lifecycle
+        and "never creates a second re-mint or dispatches automatically" in lifecycle
+        and _paragraph_with(text, (
+            "crash after approval/grant",
+            "never automatically dispatches",
+            "revokes the inert grant",
+            "requires reissue",
+        )),
+        "post-commit/pre-admission crash recovery is revoke-and-reissue only",
+    )
 
 
 def _validate_cross_database_protocol(gate: Gate, text: str) -> None:
@@ -997,6 +1674,126 @@ def _validate_cross_database_protocol(gate: Gate, text: str) -> None:
         "deny-first" in text.casefold()
         and _paragraph_with(text, ("gateway", "deny", "first", "collab")),
         "revocation must commit gateway deny/epoch first and collab history second",
+    )
+    state_tables = STATE_ADDITIVE_OBJECTS
+    collab_names = COLLAB_BASELINE_OBJECTS | COLLAB_ADDITIVE_OBJECTS
+    state_cross_refs: dict[str, list[str]] = {}
+    for table in sorted(state_tables):
+        body = _table_body(text, table)
+        refs = {
+            name
+            for name in re.findall(
+                r"REFERENCES\s+([A-Za-z_][A-Za-z0-9_]*)",
+                body,
+                re.IGNORECASE,
+            )
+            if name in collab_names
+        }
+        if refs:
+            state_cross_refs[table] = sorted(refs)
+    state_names = STATE_BASELINE_OBJECTS | STATE_ADDITIVE_OBJECTS
+    collab_cross_refs: dict[str, list[str]] = {}
+    for table in sorted(COLLAB_ADDITIVE_OBJECTS):
+        body = _table_body(text, table)
+        refs = {
+            name
+            for name in re.findall(
+                r"REFERENCES\s+([A-Za-z_][A-Za-z0-9_]*)",
+                body,
+                re.IGNORECASE,
+            )
+            if name in state_names
+        }
+        if refs:
+            collab_cross_refs[table] = sorted(refs)
+    gate.require(
+        "R4 cross-DB: no cross-database foreign keys",
+        not state_cross_refs
+        and not collab_cross_refs
+        and (
+            _paragraph_with(text, ("no", "cross-database", "foreign key"))
+            or _paragraph_with(text, ("cannot", "cross-database", "foreign key"))
+            or bool(re.search(
+                r'"cross_database_fk"\s*:\s*"forbidden"',
+                text,
+                re.IGNORECASE,
+            ))
+        ),
+        f"state_to_collab={_stable_repr(state_cross_refs)} collab_to_state={_stable_repr(collab_cross_refs)}",
+    )
+
+
+def _validate_matrix_and_c2_c3_scope(gate: Gate, text: str) -> None:
+    try:
+        matrix = section(text, "4. Source-of-truth matrix", level=2)
+    except ValueError:
+        matrix = ""
+    rows: dict[str, str] = {}
+    for line in matrix.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [re.sub(r"[*`]", "", cell).strip() for cell in line.strip("|").split("|")]
+        if len(cells) >= 2:
+            rows[cells[0]] = cells[1]
+    expected_owners = {
+        "Surface": "collab.db.surfaces",
+        "Configured surface capability": "collab.db.surfaces.capability_json",
+        "Effective surface capability": "state.db.gateway_surface_security",
+        "Effective profile delegation": "state.db.gateway_profile_delegations",
+        "Session (execution/replay)": "state.db.sessions",
+        "Connection/task origin evidence": "state.db.gateway_task_origins",
+        "Approval authority (who may decide)": "state.db.surface_authorities",
+        "Approval state / display audit": "state.db.tool_approvals",
+        "Immutable registration binding": "state.db.gateway_approval_bindings",
+        "Decision evidence": "tool_approvals.decided_",
+        "Action grant (one-shot consumption, §1.4)": "state.db.gateway_action_grants",
+        "Approval expiry": "tool_approvals.status='expired'",
+        "Approval delivery": "approval_deliveries",
+    }
+    ownership_mismatches = {
+        concept: {"expected": owner, "actual": rows.get(concept)}
+        for concept, owner in expected_owners.items()
+        if owner not in rows.get(concept, "")
+    }
+    gate.require(
+        "R4 matrix: authoritative owners pinned",
+        not ownership_mismatches,
+        _stable_repr(ownership_mismatches),
+    )
+
+    try:
+        c2 = section(
+            text,
+            "3.4.2 C2 behavior — registration may wait; decision→dispatch stays SYNCHRONOUS",
+            level=4,
+        )
+    except ValueError:
+        c2 = ""
+    gate.require(
+        "R4 scope: C2 synchronous registration/decision/admission semantics",
+        "in C2 there is no asynchronous decision-delivery→apply gap" in c2
+        and "request/registration→decision wait" in c2
+        and "guarded decision transaction atomically creates" in c2
+        and "synchronous admission fence" in c2
+        and "C2 still MUST NOT invent an asynchronous/offline apply seam" in c2,
+        "C2 section must own pending-context comparison and synchronous pre-tool admission only",
+    )
+    try:
+        c3 = section(
+            text,
+            "3.4.3 Property 10 deferred to C3 — the real decide≠apply seam (property-6-vs-10 collision is latent-until-C3)",
+            level=4,
+        )
+    except ValueError:
+        c3 = ""
+    gate.require(
+        "R4 scope: C3 asynchronous apply semantics remain deferred",
+        "decision-delivery→apply seam" in c3
+        and "DEFERRED to C3" in c3
+        and "property 10 WINS over property 6" in c3
+        and "LATENT-UNTIL-C3" in c3
+        and "a **C3** invariant" in c3,
+        "only C3 may own future asynchronous decision-delivery/apply revalidation",
     )
 
 
@@ -1038,6 +1835,374 @@ def _validate_ctxhash(gate: Gate, text: str) -> None:
         count(inputs, "CTXHASH_V1") >= 1
         and _paragraph_with(inputs, ("CTXHASH_V1", "first bytes", "future change")),
         "CTXHASH_V1 must be the first bytes and any future serializer change needs a new tag",
+    )
+    framing = next(
+        (
+            paragraph for paragraph in re.split(r"\n\s*\n", inputs)
+            if "Frozen serializer vector (framing-only)" in paragraph
+        ),
+        "",
+    )
+    framing_match = re.search(
+        r"UTF-8 byte lengths are `([0-9,]+)`, total framed input length is "
+        r"`(\d+)`, and the SHA-256 is `([0-9a-f]{64})`",
+        framing,
+    )
+    framing_declared = (
+        (
+            tuple(int(item) for item in framing_match.group(1).split(",")),
+            int(framing_match.group(2)),
+            framing_match.group(3),
+        )
+        if framing_match else None
+    )
+    framing_observed = _framed_sha256("CTXHASH_V1", CTXHASH_FRAMING_FIELDS)
+    gate.require(
+        "R4 CTXHASH_V1: framing-only golden vector retained",
+        framing_declared
+        == (CTXHASH_FRAMING_LENGTHS, CTXHASH_FRAMING_TOTAL, CTXHASH_FRAMING_DIGEST)
+        and framing_observed == framing_declared
+        and all(f"`{field}`" in framing for field in CTXHASH_FRAMING_FIELDS[:9])
+        and "64 lowercase `c` characters" in framing
+        and "do **not** satisfy the semantic inner-digest contract" in framing,
+        f"declared={_stable_repr(framing_declared)} observed={_stable_repr(framing_observed)}",
+    )
+
+    semantic = next(
+        (
+            paragraph for paragraph in re.split(r"\n\s*\n", inputs)
+            if "Frozen end-to-end semantic vector" in paragraph
+        ),
+        "",
+    )
+    # The fixture block is its own Markdown paragraph immediately after the
+    # semantic-vector introduction, so search the section rather than only
+    # the introductory paragraph.
+    semantic_objects: dict[str, Any] = {}
+    for name in ("privacy", "routing", "security"):
+        match = re.search(rf"(?m)^{name}\s*=\s*(\{{.*\}})$", inputs)
+        if not match:
+            continue
+        try:
+            semantic_objects[name] = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            semantic_objects[name] = "<invalid-json>"
+    gate.require(
+        "R4 CTXHASH_V1: semantic fixture objects pinned",
+        bool(semantic) and semantic_objects == CTXHASH_SEMANTIC_OBJECTS,
+        f"observed={_stable_repr(semantic_objects)}",
+    )
+    semantic_hashes = {
+        name: hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
+        for name, value in semantic_objects.items()
+        if isinstance(value, dict)
+    }
+    hash_match = re.search(
+        r"required lowercase hashes are f8 `([0-9a-f]{64})`, f9 "
+        r"`([0-9a-f]{64})`, and f10 `([0-9a-f]{64})`",
+        inputs,
+    )
+    declared_hashes = (
+        dict(zip(("privacy", "routing", "security"), hash_match.groups(), strict=True))
+        if hash_match else None
+    )
+    gate.require(
+        "R4 CTXHASH_V1: semantic inner hashes independently reproduced",
+        semantic_hashes == CTXHASH_SEMANTIC_HASHES
+        and declared_hashes == CTXHASH_SEMANTIC_HASHES,
+        f"declared={_stable_repr(declared_hashes)} observed={_stable_repr(semantic_hashes)}",
+    )
+    final_match = re.search(
+        r"final field lengths are `([0-9,]+)`, total framed length is `([0-9]+)`, "
+        r"and `CTXHASH_V1` is `([0-9a-f]{64})`",
+        inputs,
+    )
+    final_declared = (
+        (
+            tuple(int(item) for item in final_match.group(1).split(",")),
+            int(final_match.group(2)),
+            final_match.group(3),
+        )
+        if final_match else None
+    )
+    semantic_fields = (
+        *CTXHASH_FRAMING_FIELDS[:7],
+        *(semantic_hashes.get(name, "") for name in ("privacy", "routing", "security")),
+    )
+    final_observed = _framed_sha256("CTXHASH_V1", semantic_fields)
+    gate.require(
+        "R4 CTXHASH_V1: end-to-end semantic vector independently reproduced",
+        final_declared
+        == (CTXHASH_SEMANTIC_LENGTHS, CTXHASH_SEMANTIC_TOTAL, CTXHASH_SEMANTIC_DIGEST)
+        and final_observed == final_declared,
+        f"declared={_stable_repr(final_declared)} observed={_stable_repr(final_observed)}",
+    )
+
+
+def _qualified_python_name(node: ast.AST) -> str:
+    """Return a stable dotted name for the simple call forms used here."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _qualified_python_name(node.value)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    return ""
+
+
+def _top_level_function(
+    tree: ast.Module | None,
+    name: str,
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    if tree is None:
+        return None
+    matches = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == name
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _python_calls(node: ast.AST | None) -> set[str]:
+    if node is None:
+        return set()
+    return {
+        name
+        for item in ast.walk(node)
+        if isinstance(item, ast.Call)
+        if (name := _qualified_python_name(item.func))
+    }
+
+
+def _python_decorators(
+    node: ast.FunctionDef | ast.AsyncFunctionDef | None,
+) -> set[str]:
+    if node is None:
+        return set()
+    names: set[str] = set()
+    for decorator in node.decorator_list:
+        target = decorator.func if isinstance(decorator, ast.Call) else decorator
+        name = _qualified_python_name(target)
+        if name:
+            names.add(name)
+    return names
+
+
+def _literal_error_shapes(node: ast.AST | None) -> list[dict[str, Any]]:
+    """Collect literal fields from dicts without requiring every value literal."""
+    if node is None:
+        return []
+    shapes: list[dict[str, Any]] = []
+    for item in ast.walk(node):
+        if not isinstance(item, ast.Dict):
+            continue
+        fields: dict[str, Any] = {}
+        for key, value in zip(item.keys, item.values, strict=True):
+            if (
+                isinstance(key, ast.Constant)
+                and isinstance(key.value, str)
+                and isinstance(value, ast.Constant)
+            ):
+                fields[key.value] = value.value
+        if isinstance(fields.get("code"), str):
+            shapes.append(fields)
+    return shapes
+
+
+def _code_retryability_assignments(node: ast.AST | None) -> dict[str, bool]:
+    """Read the mapper's explicit ``code, retryable = <literal>, <bool>`` arms."""
+    if node is None:
+        return {}
+    assignments: dict[str, bool] = {}
+    for item in ast.walk(node):
+        if not isinstance(item, ast.Assign) or len(item.targets) != 1:
+            continue
+        target = item.targets[0]
+        value = item.value
+        if not (
+            isinstance(target, (ast.Tuple, ast.List))
+            and isinstance(value, (ast.Tuple, ast.List))
+            and len(target.elts) == len(value.elts) == 2
+            and all(isinstance(part, ast.Name) for part in target.elts)
+            and [part.id for part in target.elts] == ["code", "retryable"]
+            and isinstance(value.elts[0], ast.Constant)
+            and isinstance(value.elts[0].value, str)
+            and isinstance(value.elts[1], ast.Constant)
+            and isinstance(value.elts[1].value, bool)
+        ):
+            continue
+        assignments[value.elts[0].value] = value.elts[1].value
+    return assignments
+
+
+def _validate_governed_skill_source(gate: Gate, repo: Path) -> None:
+    """Bind §10.4 to shipped kernel source without claiming gateway reachability."""
+    trees: dict[str, ast.Module] = {}
+    source_errors: dict[str, str] = {}
+    for key, relative in GOVERNED_SOURCE_PATHS.items():
+        path = repo / relative
+        try:
+            trees[key] = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
+        except (OSError, SyntaxError, UnicodeError) as exc:
+            source_errors[key] = f"{type(exc).__name__}: {exc}"
+    gate.require(
+        "R4 source: governed kernel files parse",
+        not source_errors and set(trees) == set(GOVERNED_SOURCE_PATHS),
+        _stable_repr(source_errors or {"missing": sorted(set(GOVERNED_SOURCE_PATHS) - set(trees))}),
+    )
+
+    mapper = _top_level_function(trees.get("mapper"), "map_activation_failure")
+    decide = _top_level_function(trees.get("queue"), "decide")
+    rollback = _top_level_function(trees.get("rollback"), "rollback")
+    rollback_tool = _top_level_function(trees.get("server"), "rollback_skill")
+    versions_tool = _top_level_function(trees.get("server"), "list_skill_versions")
+
+    mapper_call = "governed_skills.map_activation_failure"
+    call_sites = {
+        "skill_queue.decide": mapper_call in _python_calls(decide),
+        "skill_rollback.rollback": mapper_call in _python_calls(rollback),
+    }
+    gate.require(
+        "R4 source: shared activation-failure mapper call sites",
+        all(call_sites.values()),
+        _stable_repr(call_sites),
+    )
+
+    mapper_literals = {
+        item.value
+        for item in ast.walk(mapper)
+        if isinstance(item, ast.Constant)
+        and isinstance(item.value, str)
+        and item.value.startswith("SKILL_")
+    } if mapper is not None else set()
+    copied_shapes = {
+        source: sorted(
+            shape["code"]
+            for shape in _literal_error_shapes(node)
+            if shape["code"] in SHARED_MAPPER_CODES
+        )
+        for source, node in {
+            "skill_queue.decide": decide,
+            "skill_rollback.rollback": rollback,
+        }.items()
+    }
+    copied_literals = {
+        source: sorted({
+            item.value
+            for item in ast.walk(node)
+            if isinstance(item, ast.Constant)
+            and isinstance(item.value, str)
+            and item.value in SHARED_MAPPER_CODES
+        }) if node is not None else []
+        for source, node in {
+            "skill_queue.decide": decide,
+            "skill_rollback.rollback": rollback,
+        }.items()
+    }
+    gate.require(
+        "R4 source: mapper owns mapped error dictionaries",
+        mapper_literals == SHARED_MAPPER_CODES
+        and all(not codes for codes in copied_shapes.values())
+        and all(not codes for codes in copied_literals.values()),
+        f"mapper_codes={_stable_repr(mapper_literals)} "
+        f"copied_shapes={_stable_repr(copied_shapes)} "
+        f"copied_literals={_stable_repr(copied_literals)}",
+    )
+
+    retryability = _code_retryability_assignments(mapper)
+    unproven_retryability = {
+        code: retryability.get(code)
+        for code in sorted(UNPROVEN_CODES)
+    }
+    gate.require(
+        "R4 source: UNPROVEN codes are non-retryable",
+        unproven_retryability == {code: False for code in sorted(UNPROVEN_CODES)},
+        _stable_repr(unproven_retryability),
+    )
+
+    rollback_shapes = _literal_error_shapes(rollback)
+    direct_shapes = {
+        str(shape["code"]): shape.get("retryable")
+        for shape in rollback_shapes
+        if shape["code"] in DIRECT_ROLLBACK_CODES
+    }
+    gate.require(
+        "R4 source: rollback owns direct validation codes",
+        direct_shapes == {code: False for code in DIRECT_ROLLBACK_CODES},
+        _stable_repr(direct_shapes),
+    )
+
+    registrations = {
+        "rollback_skill": (
+            "mcp.tool" in _python_decorators(rollback_tool)
+            and "skill_rollback.rollback" in _python_calls(rollback_tool)
+        ),
+        "list_skill_versions": (
+            "mcp.tool" in _python_decorators(versions_tool)
+            and "skill_rollback.list_versions" in _python_calls(versions_tool)
+        ),
+    }
+    gate.require(
+        "R4 source: governed MCP tools registered",
+        all(registrations.values()),
+        _stable_repr(registrations),
+    )
+
+
+def _validate_gs_accept_receipt(gate: Gate, repo: Path, text: str) -> None:
+    receipt_path = repo / GS_ACCEPT_RECEIPT_PATH
+    try:
+        receipt = receipt_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        gate.require(
+            "R4 GS receipt: immutable source result read",
+            False,
+            f"{type(exc).__name__}: {exc}",
+        )
+        receipt = ""
+    receipt_result = re.search(
+        r"Result:\s*\*\*(\d+) passed, (\d+) xfailed\*\*",
+        receipt,
+    )
+    receipt_commit = re.search(r"against merged master \(`([0-9a-f]{7,40})`\)", receipt)
+    observed = (
+        int(receipt_result.group(1)),
+        int(receipt_result.group(2)),
+        receipt_commit.group(1) if receipt_commit else None,
+    ) if receipt_result else None
+    gate.require(
+        "R4 GS receipt: immutable source result read",
+        observed == (8, 2, "83690f3"),
+        f"path={GS_ACCEPT_RECEIPT_PATH} observed={_stable_repr(observed)}",
+    )
+    handoff_report = bool(re.search(
+        r"(?:lane\s+)?handoff\s+(?:reports|reported)[^.\n]{0,180}"
+        r"9\s+passed\s*/\s*1\s+xfail(?:ed)?",
+        text,
+        re.IGNORECASE,
+    ))
+    false_repository_record = bool(re.search(
+        r"repository\s+(?:record|receipt)[^.\n]{0,180}"
+        r"9\s+passed\s*/\s*1\s+xfail(?:ed)?",
+        text,
+        re.IGNORECASE,
+    ))
+    receipt_claim = bool(re.search(
+        rf"{re.escape(GS_ACCEPT_RECEIPT_PATH)}[^.\n]{{0,180}}"
+        r"8\s+passed\s*/\s*2\s+xfail(?:ed)?[^.\n]{0,100}`?83690f3`?",
+        text,
+        re.IGNORECASE,
+    )) or bool(re.search(
+        rf"{re.escape(GS_ACCEPT_RECEIPT_PATH)}[^\n]{{0,240}}"
+        r"8\s+passed\s*/\s*2\s+xfail(?:ed)?",
+        text,
+        re.IGNORECASE,
+    ))
+    gate.require(
+        "R4 GS receipt: handoff and repository evidence distinguished",
+        handoff_report and receipt_claim and not false_repository_record,
+        f"handoff={handoff_report} receipt={receipt_claim} false_record={false_repository_record}",
     )
 
 
@@ -1094,8 +2259,12 @@ def _validate_governed_skill_boundary(gate: Gate, text: str) -> None:
     gate.require(
         "R4 governed errors: shared mapper, never copied",
         bool(mapper_paragraph)
-        and "skill_queue.decide()" in mapper_paragraph
-        and any(term in mapper_paragraph.casefold() for term in ("not copied", "not reimplemented", "never copied")),
+        and "skill_queue.decide()" in text
+        and bool(re.search(
+            r"(?:never|must\s+not|not)\s+cop(?:y|ied)|not\s+reimplement",
+            mapper_paragraph,
+            re.IGNORECASE,
+        )),
         "C2 must use governed_skills.map_activation_failure rather than copying error shapes",
     )
     codes = {
@@ -1113,8 +2282,8 @@ def _validate_governed_skill_boundary(gate: Gate, text: str) -> None:
     unproven = next(
         (
             paragraph for paragraph in re.split(r"\n\s*\n", text)
-            if "SKILL_PROJECTION_UNPROVEN_AFTER_REVERT" in paragraph
-            and "SKILL_ACTIVATION_CACHE_UNPROVEN" in paragraph
+            if "UNPROVEN" in paragraph
+            and "non-retryable" in paragraph.casefold()
         ),
         "",
     )
@@ -1152,8 +2321,8 @@ def _validate_evidence_honesty(gate: Gate, text: str, pregate: str) -> None:
         any(
             "observed" in paragraph.casefold()
             and "expected" in paragraph.casefold()
-            and ("never" in paragraph.casefold() or "must not" in paragraph.casefold())
-            and ("copy" in paragraph.casefold() or "derived" in paragraph.casefold())
+            and any(term in paragraph.casefold() for term in ("never", "must not", "reject"))
+            and ("copi" in paragraph.casefold() or "derived" in paragraph.casefold())
             for paragraph in paragraphs
         ),
         "evidence rules must prohibit deriving observed values from expected constants",
@@ -1171,13 +2340,24 @@ def _validate_evidence_honesty(gate: Gate, text: str, pregate: str) -> None:
     )
     gate.require(
         "R4 evidence: failure report cannot be overwritten",
-        _paragraph_with(pregate, ("never", "overwrite", "failure report")),
+        any(
+            "failure report" in paragraph.casefold()
+            and (
+                "preserve" in paragraph.casefold()
+                or (
+                    "never" in paragraph.casefold()
+                    and "overwrite" in paragraph.casefold()
+                )
+            )
+            for paragraph in paragraphs
+        ),
         "a later path must never overwrite failure evidence",
     )
     gate.require(
         "R4 evidence: future proof launches real hashed artifact",
         any(
-            "real child process" in paragraph.casefold()
+            "launch" in paragraph.casefold()
+            and "real artifact" in paragraph.casefold()
             and "hash" in paragraph.casefold()
             and "child output" in paragraph.casefold()
             and "disposable" in paragraph.casefold()
@@ -1188,7 +2368,13 @@ def _validate_evidence_honesty(gate: Gate, text: str, pregate: str) -> None:
     gate.require(
         "R4 evidence: design/model result not runtime proof",
         _paragraph_with(text, ("design", "model", "not", "built-artifact"))
-        or _paragraph_with(text, ("design", "SQLite-model", "not runtime")),
+        or any(
+            "design" in paragraph.casefold()
+            and "sqlite-model" in paragraph.casefold()
+            and "only" in paragraph.casefold()
+            and "runtime-success" in paragraph.casefold()
+            for paragraph in re.split(r"\n\s*\n", text)
+        ),
         "the linter/SQLite model cannot be labeled built-artifact evidence",
     )
     fixture_free = _without_block(text.encode("utf-8"), "BASELINE_STATE_DB_AF52430")
@@ -1206,6 +2392,69 @@ def _validate_evidence_honesty(gate: Gate, text: str, pregate: str) -> None:
         "R4 evidence: no hard-coded observed/PASS-finally code",
         not copied_assignment and not pass_in_finally,
         f"observed_equals_expected={copied_assignment} pass_in_finally={pass_in_finally}",
+    )
+
+
+def _validate_final_review_closeouts(gate: Gate, text: str) -> None:
+    gate.require(
+        "R4 CT-2 provisioning: authority insert is state-only",
+        _paragraph_with(
+            text,
+            (
+                "grantAuthority(surfaceId, authority)",
+                "no cross-WAL read",
+                "same `state.db` transaction",
+                "current live projected kind/role/auth epoch/source revision",
+            ),
+        ),
+        "grantAuthority must validate the already-activated projection in one state.db transaction without a cross-WAL read",
+    )
+    gate.require(
+        "R4 grant: finite TTL has an exact source and admission writer",
+        _paragraph_with(
+            text,
+            (
+                "Grant expiry is distinct",
+                "canonical_now + GRANT_TTL_SECONDS",
+                "never copies the approval row's deadline",
+                "finite",
+                "expires_at<=canonical_now",
+                "revoked",
+                "expires_at>canonical_now",
+            ),
+        ),
+        "the one-shot grant needs its own finite TTL formula plus lazy expiry/revocation at admission",
+    )
+    gate.require(
+        "R4 delivery: revoked targets excluded without changing approval truth",
+        _paragraph_with(
+            text,
+            (
+                "Rebuild/reconnect excludes revoked",
+                "no eligible operator surface exists",
+                "remains canonically `pending`",
+                "delivery-failed",
+                "no card is offered to the revoked target",
+                "no delivery failure changes approval state",
+            ),
+        ),
+        "delivery rebuild must exclude revoked targets and leave canonical approval state unchanged",
+    )
+
+    questions = section(text, "12. Open questions for the operator (not guessed)", level=2)
+    missing_metadata: list[str] = []
+    for number in (1, 2, 3, 5, 6, 8):
+        match = re.search(
+            rf"(?m)^- \*\*OQ-{number}\b([^\n]*)\*\*",
+            questions,
+        )
+        heading = match.group(1).casefold() if match else ""
+        if "owner:" not in heading or "deadline:" not in heading:
+            missing_metadata.append(f"OQ-{number}")
+    gate.require(
+        "R4 open questions: named owners and gate-relative deadlines",
+        not missing_metadata,
+        "missing owner/deadline metadata: " + ", ".join(missing_metadata),
     )
 
 
@@ -1277,6 +2526,12 @@ def _run_revision_4_checks(
 
     fixture_free_text = _without_block(data, "BASELINE_STATE_DB_AF52430")
     additions = _validate_migration_contract(gate, fixture_free_text, state_map)
+    _validate_delivery_and_expiry_ddl(
+        gate,
+        fixture_free_text,
+        expected_gateway if gateway_matches else None,
+        additions,
+    )
     if gateway_matches and collab_matches and expectations is not None:
         _validate_sqlite_fixtures(
             gate,
@@ -1293,11 +2548,16 @@ def _run_revision_4_checks(
         )
 
     _validate_identity_and_authority(gate, fixture_free_text)
+    _validate_profile_registry_contract(gate, fixture_free_text)
     _validate_approval_state(gate, fixture_free_text)
     _validate_cross_database_protocol(gate, fixture_free_text)
+    _validate_matrix_and_c2_c3_scope(gate, fixture_free_text)
     _validate_ctxhash(gate, fixture_free_text)
     _validate_governed_skill_boundary(gate, fixture_free_text)
+    _validate_governed_skill_source(gate, repo)
+    _validate_gs_accept_receipt(gate, repo, fixture_free_text)
     _validate_evidence_honesty(gate, fixture_free_text, pregate)
+    _validate_final_review_closeouts(gate, fixture_free_text)
 
 
 def run(prd: Path, repo: Path | None = None) -> tuple[Gate, str]:
@@ -1611,10 +2871,28 @@ def run(prd: Path, repo: Path | None = None) -> tuple[Gate, str]:
     return gate, summary
 
 
-def render(prd: Path, gate: Gate, summary: str) -> str:
+def _report_prd_path(prd: Path, repo: Path) -> str:
+    try:
+        return prd.resolve().relative_to(repo.resolve()).as_posix()
+    except ValueError:
+        # Mutant/test inputs live outside the checkout.  A basename is stable
+        # across machines and cannot leak a workstation-specific temp path.
+        return prd.name
+
+
+def render(
+    prd: Path,
+    gate: Gate,
+    summary: str,
+    repo: Path | None = None,
+) -> str:
+    display_path = _report_prd_path(
+        prd,
+        repo or Path(__file__).resolve().parents[1],
+    )
     lines = [
         "# PRD-TCLAW-COLLAB-GATEWAY-004 Consistency Report", "",
-        f"- PRD: `{prd}`", f"- Result: `{summary}`", "",
+        f"- PRD: `{display_path}`", f"- Result: `{summary}`", "",
         "## Passed checks", "",
         *(f"- {name}" for name in gate.passed),
         "", "## Findings", "",
@@ -1645,7 +2923,10 @@ def main() -> int:
         print(f"- {item.check}: {item.detail}")
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(render(args.prd.resolve(), gate, summary), encoding="utf-8")
+        args.report.write_text(
+            render(args.prd.resolve(), gate, summary, repo),
+            encoding="utf-8",
+        )
     return 1 if gate.findings else 0
 
 

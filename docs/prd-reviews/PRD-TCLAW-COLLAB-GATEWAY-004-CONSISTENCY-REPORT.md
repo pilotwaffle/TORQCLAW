@@ -1,7 +1,7 @@
 # PRD-TCLAW-COLLAB-GATEWAY-004 Consistency Report
 
-- PRD: `E:\TorqClaw\docs\prd-reviews\PRD-TCLAW-COLLAB-GATEWAY-004.md`
-- Result: `PASS: 67 checks passed, 0 failed`
+- PRD: `docs/prd-reviews/PRD-TCLAW-COLLAB-GATEWAY-004.md`
+- Result: `PASS: 224 checks passed, 0 failed`
 
 ## Passed checks
 
@@ -72,6 +72,163 @@
 - §7 all 12 adversarial rows present
 - §8 every ticket has an AC: line
 - §8 expected ticket set present
+- R4 compatibility: original 67 checks executed
+- R4 structure: exactly sections 1-13
+- R4 markers: globally balanced and nested
+- R4 markers: BASELINE_STATE_DB_AF52430
+- R4 markers: BASELINE_GATEWAY_SCHEMA_AF52430
+- R4 markers: BASELINE_COLLAB_MIGRATION_DDL_AF52430
+- R4 markers: BASELINE_OBJECT_EXPECTATIONS_V4
+- R4 markers: STATE_DB_MAP_V4
+- R4 baseline: raw git show af52430
+- R4 baseline bytes/SHA-256: gateway schema
+- R4 baseline bytes/SHA-256: collaboration migration DDL
+- R4 JSON: BASELINE_OBJECT_EXPECTATIONS_V4
+- R4 JSON: STATE_DB_MAP_V4
+- R4 expectations: baseline_ref
+- R4 expectations: principals columns
+- R4 expectations: sessions columns
+- R4 expectations: tasks columns
+- R4 expectations: tool_approvals columns
+- R4 expectations: events FK
+- R4 expectations: required baseline objects
+- R4 expectations: C0.1 auth tables
+- R4 map: top-level entries
+- R4 map: baseline_ref
+- R4 map: physical databases
+- R4 map: state.db object
+- R4 map: state.db entries
+- R4 map: sessions preserved
+- R4 map: events preserved
+- R4 map: tasks preserved
+- R4 map: skill_queue no-touch
+- R4 map: tool_approvals additive preservation
+- R4 map: state.db additive objects
+- R4 map: no gateway_approval_events reducer
+- R4 map: no durable session-auth snapshot
+- R4 map: protected payload store remains uncreated
+- R4 map: collab.db object
+- R4 map: collab.db entries
+- R4 map: principals preserved
+- R4 map: live C0.1 and collab.db preserved
+- R4 map: collab.db additive objects
+- R4 map: fail-closed cross-database protocol
+- R4 map: unrelated objects preserved
+- R4 migration: exactly six ALTER columns in canonical order
+- R4 migration: exact nullable column types
+- R4 migration: additions have no constraints or defaults
+- R4 migration: every ALTER uses the named guard
+- R4 migration: PRAGMA table_info guard
+- R4 migration: no rebuild/sentinel/history rewrite
+- R4 migration: no gateway_approval_events table/reducer
+- R4 migration: no gateway_session_auth table
+- R4 migration: no gateway_approval_payloads table
+- R4 additive DDL: approval delivery table/indexes are guarded
+- R4 additive DDL: approval expiry index is guarded
+- R4 SQLite: proposed delivery/expiry DDL executes and repeats
+- R4 SQLite state.db: required baseline objects
+- R4 SQLite collab.db: required baseline objects
+- R4 SQLite: physical database separation
+- R4 SQLite state.db columns: sessions
+- R4 SQLite state.db columns: tasks
+- R4 SQLite state.db columns: tool_approvals
+- R4 SQLite collab.db columns: principals
+- R4 SQLite state.db FK: events
+- R4 SQLite state.db: declared indexes installed
+- R4 SQLite state.db: declared triggers installed
+- R4 SQLite state.db: foreign_key_check
+- R4 SQLite collab.db: declared indexes installed
+- R4 SQLite collab.db: declared triggers installed
+- R4 SQLite collab.db: foreign_key_check
+- R4 SQLite migration model: original approval row/value/rowid preserved
+- R4 SQLite migration model: skill_queue row/value/rowid preserved
+- R4 SQLite migration model: six additions are physically nullable
+- R4 SQLite migration model: guarded repeat is no-op
+- R4 SQLite: execute separate pinned baseline DDL
+- R4 identity: globally unique surface_id
+- R4 identity: globally unique credential_id
+- R4 identity: globally unique secret_hmac
+- R4 identity: credential references one surface
+- R4 authority: state-owned effective capability/profile revision
+- R4 identity: ConnectionAuthContext remains connection-scoped
+- R4 identity: immutable request-keyed task origin
+- R4 profile: live delegation keyed by surface and profile
+- R4 profile: source-owned EffectiveProfile revisions rechecked
+- R4 authority: Origin independent of Authority
+- R4 authority: different-origin authorized operator positive path
+- R4 authority: live operator-kind approve plus resource authz
+- R4 authority: channel and automation decision path denied
+- R4 CT-2: configured and effective role columns pinned
+- R4 CT-2: configured truth projects grant-last to state enforcement
+- R4 CT-2: decision is state-only and fail-closed on projection drift
+- R4 authority: same-origin authorized operator positive path
+- R4 authority: channel self-approval structurally denied
+- R4 profile: registry enforcement hash bound through all state stages
+- R4 profile: duplicate/vague profile hashes absent
+- R4 profile: policy hash is byte-identical source copy
+- R4 profile: registry enforcement formula and exact material pinned
+- R4 profile: delegations are immutable and revisioned on change
+- R4 profile: security hash binds registry enforcement
+- R4 approval: canonical state and one centralized writer
+- R4 approval: no sidecar status/transition authority
+- R4 approval: pending decider/context nullability
+- R4 approval: expiry uses canonical pending guard
+- R4 approval: expiry/decision race first-writer-wins
+- R4 approval: exact grant consumed in dispatch interval
+- R4 approval: canonicalJson hash checked against regenerated actual args
+- R4 action args: present plain object with explicit empty-object no-arg
+- R4 ACTIONHASH_V1: exact formula and pre-execute comparison
+- R4 ACTIONHASH_V1: independently reproduced golden vector
+- R4 approval: payload persistence reserved for future approval
+- R4 profile: gateway_task_origins binds delegation id and revision
+- R4 profile: gateway_approval_bindings binds delegation id and revision
+- R4 profile: gateway_action_grants binds delegation id and revision
+- R4 grant: dispatch task is FK-backed and unique
+- R4 grant: re-mint task, decision, and grant share one transaction
+- R4 grant: committed crash residue never auto-dispatches
+- R4 cross-DB: no atomicity/unification claim
+- R4 cross-DB: grant-last
+- R4 cross-DB: deny-first
+- R4 cross-DB: no cross-database foreign keys
+- R4 matrix: authoritative owners pinned
+- R4 scope: C2 synchronous registration/decision/admission semantics
+- R4 scope: C3 asynchronous apply semantics remain deferred
+- R4 CTXHASH_V1: exact ten fields and order
+- R4 CTXHASH_V1: pinned byte serializer
+- R4 CTXHASH_V1: active version tag pinned first
+- R4 CTXHASH_V1: framing-only golden vector retained
+- R4 CTXHASH_V1: semantic fixture objects pinned
+- R4 CTXHASH_V1: semantic inner hashes independently reproduced
+- R4 CTXHASH_V1: end-to-end semantic vector independently reproduced
+- R4 GS sequencing: stale acceptance claim absent
+- R4 GS sequencing: F-1 closed and acceptance result current
+- R4 GS sequencing: soak then operator default-on
+- R4 governed tools: both are operator-surface only
+- R4 governed tools: no C2 or delegated path
+- R4 governed errors: shared mapper, never copied
+- R4 governed errors: exact four codes present
+- R4 governed errors: UNPROVEN non-retryable/no auto-retry
+- R4 governed tools: disable/unpublish nonexistent
+- R4 governed tools: rollback re-enables by design
+- R4 governed flag: stays default-off
+- R4 source: governed kernel files parse
+- R4 source: shared activation-failure mapper call sites
+- R4 source: mapper owns mapped error dictionaries
+- R4 source: UNPROVEN codes are non-retryable
+- R4 source: rollback owns direct validation codes
+- R4 source: governed MCP tools registered
+- R4 GS receipt: immutable source result read
+- R4 GS receipt: handoff and repository evidence distinguished
+- R4 evidence: observed never copied from expected
+- R4 evidence: PASS only after zero and never from finally
+- R4 evidence: failure report cannot be overwritten
+- R4 evidence: future proof launches real hashed artifact
+- R4 evidence: design/model result not runtime proof
+- R4 evidence: no hard-coded observed/PASS-finally code
+- R4 CT-2 provisioning: authority insert is state-only
+- R4 grant: finite TTL has an exact source and admission writer
+- R4 delivery: revoked targets excluded without changing approval truth
+- R4 open questions: named owners and gate-relative deadlines
 
 ## Findings
 
