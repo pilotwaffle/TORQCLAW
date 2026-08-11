@@ -124,99 +124,24 @@ def decide(queue_id: str, decision: str, edited_markdown: str | None = None) -> 
             # thread still observes `status == "pending"` and is correctly
             # rejected by the guard above -- it cannot race a second
             # activation attempt in.
-            from .runtime_quiescence import (
-                SkillActivationRestoredButCacheUnprovenError,
-                SkillRuntimeBusyError,
-            )
-            from .governed_skills import GovernanceRevertedProjectionUnprovenError
-
             try:
                 installed = governed_skills.install_approved_skill(name, content)
-            except SkillRuntimeBusyError:
-                from .hermes_runner import RUNNING
-
-                active_tasks = len(RUNNING)
-                return {
-                    "ok": False,
-                    "code": "SKILL_RUNTIME_BUSY",
-                    "retryable": True,
-                    "status": "pending",
-                    "activeTasks": active_tasks,
-                    "error": (
-                        f"Skill activation is blocked while {active_tasks} "
-                        "Hermes task(s) are running. No skill state changed. "
-                        "Retry when those tasks finish."
-                    ),
-                }
-            except GovernanceRevertedProjectionUnprovenError as exc:
-                # Deliberately DISTINCT from the generic activation-failure
-                # result below: this is the one activation-failure shape
-                # where TORQCLAW cannot claim "nothing partial is left
-                # published or governed-active" (see this function's own
-                # docstring). Governance was reverted (conservative -- it
-                # points at the prior digest again), but the published
-                # projection restore then also failed, so the actual bytes
-                # on disk for this skill id are unproven. `retryable: true`
-                # is deliberately omitted here: a blind automated retry is
-                # not obviously safe until an operator has looked at what is
-                # actually published on disk, unlike the ordinary
-                # activation-failure case below where the coordinator's own
-                # restore path guarantees a clean slate.
-                return {
-                    "ok": False,
-                    "code": "SKILL_PROJECTION_UNPROVEN_AFTER_REVERT",
-                    "retryable": False,
-                    "status": "pending",
-                    "error": str(exc),
-                }
-            except SkillActivationRestoredButCacheUnprovenError as exc:
-                # Deliberately DISTINCT from the generic activation-failure
-                # shape below: that shape's docstring (and this function's
-                # own, above) promises "nothing partial is left published or
-                # governed-active -- the coordinator's own restore path
-                # guarantees that." This exception means that guarantee does
-                # NOT hold: the coordinator's own docstring
-                # (runtime_quiescence.py's SkillActivationRestoredButCacheUnprovenError,
-                # and ActivationCoordinator.run) states the on-disk external
-                # projection was changed TWICE (publish, then restore) even
-                # though governed state was never committed, and the
-                # mandatory post-restore cache invalidation could not be
-                # proven -- an in-process Hermes agent may still be serving a
-                # stale prompt reflecting either the failed new version or an
-                # unprovably-stale view of the restored one. Folding this
-                # into SKILL_ACTIVATION_FAILED/retryable would silently
-                # promise a clean slate that was never achieved. `retryable`
-                # is False here for the same reason it is False for
-                # SKILL_PROJECTION_UNPROVEN_AFTER_REVERT: a blind automated
-                # retry is not obviously safe until an operator has confirmed
-                # the actual cache/projection state.
-                return {
-                    "ok": False,
-                    "code": "SKILL_ACTIVATION_CACHE_UNPROVEN",
-                    "retryable": False,
-                    "status": "pending",
-                    "error": str(exc),
-                }
             except Exception as exc:
-                # Any other activation failure (publication error, governed
-                # commit failure, coordination/verification failure, ...):
-                # the row stays pending and is retryable. Nothing partial is
-                # left published or governed-active -- the coordinator's own
-                # restore path guarantees that -- so a retry re-attempts the
-                # exact same (skill_id, markdown) pair from a clean slate.
-                # NOTE: this guarantee specifically does NOT extend to a
-                # SkillActivationRestoredButCacheUnprovenError (handled in
-                # its own arm above) or a GovernanceRevertedProjectionUnprovenError
-                # (handled above that) -- both are raised precisely because
-                # the coordinator's restore path did NOT reach a clean,
-                # provable slate.
-                return {
-                    "ok": False,
-                    "code": "SKILL_ACTIVATION_FAILED",
-                    "retryable": True,
-                    "status": "pending",
-                    "error": str(exc),
-                }
+                # The full operator-facing failure taxonomy (busy / the two
+                # non-retryable UNPROVEN codes / generic retryable) lives in
+                # governed_skills.map_activation_failure -- ONE mapping,
+                # shared with the rollback surface (skill_rollback.py) so
+                # the shapes cannot drift, with each arm's full rationale on
+                # that function and the exception classes themselves.
+                # queue_status="pending" keeps every failure result here
+                # byte-identical to the pre-extraction shapes (pinned by
+                # test_governed_rollback's golden-shape test of the mapper,
+                # plus the decide()-level BUSY/CACHE_UNPROVEN pins in
+                # test_activation_coordinator_wiring): the row genuinely
+                # stays pending on every failure arm.
+                return governed_skills.map_activation_failure(
+                    exc, queue_status="pending"
+                )
 
             _conn.execute(
                 "UPDATE skill_queue SET status=? WHERE queue_id=?", (new_status, queue_id)

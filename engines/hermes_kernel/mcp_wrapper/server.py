@@ -14,7 +14,7 @@ from starlette.responses import JSONResponse
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import skill_queue, task_store
+from . import skill_queue, skill_rollback, task_store
 from .contracts import validate_gateway_request
 from . import failover_runtime
 
@@ -422,6 +422,26 @@ async def decide_skill(queue_id: str, decision: str,
 async def get_skill_draft(queue_id: str) -> dict:
     """P4: return a draft's full markdown for the console editor (large drafts)."""
     return skill_queue.get_draft(queue_id)
+
+
+@mcp.tool()
+async def rollback_skill(skill_id: str, digest: str) -> dict:
+    """GS-ROLLBACK: roll a governed skill back to an exact previously
+    installed digest, end to end -- published projection, prompt cache, and
+    governance move together (the store-only rollback GS-ACCEPT F-1 caught
+    moved governance while the model kept being served the reverted
+    content). Governed-only: refuses when TORQCLAW_GOVERNED_SKILLS is off.
+    NOTE: rolling back a disabled skill re-enables it."""
+    return skill_rollback.rollback(skill_id, digest)
+
+
+@mcp.tool()
+async def list_skill_versions(skill_id: str) -> dict:
+    """GS-ROLLBACK: list a governed skill's installed versions (with
+    installedAt and tamper flags) plus its governed-active and published
+    digests, so an operator can pick an exact rollback target and see
+    governed/published divergence."""
+    return skill_rollback.list_versions(skill_id)
 
 
 if __name__ == "__main__":

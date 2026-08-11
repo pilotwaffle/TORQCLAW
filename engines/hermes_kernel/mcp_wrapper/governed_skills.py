@@ -66,12 +66,19 @@ import re
 import shutil
 import tempfile
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
 from . import skill_publisher
 from .runtime_quiescence import ActivationCoordinator, _MUTATION_LOCK
-from .verified_skill_store import SkillStoreError, VerifiedSkillStore, file_digest
+from .verified_skill_store import (
+    SkillApprovalError,
+    SkillStoreError,
+    VerifiedSkillStore,
+    _normalize_digest,
+    file_digest,
+)
 
 
 class GovernedSkillError(Exception):
@@ -325,7 +332,9 @@ def install_approved_skill(skill_id: str, markdown: str) -> dict[str, Any]:
     projection -> publish new -> invalidate cache -> activate (governed
     commit) -> verify -> finalize/restore]. Each step is the real
     ``VerifiedSkillStore`` / ``skill_publisher`` implementation, so the result
-    is digest-bound, audited, rollback-capable, and -- critically -- verified
+    is digest-bound, audited, rollback-capable (through
+    :func:`rollback_governed_skill`, the production rollback path GS-ACCEPT
+    F-1 found missing), and -- critically -- verified
     discoverable by the actual Hermes loader rather than merely written to a
     directory we hope is the right one.
 
@@ -550,3 +559,319 @@ def install_approved_skill(skill_id: str, markdown: str) -> dict[str, Any]:
         }
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
+
+
+def rollback_governed_skill(skill_id: str, digest: str) -> dict[str, Any]:
+    """Roll a governed skill back to an exact previously installed digest,
+    end to end (GS-ROLLBACK; closes GS-ACCEPT finding F-1).
+
+    ``VerifiedSkillStore.rollback()`` alone moves GOVERNANCE to the prior
+    digest but leaves the published projection -- the bytes the real Hermes
+    prompt builder renders -- untouched, so the operator sees "rolled back"
+    while the model keeps serving the reverted content. This function runs
+    the same four-callback ``ActivationCoordinator`` transaction the install
+    path uses, so the projection, the prompt cache, and governance move
+    together or not at all:
+
+        retain current published projection -> publish the target installed
+        digest -> invalidate cache -> governed rollback commit -> verify
+        governed AND published state -> finalize (or restore on failure).
+
+    Notes an operator surface must relay (see ``skill_rollback.py``):
+
+    - Rolling back a ``disable()``d skill re-enables it --
+      ``store.rollback()`` unconditionally writes ``enabled: True``.
+    - A skill that is installed but has NO active-state entry (reachable:
+      a first-time install whose verify failed was reverted with
+      ``previous=None``, deleting the entry while the installed record
+      survives) cannot be rolled back: ``_current_permissions`` returns
+      ``()`` for it, so the store would demand a fresh approval even for
+      the baseline ``["read"]`` capability. That is detected here BEFORE
+      the coordinator runs and raised as ``SkillApprovalError`` -- the
+      remedy is a normal re-approval through the install path, so no
+      approval parameter exists on this function by design.
+
+    Idempotent on the exact ``(skill_id, digest)`` pair via the same
+    byte-verifying check the install path uses: if the target digest is
+    already both governed-active and published, returns success with
+    ``reconciledFromPriorSuccess`` and runs no transaction. A crash between
+    publish and commit leaves published=target vs governed=prior with no
+    reconciler -- a retry of this call heals it (the fast path correctly
+    refuses, the full run re-publishes and commits); this is the same
+    exposure the install path has.
+
+    Raises ``GovernedSkillError`` on an invalid id or a digest that is not
+    an installed version of this skill. Propagates
+    ``runtime_quiescence.SkillRuntimeBusyError`` (retryable, nothing
+    changed), the coordinator's typed errors, and ``SkillApprovalError`` as
+    above. Nothing durably moves if any step fails.
+    """
+    sid = _validate_id(skill_id)
+    try:
+        target_digest = _normalize_digest(digest)
+    except SkillStoreError as exc:
+        raise GovernedSkillError(f"invalid rollback digest {digest!r}: {exc}") from exc
+
+    store = _store()
+    target_dir = store.versions_dir / sid / target_digest
+    if not target_dir.is_dir():
+        # Cheap, mutation-free refusal BEFORE the coordinator's lock and
+        # quiescence gate. store.rollback() re-checks the state record under
+        # its own lock either way; this just keeps "unknown digest" from
+        # costing a publish/restore round-trip.
+        raise GovernedSkillError(
+            f"rollback target is not an installed version: {sid}@{target_digest}"
+        )
+
+    if _already_active_and_published(sid, target_digest):
+        return {
+            "ok": True,
+            "skillId": sid,
+            "digest": target_digest,
+            "publishedPath": str(skill_publisher.published_skills_dir() / sid),
+            "reconciledFromPriorSuccess": True,
+        }
+
+    if not store.has_active_entry(sid):
+        # See the docstring: fail fast with an accurate error instead of
+        # letting store.rollback()'s capability-delta check produce a
+        # misleading "adds capabilities" approval demand mid-transaction
+        # (after a publish that would then have to be restored).
+        raise SkillApprovalError(
+            f"rollback target skill {sid!r} has never been governed-active; "
+            "re-approve it through the normal install path instead"
+        )
+
+    # No stageId exists for a rollback (nothing is staged -- the source is
+    # the immutable installed version directory), so the per-transaction
+    # retained-projection parent is keyed on a fresh transaction id instead.
+    retain_root = (
+        skill_publisher.published_skills_retained_root() / f"rollback-{uuid.uuid4().hex}"
+    )
+
+    # Same holder discipline as install_approved_skill -- see the comments
+    # there (governed_skills.py, install path) for why publish_holder exists
+    # and why commit_holder["previous"] is only ever written AFTER the
+    # governed flip returns.
+    publish_holder: dict[str, Any] = {}
+    commit_holder: dict[str, Any] = {}
+
+    def _publish() -> dict[str, Any]:
+        result = skill_publisher.publish_skill(
+            target_dir,
+            digest=target_digest,
+            source="torqclaw:operator-rollback",
+            retain_replaced_into=retain_root,
+        )
+        publish_holder["result"] = result
+        return result
+
+    def _restore(publish_result: dict[str, Any]) -> None:
+        # Governance first, unconditionally relative to the publisher
+        # restore -- the ordering ruling from GS-COORD round 2 (see
+        # install_approved_skill._restore): a publisher-restore failure must
+        # leave governance CONSERVATIVE, pointing at the pre-rollback
+        # digest, never optimistically at the target.
+        if "previous" in commit_holder:
+            locked_store = _store_locked()
+            # No approval was consumed by the rollback commit, so there is
+            # none to un-consume: approval_token is None by design (typed
+            # `str | None`; a fake token would corrupt the approvals table).
+            locked_store.revert_activation(
+                sid, target_digest, None, commit_holder["previous"]
+            )
+
+        try:
+            skill_publisher.restore_retained_projection(
+                skill_id=sid, retained_path=publish_result.get("retainedPath")
+            )
+        except Exception as exc:
+            if "previous" in commit_holder:
+                raise GovernanceRevertedProjectionUnprovenError(
+                    f"skill {sid!r}: governed-active state was reverted to "
+                    f"digest {commit_holder['previous'].get('digest') if commit_holder['previous'] else None!r} "
+                    "after a failed rollback, but restoring the prior "
+                    "published projection then failed; TORQCLAW cannot prove "
+                    "what is currently published on disk for this skill id"
+                ) from exc
+            raise
+
+        shutil.rmtree(retain_root, ignore_errors=True)
+
+    def _commit() -> dict[str, Any]:
+        locked_store = _store_locked()
+        # Raw internal shape, captured in a local first -- commit_holder must
+        # only ever reflect a commit that actually landed (the GS-COORD
+        # round-3 vacuous-revert lesson; see install_approved_skill._commit).
+        previous = locked_store._load_state()["active"].get(sid)
+        result = locked_store.rollback(sid, target_digest)
+        commit_holder["previous"] = previous
+        return result
+
+    def _verify(commit_result: dict[str, Any]) -> None:
+        locked_store = _store_locked()
+        active = locked_store.get_active(sid)
+        if active is None or active.get("digest") != target_digest:
+            raise GovernedSkillError(
+                f"post-rollback verification failed: {sid} is not "
+                f"governed-active at digest {target_digest}"
+            )
+        if not skill_publisher.is_published(sid):
+            raise GovernedSkillError(
+                f"post-rollback verification failed: {sid} is governed-"
+                "active but not published"
+            )
+        # The check that closes F-1's failure shape: the PUBLISHED BYTES
+        # must hash to the rollback target. `is_published` alone would pass
+        # vacuously with the superseded bytes still on disk if the publish
+        # step were ever skipped or subverted -- this is the deletion-probe
+        # tripwire for exactly that sabotage.
+        skill_publisher._verify_published_digest(
+            skill_publisher.published_skills_dir() / sid,
+            expected_digest=target_digest,
+            skill_id=sid,
+        )
+
+    ActivationCoordinator(
+        publish=_publish, restore=_restore, commit=_commit, verify=_verify
+    ).run()
+
+    published_result = publish_holder["result"]
+    skill_publisher.discard_retained_projection(published_result.get("retainedPath"))
+    shutil.rmtree(retain_root, ignore_errors=True)
+
+    return {
+        "ok": True,
+        "skillId": sid,
+        "digest": target_digest,
+        "publishedPath": published_result["path"],
+        "rolledBack": True,
+    }
+
+
+def list_governed_versions(skill_id: str) -> dict[str, Any]:
+    """Everything an operator needs to pick a rollback target: every
+    installed version with ``installedAt`` (tamper-tolerant -- a corrupt
+    version directory is flagged, not fatal, which matters precisely when
+    rollback is the remedy), plus the current governed-active digest and
+    the published digest so governed/published divergence is visible.
+
+    Read-only: no quiescence requirement, no lock beyond the store's own.
+    ``publishedDigest`` is the provenance sidecar's CLAIM;
+    ``publishedVerified`` reports whether the on-disk bytes actually hash
+    to it (the sidecar is plain JSON and can lie -- same reasoning as
+    ``_already_active_and_published``).
+    """
+    sid = _validate_id(skill_id)
+    store = _store()
+    versions = store.list_versions(sid)
+
+    active_digest: str | None = None
+    active_state_error: str | None = None
+    try:
+        active = store.get_active(sid)
+        active_digest = active["digest"] if active else None
+    except SkillStoreError as exc:
+        # An active entry exists but its package no longer validates --
+        # exactly the state an operator lists versions to escape from.
+        active_state_error = str(exc)
+
+    published_digest: str | None = None
+    published_verified = False
+    published_dir = skill_publisher.published_skills_dir() / sid
+    provenance_path = published_dir / skill_publisher.PROVENANCE_FILENAME
+    try:
+        import json
+
+        claimed = json.loads(provenance_path.read_text(encoding="utf-8")).get("digest")
+        published_digest = claimed if isinstance(claimed, str) else None
+    except (OSError, ValueError):
+        published_digest = None
+    if published_digest is not None:
+        try:
+            skill_publisher._verify_published_digest(
+                published_dir, expected_digest=published_digest, skill_id=sid
+            )
+            published_verified = True
+        except SkillStoreError:
+            published_verified = False
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "skillId": sid,
+        "versions": versions,
+        "activeDigest": active_digest,
+        "publishedDigest": published_digest,
+        "publishedVerified": published_verified,
+        "governedSkillsEnabled": enabled(),
+    }
+    if active_state_error is not None:
+        result["activeStateError"] = active_state_error
+    return result
+
+
+def map_activation_failure(exc: Exception, *, queue_status: str | None) -> dict[str, Any]:
+    """The ONE operator-facing failure taxonomy for governed activation
+    transactions (install and rollback share the coordinator, so they share
+    the failure shapes -- two copies of this mapping would drift).
+
+    Extracted from ``skill_queue.decide()``'s except arms verbatim;
+    ``decide()`` passes ``queue_status="pending"`` and its results stay
+    byte-identical (pinned by test). Surfaces with no queue row (the
+    rollback tool) pass ``None`` and the ``status`` key is omitted --
+    ``"status": "pending"`` is a queue-row claim and must not be emitted
+    where no row exists.
+
+    Arm semantics (the full rationale lives on each exception class and on
+    ``decide()``'s docstring):
+
+    - ``SkillRuntimeBusyError``: retryable; nothing changed; the caller
+      should retry once live Hermes runs finish. ``activeTasks`` is a
+      kernel fact and is reported for every surface.
+    - ``GovernanceRevertedProjectionUnprovenError``: NOT retryable --
+      governance was reverted (conservative) but the published bytes are
+      unproven; an operator must look before any blind retry.
+    - ``SkillActivationRestoredButCacheUnprovenError``: NOT retryable --
+      the projection was changed twice and the mandatory post-restore cache
+      invalidation could not be proven; a live agent may be serving a stale
+      prompt.
+    - anything else: retryable ``SKILL_ACTIVATION_FAILED`` -- the
+      coordinator's restore path guarantees nothing partial is left
+      published or governed-active, so a retry starts from a clean slate.
+    """
+    from .runtime_quiescence import (
+        SkillActivationRestoredButCacheUnprovenError,
+        SkillRuntimeBusyError,
+    )
+
+    if isinstance(exc, SkillRuntimeBusyError):
+        from .hermes_runner import RUNNING
+
+        active_tasks = len(RUNNING)
+        result: dict[str, Any] = {
+            "ok": False,
+            "code": "SKILL_RUNTIME_BUSY",
+            "retryable": True,
+        }
+        if queue_status is not None:
+            result["status"] = queue_status
+        result["activeTasks"] = active_tasks
+        result["error"] = (
+            f"Skill activation is blocked while {active_tasks} "
+            "Hermes task(s) are running. No skill state changed. "
+            "Retry when those tasks finish."
+        )
+        return result
+
+    if isinstance(exc, GovernanceRevertedProjectionUnprovenError):
+        code, retryable = "SKILL_PROJECTION_UNPROVEN_AFTER_REVERT", False
+    elif isinstance(exc, SkillActivationRestoredButCacheUnprovenError):
+        code, retryable = "SKILL_ACTIVATION_CACHE_UNPROVEN", False
+    else:
+        code, retryable = "SKILL_ACTIVATION_FAILED", True
+
+    result = {"ok": False, "code": code, "retryable": retryable}
+    if queue_status is not None:
+        result["status"] = queue_status
+    result["error"] = str(exc)
+    return result
