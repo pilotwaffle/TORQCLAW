@@ -329,7 +329,11 @@ class VerifiedSkillStore:
             }
 
     def revert_activation(
-        self, skill_id: str, digest: str, approval_token: str, previous: Mapping[str, Any] | None
+        self,
+        skill_id: str,
+        digest: str,
+        approval_token: str | None,
+        previous: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         """Undo exactly what a single prior ``activate()`` call committed,
         using the ``previous`` active-state snapshot ``activate()`` itself
@@ -548,6 +552,26 @@ class VerifiedSkillStore:
                 "version": artifact["manifest"]["version"],
             }
 
+    def has_active_entry(self, skill_id: str) -> bool:
+        """Whether ANY active-state entry exists for ``skill_id`` -- enabled,
+        disabled, or even tampered.
+
+        Deliberately distinct from ``get_active()``, which returns ``None``
+        for a disabled entry and raises on a tampered package: rollback
+        eligibility (GS-ROLLBACK) hinges only on whether the skill has ever
+        been governed-active, because ``_current_permissions`` keys its
+        capability-delta check on the entry's existence, not its enabled
+        flag. A skill with no entry at all (e.g. a first-time install whose
+        verify failed and was reverted with ``previous=None``) would make
+        ``rollback()`` demand a fresh approval for the baseline ``["read"]``
+        capability -- callers use this read to fail fast with an accurate
+        error instead.
+        """
+
+        _validate_id(skill_id)
+        with self._lock:
+            return skill_id in self._load_state()["active"]
+
     def list_installed(self, skill_id: str | None = None) -> list[dict[str, Any]]:
         """List validated installed records; tampered records are not returned."""
 
@@ -567,6 +591,53 @@ class VerifiedSkillStore:
                         expected_digest=digest,
                     )
                     result.append(_public_artifact(artifact))
+            return result
+
+    def list_versions(self, skill_id: str) -> list[dict[str, Any]]:
+        """Tamper-TOLERANT per-skill version listing for operator surfaces
+        (GS-ROLLBACK).
+
+        ``list_installed`` raises out of ``_read_package`` on the first
+        corrupt version directory, killing the entire listing -- which is
+        exactly when an operator most needs to see the versions in order to
+        roll back away from the corruption. This method instead returns
+        every state record, flags the ones whose on-disk package no longer
+        validates with ``"tampered": True``, and exposes ``installedAt`` --
+        the only ordering signal a governed skill has, since every governed
+        version carries the fixed manifest version ``"1.0.0"``.
+
+        Newest first. A tampered entry is not a valid rollback target and
+        callers must treat it as display-only.
+        """
+
+        _validate_id(skill_id)
+        with self._lock:
+            state = self._load_state()
+            records = state["installed"].get(skill_id, {})
+            result: list[dict[str, Any]] = []
+            for digest in sorted(records):
+                record = records[digest]
+                entry: dict[str, Any] = {
+                    "skillId": skill_id,
+                    "digest": digest,
+                    "version": record.get("version"),
+                    "source": record.get("source"),
+                    "installedAt": record.get("installedAt"),
+                }
+                try:
+                    installed_path = self.versions_dir / skill_id / digest
+                    _ensure_contained(self.versions_dir, installed_path)
+                    _read_package(
+                        installed_path,
+                        self.root,
+                        expected_id=skill_id,
+                        expected_digest=digest,
+                    )
+                    entry["tampered"] = False
+                except SkillStoreError:
+                    entry["tampered"] = True
+                result.append(entry)
+            result.sort(key=lambda e: e.get("installedAt") or 0, reverse=True)
             return result
 
     def reconcile(self) -> dict[str, Any]:

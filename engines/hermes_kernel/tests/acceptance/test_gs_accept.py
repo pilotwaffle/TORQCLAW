@@ -272,13 +272,17 @@ def test_steps_09_to_11_rolled_back_version_is_not_usable(env, monkeypatch):
     """Roll back to a prior digest; the SUPERSEDED content must leave the
     model's index.
 
-    NOTE ON SCOPE (finding, recorded rather than papered over): the governed
-    path exposes no *removal* API. ``governed_skills`` exports only
-    ``enabled()`` and ``install_approved_skill()``; the store offers
-    ``rollback(skill_id, digest)``, which activates one exact previously
-    installed digest. Step 9's "roll back / disable" is therefore only half
-    satisfiable today -- rollback yes, disable no. This test pins the half
-    that ships. See the GS-ACCEPT report for the gap.
+    GS-ROLLBACK closed F-1: rollback now runs end to end through
+    ``governed_skills.rollback_governed_skill`` -- projection, prompt cache,
+    and governance move together. This test's original run reached the
+    store's governance-only ``rollback()`` directly (there was no production
+    path to call -- that WAS the finding) and xfailed on the divergence it
+    left; both the xfail and the direct store call are gone deliberately.
+
+    NOTE ON SCOPE (still true, recorded rather than papered over): the
+    governed path exposes no *disable/removal* API. Step 9's "roll back /
+    disable" is satisfied on the rollback half only; disable is the
+    GS-DISABLE lane.
     """
     monkeypatch.setenv("TORQCLAW_GOVERNED_SKILLS", "1")
     governed = _reload_stack()
@@ -295,11 +299,11 @@ def test_steps_09_to_11_rolled_back_version_is_not_usable(env, monkeypatch):
         "is using superseded content."
     )
 
-    # 9: roll back to the exact prior digest through the real store.
-    from mcp_wrapper.verified_skill_store import VerifiedSkillStore
-
-    store = VerifiedSkillStore(env["data"] / "verified_skills")
-    store.rollback(SKILL_ID, v1)
+    # 9: roll back to the exact prior digest through the PRODUCTION path
+    # (GS-ROLLBACK). Never the bare store: that call moves governance only
+    # and was precisely the F-1 divergence.
+    rollback_result = governed.rollback_governed_skill(SKILL_ID, v1)
+    assert rollback_result["ok"] is True and rollback_result["rolledBack"] is True
 
     # 10+11: a fresh boot must not offer the superseded version.
     from run_agent import AIAgent
@@ -313,31 +317,24 @@ def test_steps_09_to_11_rolled_back_version_is_not_usable(env, monkeypatch):
         enabled_toolsets=["skills"],
     )
 
-    # What actually ships today, measured: governance moves, the projection
-    # does not. Pinned so the divergence cannot widen unnoticed.
     state = json.loads((env["data"] / "verified_skills" / "state.json").read_text())
     assert state["active"][SKILL_ID]["digest"] == v1, "governed rollback did not move"
 
+    # Step 11, the assertion F-1 made impossible: the rendered system prompt
+    # -- the surface the model's turn actually consumes -- serves the rolled-
+    # back version and NOT the superseded one.
     rendered = _rendered_skill_index()
-    pytest.xfail(
-        "GS-ACCEPT BLOCKING FINDING -- step 11 fails against shipped code.\n\n"
-        "store.rollback() moves GOVERNANCE to the prior digest but does NOT "
-        "re-publish the prior projection. Measured: governed-active is v1 while "
-        "the rendered system prompt still contains the v2 body "
-        f"({'999.999 present' if '999.999' in rendered else 'v2 absent'}). The "
-        "operator sees 'rolled back'; the model keeps using the reverted "
-        "content.\n\n"
-        "Worse, and the reason this is a finding rather than a bug report: "
-        "store.rollback() has NO production caller. Not governed_skills, not "
-        "the gateway, not the console -- grep is empty. governed_skills.py:328 "
-        "describes the governed path as 'rollback-capable', which is the "
-        "unenforced-claim pattern this program exists to catch: the capability "
-        "exists as a method and is reachable from no operator surface.\n\n"
-        "Step 9 ('roll back / disable it') is therefore NOT satisfiable today. "
-        "Closing it needs a governed rollback that routes through "
-        "ActivationCoordinator exactly as activation does -- publish the prior "
-        "projection, invalidate, commit, verify -- which is a GS-COORD-shaped "
-        "product change, not a test fix. Recorded for the operator to schedule."
+    assert "999.999" not in rendered and "badly" not in rendered, (
+        "governed rollback reported success but the rendered system prompt "
+        "still contains the superseded v2 body -- the F-1 divergence is back."
+    )
+    # The index renders the skill id + DESCRIPTION (not the body), and the
+    # description is exactly what v2 changed: "furlongs to metres" (v1) vs
+    # "furlongs badly" (v2). Asserting on it distinguishes the versions on
+    # the surface the model actually reads.
+    assert SKILL_ID in rendered and "furlongs to metres" in rendered, (
+        "the rolled-back v1 skill is absent from the rendered system prompt; "
+        "rollback must re-publish the prior projection, not merely remove v2."
     )
 
 
