@@ -1,9 +1,9 @@
 # PRD-TCLAW-COLLAB-GATEWAY-004 — Surface Identity (C1) + Approval Broker (C2)
 
-- Status: **DESIGN ONLY — Revision 4, 2026-08-11.** Terra accepted all fresh Sol G1R findings and authorized a bounded Revision 4 correction; this revision integrates that correction into the FULL PRD body (the standalone Rev-4 design artifact is preserved verbatim in §10.1–10.3). No code changes are authorized by this document; it specifies contracts a reviewer gates and builders later implement. No runtime source/tests/build/Git/TrustOS/governed-skill/GS/paused-lane files are changed by this document. All previously frozen operator rulings remain encoded (identity≠capability≠AUTHORITY split; CT-2 `approve`-authority provisioning; H-1 operator short-circuit subordination; OQ-4 context_hash inputs; Property-10 apply-time re-validation deferred to C3). Architecture was ratified sound; Revision 4 is a baseline-and-migration correction, not a redesign.
+- Status: **DESIGN ONLY — Revision 4 correction, 2026-08-11.** This full §1–§13 document is the canonical C1/C2 design contract. It incorporates the frozen rulings (identity≠capability≠AUTHORITY; CT-2 `approve` provisioning; H-1 operator-short-circuit subordination; `CTXHASH_V1`; Property-10 apply-time re-validation deferred to C3) and corrects the destructive migration proposal that was pushed in `3220157`. No C1/C2 runtime build is authorized by this document. No runtime source, TrustOS, governed-skill, GS, or paused-lane file is changed by this design lane.
 - Scope: **C1 (Surface Identity) and C2 (Approval Broker) only.** C3/C4 and everything in §9 are out of scope.
-- Frozen baseline: **`af52430a0d719c449a9379866b84c154fc3c3b8a`** (merge of PR #44, C0.1 authenticated identity transport, on `feat/collab-gateway-c1-c2`). The C0 principal bridge (`packages/gateway/src/principalBridge.ts`) landed at `da688c0`, which is **historical only** as a baseline ref — its CONTRACTS (§1.3) remain frozen and are not re-specified. The target is **additive over `af52430`** with the two bounded exceptions in §1.5.
-- **Build gate (operator sequencing, updated 2026-08-11): the governed-skill lane is CLOSED.** GS-COORD shipped (`c824bcd`); GS-ACCEPT passed live acceptance (its one blocking finding F-1 was closed by GS-ROLLBACK, merged and pushed as `39a7707` on 2026-08-10; the GS-ACCEPT re-run on the merged tree is green — 9 passed / 1 xfailed, the xfail being the recorded-minor F-2 empty-body finding). The remaining external gate before any C1/C2 RUNTIME surface is the operator's **soak → governed default-on** decision; the C1/C2 runtime build stays unauthorized until the operator explicitly authorizes it after that gate. This PRD's design work is authorized to proceed — that is what it is. See §11 CT-4 for the baseline-freshness consequences.
+- Frozen schema baseline: **`af52430a0d719c449a9379866b84c154fc3c3b8a`** (merge of PR #44, C0.1 authenticated identity transport, on `feat/collab-gateway-c1-c2`). The C0 principal bridge (`packages/gateway/src/principalBridge.ts`) landed at `da688c0`, which is **historical only** as a baseline ref — its CONTRACTS (§1.3) remain frozen and are not re-specified. The target is **strictly additive over `af52430`**, with no destructive exception (§1.5).
+- **Build gate (operator sequencing, updated 2026-08-11): the governed-skill implementation lane is CLOSED.** GS-COORD shipped (`c824bcd`) and GS-ROLLBACK closed GS-ACCEPT finding F-1 at `39a7707` on 2026-08-10. The repository record reports the merged acceptance re-run as **9 passed / 1 xfailed** (the xfail is minor F-2, empty-body); this PRD does not carry an immutable test receipt, so a builder MUST re-derive that result from the active baseline rather than treat the count as proof. The remaining external gate before any C1/C2 RUNTIME surface is the operator's **soak → governed default-on** decision, followed by separate explicit C1/C2 runtime authorization. See §11 CT-4.
 - Feature flag: `TORQCLAW_COLLAB_ENABLED`, read **per-call** (`collabEnabled()`), default **off**. Flag-off behavior is byte-identical to today, including the SEC-1 hole, per C0's rationale.
 - House-style ancestors: `docs/prd-reviews/PRD-TCLAW-COLLABORATION-SUBSTRATE-001-v0.14.md` (section shape, DDL rigor, exhaustive-registry discipline, consistency pre-gate).
 
@@ -42,9 +42,9 @@ Operator ruling 2026-08-08 (frozen; do not re-litigate). Three layers are kept *
 
 **Hard constraints (each a FREEZE blocker if violated):**
 
-1. The gateway `sessions` table is NOT replaced by `collab_session_bindings`. C0 already ruled this out (`principalBridge.ts` header, "WHAT THIS DELIBERATELY DOES NOT DO"). C1 EXTENDS `sessions.resolve()` / `assertResumeAllowed()`; it does not swap them. (Revision 4 goes further: the C0.1 auth store is ARCHIVED, not promoted — §1.5.)
-2. No second execution/event/receipt/approval state machine is created. `events` stays the append-only source of truth; `run_receipts` and the new `approval_deliveries` are **rebuildable, droppable projections** modeled on the `run_receipts` precedent (`schema.sql §9`, `ops/receipts-rebuild.mjs`). The `gateway_approval_events` sidecar (§3.1) is approval-lifecycle *evidence* scoped to one approval id, not a second event log — a design that turns it into a general event stream FAILS review (§6.5).
-3. `tool_approvals` stays canonical for approval state. C2 adds one status value (`'expired'`) and evidence SIDECARS by versioned migration (§3.1, Revision 4); it does not move approval truth into a collab table.
+1. The gateway `sessions` table is NOT replaced by `collab_session_bindings`. C0 already ruled this out (`principalBridge.ts` header, "WHAT THIS DELIBERATELY DOES NOT DO"). C1 EXTENDS `sessions.resolve()` / `assertResumeAllowed()`; it does not swap, archive, rename, or delete the live C0.1 store.
+2. No second execution/event/receipt/approval state machine is created. `events` stays the append-only source of truth; `run_receipts` and the new `approval_deliveries` are **rebuildable, droppable projections** modeled on the `run_receipts` precedent (`schema.sql §9`, `ops/receipts-rebuild.mjs`). Approval lifecycle evidence uses the canonical `tool_approvals` row plus existing `events`; a new approval-event log FAILS review (§6.5).
+3. The existing physical `tool_approvals` table and its rows stay canonical for approval state and exact action data. C2 adds exactly six nullable, guarded columns (§3.1); it does not rebuild the table, rewrite history, change rowids, or move approval truth into a sidecar or collab table.
 4. Flag-off = documented legacy behavior, byte-for-byte, including the SEC-1 hole for pre-bridge sessions (C0 rationale: enabling a subsystem and changing security behavior are separate, individually-revertable decisions).
 
 ### 1.3 What C0 already established (do not re-specify)
@@ -58,23 +58,25 @@ Operator ruling 2026-08-08 (frozen; do not re-litigate). Three layers are kept *
 
 ### 1.4 Controlling invariant (Revision 4, FROZEN, normative)
 
-A command may cause direct external work only when a server-derived `ConnectionAuthContext`, current scoped authority, current profile delegation, and **one unconsumed exact-action grant** all validate in the **same canonical `state.db` serialization interval immediately before `dispatch_started`**. Revocation that commits first prevents dispatch; dispatch that commits first is durably recorded and is never automatically replayed.
+A command may cause direct external work only when a server-derived `ConnectionAuthContext`, current gateway-owned auth epoch, current effective execution-capability/profile revision, current scoped authority, and **one unconsumed exact-action grant** all validate in the **same canonical `state.db` serialization interval immediately before `dispatch_started`**. The action digest must match the exact canonical `(request_id, tool_name, args_json)` approved. Revocation or capability narrowing that commits its gateway deny/revision first prevents dispatch; dispatch that commits first is durably recorded and is never automatically replayed.
 
 Consequences pinned by this invariant:
 
-- `ConnectionAuthContext` is **server-derived** (from the bind-time credential validation, §2.6 step 2, recorded in `gateway_session_auth`, §2.13) — never client-supplied and never trusted from a frame.
+- `ConnectionAuthContext` is **server-derived** (from bind-time credential validation, §2.6 step 2, then pinned to the current `gateway_surface_security` revisions in `gateway_session_auth`, §2.13) — never client-supplied and never trusted from a frame.
 - The "one unconsumed exact-action grant" is a first-class record (`gateway_action_grants`, §3.1): a grant names one exact action for one approval, and consuming it is a durable write in the same serialization interval as the dispatch admission check. A consumed, revoked, expired, or absent grant ⇒ no dispatch.
 - The revocation/dispatch race has exactly one legal outcome per side: whichever commits first wins, and the loser observes it. There is no window in which both a committed revocation and a subsequent automatic dispatch can hold.
 - This invariant is the C2 counterpart of the gateway's existing no-replay discipline (`tool_approvals` first-decision-wins): decisions are never auto-replayed, and grants are never auto-reissued.
+- `collab.db` and `state.db` are separate SQLite databases with separate WALs. This PRD claims no cross-database atomic transaction. Widening/provisioning commits identity/config in `collab.db` first and activates the gateway projection/authority **last**; interruption leaves the surface inactive. Revocation or narrowing commits the gateway deny/epoch/revision **first** and records the collab-side mutation second; interruption leaves dispatch denied. Recovery may finish revoke-side bookkeeping, but MUST NOT complete a partial grant or reverse a committed deny.
 
-### 1.5 Revision 4 baseline boundary (additive over `af52430`, two bounded exceptions)
+### 1.5 Revision 4 baseline boundary (strictly additive over `af52430`)
 
-The target state is **additive** over the `af52430` baseline: baseline principals, sessions, tasks, events, unrelated objects, and their data remain canonical and byte-preserved. Exactly two bounded, versioned migration exceptions exist (both flagged for the reviewer in §11 CT-5):
+The target state is **strictly additive** over the `af52430` baseline. The physical `state.db` and `collab.db` remain separate. Every baseline table name, column, index, trigger, row, value, and live lookup remains available; in particular:
 
-1. **`tool_approvals` is REBUILT COMPATIBLY** — every original column and every `approval_id` retained; historical `args_json` values are replaced with the exact redaction sentinel `REDACTED_LEGACY_ARGS_V4`; action and authority data move to the §3.1 sidecars. See §3.1 for the full contract.
-2. **The C0.1 auth tables are ARCHIVED** — the four C0.1 auth tables (enumerated as `c01_auth_tables` in the §10.2 baseline expectations) are copied under the `c01_archive_` prefix, then the live old auth table names are removed. **Authentication is denied until explicit reprovision** through the C1 issuance flow (§2.3): no archived credential authenticates anything. The archive preserves audit history; it grants nothing.
+1. `tool_approvals` is altered in place with exactly six nullable, `PRAGMA table_info`-guarded columns. Its original rows, values, `args_json`, `status`, and SQLite `rowid` ordering are preserved.
+2. `principals`, `principal_credentials`, `collab_session_bindings`, `collab_installation`, and `collab_schema_migrations` remain live in `collab.db`; C0.1 authentication and migration discovery continue to read them. No table is renamed, archived, copied as replacement, or deleted.
+3. `skill_queue`, tasks, events, episodes, receipts, telemetry, and every unrelated object are data-untouched. Card/export redaction is a read-time projection; C1/C2 performs no blanket at-rest rewrite.
 
-Everything else follows the §6.2 additive/guarded discipline unchanged.
+Flag-off makes every new table and column inert. Any irreversible historical erasure or C0.1 retirement is a separate, explicitly authorized future migration, not C1/C2.
 
 ---
 
@@ -93,7 +95,7 @@ Everything else follows the §6.2 additive/guarded discipline unchanged.
 
 **Invariant SI-2:** each of `desktop, mobile, http, telegram, slack, automation` is a **surface kind**, not a principal. Adding a new device or channel adds a `surfaces` row, never a `principals` row. The schema accommodates all six kinds without any per-kind table.
 
-### 2.2 Canonical Surface schema (new table)
+### 2.2 Canonical Surface schema (new table in `collab.db`)
 
 ```sql
 -- C1: a Surface is where one Principal acts. Belongs to exactly one principal.
@@ -111,14 +113,19 @@ CREATE TABLE surfaces (
                         CHECK (state IN ('active','revoked')),
     created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
     revoked_at        DATETIME,
-    last_seen_at      DATETIME
+    last_seen_at      DATETIME,
+    FOREIGN KEY (principal_id) REFERENCES principals(id),
+    CHECK (surface_kind NOT IN ('telegram','slack','automation')
+           OR surface_role != 'operator')
 );
 CREATE INDEX idx_surfaces_principal_state ON surfaces(principal_id, state);
 ```
 
 Rationale for column choices, each pinned by a test:
 - `surface_kind` CHECK enumerates exactly the six kinds (SI-2). A seventh kind is a reviewed schema change, not silent free text.
+- `surface_id PRIMARY KEY` is globally unique within `collab.db`; it cannot be reused under a second principal. The principal foreign key and immutable-owner API pin SI-1. A composite ownership key may be added for validation, but can never replace this global key.
 - **`surface_role` is the normative "operator-kind surface" discriminator** (FROZEN predicate, §2.7.1). `surface_kind` (device/channel type) is NOT sufficient to decide operator-kind: two `desktop` surfaces can differ in whether they are the operator's control-plane surface. `surface_role ∈ ('operator','agent','automation')` is the authoritative predicate CT-2 checks (`operator-kind surface ⇔ surface_role = 'operator'`), and it defaults to `'agent'` (fail-closed: a mis-provisioned surface is never operator-kind). The CHECK enumerates exactly three roles; a new role is a reviewed schema change.
+- The cross-column CHECK makes CT-2 structural: `telegram`, `slack`, and `automation` kinds cannot be written as operator-role surfaces. Provisioning and decision time recheck both kind and role; the DDL constraint is a backstop, not the only guard.
 - `state` mirrors the collab credential `('active','revoked')` two-state discipline (`credentials.ts` `state` field). Expiry is a **credential** property (§2.4), not a surface-row property.
 - `capability_json` defaults to `'[]'` (deny-all) so a mis-provisioned surface holds no authority (§2.7, fail-closed).
 
@@ -135,15 +142,18 @@ Credentials for surfaces reuse `packages/collab/src/credentials.ts` verbatim as 
 CREATE TABLE surface_credentials (
     credential_id     TEXT PRIMARY KEY,               -- canonical lowercase UUID (parseToken shape)
     surface_id        TEXT NOT NULL,                  -- the surface this credential authenticates
-    secret_hmac       BLOB NOT NULL,                  -- HMAC-SHA-256(principalPepper, token bytes); NEVER the token
+    secret_hmac       BLOB NOT NULL UNIQUE,           -- one deterministic credential match; NEVER the token
     state             TEXT NOT NULL DEFAULT 'active'
                         CHECK (state IN ('active','revoked')),
     issued_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
     expires_at        DATETIME,                        -- NULL = non-expiring; §2.4
-    revoked_at        DATETIME
+    revoked_at        DATETIME,
+    FOREIGN KEY (surface_id) REFERENCES surfaces(surface_id)
 );
 CREATE INDEX idx_surface_credentials_surface_state ON surface_credentials(surface_id, state);
 ```
+
+`credential_id PRIMARY KEY` and `secret_hmac UNIQUE` are load-bearing: the `tq1_<credentialId>` lookup resolves at most one row before constant-work verification, and a duplicate id or HMAC is rejected by SQLite. Negative DDL probes for both collisions are C1 acceptance evidence (§7, C1-2).
 
 > **Note on `expires_at` (contradiction surfaced — see §11 CT-1):** the collab substrate PRD/lint *forbids* `expires_at` and `'expired'` because they were removed from the **`principal_credentials`** model. This `expires_at` lives on **`surface_credentials`** (a different, C1-new table) and on the approval-expiry seam (§3.9). These are distinct tables with a distinct product requirement (surface credential TTL, one-shot-approval TTL). Reviewer must confirm the surface/approval TTL is intended to reintroduce expiry at the SURFACE/APPROVAL layer while the PRINCIPAL-credential layer keeps its no-expiry ruling. Encoded here as an **explicit divergence**, not an oversight.
 
@@ -174,39 +184,43 @@ Ordered resume gate (all conditions evaluated in this order; first refusal wins)
 
 ### 2.7 Capability assignment (subset-of-principal authority)
 
-- `surfaces.capability_json` is a JSON array of capability tokens (each `SAFE_ID`-shaped). It is a **subset** of the principal's authority. The authority set itself is principal-owned (collab); C1 only records the surface's slice.
-- **Enforcement point (design contract):** a surface's capability set is consulted at the gateway authorization seam (`authz.ts`) *in addition to* the session `role`, not instead of it. A surface lacking a capability is denied even if its principal holds it. This is the mechanism that makes SI-1 real: a stolen `telegram` surface credential grants only what that telegram surface was provisioned, never the operator's full authority.
+- `collab.db.surfaces.capability_json` is a configured request: a JSON array of capability tokens (each `SAFE_ID`-shaped). The shipped `principals` table has no standalone capability set, so this PRD does not pretend a stored principal-capability superset exists. Gateway activation validates the request against the principal role plus the current effective profile/policy/registry contract, then writes only the allowed intersection to `gateway_surface_security`. It is not read across a second WAL during dispatch.
+- **Enforcement point (design contract):** the gateway materializes the authorized subset as the **state-owned effective capability/profile revision** in `state.db.gateway_surface_security` (§2.13). `authz.ts` checks that effective set and revision *in addition to* the session `role`, not instead of it. A missing/stale projection or a surface lacking a capability is denied even if its principal holds it. Widening uses grant-last; narrowing/revocation uses deny-first (§1.4), so a cross-database partial failure never opens authority.
 - `surfaces.capability_json` holds **execution capabilities only** — the `read` / `write` / `exec` / `browser` set mapped to the TORQCLAW execution profiles `read_only` / `workspace_write` / `browser_research` / `terminal_power` (§1.2.1). It **never** holds `approve` or any control-plane authority token; authority lives in a separate store (§2.7.1).
 - **Open question OQ-1 (§12), narrowed:** the exact *execution-capability* vocabulary (does it mirror `ClientCommand` action names, or a coarser set like `read|write|exec|browser`?) remains an open design decision for the reviewer/operator. C1 fixes the *storage and enforcement seam*, not the vocabulary. The `approve` **authority** token is NOT part of this open question — it was frozen as a reserved authority in §1.2.1 (ruling AR-1).
-- Fail-closed default: `capability_json` default `'[]'` = deny everything. Provisioning is an explicit grant.
+- Fail-closed default: `capability_json` default `'[]'` = deny everything; an absent or revision-mismatched gateway effective projection also denies. Provisioning is an explicit grant.
 
 ### 2.7.1 Control-plane AUTHORITY store + H-1 operator short-circuit subordination (FROZEN, normative)
 
 **Separate authority, separate store.** Control-plane authority (`approve`, and the reserved `cancel`/`delegate`) is held on a **distinct authority store** for the surface — the new **`surface_authorities`** table, NOT in `surfaces.capability_json`. The authorization check for `APPROVE_TOOL` reads the surface's held **authority**, never its execution capability set (§1.2.1, ruling AR-1). This is what makes "reachable only through the authority path" structurally true rather than a naming convention.
 
-**Concrete authority store — `surface_authorities` (NEW C1 table, gateway-owned).** A dedicated table (chosen over a `surfaces.authority_json` column) because control-plane authority grants are the highest-sensitivity records in the system and a per-authority row gives a clean, indexable, individually-revocable audit grain — each grant/revoke is one row event, not an opaque JSON blob rewrite. **Owner: gateway.** Authority enforcement is the `authz.ts` control-plane check, which is gateway-owned execution-authority territory; collab owns identity, the gateway owns which control-plane decisions a surface may make. Keeping the authority store gateway-side means the `APPROVE_TOOL` authorization read never crosses the identity/execution boundary.
+**Concrete authority store — `state.db.surface_authorities` (NEW C1 table, gateway-owned).** A dedicated table (chosen over a `surfaces.authority_json` column) gives each high-sensitivity grant a clean, indexable, individually-revocable audit grain. **Owner: gateway.** The authorization read and the effective surface/profile revision are therefore in the same `state.db` transaction as the approval decision. Collab owns configured identity; gateway owns effective execution and control-plane authority. Provisioning across the databases follows grant-last, and revocation follows deny-first (§1.4, §6.2).
 
 ```sql
 -- C1: SEPARATE control-plane AUTHORITY store (§2.7.1, ruling AR-1). Gateway-owned.
 -- NEVER the execution-capability path — a row here is the ONLY way a surface holds
 -- `approve`. Additive, guarded migration (§6.2). One row = one authority grant.
 CREATE TABLE IF NOT EXISTS surface_authorities (
+    grant_id          TEXT PRIMARY KEY,
     surface_id        TEXT NOT NULL,                  -- the surface holding the authority (SAFE_ID)
     authority         TEXT NOT NULL                   -- reserved control-plane authority token
                         CHECK (authority IN ('approve','cancel','delegate')),
     granted_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
-    revoked_at        DATETIME,                        -- NULL = live; non-NULL = revoked (fail-closed)
-    PRIMARY KEY (surface_id, authority)
+    auth_epoch        INTEGER NOT NULL,               -- must equal gateway_surface_security.auth_epoch
+    revoked_at        DATETIME,                       -- NULL = live; non-NULL = revoked (fail-closed)
+    FOREIGN KEY (surface_id) REFERENCES gateway_surface_security(surface_id)
 );
 CREATE INDEX IF NOT EXISTS idx_surface_authorities_surface ON surface_authorities(surface_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_surface_authorities_one_live
+    ON surface_authorities(surface_id, authority) WHERE revoked_at IS NULL;
 ```
 
-- **Serialization format:** authority is a set of enum tokens, one row per token — NOT serialized JSON. The `authority` CHECK pins the vocabulary (`approve` frozen; `cancel`/`delegate` reserved). No free-text authority can be written.
+- **Serialization format:** authority is an immutable grant ledger, one row per grant — NOT serialized JSON. The partial unique index permits at most one live `(surface_id, authority)` while retaining revoked history and allowing an explicitly authorized later re-grant at the current epoch. The `authority` CHECK pins the vocabulary (`approve` frozen; `cancel`/`delegate` reserved).
 - **Read/write API sketch (design contract; builder implements at the gateway seam):**
-  - `grantAuthority(surfaceId, authority)` — provisioning-time write; **refuses** unless the target `surfaces.surface_role = 'operator'` for the `approve` authority (CT-2 provisioning gate, §3.14). One guarded `INSERT ... ON CONFLICT DO NOTHING`.
-  - `revokeAuthority(surfaceId, authority)` — sets `revoked_at = now` (never deletes; audit trail persists).
-  - `holdsAuthority(surfaceId, authority): boolean` — decision-time read used by `authz.ts`; returns true **only** for a row with matching `(surface_id, authority)` AND `revoked_at IS NULL`. This is the single authority read seam for `APPROVE_TOOL`.
-- **Fail-closed default:** a surface with NO matching live `surface_authorities` row holds NO authority. Absence, a revoked row, an unknown surface, or a malformed lookup all resolve to "no authority" → `APPROVE_TOOL` denied. Authority is never implied by execution capability, role, or surface kind.
+  - `grantAuthority(surfaceId, authority)` — provisioning-time write; **refuses** unless the current gateway projection is live and, for `approve`, both the configured kind and effective role satisfy CT-2. It inserts a new ledger row at the current auth epoch; a live duplicate is an explicit refusal, not a silent no-op.
+  - `revokeAuthority(surfaceId, authority)` — sets `revoked_at = now` on the one live row and bumps/commits the gateway deny epoch in the same transaction (never deletes; audit trail persists).
+  - `holdsAuthority(surfaceId, authority, authEpoch): boolean` — decision-time read used by `authz.ts`; returns true **only** for a row with matching `(surface_id, authority)`, matching current auth epoch, and `revoked_at IS NULL`. This is the single authority read seam for `APPROVE_TOOL`.
+- **Fail-closed default:** a surface with NO matching live, current-epoch `surface_authorities` row holds NO authority. Absence, revocation, epoch mismatch, unknown surface, or malformed lookup all resolve to "no authority" → `APPROVE_TOOL` denied. Authority is never implied by execution capability, profile, principal role, or surface kind.
 - **Migration:** `CREATE TABLE IF NOT EXISTS surface_authorities (...)` per §6.2; any post-first-ship column is `PRAGMA table_info`-guarded `ALTER` (storage.ts:107-111 precedent).
 
 **Ruling H-1 (frozen): subordinate the operator short-circuit in `authz.ts`.** Today `authz.ts:99-101` short-circuits ALL per-command logic for operators:
@@ -246,13 +260,15 @@ principal authority
 
 - Every C1 mutation (`CREATE_SURFACE`, issue/rotate/revoke credential, `REVOKE_SURFACE`) writes a **secret-free** audit row (reuse collab audit discipline: `collab_audit`-style, secret-free, indexed by kind+created). Design contract: audit is append-only and never carries token bytes or `secret_hmac`.
 - **Recovery:** because `surfaces`/`surface_credentials` are authoritative (not projections), they are backed up with the DB. The plaintext token is unrecoverable by construction (only the HMAC is stored) — recovery of a lost credential is **re-issue**, never retrieval. This mirrors the collab recovery-kit posture (secrets are re-minted, never read back).
-- **Revision 4 addendum:** the archived C0.1 auth records (§1.5) are audit history ONLY. Nothing reads them at auth time; reprovision mints fresh C1 credentials through the §2.3 flow.
+- **Revision 4 correction:** the existing C0.1 auth records and live table names remain unchanged and continue to serve the legacy path. New C1 surface credentials are additive. Recovery never renames or substitutes one store for the other.
+- Cross-database recovery follows the security order in §1.4: it may finish a collab-side revoke/audit after a gateway deny has committed, but it MUST NOT finish a partially activated grant, roll an auth epoch backward, recreate an authority row, or replay external work.
 
 ### 2.10 Migration / backward-compat
 
 - New tables via **guarded** migration (§6.2), following the exact `storage.ts:107-111` precedent. `CREATE TABLE IF NOT EXISTS surfaces (...)` plus, for any column added to `surfaces`/`surface_credentials` *after their first ship*, a `PRAGMA table_info` guard before `ALTER TABLE ... ADD COLUMN`.
 - **IF NOT EXISTS trap (called out):** an existing DB that already has `surfaces` will NOT pick up a new column from a re-run `CREATE`. Every post-first-ship column is nullable + `ALTER`-guarded.
 - No `sessions` schema change is needed by C1 — C0 already added `principal_id`/`surface_id`. The Revision 4 auth evidence lives in the `gateway_session_auth` sidecar (§2.13), never in new `sessions` columns.
+- The migration does not copy `principals` into `state.db` and does not rebuild, rename, archive, or delete any C0.1 table in `collab.db`. Each database migrates locally and repeatably; the runtime coordinator supplies grant-last/deny-first ordering across their separate WALs.
 
 ### 2.11 Flag-off behavior
 
@@ -269,9 +285,34 @@ With `TORQCLAW_COLLAB_ENABLED` off: `resolvePrincipalBinding` returns `null`, st
 | PARTIAL claim (principal without surface) | `PrincipalBindingError` thrown (C0, unchanged). |
 | Flag off, legacy `owner==null` session | Allowed (documented SEC-1 hole preserved; SI-4). |
 
-### 2.13 Revision 4 session-auth sidecar — `gateway_session_auth` (NEW, gateway-owned)
+### 2.13 Revision 4 gateway security projection + session-auth sidecar (NEW, gateway-owned)
 
-The baseline `sessions` table stays byte-unchanged (§10.3 map: `action: "unchanged"`). The server-derived `ConnectionAuthContext` (§1.4) is recorded in a gateway-owned SIDECAR keyed by session id — this replaces the archived C0.1 session-binding auth store (§1.5; the archived table names are enumerated in §10.2 `c01_auth_tables` and are never read at auth time):
+The baseline `sessions` table and the live C0.1 store stay unchanged (§10.3). `collab.db` remains identity/config truth; `state.db.gateway_surface_security` is the fail-closed gateway enforcement projection used to avoid a cross-WAL authorization read. Missing or stale projection state denies.
+
+```sql
+-- C1: gateway-owned effective authorization projection. It is not a second
+-- identity registry; activation is grant-last and denial/epoch change is deny-first.
+CREATE TABLE IF NOT EXISTS gateway_surface_security (
+    surface_id                    TEXT PRIMARY KEY,
+    principal_id                  TEXT NOT NULL,
+    surface_role                  TEXT NOT NULL
+                                    CHECK (surface_role IN ('operator','agent','automation')),
+    state                         TEXT NOT NULL DEFAULT 'revoked'
+                                    CHECK (state IN ('active','revoked')),
+    auth_epoch                    INTEGER NOT NULL CHECK (auth_epoch > 0),
+    effective_capability_json     TEXT NOT NULL DEFAULT '[]',
+    effective_capability_revision TEXT NOT NULL,
+    profile_delegation_json       TEXT NOT NULL DEFAULT '[]',
+    profile_revision              TEXT NOT NULL,
+    source_identity_revision      TEXT NOT NULL,
+    activated_at                  DATETIME,
+    revoked_at                    DATETIME
+);
+```
+
+This row is the **state-owned effective capability/profile revision**. It records the effective capability set and profile delegation the gateway is willing to honor, not merely the collab-configured request. Widening becomes effective only when this row is activated last. Narrowing increments the relevant revision or revokes the row first. Connect, resume, decision, and dispatch all require the current row, principal, role, epoch, effective capability revision, and current profile delegation revision to match.
+
+The server-derived `ConnectionAuthContext` (§1.4) is then recorded in a gateway-owned sidecar keyed by session id:
 
 ```sql
 -- Revision 4: per-session server-derived auth evidence. Baseline `sessions` is
@@ -282,87 +323,101 @@ CREATE TABLE IF NOT EXISTS gateway_session_auth (
     principal_id      TEXT NOT NULL,
     surface_id        TEXT NOT NULL,
     credential_id     TEXT NOT NULL,                  -- the credential proven at bind (§2.6 step 2)
+    auth_epoch        INTEGER NOT NULL,
+    capability_revision TEXT NOT NULL,
+    profile_revision  TEXT NOT NULL,
     auth_context_json TEXT NOT NULL,                  -- server-derived ConnectionAuthContext evidence
     created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
-    closed_at         DATETIME
+    closed_at         DATETIME,
+    FOREIGN KEY (session_id) REFERENCES sessions(id),
+    FOREIGN KEY (surface_id) REFERENCES gateway_surface_security(surface_id)
 );
 ```
 
-- Authoritative (not a projection): it is the durable record of WHO/WHERE was proven at bind time, consulted by the §1.4 dispatch admission read and by H-2 origin-trust (§3.5).
+- Authoritative session evidence: it records WHO/WHERE was proven at bind time and the gateway revisions observed then. The §1.4 admission transaction compares it with the live `gateway_surface_security` row; the session row alone can never keep stale authority alive.
 - Flag-off: never written, never read (SI-4 holds).
 
 ---
 
 ## 3. C2 — Approval Broker
 
-### 3.1 Foundation: EXTEND `tool_approvals`, do not fork it (Revision 4: compatible rebuild + sidecars)
+### 3.1 Foundation: EXTEND `tool_approvals`, do not fork or rebuild it
 
 `tool_approvals` (`schema.sql §8`) stays canonical for approval STATE. `approvals.ts::decideApproval` already performs `UPDATE ... WHERE approval_id=? AND status='pending'` — **first-decision-wins and replay-harmless are ALREADY enforced at this seam** (properties 3 and 4 partially hold today). C2 EXTENDS this row and its handler; it does not introduce a parallel approval store.
 
-**Revision 4 migration (supersedes the Rev-3 in-place `ALTER ... ADD COLUMN` plan):** `tool_approvals` is **rebuilt compatibly** in one versioned migration —
+Revision 4 uses the shipped migration precedent instead of a table copy. The existing table, original columns, rows, values, and `rowid` ordering remain in place. Exactly six nullable columns are added, each only after `PRAGMA table_info(tool_approvals)` proves it absent. No column has a new default or constraint, so legacy rows remain valid and null in all six additions.
 
-- **every original column is retained** (`approval_id`, `request_id`, `tool_name`, `args_json`, `status`, `created_at`, `decided_at`) and **every `approval_id` value is preserved**;
-- `status` gains the `'expired'` value (still enforced in code — §CT-3 stands: there is no DDL CHECK to alter);
-- **historical `args_json` values are replaced with the exact redaction sentinel `REDACTED_LEGACY_ARGS_V4`** — legacy model-proposed args predate the C2 redaction discipline and are display/audit-only data; the sentinel removes any retained raw-arg content while keeping the column and row shape valid;
-- **go-forward, the raw-args column is written as the same sentinel**; the display/audit copy of proposed args lives in the bounded, redacted `gateway_approval_payloads` sidecar (below) — raw args never persist un-redacted anywhere;
-- `expires_at` (property 9) is added on the rebuilt table itself, because expiry drives the status transition and belongs to the single status writer;
-- **action and authority evidence move to gateway-owned SIDECAR tables** keyed by `approval_id`, written in the SAME transaction as the guarded status UPDATE where they are decision evidence.
-
-The four C2 sidecars (all gateway-owned, same `state.db`):
-
-```sql
--- C2 sidecar 1: identity + context evidence for one approval. One row per approval.
--- origin_* written at registerApproval; decided_* + context_hash written in the SAME
--- transaction as the guarded status UPDATE (property 7 atomicity).
-CREATE TABLE IF NOT EXISTS gateway_approval_bindings (
-    approval_id           TEXT PRIMARY KEY,           -- = tool_approvals.approval_id
-    origin_principal_id   TEXT,                       -- who ORIGINATED the task (nullable pre-C2)
-    origin_surface_id     TEXT,
-    decided_principal_id  TEXT,                       -- who DECIDED (property 7)
-    decided_surface_id    TEXT,
-    context_hash          TEXT,                       -- §3.4.1 digest, stored at decide (property 10, C2 part)
-    created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at            DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
--- C2 sidecar 2: the ONE UNCONSUMED EXACT-ACTION GRANT of the §1.4 invariant.
--- An APPROVE mints exactly one row; dispatch admission consumes it durably in the
--- same serialization interval it validates in. No unconsumed row => no dispatch.
-CREATE TABLE IF NOT EXISTS gateway_action_grants (
-    grant_id          TEXT PRIMARY KEY,               -- randomUUID
-    approval_id       TEXT NOT NULL UNIQUE,           -- one grant per approval (one-shot, property 11)
-    request_id        TEXT NOT NULL,                  -- the task being re-minted
-    tool_name         TEXT NOT NULL,                  -- the exact grant unit (grantedTools=[tool_name])
-    created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
-    consumed_at       DATETIME,                        -- NULL = unconsumed; set at dispatch admission
-    revoked_at        DATETIME                         -- revocation-commits-first wins (§1.4)
-);
-
--- C2 sidecar 3: bounded, redacted display/audit payload (property 8). The ONLY
--- persisted representation of proposed args; produced by the export.ts redactor
--- discipline at write time. Raw args are never stored (see the args_json sentinel).
-CREATE TABLE IF NOT EXISTS gateway_approval_payloads (
-    approval_id       TEXT PRIMARY KEY,               -- = tool_approvals.approval_id
-    summary_json      TEXT NOT NULL,                  -- bounded, redacted; "known secret shapes removed"
-    created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
--- C2 sidecar 4: append-only per-approval lifecycle evidence (registered/delivered/
--- decided/expired/consumed). SCOPED to one approval id. NOT a second event log —
--- `events` remains the execution source of truth (§1.2 constraint 2, §6.5); a design
--- that generalizes this into an event stream FAILS review.
-CREATE TABLE IF NOT EXISTS gateway_approval_events (
-    seq               INTEGER PRIMARY KEY AUTOINCREMENT,
-    approval_id       TEXT NOT NULL,
-    kind              TEXT NOT NULL,                   -- registered|delivered|decided|expired|consumed|revoked
-    detail_json       TEXT,                            -- secret-free
-    created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_gateway_approval_events_approval
-    ON gateway_approval_events(approval_id);
+```ts
+// C2 EXTENDS the physical table in place. These are the only six additions.
+const cols = db.prepare(`PRAGMA table_info(tool_approvals)`).all(); // { name }[]
+const add = (name, ddl) => { if (!cols.some(c => c.name === name)) db.exec(ddl); };
+add('origin_principal_id',  `ALTER TABLE tool_approvals ADD COLUMN origin_principal_id  TEXT`);
+add('origin_surface_id',    `ALTER TABLE tool_approvals ADD COLUMN origin_surface_id    TEXT`);
+add('decided_principal_id', `ALTER TABLE tool_approvals ADD COLUMN decided_principal_id TEXT`);
+add('decided_surface_id',   `ALTER TABLE tool_approvals ADD COLUMN decided_surface_id   TEXT`);
+add('expires_at',           `ALTER TABLE tool_approvals ADD COLUMN expires_at           DATETIME`);
+add('context_hash',         `ALTER TABLE tool_approvals ADD COLUMN context_hash         TEXT`);
 ```
 
-**Single-writer requirement (M-1/M-2, normative — unchanged by Revision 4).** Because there is **no DDL CHECK** on `tool_approvals.status`, the four-value enum (`pending|approved|rejected|expired`) has **no schema-level enforcement point** — the only thing keeping the column legal is code discipline. The PRD therefore **normatively requires that `tool_approvals.status` has exactly ONE centralized writer**: the existing `decideApproval` guarded UPDATE (extended in C2 to write the `gateway_approval_bindings` decide evidence in the same transaction) plus the single expiry transition it also owns (the `pending→expired` sweep/lazy-check, §3.9), which share the same writer module. No other code path may `UPDATE ... status` on `tool_approvals`. This single enforcement point is what substitutes for the missing DDL CHECK; a reviewer must verify no second writer exists (a `grep`-able invariant). By contrast, the NEW `approval_deliveries` table (§3.13) **keeps its DDL CHECK** on `delivery_state` (`CHECK (delivery_state IN ('pending','delivered','acked','failed'))`) because a fresh `CREATE TABLE` can carry the constraint from the start.
+`status` may now be written as `'expired'`; the shipped table has no status CHECK to replace. No migration changes historical `status` or `args_json`. The canonical `args_json` remains the exact action payload used by the existing approval/mint path; cards, exports, logs, and channel/browser responses receive only a generated bounded/redacted view (§3.10). Historical at-rest erasure is outside C1/C2.
+
+The additive C2 state tables below contain binding/grant material but no approval state:
+
+```sql
+-- Immutable registration facts only. No status and no decision fields.
+CREATE TABLE IF NOT EXISTS gateway_approval_bindings (
+    approval_id       TEXT PRIMARY KEY,
+    request_id        TEXT NOT NULL,
+    session_id        TEXT NOT NULL,
+    credential_id     TEXT NOT NULL,
+    auth_epoch        INTEGER NOT NULL,
+    action_hash       TEXT NOT NULL,
+    registration_context_hash TEXT NOT NULL,
+    profile_revision  TEXT NOT NULL,
+    privacy_revision  TEXT NOT NULL,
+    registered_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (approval_id) REFERENCES tool_approvals(approval_id),
+    FOREIGN KEY (request_id) REFERENCES tasks(request_id),
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+-- Reserved for NEW protected payloads only after OQ-7 receives explicit approval.
+-- The C1/C2 migration creates this empty; it never rewrites legacy args_json into it.
+CREATE TABLE IF NOT EXISTS gateway_approval_payloads (
+    approval_id       TEXT PRIMARY KEY,
+    ciphertext        BLOB NOT NULL,
+    key_reference     TEXT NOT NULL,
+    payload_digest    TEXT NOT NULL,
+    retention_expires_at DATETIME NOT NULL,
+    created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (approval_id) REFERENCES tool_approvals(approval_id)
+);
+
+-- One exact-action, one-shot grant created only by the winning APPROVE transaction.
+CREATE TABLE IF NOT EXISTS gateway_action_grants (
+    grant_id          TEXT PRIMARY KEY,
+    approval_id       TEXT NOT NULL UNIQUE,
+    request_id        TEXT NOT NULL,
+    tool_name         TEXT NOT NULL,
+    action_hash       TEXT NOT NULL,
+    context_hash      TEXT NOT NULL,
+    auth_epoch        INTEGER NOT NULL,
+    capability_revision TEXT NOT NULL,
+    profile_revision  TEXT NOT NULL,
+    expires_at        DATETIME NOT NULL,
+    created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+    consumed_at       DATETIME,
+    revoked_at        DATETIME,
+    FOREIGN KEY (approval_id) REFERENCES tool_approvals(approval_id),
+    FOREIGN KEY (request_id) REFERENCES tasks(request_id)
+);
+```
+
+**Canonical row shapes (normative):** a newly registered `pending` row has non-null `origin_*` and `expires_at`; its `decided_*`, `decided_at`, and `context_hash` remain null and it has no grant. The winning `approved` or `rejected` decision atomically writes non-null `decided_*`, `decided_at`, and `context_hash` with the guarded status transition; only `approved` creates exactly one grant. An `expired` row retains origin/expiry, keeps `decided_*`, `decided_at`, and `context_hash` null, and has no grant. Pre-C2 rows remain valid without fabricated values.
+
+**Single-writer requirement (M-1/M-2, normative).** Because there is **no DDL CHECK** on `tool_approvals.status`, the four-value enum (`pending|approved|rejected|expired`) has exactly **one centralized writer**. The existing `decideApproval` module owns both decision transitions and the expiry transition. Decision uses the guarded pending UPDATE and writes the canonical `decided_*`, `decided_at`, and `context_hash` in the same transaction. Expiry uses `UPDATE tool_approvals SET status='expired' WHERE status='pending' AND expires_at<=now`; it writes no decision evidence and creates no grant. Decision and expiry race through the same `state.db` writer transaction: the first commit wins, and the loser changes zero rows. No other code path may update approval status.
+
+The absence of a table CHECK is therefore a code-audit and mutation-test obligation. By contrast, new `approval_deliveries` keeps its DDL CHECK on projection-only `delivery_state` because a fresh table can carry that constraint from first ship.
 
 ### 3.2 What collab identity decides (and what it does not)
 
@@ -370,7 +425,7 @@ Collab/Surface identity supplies four *inputs* to a gateway-owned decision:
 - which surfaces may **RECEIVE** an approval card (delivery targeting, §3.13);
 - which surfaces may **DECIDE** it (authorization, property 2);
 - which **principal+surface** decided (evidence, property 7);
-- where the **originating task** came from (origin, recorded at `registerApproval` into `gateway_approval_bindings`; task ownership recorded in the `gateway_task_owners` sidecar — `(request_id, origin_principal_id, origin_surface_id)`, baseline `tasks` untouched per §10.3).
+- where the **originating task** came from (the server-owned task/session context, recorded directly in canonical `tool_approvals.origin_*` at `registerApproval`; immutable exact-action facts are bound in `gateway_approval_bindings`, while baseline `tasks` stays untouched).
 
 The **state transition itself** remains the gateway's `decideApproval` guarded UPDATE. Collab never writes `tool_approvals.status`.
 
@@ -378,22 +433,22 @@ The **state transition itself** remains the gateway's `decideApproval` guarded U
 
 | # | Property | Contract | Enforcement seam |
 |---|---|---|---|
-| 1 | Channel-originated task cannot self-approve | If `origin_surface_id` is a channel/automation surface, a DECIDE from that same surface (or a surface lacking `approve` capability) is refused. | `authz.ts` + C2 broker check |
-| 2 | Origin ⟂ Authority | Approval *origin* (who submitted) and approval *authority* (who may decide) are independent records; deciding is gated on held authority, never on being the originator. | separate binding fields + authority check |
+| 1 | Channel-originated task cannot self-approve | If `origin_surface_id` is a channel/automation surface, a DECIDE from that same surface is refused; independently, every channel/automation deciding surface lacks operator-role `approve` authority. | `authz.ts` + C2 broker check |
+| 2 | Origin ⟂ Authority | **Origin independent of Authority:** `origin_*` records who submitted; the currently authenticated deciding connection supplies `decided_*`. A different-origin authorized operator is a required positive path. Authority comes from a live `approve` row plus existing resource/task `authz`, never from origin equality. | canonical origin/decision columns + authority check |
 | 3 | Only first valid decision changes state | Reuse existing `UPDATE ... WHERE status='pending'` (`approvals.ts:52-56`). At most one transition fires. | **already holds** — C2 writes evidence in the SAME transaction |
 | 4 | Duplicate/replayed decisions harmless | Second decide → `info.changes===0` → `null`, no side effect. | **already holds** (`approvals.ts:58`) |
 | 5 | Delivery failure never becomes approval | `approval_deliveries` is a projection; a delivery-row failure cannot write `tool_approvals.status`. Delivery and decision are separate tables with separate writers. | table separation (§3.13) |
 | 6 | Delivery survives operator-surface disconnect/reconnect | An undelivered/`pending` approval is re-derivable and re-deliverable on reconnect from `tool_approvals` + `approval_deliveries` (projection is rebuildable). | reconnect re-projects |
-| 7 | Decision evidence records principal+surface | `decided_principal_id`/`decided_surface_id` written to `gateway_approval_bindings` **in the same transaction** as the guarded status UPDATE (atomic with the transition). | binding sidecar (§3.1) |
-| 8 | Approval cards get bounded/redacted arg summaries only | The card carries a bounded, redacted summary — never raw args. Reuse the export redactor discipline (`export.ts`): allowlist projection, scrub-then-cap, honest "known secret shapes removed" language. `LIST_APPROVALS` already excludes `args_json` (`approvals.ts:99-101`); Revision 4 goes further — the persisted `args_json` is the `REDACTED_LEGACY_ARGS_V4` sentinel and the only stored payload is the redacted `gateway_approval_payloads` row. | redactor reuse + payload sidecar |
-| 9 | Approval EXPIRES rather than staying actionable | `expires_at` set at `registerApproval`; a sweep (or lazy check at decide-time) transitions `pending→expired` via `UPDATE ... WHERE status='pending' AND expires_at<=now`. An expired approval is not decidable. | new status + TTL |
-| 10 | Approval bound to execution context; changed policy/profile/privacy INVALIDATES a stale approval | **C2:** `context_hash` (over the §3.4.1 FROZEN input set) is computed + STORED at decide time as evidence — C2 apply is SYNCHRONOUS (`server.ts:185-202`), so there is no decide→apply seam and no re-validation in C2. **C3:** live apply-time re-validation (property-10-wins over 6) once async/offline delivery creates a real decide≠apply seam. See §3.4. | C2: context_hash stored at decide. **C3: apply-time re-check (deferred)** |
+| 7 | Decision evidence records principal+surface | `decided_principal_id`/`decided_surface_id`, `decided_at`, and `context_hash` are written on canonical `tool_approvals` **in the same transaction** as the guarded status UPDATE. No sidecar holds a competing decision tuple. | canonical row (§3.1) |
+| 8 | Approval cards get bounded/redacted arg summaries only | The card carries a generated bounded/redacted summary — never raw `args_json`. Reuse the export redactor discipline (`export.ts`): allowlist projection, scrub-then-cap, honest "known secret shapes removed" language. Historical and go-forward exact action data remain unchanged in canonical `args_json`; C1/C2 adds no unprotected copy and performs no blanket at-rest rewrite. | read-time redactor |
+| 9 | Approval EXPIRES rather than staying actionable | New rows receive finite `expires_at`. APPROVE requires `status='pending' AND expires_at>canonical_now`; expiry uses `UPDATE ... WHERE status='pending' AND expires_at<=now` in the same centralized writer. A flag-on legacy row with NULL expiry/binding is inert and must be reissued, never silently actionable. | canonical writer + TTL |
+| 10 | Approval bound to execution context; changed policy/profile/privacy INVALIDATES a stale approval | **C2 registration→decision:** registration stores a `registration_context_hash` in the immutable binding; decision recomputes it, refuses/expires on mismatch, then stores `tool_approvals.context_hash` as decision evidence. **C2 decision→dispatch:** apply remains synchronous and the §1.4 fence rechecks current epoch/profile/security. **C3:** live re-validation across a future asynchronous decision-delivery→apply seam remains deferred. | C2: registration/decision comparison + decision evidence. **C3: async apply re-check (deferred)** |
 | 11 | No "Allow for session" unless a real session-grant primitive exists | Default C2 contract is **one-shot** (`gateway_action_grants.approval_id UNIQUE` — one grant per approval, consumed once). A durable "allow for session" grant is explicitly NOT designed here (OQ-3, §12); UIs must not offer it. | contract + lint literal |
-| 12 | Path/profile/security restrictions remain authoritative AFTER approval | Approval grants the specific tool; it never bypasses path allowlists, profile gates, or privacy restrictions enforced downstream in `dispatch.ts`. Those re-check on the re-minted run. | dispatch re-check (unchanged) |
+| 12 | Path/profile/security restrictions remain authoritative AFTER approval | Approval grants the exact action; it never bypasses path allowlists, privacy restrictions, policy hash, registry version, or the **current profile delegation**. The synchronous admission fence rechecks the live effective capability/profile revision and downstream restrictions before consuming the grant. | §1.4 transaction + dispatch re-check |
 
-### 3.4 Context binding — the `context_hash` (FROZEN inputs; C2 computes+stores, C3 re-validates)
+### 3.4 Context binding — `CTXHASH_V1` (C2 registration→decision check; C3 async apply check)
 
-Two operator rulings 2026-08-08 (frozen) govern this section: (a) **OQ-4 is closed** — the `context_hash` input set is now fully specified and normative (no "mechanism normative, inputs TBD"); and (b) **Property-10 / C-1** — C2 apply stays SYNCHRONOUS and live apply-time re-validation is DEFERRED to C3. Both are encoded below.
+Two operator rulings 2026-08-08 (frozen) govern this section: (a) **OQ-4 is closed** — the context input set and byte serializer are normative; and (b) **Property-10 / C-1** — C2 decision→dispatch stays SYNCHRONOUS, while live re-validation across a future asynchronous decision-delivery→apply seam is DEFERRED to C3. The correction adds the missing C2 registration→decision comparison without inventing an async apply seam.
 
 #### 3.4.1 Canonical `context_hash` input set (FROZEN, normative — clears C-2, closes OQ-4)
 
@@ -436,38 +491,40 @@ Two independent implementations that agree on the ten field VALUES will produce 
 
 **Why adversarial test A9 passes BECAUSE of this set:** A9 changes the profile and/or privacy posture between request and apply. Because **resolved execution profile (5)** and **privacy/security context (8)** are inputs to the hash, any such change produces a different `context_hash`, so the mismatch is detectable by construction. A9 cannot be defeated by a tool/args-only hash — that is exactly the weakness this frozen set removes. (A9 is a **C3** acceptance test — see §3.4.3.)
 
-#### 3.4.2 C2 behavior — SYNCHRONOUS apply, no decide→apply seam (Property-10 / C-1 ruling, clears C-1 + L-2)
+#### 3.4.2 C2 behavior — registration may wait; decision→dispatch stays SYNCHRONOUS
 
-**Ruling (frozen): in C2 there is NO decide→apply gap.** Today `decideApproval` and `mintGrantedRequest` run in the **same `server.ts` tick** — the `APPROVE_TOOL` handler calls `decideApproval(...)` (`server.ts:185`) and, on APPROVE, immediately `mintGrantedRequest(...)` and `dispatch(...)` within the same synchronous case (`server.ts:185-202`). The decision IS the application; there is no interval in which context could drift between deciding and applying.
+**Ruling (frozen): in C2 there is no asynchronous decision-delivery→apply gap.** That does not erase the real request/registration→decision wait: an approval may remain pending while profile, policy, registry, routing, privacy, or surface state changes. C2 closes that existing gap as follows:
 
-Therefore:
-- **In C2, `context_hash` is computed and STORED at decide time as evidence** on the canonical `gateway_approval_bindings` sidecar row (§3.1), keyed to the `tool_approvals` approval id. It records the exact context the decision was made under.
-- **In C2, `context_hash` is NOT re-validated at a separate apply time** — because there is no separate apply time. Live apply-time re-validation (Property 10 in its full form) is **EXPLICITLY NOT a C2 invariant**.
-- **C2 must NOT invent an async/offline seam solely to make A9 pass.** Manufacturing a decide≠apply gap that does not exist today would add attack surface for no C2 benefit.
+1. Registration computes `CTXHASH_V1` over the frozen request context and stores it as `gateway_approval_bindings.registration_context_hash`; canonical `tool_approvals.context_hash` remains null while pending.
+2. The centralized decision writer resolves the **current** ten inputs and recomputes the digest. A mismatch refuses approval (or atomically expires the still-pending row with an explicit context-invalidated reason); it writes no decider evidence and creates no grant.
+3. A match permits the guarded decision transaction to write canonical `decided_*`, `decided_at`, and `context_hash`, with an exact-action grant only for APPROVE.
+4. Immediately before `dispatch_started`, the §1.4 transaction rechecks current gateway epoch, effective capability/profile delegation revision, exact action digest, expiry, authority, and downstream path/privacy restrictions before consuming the grant.
+
+C2 still MUST NOT invent an asynchronous/offline apply seam solely to make C3's A9 pass. The registration→decision comparison and synchronous admission fence are C2; a later decision-delivery→apply comparison is C3.
 
 #### 3.4.3 Property 10 deferred to C3 — the real decide≠apply seam (property-6-vs-10 collision is latent-until-C3)
 
-The property-6-vs-10 collision (durable delivery of a *stale-but-delivered* decision) only becomes real in **C3**, where async/offline delivery introduces a genuine `decide != apply` seam (operator decides while offline; the decision is delivered and applied later). **Property-10 live apply-time re-validation is DEFERRED to C3.** At that point:
+The property-6-vs-10 collision (durable delivery of a *stale-but-delivered decision*) only becomes real in **C3**, where async/offline delivery introduces a genuine decision-delivery→apply seam. **Property-10 live re-validation across that future seam is DEFERRED to C3.** At that point:
 - Recompute the current `context_hash` (over the §3.4.1 frozen inputs) at the moment the decision would take effect.
 - Equal to the stored hash → apply normally.
 - Materially different → the stale approval is **INVALIDATED**: transition `pending→expired` (or, if already `approved`, refuse to act and surface it) and emit an **EXPLICIT operator-facing failure state** — NOT a silent no-op.
 - **Ruling: property 10 WINS over property 6** at the collision point. Durable delivery (6) guarantees the decision is not *lost*; it does not guarantee it is still *valid*. This ruling is recorded now but is a **C3** invariant.
 
-**The property-6-vs-10 collision is therefore LATENT-UNTIL-C3.** In C2, property 6 (durable delivery survives reconnect) holds without colliding with anything, because C2 has no seam in which a delivered decision can go stale before apply.
+**The property-6-vs-10 delivery collision is therefore LATENT-UNTIL-C3.** C2 nevertheless rejects context drift accumulated while the approval was pending and rechecks the live gateway security revisions before synchronous dispatch.
 
-**Source-of-truth note:** `context_hash` is stored on the gateway-owned `gateway_approval_bindings` sidecar keyed to the canonical `tool_approvals` row (not on the delivery projection), so both the C2 evidence write and the C3 re-validation read authoritative state. `approval_deliveries` can be dropped and rebuilt without affecting either.
+**Source-of-truth note:** immutable registration context lives in `gateway_approval_bindings.registration_context_hash`; the winning decision digest lives in canonical `tool_approvals.context_hash`. Neither lives in the delivery projection, so `approval_deliveries` can be dropped and rebuilt without changing approval or context truth.
 
 ### 3.5–3.12 Property detail (see the table in §3.3; expanded contracts)
 
-- **3.5 (prop 1 detail):** "self-approve" is defined structurally: a DECIDE whose `decided_surface_id === origin_surface_id` AND whose surface is a channel/automation kind is refused. An operator surface deciding its own operator-originated task is allowed (operators are the approval authority today, `authz.ts` `case 'APPROVE_TOOL'`). Combined with CT-2 (§3.14) — channel/automation surfaces can never hold `approve` — a channel-originated task cannot self-approve on two independent grounds (structural self-approve refusal + absence of `approve` authority).
+- **3.5 (prop 1 detail):** "self-approve" is defined structurally: a DECIDE whose current deciding surface equals `origin_surface_id` and is channel/automation is refused. Positive authority never requires origin equality: a **different-origin authorized operator** surface may decide when its current connection/epoch is valid, it has a live `approve` row, and existing resource/task `authz` permits it. Channel/automation surfaces fail both the kind/role gate and the authority lookup.
   - **Dependency H-2 (frozen): property 1 origin-trust depends on the C1-5 bind-time surface-validity gate.** Property 1 reasons over `origin_surface_id`. That record is only **trustworthy** if the presenting credential was validated at connect/bind time — otherwise a surface could present a forged/unvalidated `origin_surface_id` and the "channel-originated" classification would be spoofable. The C1-5 resume/bind surface-validity gate (§2.6 step 2), whose proof is durably recorded in `gateway_session_auth` (§2.13), is what establishes that `origin_surface_id` was proven at connect. **Therefore C2-3 (prop 1 enforcement) explicitly DEPENDS ON C1-5 being landed first** (recorded in the ticket decomposition, §8).
-- **3.6 (prop 2 detail):** the origin fields are written at `registerApproval` (from the blocked task's session binding, via `gateway_session_auth`); the decide fields at `decideApproval`. Nothing couples them.
-- **3.7 (props 3+4):** no new code required for the core guard — the existing atomic `UPDATE` is the mechanism; C2 widens the transaction to include the binding-sidecar evidence write. A test must prove two simultaneous decides still yield exactly one transition WITH exactly one evidence tuple.
+- **3.6 (prop 2 detail):** origin fields are written on canonical `tool_approvals` at registration from the blocked task's server-owned session context; the current deciding connection supplies canonical decision fields inside the winning transition. The positive predicate never binds current connection identity to origin identity. **Origin independent of Authority** is tested with a different-origin authorized operator success case plus cross-channel/non-operator negatives.
+- **3.7 (props 3+4):** the existing atomic pending guard remains the core. C2 widens the same transaction to write canonical decision evidence and, for APPROVE only, one grant. Tests prove two simultaneous decisions or decision-vs-expiry yield exactly one terminal transition and never a second evidence tuple or grant.
 - **3.8 (prop 5):** `approval_deliveries` writer is separate from `decideApproval`; a delivery insert/ack failure path has no code route to `tool_approvals.status`.
-- **3.9 (prop 9 TTL):** `expires_at` default is a fixed TTL (proposed 15 minutes — value is **OQ-5, §12**). Expiry transition is idempotent and replay-harmless (same `WHERE status='pending'` guard shape). An expired approval's action grant (if any was minted) is unreachable: grants are minted only on APPROVE, and an expired row cannot be approved.
-- **3.10 (prop 8 redaction):** the card summary is produced by the gateway (never assembled client-side), reusing `export.ts` redactor primitives; honest language only ("known secret shapes removed"), never "safe". Revision 4: the redacted summary is the ONLY persisted payload (`gateway_approval_payloads`); the rebuilt `args_json` column carries the `REDACTED_LEGACY_ARGS_V4` sentinel.
+- **3.9 (prop 9 TTL):** new registrations receive a finite TTL (proposed 15 minutes — value is **OQ-5, §12**) from one canonical clock. APPROVE/REJECT requires `status='pending' AND expires_at>canonical_now`; the same writer materializes expiry via `UPDATE ... WHERE status='pending' AND expires_at<=now`. First commit wins. Expired rows have null decision/context evidence and no grant. Under the flag, legacy NULL-expiry or missing-binding rows are inert and return reissue-required; migration does not mutate them.
+- **3.10 (prop 8 redaction):** the gateway produces card/export summaries at read time, reusing `export.ts` redactor primitives; honest language only ("known secret shapes removed"), never "safe". Exact legacy and go-forward `args_json` remains canonical and unchanged. `gateway_approval_payloads` remains empty until OQ-7 approves an encryption/key/retention mechanism for newly registered payloads; C1/C2 never creates an unprotected second copy or rewrites history.
 - **3.11 (prop 11):** one-shot is the only grant C2 ships (`gateway_action_grants`, one consumable row per approval). **Prohibition statement (normative):** "Allow for session" is PROHIBITED as a shippable grant option — it MUST NOT appear as a grant type in any UI, config, or grant-type enum — until a real canonical session-grant primitive is separately designed (OQ-3, §12). The §10 pre-gate lints this prohibition in two directions: the implementation/config surface must not contain the string, and THIS PRD must contain this prohibition statement (§10, corrected).
-- **3.12 (prop 12):** the re-minted GatewayRequest still passes through `dispatch.ts` path/profile/privacy gates. Approval widens exactly one grant unit (`grantedTools=[tool_name]`, per `schema.sql §8` comment); it disables nothing else. Under the §1.4 invariant, dispatch admission additionally requires the grant row to be unconsumed and unrevoked in the same serialization interval.
+- **3.12 (prop 12):** the re-minted `GatewayRequest` still passes through `dispatch.ts` path/profile/privacy gates. Approval widens exactly one action and disables nothing else. The §1.4 transaction recomputes the action digest and requires current auth epoch, **current profile delegation**, effective capability/profile revisions, authority, expiry, and an unconsumed/unrevoked grant before dispatch.
 
 ### 3.13 Durable delivery projection `approval_deliveries` (NEW — projection, NOT truth)
 
@@ -484,12 +541,15 @@ CREATE TABLE approval_deliveries (
     delivery_state    TEXT NOT NULL DEFAULT 'pending' -- pending | delivered | acked | failed
                         CHECK (delivery_state IN ('pending','delivered','acked','failed')),
     created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+    updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (approval_id) REFERENCES tool_approvals(approval_id)
 );
 CREATE INDEX idx_approval_deliveries_approval ON approval_deliveries(approval_id);
+CREATE INDEX idx_approval_deliveries_target_state
+    ON approval_deliveries(target_surface_id, delivery_state);
 ```
 
-- A `rebuild` script (analogous to `ops/receipts-rebuild.mjs`) MUST be able to drop and regenerate `approval_deliveries` from canonical state, with no loss of approval truth. This is the acceptance proof that the projection is not load-bearing for correctness.
+- A `rebuild` script (analogous to `ops/receipts-rebuild.mjs`) MUST be able to drop and regenerate the **current actionable delivery view** from canonical pending approvals plus current eligible operator surfaces, with no loss of approval truth. Historical transport attempts/acks are observability only and need not reproduce byte-identically; they cannot authorize a decision.
 - Reconnect (property 6): on operator-surface reconnect, undelivered/`pending` approvals are re-projected and re-offered; the delivery projection tracks best-effort delivery, the `tool_approvals` row remains the truth.
 
 ### 3.14 CT-2 — `approve` authority provisioning rule (FROZEN, normative)
@@ -517,26 +577,28 @@ Operator ruling 2026-08-08 (frozen; clears H-3, encodes CT-2). This is the provi
 
 | Concept | Authoritative owner / table | Projection / cache | Notes |
 |---|---|---|---|
-| Principal identity | collab `principals` | — | C0 substrate |
-| **Surface** | **`surfaces` (C1)** | — | authoritative; backed up with DB |
-| **Surface credential (HMAC)** | **`surface_credentials` (C1)** | — | plaintext never stored; re-issue, never retrieve |
-| **Surface capability** | **`surfaces.capability_json` (C1)** | — | subset of principal authority |
-| Session (execution/replay) | gateway `sessions` (C0 columns) | — | NOT replaced by collab bindings |
-| **Session auth evidence (`ConnectionAuthContext`)** | **`gateway_session_auth` (C1, Revision 4, §2.13)** | — | server-derived at bind; replaces the archived C0.1 auth store |
-| Execution status / events | gateway `tasks` / **`events` (source of truth)** | `run_receipts` | unchanged |
-| **Task ownership (origin identity)** | **`gateway_task_owners` (C2 sidecar, §3.2)** | — | baseline `tasks` untouched |
-| **Approval STATE** | **gateway `tool_approvals` (canonical)** | — | C2 rebuild-compatible (§3.1); state never leaves this table |
-| **Approval origin** | **`gateway_approval_bindings.origin_*` (C2 sidecar, §3.1)** | — | written at registerApproval |
-| **Approval authority (who may decide)** | **`surface_authorities` (C1, separate authority store §2.7.1)** consulted at the `authz.ts` authority-check seam (post-H-1 subordination) | — | held-authority lookup, NEVER `capability_json`/the execution-capability path (AR-1); computed against the presenting surface's held `approve` authority |
-| **Decision evidence** | **`gateway_approval_bindings.decided_*` (C2 sidecar, §3.1)** | — | same transaction as the status UPDATE |
-| **Action grant (one-shot consumption, §1.4)** | **`gateway_action_grants` (C2 sidecar, §3.1)** | — | one unconsumed exact-action grant; consumed durably at dispatch admission |
-| **Approval expiry** | **`tool_approvals.status='expired'` + `expires_at` (C2)** | — | one-shot TTL |
-| **Approval payload (redacted)** | **`gateway_approval_payloads` (C2 sidecar, §3.1)** | — | the only persisted args representation; legacy column holds the sentinel |
-| **Approval-context binding** | **`gateway_approval_bindings.context_hash` (C2 sidecar)** | — | stored as evidence at decide (C2); apply-time re-validation deferred to C3 (§3.4) |
+| Principal identity | `collab.db.principals` + live C0.1 tables | — | C0 substrate remains live and unchanged |
+| **Surface identity/configuration** | **`collab.db.surfaces` (C1)** | — | globally unique immutable owner; identity/config truth |
+| **Surface credential (HMAC)** | **`collab.db.surface_credentials` (C1)** | — | globally unique id/HMAC; plaintext never stored |
+| **Configured surface capability** | **`collab.db.surfaces.capability_json` (C1)** | — | requested configuration, never a dispatch-time cross-WAL read |
+| **Effective surface capability/profile** | **`state.db.gateway_surface_security` (C1)** | identity-derived enforcement state | state-owned effective capability/profile revision; missing/stale denies |
+| Session (execution/replay) | `state.db.sessions` (C0 columns) | — | NOT replaced by collab bindings |
+| **Session auth evidence (`ConnectionAuthContext`)** | **`state.db.gateway_session_auth` (C1, §2.13)** | — | server-derived and revision-pinned; C0.1 remains live |
+| **Approval authority (who may decide)** | **`state.db.surface_authorities` (C1)** | — | live current-epoch `approve` ledger row; never execution capability |
+| Execution status / events | `state.db.tasks` / **`state.db.events`** | `run_receipts` | existing event source of truth; no new lifecycle log |
+| **Approval STATE + exact action** | **`state.db.tool_approvals` (canonical)** | read-time redacted card/export | original table/rows/rowid/args retained; six nullable additions only |
+| **Approval origin** | **`tool_approvals.origin_*`** | — | written at registration from server-owned session context |
+| **Immutable registration binding** | **`state.db.gateway_approval_bindings`** | — | task/session/action/context facts only; no status or decision fields |
+| **Decision evidence** | **`tool_approvals.decided_*`, `decided_at`, `context_hash`** | — | same canonical transaction as the winning status UPDATE |
+| **Action grant (one-shot consumption, §1.4)** | **`state.db.gateway_action_grants`** | — | exact action + revisions; consumed durably at admission |
+| **Approval expiry** | **`tool_approvals.status='expired'` + `expires_at`** | — | centralized writer; expired has null decision/context and no grant |
+| **Protected new payload (conditional)** | **`gateway_approval_payloads` only after OQ-7 approval** | read-time redacted card/export | empty by default; no legacy rewrite or unprotected second copy |
+| **Approval-context binding** | **registration digest in `gateway_approval_bindings`; decision digest in `tool_approvals.context_hash`** | — | C2 compares registration→decision; C3 async apply recheck deferred |
 | **Approval delivery** | **`approval_deliveries` (C2) — PROJECTION** | (is the projection) | rebuildable, droppable; never truth |
 | Receipts | `run_receipts` (projection) | (is the projection) | precedent for `approval_deliveries` |
+| Governed-skill state | existing Hermes/kernel owners | — | `skill_queue` schema/data/runtime untouched by C1/C2 |
 
-Explicit statement: **gateway owns execution / events / receipts / approval-STATE; collab owns identity (principals, surfaces, credentials, capability); all new C1/C2 tables are additive** (the two bounded Revision 4 migration exceptions are §1.5's compatible rebuild and C0.1 archive). No existing authoritative table is repurposed or replaced.
+Explicit statement: **gateway owns effective execution, events, receipts, approval state, and control-plane authority; collab owns configured identity, surfaces, and credentials. All C1/C2 schema work is additive.** The two physical databases are not unified and no existing authoritative table is repurposed, rebuilt, archived, renamed, or deleted.
 
 ---
 
@@ -556,13 +618,13 @@ Per-control proof obligations (illustrative, not exhaustive — the ticket accep
 |---|---|---|---|
 | Surface credential verify (existence-oblivious) | HMAC-count equality across hit/miss/revoked/expired/malformed | reached from `server.ts` connect path | booted dist refuses revoked surface |
 | Resume surface gate (§2.6 step 2) | step-2 refusal fixtures; `gateway_session_auth` written on success | reached from `sessions.resolve` | booted dist enforces gate with flag on |
-| First-decision-wins + evidence (props 3,7) | concurrent decide → one transition, one evidence tuple | reached from `APPROVE_TOOL` handler | booted dist records evidence |
+| First-decision-wins + evidence (props 3,7) | concurrent decide/expiry → one canonical transition, one evidence tuple, at most one grant | reached from `APPROVE_TOOL` handler and centralized expirer | booted dist records canonical evidence |
 | Channel self-approve prevention (prop 1) | channel/automation `decided_surface_id`==`origin_surface_id` refused; channel surface holds no `approve` authority | refusal reached from the `APPROVE_TOOL` authority check (post-H-1 seam, §2.7.1) — depends on C1-5 origin-trust | **booted dist refuses channel self-approve** (channel surface cannot decide its own originated task on a live artifact) |
 | Post-approval path/profile re-check (prop 12) | re-minted GatewayRequest still hits `dispatch.ts` path/profile/privacy gates; approval widens only `grantedTools=[tool_name]`; grant row consumed durably (§1.4) | re-check reached on the re-mint/dispatch path from `server.ts:196-202` | **booted dist re-checks path/profile/privacy after approval** (a booted artifact still denies a path/profile-violating tool even once approved) |
-| Context binding — store as evidence (§3.4.1, prop 10 **C2 part**) | `context_hash` over the frozen input set is computed + stored at decide time | reached from `APPROVE_TOOL` decide path | booted dist writes `context_hash` on decide |
+| Context binding (§3.4.1, prop 10 **C2 part**) | registration digest stored; decision recomputes current digest, rejects mismatch, stores canonical evidence only on a winner | reached from register + `APPROVE_TOOL` paths | booted dist rejects registration→decision drift and writes winning `context_hash` |
 | Context invalidation (§3.4.3, prop 10 **C3 part — DEFERRED**) | context mismatch → explicit failure | reached from async apply/re-mint path (C3) | booted dist fails loudly on stale apply (C3) |
 | Delivery projection rebuild (§3.13) | rebuild yields identical delivery view | rebuild script reachable | rebuild runs against booted DB |
-| Revision 4 migration (§1.5, §3.1) | rebuild retains all columns + approval ids; historical args read back as the sentinel; archived auth denied | migration runs from the real startup path | booted dist over a migrated legacy DB: baseline data intact, archived credentials refuse auth |
+| Revision 4 migration (§1.5, §3.1) | six guarded nullable columns; original `tool_approvals` table/rowid/rows/values/args/status preserved; C0.1 + `skill_queue` untouched | migration runs from the real startup path | booted dist over separate migrated DB copies preserves legacy flag-off artifacts and denies missing/stale gateway projections |
 
 ---
 
