@@ -150,6 +150,13 @@ restore-before-unlock. Activation is transactional — on failure the prior
 projection is restored, the new digest is not active, the approval is not
 falsely consumed, and no retained journal can later complete it silently.
 
+As of GS-ROLLBACK, rollback is also end-to-end: the
+`rollback_skill` MCP tool → `governed_skills.rollback_governed_skill()` path
+runs the same coordinator transaction, re-publishing the target version's
+bytes and verifying their digest — never governance alone (the GS-ACCEPT F-1
+divergence). **A governed disable/removal surface still does not exist**
+(GS-DISABLE, unscoped); rolling back a disabled skill re-enables it.
+
 It stays **off** unless `TORQCLAW_GOVERNED_SKILLS` is set. It remains off until
 a live acceptance run (GS-ACCEPT) boots a real agent against the shipped binary
 and a soak follows — unit and integration tests alone are not treated as

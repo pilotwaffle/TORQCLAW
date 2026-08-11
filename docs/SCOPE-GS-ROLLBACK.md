@@ -314,3 +314,48 @@ GS-COORD-shaped but smaller: the coordinator, publisher retain/restore, and
 error taxonomy all exist. ~200 lines of product code (one function + two
 tools + one shared error-mapper), ~400 lines of tests. The unbounded tail is
 the same as always: what the deletion probes find.
+
+## 8. Build record (2026-08-10)
+
+Build commit `56c1964` on `gs-rollback-work`; G2A round-1 fixes follow it.
+
+### Deletion probes — all six RED, then restored
+
+| # | Deleted control | Result |
+|---|---|---|
+| 1 | `_publish` made a no-op reporting success | **RED** — 10 failures; the verify digest tripwire caught it everywhere including the happy path |
+| 2 | `_verify_published_digest` dropped from `verify` | **RED** — `test_verify_catches_a_publish_that_lied_about_the_bytes`: DID NOT RAISE |
+| 3 | `commit_holder["previous"]` recorded before the governed flip | **RED** — `test_commit_failure_restores_projection_without_a_governed_revert` (vacuous-revert detector) |
+| 4 | Restore ordering inverted (projection before governance) | **RED** — raw `OSError` escaped instead of `GovernanceRevertedProjectionUnprovenError` |
+| 5 | `rollback_skill` tool unregistered | **RED** — `test_rollback_tools_are_registered_on_the_server` |
+| 6 | Failure taxonomy collapsed to generic retryable | **RED** — golden-shape mapper test |
+
+### G2A round 1 — REJECT, one BLOCKING defect (fixed)
+
+`GovernanceRevertedProjectionUnprovenError` **extends** `GovernedSkillError`
+and propagates UNWRAPPED out of the coordinator's restore path, so
+`skill_rollback.rollback`'s invalid-target arm (placed first) swallowed it
+and mislabelled the one must-inspect-disk state as
+`SKILL_ROLLBACK_INVALID_TARGET`. G2A reproduced it live through the shipped
+surface. Root cause of the test gap: every failure-taxonomy assertion
+stopped at the kernel or the bare mapper — probe 6 tested the wrong layer.
+Fix: the subclass arm now precedes and routes through the shared mapper;
+`test_surface_reports_unproven_projection_not_invalid_target` drives the
+exception through the surface and pins the returned dict.
+
+Ride-alongs fixed: `skill_queue.py` comment named a nonexistent enforcement
+point (test lives in `test_governed_rollback.py`, not `test_skill_queue.py`);
+README §Verified-skills gained the GS-ROLLBACK paragraph promised in §3.4
+(including the re-enable semantic and the still-missing disable surface);
+the round-1 commit message's unit-gate count said 324 — the correct count on
+that tree is **325 passed / 1 skipped / 10 deselected** (G2A re-derived it).
+
+G2A NOTEs recorded, deliberately not fixed in this lane: `list_versions`
+dies on a hand-corrupted `state.json` with non-dict records (tamper
+tolerance is scoped to version *directories*); the idempotent fast path
+reads outside `_MUTATION_LOCK` (pre-existing, shared with install);
+`publish_skill` can raise after mutating the projection with the coordinator
+treating it as nothing-to-restore (pre-existing, shared with install);
+acceptance's `_rendered_skill_index` clears the prompt cache itself, so
+step 11 proves projection movement, not cache invalidation (covered at unit
+level).

@@ -135,7 +135,9 @@ def decide(queue_id: str, decision: str, edited_markdown: str | None = None) -> 
                 # that function and the exception classes themselves.
                 # queue_status="pending" keeps every failure result here
                 # byte-identical to the pre-extraction shapes (pinned by
-                # test_skill_queue's golden-shape test): the row genuinely
+                # test_governed_rollback's golden-shape test of the mapper,
+                # plus the decide()-level BUSY/CACHE_UNPROVEN pins in
+                # test_activation_coordinator_wiring): the row genuinely
                 # stays pending on every failure arm.
                 return governed_skills.map_activation_failure(
                     exc, queue_status="pending"

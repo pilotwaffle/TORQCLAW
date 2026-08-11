@@ -50,8 +50,22 @@ def rollback(skill_id: str, digest: str) -> dict[str, Any]:
 
     try:
         return governed_skills.rollback_governed_skill(skill_id, digest)
+    except governed_skills.GovernanceRevertedProjectionUnprovenError as exc:
+        # MUST precede the GovernedSkillError arm below: this class EXTENDS
+        # GovernedSkillError, and the coordinator propagates restore-callback
+        # failures UNWRAPPED -- G2A round 1 reproduced the subclass being
+        # swallowed by the invalid-target arm, machine-labelling the one
+        # failure state that requires an operator to inspect disk before
+        # retrying as a bad argument. Routed through the shared mapper so
+        # the surface emits the same non-retryable
+        # SKILL_PROJECTION_UNPROVEN_AFTER_REVERT code decide() does.
+        return governed_skills.map_activation_failure(exc, queue_status=None)
     except governed_skills.GovernedSkillError as exc:
-        # Invalid id / unknown digest: refused before any mutation.
+        # Invalid id / unknown digest: refused before any mutation. This arm
+        # can only see the kernel's PRE-coordinator refusals -- a verify
+        # failure's GovernedSkillError arrives wrapped in
+        # SkillActivationCoordinationError and lands in the generic mapper
+        # arm; the restore-path subclass is caught above.
         return {
             "ok": False,
             "code": "SKILL_ROLLBACK_INVALID_TARGET",

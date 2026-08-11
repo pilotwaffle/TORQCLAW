@@ -306,6 +306,35 @@ def test_publisher_restore_failure_after_landed_commit_is_reported_unproven(
     )
 
 
+def test_surface_reports_unproven_projection_not_invalid_target(monkeypatch):
+    """G2A round 1 BLOCKING defect, re-pinned at the SURFACE:
+    GovernanceRevertedProjectionUnprovenError extends GovernedSkillError and
+    propagates UNWRAPPED out of the coordinator's restore path, so an
+    invalid-target arm placed first swallowed it -- mislabelling the one
+    failure state that requires an operator to inspect disk before retrying
+    as a bad argument. Every other failure-taxonomy test stops at the kernel
+    or the bare mapper; this one drives the exception through
+    skill_rollback.rollback and asserts on the returned dict."""
+    v1, v2 = _install_two_versions()
+
+    monkeypatch.setattr(skill_publisher, "is_published", lambda skill_id: False)
+
+    def _raising_restore(*, skill_id, retained_path):
+        raise OSError("injected projection-restore failure")
+
+    monkeypatch.setattr(
+        skill_publisher, "restore_retained_projection", _raising_restore
+    )
+
+    result = skill_rollback.rollback(SID, v1)
+
+    assert result["ok"] is False
+    assert result["code"] == "SKILL_PROJECTION_UNPROVEN_AFTER_REVERT"
+    assert result["retryable"] is False
+    assert "status" not in result
+    assert _state()["active"][SID]["digest"] == v2, "governance stays conservative"
+
+
 # ---------------------------------------------------------------------------
 # Idempotency.
 # ---------------------------------------------------------------------------
