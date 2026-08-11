@@ -1878,9 +1878,16 @@ def _validate_ctxhash(gate: Gate, text: str) -> None:
     # The fixture block is its own Markdown paragraph immediately after the
     # semantic-vector introduction, so search the section rather than only
     # the introductory paragraph.
+    # `inputs` comes from raw bytes decoded WITHOUT newline translation (see
+    # _without_block), so on a core.autocrlf=true checkout — the configuration
+    # this repo's own _worktree_text_to_git_bytes docstring records — each
+    # fixture line ends "\r\n" and a bare `$` after `}` never matches. `\r?$`
+    # keeps the gate's verdict identical between LF and CRLF materializations
+    # of the same blob without weakening the check: an absent or wrong fixture
+    # object still fails here and at the digest comparisons below.
     semantic_objects: dict[str, Any] = {}
     for name in ("privacy", "routing", "security"):
-        match = re.search(rf"(?m)^{name}\s*=\s*(\{{.*\}})$", inputs)
+        match = re.search(rf"(?m)^{name}\s*=\s*(\{{.*\}})\r?$", inputs)
         if not match:
             continue
         try:

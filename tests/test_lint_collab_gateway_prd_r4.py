@@ -795,3 +795,21 @@ def test_cli_failure_report_is_deterministic(tmp_path: Path) -> None:
     assert first.stderr == second.stderr
     assert report.read_bytes() == first_report
     assert b"R4 markers: STATE_DB_MAP_V4" in first_report
+
+
+def test_canonical_prd_passes_gate_on_a_crlf_checkout(tmp_path: Path) -> None:
+    """The repo checks out with core.autocrlf=true on Windows (recorded in the
+    linter's own _worktree_text_to_git_bytes docstring), so the gate must reach
+    the same verdict on a CRLF materialization of the canonical PRD as on the
+    LF blob git stores. Regression for the CTXHASH_V1 semantic-fixture regex,
+    whose bare $ anchor missed fixture lines ending CRLF and turned three
+    checks falsely red on every Windows checkout while the identical commit
+    passed 224/224 on LF checkouts. The mutation harness cannot catch this
+    class itself: _write_mutation round-trips through read_text (normalizing
+    to LF), so every mutant it writes is LF regardless of the checkout.
+    """
+    crlf = tmp_path / PRD.name
+    crlf.write_bytes(
+        PRD.read_text(encoding="utf-8").replace("\n", "\r\n").encode("utf-8")
+    )
+    assert _findings(crlf) == set()
