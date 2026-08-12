@@ -522,6 +522,53 @@ def _paragraph_with(text: str, terms: tuple[str, ...]) -> bool:
     )
 
 
+def _sentence_start(text: str, pos: int) -> int:
+    """Return the offset just after the nearest sentence-ending punctuation
+    (`. ` / `; ` / `\n`) at or before `pos`, so a negation search can be
+    scoped to the current sentence instead of bleeding into the previous one.
+    """
+    boundary = -1
+    for m in re.finditer(r"[.;]\s+|\n", text[:pos]):
+        boundary = m.end()
+    return max(0, boundary)
+
+
+def _paragraph_with_affirmed(
+    text: str, terms: tuple[str, ...], affirmed: str,
+) -> bool:
+    """Like `_paragraph_with`, but additionally requires that at least one
+    occurrence of `affirmed` inside a co-occurring paragraph is NOT preceded
+    by a nearby negation word (see `near_negation`), scoped to the current
+    sentence.
+
+    `_paragraph_with` alone is negation-blind: it only checks that terms
+    co-occur as substrings, so inverting a load-bearing word to its negated
+    form (e.g. "the grant is consumed" -> "the grant is NOT consumed") still
+    satisfies plain substring co-occurrence and leaves the check green. This
+    wrapper closes that hole for the specific, named positive claim inside a
+    paragraph, without weakening `_paragraph_with`'s existing co-occurrence
+    semantics for every other, non-invertible use of it. The negation search
+    is clipped to the current sentence (not just the current paragraph)
+    because `near_negation`'s paragraph-wide window can otherwise pick up an
+    unrelated negation from an earlier sentence in a dense normative
+    paragraph.
+    """
+    folded_terms = tuple(term.casefold() for term in terms)
+    for paragraph in re.split(r"\n\s*\n", text):
+        folded_paragraph = paragraph.casefold()
+        if not all(term in folded_paragraph for term in folded_terms):
+            continue
+        positions = [
+            m.start()
+            for m in re.finditer(re.escape(affirmed), paragraph, re.IGNORECASE)
+        ]
+        for pos in positions:
+            sentence_start = _sentence_start(paragraph, pos)
+            if not near_negation(paragraph[sentence_start:], pos - sentence_start):
+                return True
+    return False
+
+
 def _without_block(data: bytes, name: str) -> str:
     begin = _marker_pattern(name + "_BEGIN", consumes_newline=True).search(data)
     end = _marker_pattern(name + "_END", consumes_newline=False).search(data)
@@ -772,9 +819,19 @@ def _validate_migration_contract(
         "the six ALTERs need a per-column PRAGMA table_info absence guard",
     )
 
-    before_s9 = text.split("## 9. Explicitly OUT OF SCOPE", 1)[0]
+    # Revision-4 scoping (§10.4 item 7): the destructive-migration scan must
+    # cover proposal-level text everywhere a proposal could hide a destructive
+    # statement, not just before §9. `text` here is already fixture-free (the
+    # caller strips the §10.1 BASELINE_STATE_DB_AF52430 block before calling
+    # this function), so scanning the whole document catches a destructive
+    # statement placed in §11/§12/§13 that a `before_s9` truncation would miss
+    # (proven by an adversarial `DROP TABLE tool_approvals` probe placed in
+    # §12). §10's own spec prose never needs a separate exclusion here: it
+    # documents the prohibition descriptively but does not itself contain any
+    # of the dangerous SQL/sentinel patterns below (verified against the
+    # canonical PRD).
     map_text = _stable_repr(state_map or {})
-    proposed = before_s9 + "\n" + map_text
+    proposed = text + "\n" + map_text
     dangerous_patterns = {
         "table rebuild/rename": r"ALTER\s+TABLE\s+tool_approvals\s+RENAME|CREATE\s+TABLE\s+tool_approvals_v\w*",
         "table drop": r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?tool_approvals",
@@ -789,6 +846,27 @@ def _validate_migration_contract(
         "R4 migration: no rebuild/sentinel/history rewrite",
         not found_dangerous,
         f"proposal-level destructive approval migration patterns: {found_dangerous}",
+    )
+    # Explicit, separately-named regression lock for the specific scoping
+    # hole an adversarial review found: `dangerous_patterns` above used to be
+    # scanned only over `text.split("## 9. Explicitly OUT OF SCOPE", 1)[0]`,
+    # so a destructive statement placed anywhere at or after §9 (including
+    # §11/§12/§13) was invisible to the gate. `proposed` is now built from the
+    # whole fixture-free document, so this check is redundant with the one
+    # above on any correctly-scanned document — it exists as an explicit,
+    # independently named assertion over just the post-§9 tail, so a future
+    # regression that narrows the scan back to a `before_s9`-style prefix
+    # fails here by name even if the primary check above were ever weakened
+    # back down instead of removed.
+    s9_tail = text[text.index("## 9. Explicitly OUT OF SCOPE"):] + "\n" + map_text
+    tail_dangerous = [
+        name for name, pattern in dangerous_patterns.items()
+        if re.search(pattern, s9_tail, re.IGNORECASE)
+    ]
+    gate.require(
+        "R4 migration: destructive scan covers §9 onward (§11-§13 regression lock)",
+        not tail_dangerous,
+        f"destructive patterns found at/after §9 (would previously have been invisible): {tail_dangerous}",
     )
     gate.require(
         "R4 migration: no gateway_approval_events table/reducer",
@@ -1503,7 +1581,11 @@ def _validate_approval_state(gate: Gate, text: str) -> None:
     )
     gate.require(
         "R4 approval: exact grant consumed in dispatch interval",
-        _paragraph_with(text, ("exact", "grant", "consum", "state.db", "dispatch")),
+        _paragraph_with_affirmed(
+            text,
+            ("exact", "grant", "consum", "state.db", "dispatch"),
+            "consumes the grant",
+        ),
         "one exact grant must be consumed with the state.db dispatch admission check",
     )
     gate.require(
@@ -2311,7 +2393,9 @@ def _validate_governed_skill_boundary(gate: Gate, text: str) -> None:
     )
     gate.require(
         "R4 governed tools: rollback re-enables by design",
-        _paragraph_with(text, ("rollback_skill", "re-enables", "disabled", "by design")),
+        _paragraph_with_affirmed(
+            text, ("rollback_skill", "re-enables", "disabled", "by design"), "re-enables",
+        ),
         "must state that rollback_skill re-enables a disabled skill by design",
     )
     gate.require(
@@ -2807,14 +2891,18 @@ def run(prd: Path, repo: Path | None = None) -> tuple[Gate, str]:
     # STRUCTURAL PARITY CHECKS
     # ------------------------------------------------------------------
 
-    # §4 source-of-truth matrix row coverage
-    sot_required_rows = [
-        "Surface", "SurfaceCredential", "surface capability",
-        "approval origin", "approval authority", "approval delivery",
-        "approval expiry", "decision evidence", "context binding",
-    ]
-    # The matrix uses close-but-not-identical row labels; map each required
-    # concept to a substring known to appear in its matrix row.
+    # §4 source-of-truth matrix row coverage. The nine required concepts
+    # (Surface, SurfaceCredential, surface capability, approval origin,
+    # approval authority, approval delivery, approval expiry, decision
+    # evidence, context binding) are exactly the key set of
+    # `sot_row_markers` below — there is deliberately no separate
+    # `sot_required_rows` list: the matrix uses close-but-not-identical row
+    # labels, so each required concept is mapped directly to a regex marker
+    # known to appear in its matrix row, and the marker dict's keys ARE the
+    # required-concept list. A prior revision kept a `sot_required_rows`
+    # list alongside this dict; it was never read (the loop below iterates
+    # `sot_row_markers.items()`, not the list) and duplicated the dict's
+    # keys, so it was deleted rather than wired in.
     sot_row_markers = {
         "Surface": r"\|\s*\*\*Surface\*\*\s*\|",
         "SurfaceCredential": r"Surface credential \(HMAC\)",
