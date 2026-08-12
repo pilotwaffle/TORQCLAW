@@ -1,3 +1,35 @@
+# One truth per commit, on every machine.
+#
+# PRD-004 CTXHASH incident (2026-08-11): the same commit honestly reported
+# PASS 224/224 on an LF checkout and FAIL 221/3 on this repo's own Windows
+# autocrlf=true checkout, because a byte-level gate read working-tree bytes
+# and the two machines materialized different bytes from the same blob.
+# Verdicts of byte-reading gates must be a function of the COMMIT, never of
+# the checkout platform — so working-tree materialization is pinned here.
+#
+# LF is the repo truth (the index was already 100% LF when this landed).
+# Every modern Windows toolchain in use here (Python, Node, PowerShell 5.1,
+# VS Code, uv, pnpm) consumes LF correctly.
+* text=auto eol=lf
+
+# cmd.exe batch parsing has documented quirks with LF (multi-line labels /
+# call targets); keep the native format for the one interpreter that cares.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Pre-existing pins (predate the repo-wide rule; kept for the
+# linguist-generated markers — the eol=lf part is now redundant but harmless).
 packages/contracts/generated/*.json text eol=lf linguist-generated=true
 engines/hermes_kernel/mcp_wrapper/schemas/*.json text eol=lf linguist-generated=true
 tests/fixtures/*.json text eol=lf
+
+# Explicit binary pins (belt over text=auto's content sniffing).
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.woff binary
+*.woff2 binary
