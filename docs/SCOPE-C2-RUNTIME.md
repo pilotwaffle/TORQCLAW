@@ -29,13 +29,30 @@ requires C2 to extend it. A9 is C3 and was deliberately not built.
 
 | Gate | Result |
 |---|---|
-| TS suite (**no exclusions**) | **94 files / 1730 tests, ALL PASS** |
+| TS suite (**no exclusions**) | **94 files / 1730 tests** — all pass; see the load-sensitivity note below |
 | Reachability | **PASS — 107 modules** (baseline 100; +7 C2 modules), `skillTrust.ts` still the only declared dormant |
 | Build | 8/8 successful |
 | PRD gate | **PASS 225 checks / 0 failed** — unchanged from baseline (kernel-adjacent files stayed neutral) |
 | Built-artifact (§5(c)) | 5/5 — boot migration, idempotent re-boot, raw-args-never-on-wire, flag-off inertness |
 | **Flag-ON built-artifact E2E** | **3/3** — pending -> C2 binding -> APPROVE mints one grant -> re-run admitted once -> replay mints no second grant; plus both FRONTIER fences |
 | SI-4 flag-off | **both decision legs** byte-identical (REJECT and APPROVE), **0 rows** in all three C2 tables, all six columns NULL, the decision still transitions |
+
+### Load sensitivity of `collab-build-lock` (re-run before calling it a regression)
+
+Under FULL-suite parallel load on this box, `tests/collab-build-lock.test.ts`
+intermittently fails on wall-clock assertions (`reclaims a valid dead PID
+immediately` asserts the reclaim completes in under 2 s). It passes reliably
+in isolation (6/6), and co-run with both new C2 E2E suites (11/11).
+
+This is a pre-existing property of that test, not a C2 regression: it
+measures elapsed real time, so it degrades with CPU saturation rather than
+with anything C2 changed. The C2 lane did make saturation more likely by
+adding two suites that boot real gateways, and that is worth stating rather
+than hiding. **No C2 test is load-sensitive** — the flag-on E2E, SI-4, and
+built-artifact suites pass in every run recorded here.
+
+Method used, and recommended: re-run a suspected failure isolated before
+treating it as a regression. Same discipline the fanout-unit C1 probe needed.
 
 ### A note on the briefed exclusions
 
