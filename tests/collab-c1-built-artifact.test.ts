@@ -16,14 +16,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
-import { runCollaborationMigration } from '../packages/collab/src/migration.js';
-import { runSurfaceIdentityMigration } from '../packages/collab/src/surfaces.js';
+// NOTE: the collab migrations are deliberately NOT imported here any more.
+// The booted artifact creates its own schemas; importing them would make it
+// too easy to reintroduce the hand-seeding this test exists to rule out.
 import {
-  createSurface, issueSurfaceCredential, revokeSurface, runSurfaceAuditMigration,
+  createSurface, issueSurfaceCredential, revokeSurface,
 } from '../packages/collab/src/surfaceStore.js';
 import { nodeRandomSource } from '../packages/collab/src/bootstrap.js';
 import {
-  ensureSurfaceSecuritySchema, activateSurfaceProjection, revokeSurfaceProjection,
+  activateSurfaceProjection, revokeSurfaceProjection,
 } from '../packages/gateway/src/surfaceSecurity.js';
 import {
   ensureGatewayBuild, launchGateway, connectAndCollect, closeWire, lastFrame,
@@ -41,13 +42,35 @@ const CLOSE_4001 = { code: 4001, reason: 'auth failed' };
  * Seed a real two-database installation the booted gateway will read:
  * collab.db (configured identity) + state.db (enforcement projection).
  */
+/**
+ * Boot the real artifact once against an empty data dir so IT creates both
+ * databases' schemas, then stop it.
+ *
+ * This is the G2A round-1 defect-2 proof. Previously `seed()` ran the three
+ * collab migrations by hand, which meant the test passed while the shipped
+ * artifact was incapable of standing up its own `collab.db` -- the
+ * migrations had no production caller at all. Letting the artifact migrate
+ * first, and asserting the tables exist before any data is written, is the
+ * only way this test can tell the difference.
+ */
+async function bootAndMigrate(dataDir: string, collabPath: string, pepper: Buffer): Promise<void> {
+  const boot = await launchGateway(env(dataDir, collabPath, pepper));
+  await boot.ready;
+  // One connect attempt forces the lazy collab handle to open and migrate.
+  const probe = await connectAndCollect(boot.url, {
+    role: 'operator', token: 'root-token',
+    clientInfo: { name: 'migration-probe', version: '0.1.0' },
+    auth: { kind: 'surface', credential: 'tq1_nothing' },
+  });
+  await closeWire(probe);
+  await boot.stop();
+}
+
 function seed(dataDir: string, pepper: Buffer) {
   const collabPath = join(dataDir, 'collab.db');
   const collab = new Database(collabPath);
-  runCollaborationMigration(collab);
-  runSurfaceIdentityMigration(collab);
-  runSurfaceAuditMigration(collab);
-
+  // Migrations are deliberately NOT run here -- the booted artifact already
+  // created these tables (see bootAndMigrate). This function only seeds DATA.
   const principalId = randomUUID();
   const now = new Date().toISOString();
   collab.prepare("INSERT INTO principals(id, kind, display_name, owner_principal_id, status, auth_epoch, revoked_at, created_at, updated_at) VALUES (?, 'operator','A',NULL,'active',1,NULL,?,?)").run(principalId, now, now);
@@ -67,8 +90,9 @@ function seed(dataDir: string, pepper: Buffer) {
   createSurface(collab, { surfaceId: 'desk-inert', principalId, surfaceKind: 'desktop', surfaceRole: 'operator' });
   const inertTok = issueSurfaceCredential(collab, 'desk-inert', pepper, nodeRandomSource);
 
+  // state.db schema likewise comes from the booted artifact
+  // (ensureSurfaceSecuritySchema runs at server.ts boot), not from here.
   const state = new Database(join(dataDir, 'state.db'));
-  ensureSurfaceSecuritySchema(state);
   for (const surfaceId of ['desk-a', 'desk-revoked', 'desk-expired']) {
     activateSurfaceProjection(state, {
       surfaceId, principalId, surfaceKind: 'desktop', surfaceRole: 'operator',
@@ -95,11 +119,60 @@ function env(dataDir: string, collabPath: string, pepper: Buffer) {
   };
 }
 
+/** Boot the artifact so it migrates BOTH databases, then seed data only. */
+async function prepare(dataDir: string, pepper: Buffer) {
+  await bootAndMigrate(dataDir, join(dataDir, 'collab.db'), pepper);
+  return seed(dataDir, pepper);
+}
+
 describe('C1 built-artifact enforcement (§5(c))', () => {
+  it('the booted dist creates its OWN collab.db and state.db schemas (G2A defect 2)', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'torq-c1-selfmigrate-'));
+    const pepper = Buffer.alloc(32, 0x20);
+    const collabPath = join(dataDir, 'collab.db');
+
+    // Nothing has touched either database yet.
+    await bootAndMigrate(dataDir, collabPath, pepper);
+
+    // collab.db: the artifact ran C0's migration AND both C1 migrations.
+    const collab = new Database(collabPath, { readonly: true });
+    const collabTables = (collab.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table'",
+    ).all() as { name: string }[]).map((r) => r.name);
+    expect(collabTables).toContain('principals');            // C0
+    expect(collabTables).toContain('principal_credentials'); // C0
+    expect(collabTables).toContain('surfaces');              // C1-1
+    expect(collabTables).toContain('surface_credentials');   // C1-2
+    expect(collabTables).toContain('collab_surface_audit');  // C1-6
+    const applied = (collab.prepare('SELECT id FROM collab_schema_migrations').all() as { id: string }[])
+      .map((r) => r.id).sort();
+    expect(applied).toEqual([
+      '20260806_001_collaboration_v1',
+      '20260811_002_surface_identity_c1',
+      '20260811_003_surface_audit_c1',
+    ]);
+    collab.close();
+
+    // state.db: the artifact ran the C1 state migration at boot.
+    const state = new Database(join(dataDir, 'state.db'), { readonly: true });
+    const stateTables = (state.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('gateway_surface_security','surface_authorities','gateway_task_origins')",
+    ).all() as { name: string }[]).map((r) => r.name).sort();
+    expect(stateTables).toEqual(['gateway_surface_security', 'gateway_task_origins', 'surface_authorities']);
+    state.close();
+
+    // Re-booting is a no-op, not a crash or a duplicate migration row.
+    await bootAndMigrate(dataDir, collabPath, pepper);
+    const again = new Database(collabPath, { readonly: true });
+    expect((again.prepare('SELECT COUNT(*) AS n FROM collab_schema_migrations').get() as { n: number }).n).toBe(3);
+    again.close();
+    console.log('C1_ARTIFACT_SELF_MIGRATED collab=3 migrations, state=3 tables');
+  }, 120000);
+
   it('the booted dist ACCEPTS a valid C1 surface and REFUSES revoked/expired/inert ones', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'torq-c1-artifact-'));
     const pepper = Buffer.alloc(32, 0x21);
-    const s = seed(dataDir, pepper);
+    const s = await prepare(dataDir, pepper);
 
     gateway = await launchGateway(env(dataDir, s.collabPath, pepper));
     await gateway.ready;
@@ -139,7 +212,7 @@ describe('C1 built-artifact enforcement (§5(c))', () => {
   it('the booted dist writes immutable per-request task origin for a C1 connection', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'torq-c1-origin-'));
     const pepper = Buffer.alloc(32, 0x22);
-    const s = seed(dataDir, pepper);
+    const s = await prepare(dataDir, pepper);
 
     gateway = await launchGateway(env(dataDir, s.collabPath, pepper));
     await gateway.ready;
@@ -189,7 +262,7 @@ describe('C1 built-artifact enforcement (§5(c))', () => {
 
     const dataDir = mkdtempSync(join(tmpdir(), 'torq-c1-a11-'));
     const pepper = Buffer.alloc(32, 0x23);
-    const s = seed(dataDir, pepper);
+    const s = await prepare(dataDir, pepper);
 
     try {
       // Stale artifact: revoked/expired credentials report as active.
@@ -223,7 +296,7 @@ describe('C1 built-artifact enforcement (§5(c))', () => {
 
     // Restored artifact refuses it again.
     const dir2 = mkdtempSync(join(tmpdir(), 'torq-c1-a11-fixed-'));
-    const s2 = seed(dir2, pepper);
+    const s2 = await prepare(dir2, pepper);
     gateway = await launchGateway(env(dir2, s2.collabPath, pepper));
     await gateway.ready;
     const fixed = await connectAndCollect(gateway.url, {

@@ -50,6 +50,9 @@ import {
   verifyCredential,
   credentialLookupFromDb,
   WindowsCredentialManagerStore,
+  runCollaborationMigration,
+  runSurfaceIdentityMigration,
+  runSurfaceAuditMigration,
   type SecretStore,
   type BootstrapDb,
 } from '@torqclaw/collab';
@@ -84,11 +87,51 @@ function getSecretStore(): SecretStore {
   return defaultSecretStore;
 }
 
+/**
+ * Bring a freshly opened `collab.db` up to the current schema.
+ *
+ * WHY THIS IS HERE (G2A round 1, defect 2). `state.db` self-migrates at
+ * gateway boot (`storage.ts`, and `ensureSurfaceSecuritySchema` in
+ * server.ts), but `collab.db` was only ever OPENED here -- never migrated.
+ * The C0 and C1 collab migrations therefore had no production caller at
+ * all, and the built-artifact test had to create the tables by hand, which
+ * proved the shipped artifact could not stand up its own database. A
+ * migration nothing calls is not a migration.
+ *
+ * All THREE are wired at this one seam rather than just the C1 pair, so
+ * the fix is not C1-partial: C0's `runCollaborationMigration` had the same
+ * absence.
+ *
+ * Each is independently guarded and idempotent (its own row in
+ * `collab_schema_migrations`), so this is a no-op on an already-migrated
+ * database and safe to run on every open.
+ *
+ * Failures are swallowed by design. This runs on the CONNECT path, and a
+ * migration problem must not crash the gateway or become a DoS vector: an
+ * unmigrated database simply has no surface tables, so every credential
+ * lookup misses and the connection fails closed with AUTH_FAILED -- the
+ * same outcome as an unknown credential, revealing nothing.
+ */
+function migrateCollabDb(db: BootstrapDb): void {
+  try {
+    const handle = db as unknown as Database.Database;
+    runCollaborationMigration(handle);
+    runSurfaceIdentityMigration(handle);
+    runSurfaceAuditMigration(handle);
+  } catch {
+    /* fail closed: an unmigrated DB authenticates nobody */
+  }
+}
+
 function getCollabDb(): BootstrapDb {
   if (collabDbOverride) return collabDbOverride;
   if (!defaultCollabDb) {
     const path = process.env.TORQCLAW_COLLAB_DB_PATH || join(DATA_DIR, 'collab.db');
-    defaultCollabDb = new Database(path) as unknown as BootstrapDb;
+    const opened = new Database(path) as unknown as BootstrapDb;
+    // Migrate ONCE, at initialization, before the handle is ever cached or
+    // used -- not on every call.
+    migrateCollabDb(opened);
+    defaultCollabDb = opened;
   }
   return defaultCollabDb;
 }
