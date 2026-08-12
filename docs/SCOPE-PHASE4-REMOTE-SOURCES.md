@@ -50,17 +50,29 @@ threading and headroom check) → P4-5 → P4-7 → {P4-2, P4-8, P4-9}.
 | AC-17 | revocation-vs-active reporting | P4-5 | `test_ac17_revocation_vs_active_reporting` (tier 2) |
 | AC-18 | decide-seam trust facts | P4-5 | `test_ac18_decide_seam_trust_facts` |
 
-**Tier 2 note:** four ACs (AC-2, the unedited-APPROVE half of AC-9, AC-16's
-activation-seam half, AC-17) plus P4-9's full pilot dry-run could not
-execute in this worktree — `engines/hermes_kernel/vendor/hermes-agent` is an
-**uninitialized git submodule** here (`git submodule status` shows a leading
-`-`; the directory is empty). This is a pre-existing worktree checkout gap,
-not something introduced by this build — the same gap causes 8 pre-existing
-`test_runtime_quiescence.py` failures on every run in this worktree. All
-four tests are written, pass `pytest --collect-only`, and skip cleanly via
-the same `pytestmark`/`requires_vendor` pattern `test_governed_skills.py`
-already uses. **They need a submodule-initialized environment to prove
-green** — flagged prominently per instructions, not silently glossed over.
+**Tier 2 note — RESOLVED by the orchestrator (2026-08-12).** When P4-1..P4-9
+were built, `engines/hermes_kernel/vendor/hermes-agent` was an uninitialized
+git submodule in this worktree, so four ACs (AC-2, the unedited-APPROVE half
+of AC-9, AC-16's activation-seam half, AC-17) plus P4-9's full pilot dry-run
+could only skip, and 8 `test_runtime_quiescence.py` tests failed. The
+orchestrator populated the submodule from the main checkout (commit
+`bbf020e`, same gitlink) before verification. With the vendor tree present:
+- **All 47 Phase 4 kernel tests pass**, including every previously-skipped
+  tier-2 activation-path proof.
+- `test_runtime_quiescence.py` is **19/19** (the 8 "failures" were purely the
+  empty submodule — confirmed environmental, not a P4 regression).
+- **AC-1** (bad signature refused at the `install_remote_skill` MCP tool seam)
+  and **AC-15** (full pilot dry-run: keygen → sign → loopback HTTPS → install
+  → approve → real agent boot renders the skill, then does NOT after
+  revocation+disable) both **PASS, executed not skipped** — the TRUSTOS-002
+  L816 booted-activation-path mandate satisfied.
+- **One tier-2 test failed on first real run and was corrected** (`e55e4ef`):
+  AC-17's final assertion read `list_versions()["active"]["digest"]`, but
+  `list_versions` returns the projected shape keyed `activeDigest`. The
+  load-bearing assertions (revocation reported with `active:true`, skill NOT
+  auto-disabled) already passed; only the accessor was wrong. Test-shape fix,
+  no control weakened — production behavior was correct.
+Full kernel suite on the fixed tree: **468 passed / 1 skipped**.
 
 ---
 
