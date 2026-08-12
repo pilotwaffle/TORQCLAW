@@ -101,10 +101,26 @@ export function makeEmitter(
 /** Task rows are created BEFORE execution starts: a crash leaves a resumable
  *  record, never a ghost. */
 export const taskStore = {
+  /**
+   * Create the pre-execution task row.
+   *
+   * IDEMPOTENT since C2. The re-minted dispatch task must be written
+   * INSIDE the approval decision transaction -- the one-shot grant carries
+   * an FK to it, so the row has to exist before the grant does -- and
+   * `dispatch` then runs on that same request and calls this again. As a
+   * plain INSERT, that second call was a UNIQUE violation that killed the
+   * gateway process outright. The flag-on E2E caught it.
+   *
+   * DO NOTHING rather than upsert, deliberately: the row written first is
+   * the authoritative pre-execution record, and silently rewriting its
+   * tier / router_reason / request_json under a second caller would
+   * destroy exactly the audit trail this table exists to preserve.
+   */
   create(req: GatewayRequest, diag: RouterDiagnostics): void {
     db.prepare(
       `INSERT INTO tasks (request_id, session_id, tier, router_reason, request_json)
-       VALUES (?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(request_id) DO NOTHING`,
     ).run(req.id, req.sessionId, diag.tier, diag.reason, JSON.stringify(req));
   },
   complete(requestId: string, result: string, telemetry?: unknown): void {

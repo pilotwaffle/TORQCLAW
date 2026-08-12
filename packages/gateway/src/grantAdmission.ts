@@ -100,6 +100,22 @@ function canonicalNow(db: Database.Database): string {
  * a checked one right up until it is not.
  */
 function refuseFrontier(): AdmissionResult {
+  return frontierGrantRefusal();
+}
+
+/**
+ * The SINGLE source of the FRONTIER refusal, exported so the executor
+ * fence in `dispatch.ts` and this admission seam cannot drift apart.
+ *
+ * G2A D-2: in the first C2 build `refuseFrontier` was reachable only
+ * through `admitToolCall`, which the FRONTIER path never calls -- so it
+ * was dead code, the tier was unwired-and-OPEN, and the SCOPE doc's
+ * "explicitly fail-closed" claim was false as a runtime statement. Both
+ * fences now return this one value, and both are pinned by tests.
+ */
+export function frontierGrantRefusal(): {
+  ok: false; reason: AdmissionRefusal; detail: string;
+} {
   return {
     ok: false,
     reason: 'frontier-structured-grant-unavailable',

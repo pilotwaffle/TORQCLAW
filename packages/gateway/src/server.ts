@@ -4,6 +4,7 @@ import {
   ClientCommandSchema,
   ConnectFrameSchema,
   GatewayRequestSchema,
+  ComputeTier,
   type GatewayRequest,
 } from '@torqclaw/contracts';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
@@ -11,7 +12,7 @@ import { sessions } from './sessions.js';
 import { enrichCommand } from './enrich.js';
 import { dispatch, mintGrantedRequest, emitToolDenied } from './dispatch.js';
 import { decideApproval, handleListApprovals } from './approvals.js';
-import { makeEmitter, sessionBus, persistAndPublish } from './events.js';
+import { makeEmitter, sessionBus, persistAndPublish, taskStore } from './events.js';
 import { router } from '@torqclaw/router';
 import { connectBridge, approveSkill, getSkillDraft, cancelHermesTask } from '@torqclaw/bridge';
 import { describeSkillDecision } from './skillDecision.js';
@@ -31,6 +32,19 @@ import { ensureApprovalBrokerSchema } from './approvalSchema.js';
 import { sweepExpiredApprovals, sweepExpiredGrants } from './approvalWriter.js';
 import { rebuildDeliveryProjection } from './approvalDelivery.js';
 import { revokeInertGrants, admitToolCall } from './grantAdmission.js';
+import { decideApprovalC2 } from './c2Broker.js';
+
+/**
+ * Re-minted requests built inside the C2 decision transaction, handed to
+ * the dispatcher after it COMMITS. Keyed by dispatch_request_id.
+ *
+ * The task row must be created inside the writer's transaction (the
+ * grant's FK depends on it), but dispatch must only run once that
+ * transaction has committed -- otherwise a rolled-back decision could
+ * still have started real work. This map carries the request across that
+ * boundary; entries are removed as soon as they are consumed.
+ */
+const pendingC2Dispatch = new Map<string, GatewayRequest>();
 
 // C1 (§6.2): additive, idempotent state.db migration. Safe to run with the
 // flag OFF -- the tables are created but never read or written, which is
@@ -100,12 +114,32 @@ setCancelCheck((requestId) => cancellations.isCancelled(requestId));
 // LOCAL_EDGE loop calls this immediately before any gated side effect,
 // with the ACTUAL model-generated arguments.
 //
-// Flag-off returns ok unconditionally, so the legacy path is byte-identical
-// (SI-4): no grant table is read and `grantedTools` alone still authorizes,
-// exactly as today. Flag-on, one unconsumed exact-action grant must
-// validate and be consumed in the same serialization interval.
+// TWO conditions gate the fence, and the second is load-bearing:
+//
+//   1. the flag is on -- flag-off is byte-identical legacy (SI-4), no
+//      grant table read, `grantedTools` alone still authorizes; and
+//   2. this dispatch request actually CARRIES a C2 grant.
+//
+// Condition 2 exists because "flag on" is not the same as "this request
+// went through C2". A legacy connection (no surface credential presented)
+// still registers and decides through the legacy path even with the
+// subsystem enabled, so its re-run has no grant by design. Fencing it on
+// `collabEnabled()` alone refused those runs `grant-missing` -- a real
+// SI-4 break that the APPROVE leg of the flag-on identity transcript
+// caught (G2A D-3).
+//
+// This does NOT weaken the control. A request that went through C2 always
+// has its grant row minted inside the deciding transaction, so for those
+// requests the lookup finds it and the full check runs. What condition 2
+// skips is only requests for which C2 never issued a licence in the first
+// place -- and those are exactly the requests whose approval row is
+// unbound and therefore inert/reissue-required at the decision seam.
 setToolAdmissionCheck((requestId, toolName, args) => {
   if (!collabEnabled()) return { ok: true };
+  const carriesGrant = db.prepare(
+    'SELECT 1 FROM gateway_action_grants WHERE dispatch_request_id = ?',
+  ).get(requestId) !== undefined;
+  if (!carriesGrant) return { ok: true };
   const result = admitToolCall(db, {
     dispatchRequestId: requestId, toolName, args, path: 'LOCAL_EDGE',
   });
@@ -331,10 +365,98 @@ app.get('/ws', { websocket: true }, (socket) => {
         break;
       }
       case 'APPROVE_TOOL': {
-        // Decide the grant. decideApproval is idempotent + exactly-once: a
-        // double-click returns null and we no-op (invariant 7 — no second
-        // re-dispatch). The granted tool is read from the DB row, never the
-        // client frame, so a client can't widen the grant.
+        // ── C2 path (G2A D-1): a C2-BOUND approval is decided by the one
+        // centralized writer, which checks authority, compares the
+        // registration context against a freshly resolved one, and -- on
+        // APPROVE -- mints the re-minted task AND exactly one grant inside
+        // the same transaction. `decideApprovalC2` returns `legacy` with
+        // the flag off or for an unbound (pre-C2) row, and the untouched
+        // legacy path below then runs byte-identically.
+        // Captured before the closure: inside a callback TypeScript loses
+        // the discriminated-union narrowing on `cmd`.
+        const approvalIdC2 = cmd.data.approvalId;
+        const c2 = decideApprovalC2(
+          approvalIdC2,
+          cmd.data.decision,
+          connectionAuth?.principalId ?? null,
+          connectionAuth?.surfaceId ?? null,
+          // The re-minted request is built HERE and its tasks row is
+          // written INSIDE the writer's transaction, so the grant's FK to
+          // it is satisfiable and a rollback removes both.
+          (dispatchRequestId) => {
+            const source = db.prepare(
+              `SELECT t.request_json AS requestJson, a.tool_name AS toolName
+                 FROM tool_approvals a JOIN tasks t ON t.request_id = a.request_id
+                WHERE a.approval_id = ?`,
+            ).get(approvalIdC2) as { requestJson: string; toolName: string };
+            const minted = mintGrantedRequest(source.requestJson, source.toolName);
+            minted.id = dispatchRequestId;
+            GatewayRequestSchema.parse(minted);
+            const diagMint = router.evaluateRequest(minted);
+            taskStore.create(minted, diagMint);
+            pendingC2Dispatch.set(dispatchRequestId, minted);
+          },
+        );
+
+        if (c2.kind === 'refused') {
+          // Explicit, textual operator-facing failure (§6.8) -- never a
+          // silent no-op and never an apparent success.
+          makeEmitter(sid, null, null)('SYSTEM', `Approval refused: ${c2.message}`, {
+            approvalId: cmd.data.approvalId, refusedCode: c2.code,
+          });
+          break;
+        }
+        if (c2.kind === 'noop') {
+          makeEmitter(sid, null, null)('SYSTEM', 'Approval already decided or unknown.');
+          break;
+        }
+        if (c2.kind === 'decided') {
+          const { decided: d } = c2;
+          if (d.status === 'approved') {
+            const reqB = pendingC2Dispatch.get(d.dispatchRequestId!);
+            pendingC2Dispatch.delete(d.dispatchRequestId!);
+            if (!reqB) {
+              makeEmitter(sid, null, null)('SYSTEM', 'Approval could not be re-minted.');
+              break;
+            }
+            const diag = router.evaluateRequest(reqB);
+            // D-2: FRONTIER cannot satisfy the §1.4 exact-action invariant
+            // -- its Hermes hook grants by tool NAME and never inspects
+            // args, so the admission seam cannot fence it. Refuse HERE,
+            // before any executor runs, rather than letting the tier
+            // execute real side effects under a name-only grant.
+            if (diag.tier === ComputeTier.FRONTIER) {
+              makeEmitter(sid, null, null)('SYSTEM',
+                'Approval refused: FRONTIER has no args-aware structured grant protocol, '
+                + 'so this approval cannot be fenced and is refused (fail-closed).',
+                { approvalId: cmd.data.approvalId, refusedCode: 'frontier-structured-grant-unavailable' });
+              break;
+            }
+            const reqEmit = makeEmitter(reqB.sessionId, reqB.id, null);
+            reqEmit('ROUTING', `Re-running with permission for ${d.toolName}`, reqB.enrichment);
+            makeEmitter(reqB.sessionId, reqB.id, diag.tier)('TIER_SELECTED', diag.reason, diag);
+            dispatch(reqB, diag);
+          } else {
+            const source = db.prepare(
+              'SELECT t.request_json AS requestJson FROM tool_approvals a '
+              + 'JOIN tasks t ON t.request_id = a.request_id WHERE a.approval_id = ?',
+            ).get(cmd.data.approvalId) as { requestJson: string };
+            const reqDeny: GatewayRequest = {
+              ...(JSON.parse(source.requestJson) as GatewayRequest),
+              id: randomUUID(),
+              receivedAt: new Date().toISOString(),
+            };
+            emitToolDenied(reqDeny, d.toolName, router.evaluateRequest(reqDeny));
+          }
+          break;
+        }
+
+        // ── LEGACY path (flag off, or a pre-C2 unbound row) ──
+        // Byte-identical to the shipped behaviour. decideApproval is
+        // idempotent + exactly-once: a double-click returns null and we
+        // no-op (invariant 7 — no second re-dispatch). The granted tool is
+        // read from the DB row, never the client frame, so a client can't
+        // widen the grant.
         const decided = decideApproval(cmd.data.approvalId, cmd.data.decision);
         if (!decided) {
           makeEmitter(sid, null, null)('SYSTEM', 'Approval already decided or unknown.');

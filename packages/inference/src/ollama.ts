@@ -231,8 +231,22 @@ export async function executeLocalEdge(
   // the env var is set; never active in production.
   const forced = process.env.TORQCLAW_E2E_FORCE_GATED_TOOL;
   if (forced) {
+    const forcedArgs = { e2e: true, prompt: req.payload.prompt };
     if (!req.payload.grantedTools.includes(forced)) {
-      throw new ToolApprovalRequired(forced, { e2e: true, prompt: req.payload.prompt });
+      throw new ToolApprovalRequired(forced, forcedArgs);
+    }
+    // "Honors the grant exactly like a real gated tool" MUST include the
+    // admission seam, or this seam is a hole rather than a mirror: an E2E
+    // built on it would report success while the real admission wire was
+    // broken or absent (G2A D-5 -- that is precisely how D-1 and D-2
+    // survived). The forced path now takes the same admitTool decision the
+    // real tool-call loop takes below.
+    const admission = admitTool(req.id, forced, forcedArgs);
+    if (!admission.ok) {
+      emit('TOOL_CALL', `Refused ${forced}`, { granted: true, refused: admission.reason });
+      return done(
+        `[e2e] refused ${forced}: ${admission.reason}`, start, 1, 0,
+      );
     }
     emit('TOOL_CALL', `Executing ${forced}`, { granted: true });
     return done(`[e2e] executed ${forced} under grant`, start, 1, 1);

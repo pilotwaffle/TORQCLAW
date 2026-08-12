@@ -44,9 +44,10 @@ const C2_TABLES = [
  * PENDING_APPROVAL, then decide it. That exercises registerApproval,
  * the card emit, and decideApproval -- every seam C2 touched.
  */
-async function runApprovalTranscript(url: string): Promise<{
-  frames: string[]; approvalId: string | null;
-}> {
+async function runApprovalTranscript(
+  url: string,
+  decision: 'APPROVE' | 'REJECT',
+): Promise<{ frames: string[]; approvalId: string | null }> {
   const raw: string[] = [];
   const ws = new WebSocket(url);
   await new Promise<void>((resolve, reject) => {
@@ -74,10 +75,10 @@ async function runApprovalTranscript(url: string): Promise<{
     try { approvalId = JSON.parse(line).metadata?.approvalId ?? null; } catch { /* ignore */ }
   }
   if (approvalId) {
-    ws.send(JSON.stringify({
-      action: 'APPROVE_TOOL', approvalId, decision: 'REJECT',
-    }));
-    await new Promise((r) => setTimeout(r, 1200));
+    ws.send(JSON.stringify({ action: 'APPROVE_TOOL', approvalId, decision }));
+    // APPROVE dispatches a whole re-run, so it needs longer than REJECT
+    // (which terminates immediately) before the transcript is complete.
+    await new Promise((r) => setTimeout(r, decision === 'APPROVE' ? 4000 : 1200));
   }
   try { ws.close(); } catch { /* noop */ }
   return { frames: raw, approvalId };
@@ -100,8 +101,15 @@ function scrubAll(frames: string[]): string[] {
       .replace(/"requestId":"[0-9a-f-]{36}"/g, '"requestId":"<REQ>"')
       .replace(/"approvalId":"[0-9a-f-]{36}"/g, '"approvalId":"<APPROVAL>"')
       .replace(/"timestamp":"[^"]+"/g, '"timestamp":"<TS>"')
-      // classifier latency is wall-clock measurement noise
-      .replace(/"classifierLatencyMs":[0-9.]+/g, '"classifierLatencyMs":<MS>');
+      // Wall-clock measurement noise. These are timings and server-minted
+      // ids, never behaviour: scrubbing them is what makes the comparison
+      // about the PROTOCOL rather than about how fast the box was. The
+      // substitutions stay narrow and field-anchored so they cannot hide
+      // a real divergence in frame type, order, message, or metadata.
+      .replace(/"classifierLatencyMs":[0-9.]+/g, '"classifierLatencyMs":<MS>')
+      .replace(/"inferenceLatencyMs":[0-9.]+/g, '"inferenceLatencyMs":<MS>')
+      .replace(/"elapsedMs":[0-9.]+/g, '"elapsedMs":<MS>')
+      .replace(/"taskId":"[0-9a-f-]{36}"/g, '"taskId":"<TASK>"');
     return out;
   });
 }
@@ -132,7 +140,14 @@ function approvalC2Columns(dataDir: string): Record<string, unknown>[] {
 }
 
 describe('SI-4 / A12 (C2) — flag-off identity across an approval transcript', () => {
-  it('the approval transcript is byte-identical, and no C2 row is written', async () => {
+  // D-3: BOTH decisions are exercised. An earlier version tested REJECT
+  // only, which is the half of the decision space where the claim is
+  // cheapest to satisfy -- APPROVE is the leg that dispatches a whole
+  // re-run and therefore the leg that would diverge first if the flag-on
+  // path leaked into legacy traffic.
+  it.each(['REJECT', 'APPROVE'] as const)(
+    'the %s transcript is byte-identical, and no C2 row is written',
+    async (decision) => {
     const forcedGate = { TORQCLAW_E2E_FORCE_GATED_TOOL: 'filesystem__write_file' };
 
     // ---- Run 1: flag OFF (the legacy baseline) -------------------------
@@ -142,7 +157,7 @@ describe('SI-4 / A12 (C2) — flag-off identity across an approval transcript', 
       TORQCLAW_GATEWAY_TOKEN: 'root-token', ...forcedGate,
     }, false);
     await gateway.ready;
-    const off = await runApprovalTranscript(gateway.url);
+    const off = await runApprovalTranscript(gateway.url, decision);
     await gateway.stop(); gateway = null;
 
     // ---- Run 2: flag ON, same LEGACY traffic ---------------------------
@@ -154,7 +169,7 @@ describe('SI-4 / A12 (C2) — flag-off identity across an approval transcript', 
       TORQCLAW_GATEWAY_TOKEN: 'root-token', ...forcedGate,
     }, false);
     await gateway.ready;
-    const on = await runApprovalTranscript(gateway.url);
+    const on = await runApprovalTranscript(gateway.url, decision);
     await gateway.stop(); gateway = null;
 
     // The transcript must have actually reached an approval, or this
@@ -187,9 +202,10 @@ describe('SI-4 / A12 (C2) — flag-off identity across an approval transcript', 
         expect(row.expires_at).toBeNull();
         expect(row.context_hash).toBeNull();
       }
-      // The REJECT still transitioned the row -- flag-off behaviour is
+      // The decision still transitioned the row -- flag-off behaviour is
       // preserved, not merely "nothing happened".
-      expect(rows.some((r) => r.status === 'rejected')).toBe(true);
+      const expected = decision === 'APPROVE' ? 'approved' : 'rejected';
+      expect(rows.some((r) => r.status === expected)).toBe(true);
     }
-  }, 240000);
+  }, 300000);
 });

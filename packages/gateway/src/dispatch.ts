@@ -14,6 +14,9 @@ import { makeEmitter, taskStore } from './events.js';
 import { sessions } from './sessions.js';
 import { cancellations } from './cancellations.js';
 import { registerApproval } from './approvals.js';
+import { registerApprovalC2 } from './c2Broker.js';
+import { frontierGrantRefusal } from './grantAdmission.js';
+import { collabEnabled } from './principalBridge.js';
 import {
   summarizeArgs, buildActionLabel, redactCardText, REDACTION_NOTE,
 } from './approvalCard.js';
@@ -239,6 +242,41 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
     }
   }
 
+  // D-2 / §1.4 — FRONTIER fail-closed at the EXECUTOR, not only at
+  // APPROVE_TOOL. The engine's pre-tool hook grants by tool NAME and never
+  // inspects args, so a FRONTIER run carrying gateway-issued
+  // `grantedTools` cannot satisfy the exact-action invariant: nothing
+  // downstream can prove the args about to execute are the args that were
+  // approved.
+  //
+  // Placed BEFORE the engine-availability check deliberately. A security
+  // refusal must not depend on whether the engine happens to be
+  // reachable: on a box with no engine the availability check would mask
+  // this fence entirely, and the control would look proven while being
+  // untested on exactly the machines where the engine DOES answer.
+  //
+  // This is a second fence -- the APPROVE_TOOL guard already refuses
+  // minting a FRONTIER grant -- because a granted request can also arrive
+  // by replay or from a future caller, and "unwired" must never again be
+  // mistaken for "fail-closed".
+  if (
+    diag.tier === ComputeTier.FRONTIER
+    && collabEnabled()
+    && (effectiveReq.payload.grantedTools?.length ?? 0) > 0
+  ) {
+    const refusal = frontierGrantRefusal();
+    taskStore.fail(req.id, `REFUSED: ${refusal.reason}`);
+    emit('ERROR', refusal.detail, {
+      refusedCode: refusal.reason,
+      recovery: ['RETRY_LOCAL', 'COPY_DIAGNOSTIC'],
+      prompt: req.payload.prompt,
+      sideEffectNote: 'Nothing ran — the request never reached the cloud engine.',
+    });
+    safeMaterializeReceipt(req.id);
+    cancellations.clear(req.id);
+    return;
+  }
+
   // Graceful frontier degradation: don't throw a bare error if the engine
   // never connected — tell the user plainly and offer a local re-run.
   if (diag.tier === ComputeTier.FRONTIER && !isHermesAvailable()) {
@@ -315,7 +353,20 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
       //     no RESULT and skips storeEpisode, so getContextWindow (USER_PROMPT
       //     + RESULT only) can never surface the aborted attempt.
       if (error instanceof ToolApprovalRequired) {
-        const approvalId = registerApproval(req.id, error.toolName, error.args);
+        // C2-2/C2-5 (G2A D-1): under the flag, registration goes through
+        // the C2 broker, so the row carries origin, a finite expiry, and
+        // an immutable binding. Without that binding no grant can ever be
+        // minted, and every approved re-run would be refused at the
+        // admission seam -- which is exactly the state the first C2 build
+        // shipped in.
+        //
+        // registerApprovalC2 returns null with the flag OFF, or when the
+        // evidence a binding requires is absent. The legacy registration
+        // then runs unchanged, and the resulting unbound row is inert
+        // under the flag (§3.9, reissue-required) rather than open.
+        const approvalId =
+          registerApprovalC2(req, diag, error.toolName, error.args)
+          ?? registerApproval(req.id, error.toolName, error.args);
         taskStore.complete(req.id, '', { blockedOn: error.toolName });
         // TCLAW-5A-1: gate facts ride the SAME terminal frame the card renders.
         // LOCAL_EDGE lookup is by the exact namespaced name ollama.ts gated on,
