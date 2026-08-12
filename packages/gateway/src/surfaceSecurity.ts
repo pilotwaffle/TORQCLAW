@@ -183,31 +183,65 @@ export function activateSurfaceProjection(
     }
   }
 
-  db.prepare(
-    `INSERT INTO gateway_surface_security
-       (surface_id, principal_id, surface_kind, surface_role, state, auth_epoch,
-        allowed_capability_classes_json, allowed_operation_ids_json,
-        capability_revision, source_identity_revision, activated_at, revoked_at)
-     VALUES (?,?,?,?,'active',?,?,?,?,?,?,NULL)
-     ON CONFLICT(surface_id) DO UPDATE SET
-       principal_id=excluded.principal_id,
-       surface_kind=excluded.surface_kind,
-       surface_role=excluded.surface_role,
-       state='active',
-       auth_epoch=excluded.auth_epoch,
-       allowed_capability_classes_json=excluded.allowed_capability_classes_json,
-       allowed_operation_ids_json=excluded.allowed_operation_ids_json,
-       capability_revision=excluded.capability_revision,
-       source_identity_revision=excluded.source_identity_revision,
-       activated_at=excluded.activated_at,
-       revoked_at=NULL`,
-  ).run(
-    params.surfaceId, params.principalId, params.surfaceKind, params.surfaceRole,
-    params.authEpoch,
-    JSON.stringify(params.allowedCapabilityClasses ?? []),
-    JSON.stringify(params.allowedOperationIds ?? []),
-    params.capabilityRevision, params.sourceIdentityRevision, now.toISOString(),
-  );
+  // A ROLE CHANGE IS A NARROWING EVENT AND MUST INVALIDATE LIVE AUTHORITY.
+  //
+  // `approve` is provisionable only to an operator-role surface (CT-2). If
+  // a surface is later DEMOTED through this ordinary re-activation path --
+  // a supported provisioning action, not a malformed one -- its existing
+  // `surface_authorities` row is left untouched: `revoked_at` stays NULL
+  // and, without the bump below, `auth_epoch` is unchanged, so
+  // `holdsAuthority` keeps returning true for an authority the surface may
+  // no longer hold. (Found by G2A round 1; the connection-cached role made
+  // it reachable end to end.)
+  //
+  // Bumping the epoch on ANY role change kills every live grant at the
+  // authority seam itself, because `holdsAuthority` matches on the CURRENT
+  // epoch. That makes invalidation structural rather than dependent on
+  // every caller remembering to revoke first.
+  //
+  // The bump is deliberately SURGICAL -- role changes only. If ordinary
+  // re-activation (capability widening, revision refresh) destroyed live
+  // grants, provisioning would be unusable and operators would learn to
+  // route around the control, which is worse than the bug.
+  const applyTx = db.transaction(() => {
+    const previous = db
+      .prepare('SELECT surface_role AS surfaceRole, auth_epoch AS authEpoch FROM gateway_surface_security WHERE surface_id = ?')
+      .get(params.surfaceId) as { surfaceRole: string; authEpoch: number } | undefined;
+
+    const roleChanged = previous !== undefined && previous.surfaceRole !== params.surfaceRole;
+    // Never move the epoch BACKWARD: take the caller's value if it is
+    // already ahead, otherwise one past the stored value.
+    const effectiveEpoch = roleChanged
+      ? Math.max(params.authEpoch, previous.authEpoch + 1)
+      : params.authEpoch;
+
+    db.prepare(
+      `INSERT INTO gateway_surface_security
+         (surface_id, principal_id, surface_kind, surface_role, state, auth_epoch,
+          allowed_capability_classes_json, allowed_operation_ids_json,
+          capability_revision, source_identity_revision, activated_at, revoked_at)
+       VALUES (?,?,?,?,'active',?,?,?,?,?,?,NULL)
+       ON CONFLICT(surface_id) DO UPDATE SET
+         principal_id=excluded.principal_id,
+         surface_kind=excluded.surface_kind,
+         surface_role=excluded.surface_role,
+         state='active',
+         auth_epoch=excluded.auth_epoch,
+         allowed_capability_classes_json=excluded.allowed_capability_classes_json,
+         allowed_operation_ids_json=excluded.allowed_operation_ids_json,
+         capability_revision=excluded.capability_revision,
+         source_identity_revision=excluded.source_identity_revision,
+         activated_at=excluded.activated_at,
+         revoked_at=NULL`,
+    ).run(
+      params.surfaceId, params.principalId, params.surfaceKind, params.surfaceRole,
+      effectiveEpoch,
+      JSON.stringify(params.allowedCapabilityClasses ?? []),
+      JSON.stringify(params.allowedOperationIds ?? []),
+      params.capabilityRevision, params.sourceIdentityRevision, now.toISOString(),
+    );
+  });
+  applyTx();
 }
 
 export interface LiveSurfaceSecurity {

@@ -30,7 +30,17 @@ export interface AuthzContext {
  */
 export interface SurfaceAuthzContext {
   surfaceId: string;
-  surfaceRole: 'operator' | 'agent' | 'automation';
+  /**
+   * The presenting surface's CURRENT role, read live at decision time.
+   *
+   * A function, not a value: a value copied at connect goes stale the
+   * moment the surface is re-provisioned, and an operator surface demoted
+   * to `agent` mid-connection would keep passing this check for the life
+   * of the socket (G2A round 1). Returns null when there is no live
+   * projection -- which denies, same as any other missing enforcement
+   * state.
+   */
+  currentRole: () => 'operator' | 'agent' | 'automation' | null;
   /** Live, current-epoch control-plane authority check (holdsAuthority). */
   holdsAuthority: (authority: 'approve' | 'cancel' | 'delegate') => boolean;
 }
@@ -210,7 +220,11 @@ function authorizeOperator(cmd: ClientCommand, ctx: AuthzContext): AuthzDecision
   if (cmd.action === 'APPROVE_TOOL') {
     // CT-2 decision-time enforcement: operator ROLE is required, and role
     // is the predicate -- never surface kind (§3.14).
-    if (surface.surfaceRole !== 'operator') return DENY_SURFACE_NOT_OPERATOR;
+    //
+    // Read LIVE, never from a value captured at connect: a demotion that
+    // lands mid-connection must bite on the very next command. Null (no
+    // live projection) denies.
+    if (surface.currentRole() !== 'operator') return DENY_SURFACE_NOT_OPERATOR;
     // The single authority seam. Absence, revocation, epoch drift, or a
     // missing/stale projection all resolve to false => deny (fail-closed).
     if (!surface.holdsAuthority('approve')) return DENY_AUTHORITY;

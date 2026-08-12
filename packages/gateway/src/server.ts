@@ -25,7 +25,7 @@ import { handlePreviewRoute } from './preview.js';
 import { handleGetSafeExport } from './export.js';
 import { collabEnabled, PrincipalBindingError } from './principalBridge.js';
 import { resolveConnectIdentity, type ConnectionAuthContext } from './collabIdentity.js';
-import { ensureSurfaceSecuritySchema, captureTaskOrigin, holdsAuthority } from './surfaceSecurity.js';
+import { ensureSurfaceSecuritySchema, captureTaskOrigin, holdsAuthority, liveSurfaceSecurity } from './surfaceSecurity.js';
 
 // C1 (§6.2): additive, idempotent state.db migration. Safe to run with the
 // flag OFF -- the tables are created but never read or written, which is
@@ -236,7 +236,11 @@ app.get('/ws', { websocket: true }, (socket) => {
     // first is observed by the very next command (§1.4).
     const surfaceAuthz = connectionAuth === null ? undefined : {
       surfaceId: connectionAuth.surfaceId,
-      surfaceRole: connectionAuth.surfaceRole as 'operator' | 'agent' | 'automation',
+      // BOTH of these are LIVE reads, never values captured at connect.
+      // The role especially: a surface demoted from operator to agent
+      // mid-connection must lose `approve` on its very next command, and a
+      // connect-time copy would keep it for the life of the socket.
+      currentRole: () => liveSurfaceSecurity(db, connectionAuth!.surfaceId)?.surfaceRole ?? null,
       holdsAuthority: (authority: 'approve' | 'cancel' | 'delegate') =>
         holdsAuthority(db, connectionAuth!.surfaceId, authority),
     };
