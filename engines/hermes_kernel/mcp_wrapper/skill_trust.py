@@ -235,6 +235,17 @@ def _decode_b64url(value: Any) -> bytes:
     return decoded
 
 
+def decode_b64url(value: Any) -> bytes:
+    """Public wrapper over the canonical-round-trip base64url decoder.
+
+    Callers outside this module (``remote_skills.py``'s envelope decoding of
+    ``manifestBytes``/``skillBytes``, §5.3) use this rather than reaching
+    into the private ``_decode_b64url`` -- same single implementation
+    (SP-4), just a public name for cross-module use.
+    """
+    return _decode_b64url(value)
+
+
 def _parse_iso_ms(value: Any) -> int:
     """Strict ISO-8601 UTC milliseconds -> epoch ms. Round-trip stable (§5.2)."""
     if not isinstance(value, str) or not _ISO_RE.fullmatch(value):
