@@ -334,7 +334,8 @@ def install_approved_skill(skill_id: str, markdown: str) -> dict[str, Any]:
     ``VerifiedSkillStore`` / ``skill_publisher`` implementation, so the result
     is digest-bound, audited, rollback-capable (through
     :func:`rollback_governed_skill`, the production rollback path GS-ACCEPT
-    F-1 found missing), and -- critically -- verified
+    F-1 found missing), disable-capable (through
+    :func:`disable_governed_skill`, GS-DISABLE), and -- critically -- verified
     discoverable by the actual Hermes loader rather than merely written to a
     directory we hope is the right one.
 
@@ -749,12 +750,224 @@ def rollback_governed_skill(skill_id: str, digest: str) -> dict[str, Any]:
     }
 
 
+def disable_governed_skill(skill_id: str) -> dict[str, Any]:
+    """Disable a governed skill end to end (GS-DISABLE): after success the
+    skill is NOT governed-active-enabled and NOT published, so the real
+    Hermes prompt builder stops rendering it.
+
+    ``VerifiedSkillStore.disable()`` alone flips ``enabled: False`` in
+    governed state and leaves the published projection exactly where it is
+    -- the same defect shape GS-ROLLBACK closed for ``rollback()``: the
+    operator is told the skill is off while the model keeps receiving it in
+    every rendered system prompt. Governance-only disable is worse than
+    rollback's version of the bug, because there is no "newer version" to
+    mask it: the skill simply keeps working.
+
+    This runs the same four-callback ``ActivationCoordinator`` transaction
+    install and rollback use, with the callbacks pointed at removal instead
+    of replacement::
+
+        retain the current published projection (unpublish semantics)
+          -> invalidate cache -> governed disable commit
+          -> verify (governed disabled AND not published)
+          -> finalize (discard retained) / restore on failure
+
+    Note the ``publish`` callback here *un*-publishes. That reads odd but is
+    exactly the coordinator's contract: ``publish`` means "make the desired
+    projection state live and return what ``restore`` needs to undo it". The
+    desired state for a disable is "absent", and what restore needs is the
+    retained directory. See ``skill_publisher.retain_unpublish_skill``.
+
+    THE INVERSE OF DISABLE IS ROLLBACK, DELIBERATELY. There is no
+    ``enable_governed_skill``: ``rollback_governed_skill(skill_id, digest)``
+    already re-enables (``store.rollback()`` writes ``enabled: True``
+    unconditionally) AND re-publishes the exact target digest through this
+    same transaction. A second enable path would either duplicate that
+    function or -- worse -- re-enable governance while guessing at which
+    digest to republish. An operator re-enables by rolling back to the
+    digest they want, which is also the only shape that stays digest-bound.
+
+    Idempotent: disabling a skill that is already both governed-disabled and
+    unpublished is a reconciled no-op that runs no transaction. A skill that
+    is disabled-but-still-published (or enabled-but-unpublished) is NOT
+    reconciled -- that is a divergence, and the full transaction runs to
+    heal it, mirroring ``rollback_governed_skill``'s treatment of the same
+    split state.
+
+    Raises ``GovernedSkillError`` on an invalid id or a skill with no
+    governed-active entry at all (mutation-free, before the coordinator's
+    lock). Propagates ``runtime_quiescence.SkillRuntimeBusyError`` (nothing
+    changed, retryable), the coordinator's typed errors, and
+    ``GovernanceRevertedProjectionUnprovenError`` when the projection
+    restore fails after a landed commit -- identical taxonomy to install and
+    rollback, mapped for operators by ``map_activation_failure``.
+    """
+    sid = _validate_id(skill_id)
+
+    store = _store()
+    if not store.has_active_entry(sid):
+        # Cheap, mutation-free refusal BEFORE the coordinator's lock and
+        # quiescence gate. store.disable() raises a bare SkillStoreError
+        # ("skill is not active") for this, which the surface cannot
+        # distinguish from a genuine transaction failure -- refusing here
+        # with a typed GovernedSkillError keeps "you never installed this"
+        # separate from "the disable transaction failed", and costs no
+        # unpublish/restore round-trip.
+        raise GovernedSkillError(
+            f"cannot disable {sid!r}: it has no governed-active entry "
+            "(never installed through the governed path, or already removed)"
+        )
+
+    raw_active = store._load_state()["active"].get(sid) or {}
+    already_disabled = not raw_active.get("enabled", False)
+    if already_disabled and not skill_publisher.is_published(sid):
+        # Reconciled no-op: governance already says disabled and nothing is
+        # published, so there is no divergence to heal and no projection to
+        # move. Deliberately requires BOTH halves -- a disabled skill that is
+        # still published is exactly the state this lane exists to fix, and
+        # must fall through to the full transaction.
+        return {
+            "ok": True,
+            "skillId": sid,
+            "digest": raw_active.get("digest"),
+            "disabled": True,
+            "published": False,
+            "reconciledFromPriorSuccess": True,
+        }
+
+    # No stageId exists for a disable (nothing is staged -- the projection
+    # being retained is whatever is currently published), so the
+    # per-transaction retained-projection parent is keyed on a fresh
+    # transaction id, exactly as rollback does.
+    retain_root = (
+        skill_publisher.published_skills_retained_root() / f"disable-{uuid.uuid4().hex}"
+    )
+
+    # Same holder discipline as install_approved_skill and
+    # rollback_governed_skill -- see install's comments for why
+    # commit_holder["previous"] is only ever written AFTER the governed flip
+    # returns (the GS-COORD round-3 vacuous-revert lesson).
+    publish_holder: dict[str, Any] = {}
+    commit_holder: dict[str, Any] = {}
+
+    def _publish() -> dict[str, Any]:
+        # "publish" == make the DESIRED projection state live. For a disable
+        # that is: not published, with the removed directory retained
+        # outside the loadable tree so `_restore` can put it back byte for
+        # byte.
+        result = skill_publisher.retain_unpublish_skill(sid, retain_into=retain_root)
+        publish_holder["result"] = result
+        return result
+
+    def _restore(publish_result: dict[str, Any]) -> None:
+        # Governance FIRST, unconditionally relative to the projection
+        # restore -- the frozen GS-COORD round-2 ordering ruling. A
+        # projection-restore failure must leave governance CONSERVATIVE. For
+        # a disable, "conservative" means governance still says ENABLED at
+        # the prior digest: if the bytes turn out to still be published,
+        # enabled-and-published is a coherent (pre-call) state, whereas
+        # disabled-but-published would be the silent "it says off but the
+        # model still gets it" divergence this lane closes.
+        if "previous" in commit_holder:
+            locked_store = _store_locked()
+            # A disable consumes no approval, so there is none to
+            # un-consume: approval_token is None by design (a fake token
+            # would corrupt the approvals table). revert_activation keys off
+            # the digest that is currently active -- disable() does not
+            # change the digest, only the enabled flag, so the digest here
+            # is the unchanged one from the snapshot.
+            #
+            # `previous` is never None on this branch: commit_holder is
+            # only populated after `store.disable()` RETURNED, and
+            # disable() raises unless an active entry exists -- so the
+            # snapshot taken immediately before it necessarily found one.
+            previous = commit_holder["previous"]
+            locked_store.revert_activation(sid, previous["digest"], None, previous)
+
+        try:
+            skill_publisher.restore_retained_projection(
+                skill_id=sid, retained_path=publish_result.get("retainedPath")
+            )
+        except Exception as exc:
+            if "previous" in commit_holder:
+                raise GovernanceRevertedProjectionUnprovenError(
+                    f"skill {sid!r}: governed-active state was reverted to "
+                    f"enabled at digest {commit_holder['previous'].get('digest') if commit_holder['previous'] else None!r} "
+                    "after a failed disable, but restoring the retained "
+                    "published projection then failed; TORQCLAW cannot prove "
+                    "what is currently published on disk for this skill id"
+                ) from exc
+            raise
+
+        shutil.rmtree(retain_root, ignore_errors=True)
+
+    def _commit() -> dict[str, Any]:
+        locked_store = _store_locked()
+        # Raw internal shape, captured in a local first -- commit_holder must
+        # only ever reflect a commit that actually landed.
+        previous = locked_store._load_state()["active"].get(sid)
+        result = locked_store.disable(sid)
+        commit_holder["previous"] = previous
+        return result
+
+    def _verify(commit_result: dict[str, Any]) -> None:
+        locked_store = _store_locked()
+        # get_active() returns None for a DISABLED entry (it filters on the
+        # enabled flag), so None here is the success condition -- but None
+        # is also what a missing entry returns, hence the raw-state check
+        # below rather than trusting None alone.
+        if locked_store.get_active(sid) is not None:
+            raise GovernedSkillError(
+                f"post-disable verification failed: {sid} is still "
+                "governed-active"
+            )
+        raw = locked_store._load_state()["active"].get(sid)
+        if raw is None or raw.get("enabled", False):
+            raise GovernedSkillError(
+                f"post-disable verification failed: {sid} has no disabled "
+                "governed entry (installed history must be preserved)"
+            )
+        # THE check that closes this lane's failure shape, and the deletion-
+        # probe tripwire for a no-op unpublish: the bytes must be GONE from
+        # the loadable tree. Governance alone reporting disabled is exactly
+        # the divergence -- a skill whose directory is still published keeps
+        # rendering into every system prompt no matter what state.json says.
+        if skill_publisher.is_published(sid):
+            raise GovernedSkillError(
+                f"post-disable verification failed: {sid} is governed-"
+                "disabled but STILL PUBLISHED; the real Hermes prompt "
+                "builder would keep rendering it"
+            )
+
+    ActivationCoordinator(
+        publish=_publish, restore=_restore, commit=_commit, verify=_verify
+    ).run()
+
+    published_result = publish_holder["result"]
+    skill_publisher.discard_retained_projection(published_result.get("retainedPath"))
+    shutil.rmtree(retain_root, ignore_errors=True)
+
+    return {
+        "ok": True,
+        "skillId": sid,
+        "digest": (commit_holder.get("previous") or {}).get("digest"),
+        "disabled": True,
+        "published": False,
+    }
+
+
 def list_governed_versions(skill_id: str) -> dict[str, Any]:
     """Everything an operator needs to pick a rollback target: every
     installed version with ``installedAt`` (tamper-tolerant -- a corrupt
     version directory is flagged, not fatal, which matters precisely when
     rollback is the remedy), plus the current governed-active digest and
     the published digest so governed/published divergence is visible.
+
+    GS-DISABLE adds ``disabled``/``disabledDigest``. ``get_active()``
+    filters on the enabled flag, so without them a DISABLED skill and a
+    never-active one are indistinguishable (both ``activeDigest: None``) --
+    and their remedies differ completely: roll back to the disabled digest
+    to re-enable, versus re-approve through the install path.
 
     Read-only: no quiescence requirement, no lock beyond the store's own.
     ``publishedDigest`` is the provenance sidecar's CLAIM;
@@ -775,6 +988,17 @@ def list_governed_versions(skill_id: str) -> dict[str, Any]:
         # An active entry exists but its package no longer validates --
         # exactly the state an operator lists versions to escape from.
         active_state_error = str(exc)
+
+    # GS-DISABLE: get_active() filters on the enabled flag, so a DISABLED
+    # skill and a never-active one both surface as activeDigest=None --
+    # indistinguishable to an operator deciding what to do next, and after
+    # this lane those two states have completely different remedies (roll
+    # back to re-enable, versus re-approve through install). Read the raw
+    # entry so disabled state is visible rather than inferred from an
+    # absence.
+    raw_active = store._load_state()["active"].get(sid)
+    disabled = raw_active is not None and not raw_active.get("enabled", False)
+    disabled_digest = raw_active.get("digest") if disabled else None
 
     published_digest: str | None = None
     published_verified = False
@@ -801,6 +1025,12 @@ def list_governed_versions(skill_id: str) -> dict[str, Any]:
         "skillId": sid,
         "versions": versions,
         "activeDigest": active_digest,
+        # True only when an entry EXISTS and is flipped off -- never for a
+        # skill that was never governed-active.
+        "disabled": disabled,
+        # The digest the disabled entry still points at, so an operator can
+        # roll straight back to it to re-enable. None unless disabled.
+        "disabledDigest": disabled_digest,
         "publishedDigest": published_digest,
         "publishedVerified": published_verified,
         "governedSkillsEnabled": enabled(),

@@ -138,6 +138,7 @@ __all__ = [
     "published_skills_retained_root",
     "publish_skill",
     "unpublish_skill",
+    "retain_unpublish_skill",
     "is_published",
     "discard_retained_projection",
     "restore_retained_projection",
@@ -370,6 +371,17 @@ def _read_source_package(package_dir: Path) -> dict[str, Any]:
         raise SkillPackageShapeError("skill.json exceeds byte limit")
     if len(skill_bytes) > _MAX_SKILL_BYTES:
         raise SkillPackageShapeError("SKILL.md exceeds byte limit")
+    # F-2 lower bound, mirroring the store's MIN_SKILL_BYTES check. This
+    # module deliberately does not import the store's private validator (see
+    # this function's docstring), so the contract is restated rather than
+    # shared -- but it MUST match, exactly as the upper bound and the
+    # two-file shape rule already do. Without it, publication would be a
+    # bypass seam for the one rule the store now enforces.
+    if not skill_bytes.strip():
+        raise SkillPackageShapeError(
+            "SKILL.md is empty or whitespace-only; refusing to publish a "
+            "skill that renders nothing into the prompt"
+        )
 
     try:
         manifest = json.loads(manifest_bytes.decode("utf-8"))
@@ -723,6 +735,76 @@ def unpublish_skill(skill_id: str) -> dict[str, Any]:
     os.replace(final_dir, doomed_dir)
     _remove_tree(doomed_dir)
     return {"ok": True, "skillId": skill_id, "removed": True}
+
+
+def retain_unpublish_skill(
+    skill_id: str, *, retain_into: str | os.PathLike[str]
+) -> dict[str, Any]:
+    """Unpublish ``skill_id`` while RETAINING its current projection outside
+    the loadable tree, so a coordinator ``restore`` can put it back exactly
+    (GS-DISABLE).
+
+    This is the disable transaction's ``publish`` callback primitive. The
+    coordinator's contract says ``publish`` makes the desired projection
+    state live and returns whatever ``restore`` needs to undo it; for
+    disable, the desired state is NOT PUBLISHED, and the thing ``restore``
+    needs is the exact directory that was removed.
+
+    ``unpublish_skill`` alone cannot serve here: it *deletes* the projection
+    (retire-then-``_remove_tree``), so a later verify failure would have
+    nothing to restore and the skill would stay gone despite governance
+    being reverted -- precisely the governed/published divergence
+    ``ActivationCoordinator`` exists to prevent, mirrored onto the removal
+    side.
+
+    Retention semantics are identical to ``publish_skill``'s
+    ``retain_replaced_into`` branch, and for the same reason: the retained
+    copy is MOVED OUT of ``published_skills`` entirely, never merely renamed
+    in place under a dot-prefixed name. ``EXCLUDED_SKILL_DIRS`` upstream is a
+    fixed-name frozenset with no dot-prefix rule, so a ``.torqclaw-doomed-*``
+    directory left inside the loadable tree is still scanned -- and because
+    ``.`` sorts before alphanumerics, it can WIN prompt_builder's first-wins
+    dedup. A "disabled" skill whose retained copy stayed inside the tree
+    would therefore keep rendering into the model's prompt: the exact defect
+    this lane closes.
+
+    Idempotent: unpublishing a skill that is not published returns
+    ``{"removed": False, "retainedPath": None}`` without error, which is what
+    makes disabling an already-unpublished skill a reconciled no-op rather
+    than a failure.
+
+    Returns ``retainedPath`` (``None`` if nothing was published). The caller
+    owns that directory: ``discard_retained_projection`` it on success,
+    ``restore_retained_projection`` it on failure.
+    """
+    retain_root = Path(retain_into)
+    # Fail closed BEFORE touching the projection if the retention target is
+    # itself loadable -- same inverse-membership gate publish_skill applies.
+    _assert_retention_root_outside_loadable_tree(retain_root)
+
+    target_root = published_skills_dir()
+    final_dir = target_root / skill_id
+    if not final_dir.exists():
+        return {
+            "ok": True,
+            "skillId": skill_id,
+            "removed": False,
+            "retainedPath": None,
+        }
+
+    retain_root.mkdir(parents=True, exist_ok=True)
+    retained_path = retain_root / uuid.uuid4().hex
+    # ONE os.replace out of the loadable tree -- same-volume safe because
+    # published_skills_retained is a sibling of published_skills under the
+    # same TORQCLAW_DATA_DIR. Never a copy-then-delete: a partial copy would
+    # leave the loader able to observe a half-written package.
+    os.replace(final_dir, retained_path)
+    return {
+        "ok": True,
+        "skillId": skill_id,
+        "removed": True,
+        "retainedPath": str(retained_path),
+    }
 
 
 def is_published(skill_id: str) -> bool:

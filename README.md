@@ -154,8 +154,21 @@ As of GS-ROLLBACK, rollback is also end-to-end: the
 `rollback_skill` MCP tool → `governed_skills.rollback_governed_skill()` path
 runs the same coordinator transaction, re-publishing the target version's
 bytes and verifying their digest — never governance alone (the GS-ACCEPT F-1
-divergence). **A governed disable/removal surface still does not exist**
-(GS-DISABLE, unscoped); rolling back a disabled skill re-enables it.
+divergence).
+
+As of GS-DISABLE, disable is end-to-end too: the `disable_skill` MCP tool →
+`governed_skills.disable_governed_skill()` path runs the same coordinator
+transaction with the projection step reversed — it retains and removes the
+published projection, invalidates the prompt cache, commits
+`store.disable()`, then verifies the skill is both governed-disabled and
+**no longer published**. The store-only `disable()` had the identical
+governance/projection divergence F-1 found in `rollback()`: it reported
+"off" while the model kept receiving the skill in every rendered system
+prompt. Installed digest history survives a disable, and **rollback is the
+designed inverse** — re-enabling means rolling back to the exact digest you
+want, so there is deliberately no separate enable surface that would have to
+guess one. Empty and whitespace-only skill bodies are now refused at the
+package-validation seam (`MIN_SKILL_BYTES`), closing GS-ACCEPT finding F-2.
 
 **Operator ruling 2026-08-11: governed skills are ON for this deployment**
 (`TORQCLAW_GOVERNED_SKILLS=1` in the operator's user environment). The
