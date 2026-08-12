@@ -244,3 +244,34 @@ export {
 // production runtime import closure. It is imported directly by
 // tests/collab/noawaitguard.test.ts instead, keeping `typescript` a
 // devDependency (see package.json).
+
+// C1 — Surface identity (PRD-TCLAW-COLLAB-GATEWAY-004 §2.2-§2.5)
+export {
+  runSurfaceIdentityMigration,
+  addSurfaceColumnIfMissing,
+  surfaceCredentialLookup,
+  verifySurfaceToken,
+  C1_SURFACES_MIGRATION_ID,
+  SURFACE_KINDS,
+  SURFACE_ROLES,
+  NON_OPERATOR_KINDS,
+  type SurfaceKind,
+  type SurfaceRole,
+  type VerifiedSurface,
+  type NowSource,
+} from './surfaces.js';
+
+export {
+  runSurfaceAuditMigration,
+  createSurface,
+  issueSurfaceCredential,
+  revokeSurface,
+  revokeSurfaceCredential,
+  writeSurfaceAudit,
+  SurfaceProvisioningError,
+  C1_AUDIT_MIGRATION_ID,
+  type CreateSurfaceParams,
+  type IssuedSurfaceCredential,
+  type RevokeSurfaceResult,
+  type SurfaceAuditKind,
+} from './surfaceStore.js';

@@ -50,11 +50,19 @@ import {
   verifyCredential,
   credentialLookupFromDb,
   WindowsCredentialManagerStore,
+  runCollaborationMigration,
+  runSurfaceIdentityMigration,
+  runSurfaceAuditMigration,
   type SecretStore,
   type BootstrapDb,
 } from '@torqclaw/collab';
 import type { PrincipalBinding } from './principalBridge.js';
-import { DATA_DIR } from './storage.js';
+import { DATA_DIR, db as stateDb } from './storage.js';
+import {
+  validatePresentingSurface,
+  bindingFor,
+  type ConnectionAuthContext,
+} from './surfaceGate.js';
 
 const PRINCIPAL_PEPPER_SECRET_NAME = 'TORQCLAW/principal-pepper';
 
@@ -79,11 +87,51 @@ function getSecretStore(): SecretStore {
   return defaultSecretStore;
 }
 
+/**
+ * Bring a freshly opened `collab.db` up to the current schema.
+ *
+ * WHY THIS IS HERE (G2A round 1, defect 2). `state.db` self-migrates at
+ * gateway boot (`storage.ts`, and `ensureSurfaceSecuritySchema` in
+ * server.ts), but `collab.db` was only ever OPENED here -- never migrated.
+ * The C0 and C1 collab migrations therefore had no production caller at
+ * all, and the built-artifact test had to create the tables by hand, which
+ * proved the shipped artifact could not stand up its own database. A
+ * migration nothing calls is not a migration.
+ *
+ * All THREE are wired at this one seam rather than just the C1 pair, so
+ * the fix is not C1-partial: C0's `runCollaborationMigration` had the same
+ * absence.
+ *
+ * Each is independently guarded and idempotent (its own row in
+ * `collab_schema_migrations`), so this is a no-op on an already-migrated
+ * database and safe to run on every open.
+ *
+ * Failures are swallowed by design. This runs on the CONNECT path, and a
+ * migration problem must not crash the gateway or become a DoS vector: an
+ * unmigrated database simply has no surface tables, so every credential
+ * lookup misses and the connection fails closed with AUTH_FAILED -- the
+ * same outcome as an unknown credential, revealing nothing.
+ */
+function migrateCollabDb(db: BootstrapDb): void {
+  try {
+    const handle = db as unknown as Database.Database;
+    runCollaborationMigration(handle);
+    runSurfaceIdentityMigration(handle);
+    runSurfaceAuditMigration(handle);
+  } catch {
+    /* fail closed: an unmigrated DB authenticates nobody */
+  }
+}
+
 function getCollabDb(): BootstrapDb {
   if (collabDbOverride) return collabDbOverride;
   if (!defaultCollabDb) {
     const path = process.env.TORQCLAW_COLLAB_DB_PATH || join(DATA_DIR, 'collab.db');
-    defaultCollabDb = new Database(path) as unknown as BootstrapDb;
+    const opened = new Database(path) as unknown as BootstrapDb;
+    // Migrate ONCE, at initialization, before the handle is ever cached or
+    // used -- not on every call.
+    migrateCollabDb(opened);
+    defaultCollabDb = opened;
   }
   return defaultCollabDb;
 }
@@ -131,3 +179,58 @@ export function verifySurfaceCredential(credential: string): PrincipalBinding | 
     return null;
   }
 }
+
+/**
+ * C1-5 — resolve the connect-path identity, preferring a REAL C1 surface.
+ *
+ * This is the seam server.ts calls. It runs step 2 of the §2.6 ordered
+ * gate (`validatePresentingSurface`) against the C1 `surfaces` /
+ * `surface_credentials` tables. On success the caller gets a
+ * `ConnectionAuthContext` — server-derived, connection-scoped, carrying
+ * the auth epoch and capability revision that later seams recheck.
+ *
+ * WHY THE C0.1 FALLBACK REMAINS
+ * ------------------------------
+ * C0.1 credentials live in `principal_credentials` and predate the
+ * `surfaces` table entirely. An installation that authenticated fine
+ * yesterday must keep authenticating today: C1 is additive (§1.5), so a
+ * credential with no C1 surface row falls back to the C0.1 derivation with
+ * its documented `surfaceId = credentialId` stand-in. That path yields no
+ * ConnectionAuthContext, because there is no surface projection to derive
+ * one from — which is correct: such a connection holds no C1 capability
+ * or authority, and every C1 check it meets denies fail-closed.
+ *
+ * Order matters: the C1 path is tried FIRST so a surface that has been
+ * properly provisioned is never silently downgraded to the weaker legacy
+ * derivation.
+ *
+ * Returns null on total failure, which the caller renders as the same
+ * AUTH_FAILED + close(4001) as a bad root token (M-1).
+ */
+export function resolveConnectIdentity(
+  credential: string,
+): { binding: PrincipalBinding; auth: ConnectionAuthContext | null } | null {
+  try {
+    const pepper = getSecretStore().get(PRINCIPAL_PEPPER_SECRET_NAME);
+    if (!pepper) return null;
+
+    const collabDb = getCollabDb() as unknown as Database.Database;
+
+    // C1 path first.
+    const ctx = validatePresentingSurface(
+      { collabDb, stateDb, principalPepper: pepper },
+      credential,
+    );
+    if (ctx !== null) return { binding: bindingFor(ctx), auth: ctx };
+
+    // C0.1 legacy fallback (see above).
+    const legacy = verifySurfaceCredential(credential);
+    if (legacy !== null) return { binding: legacy, auth: null };
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export type { ConnectionAuthContext };

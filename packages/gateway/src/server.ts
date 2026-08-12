@@ -25,7 +25,15 @@ import { handleGetCostSummary } from './spend.js';
 import { handlePreviewRoute } from './preview.js';
 import { handleGetSafeExport } from './export.js';
 import { collabEnabled, PrincipalBindingError } from './principalBridge.js';
-import { verifySurfaceCredential } from './collabIdentity.js';
+import { resolveConnectIdentity, type ConnectionAuthContext } from './collabIdentity.js';
+import { ensureSurfaceSecuritySchema, captureTaskOrigin, holdsAuthority, liveSurfaceSecurity } from './surfaceSecurity.js';
+
+// C1 (§6.2): additive, idempotent state.db migration. Safe to run with the
+// flag OFF -- the tables are created but never read or written, which is
+// exactly the §2.11 posture ("the C1 tables may exist but are inert").
+// Running it unconditionally at boot means a flag flip needs no migration
+// step, and re-running it is a no-op.
+ensureSurfaceSecuritySchema(db);
 
 // Read helper for authz's task-ownership check. Kept inline here (not in
 // events.ts taskStore) per scope: this ticket may only touch authz.ts,
@@ -34,6 +42,44 @@ const lookupTaskSessionStmt = db.prepare('SELECT session_id FROM tasks WHERE req
 function lookupTaskSession(taskId: string): string | null {
   const row = lookupTaskSessionStmt.get(taskId) as { session_id: string } | undefined;
   return row ? row.session_id : null;
+}
+
+/**
+ * C1-5 (§2.13): capture immutable task origin for a request whose
+ * connection presented a valid C1 surface.
+ *
+ * A no-op when there is no ConnectionAuthContext -- flag off, a legacy
+ * root-token connection, or a C0.1 credential with no C1 surface row. That
+ * is the SI-4 requirement: with the flag off no new table is written.
+ *
+ * Failures are swallowed deliberately. Origin capture is EVIDENCE, and a
+ * duplicate/parallel write must never take down a live task submission;
+ * the C2 seams that consume this evidence already treat a missing origin
+ * as fail-closed (a flag-on registration without one is inert/refused,
+ * §2.13), so losing the row denies later rather than opening anything.
+ */
+function recordTaskOrigin(
+  auth: ConnectionAuthContext | null,
+  requestId: string,
+  sessionId: string,
+): void {
+  if (!collabEnabled() || auth === null) return;
+  try {
+    captureTaskOrigin(db, {
+      requestId,
+      sessionId,
+      connectionId: auth.connectionId,
+      principalId: auth.principalId,
+      surfaceId: auth.surfaceId,
+      surfaceKind: auth.surfaceKind,
+      credentialId: auth.credentialId,
+      credentialExpiresAt: auth.credentialExpiresAt,
+      authEpoch: auth.authEpoch,
+      capabilityRevision: auth.capabilityRevision,
+    });
+  } catch {
+    /* evidence write is best-effort; consumers fail closed without it */
+  }
 }
 
 // Let the LOCAL_EDGE loop observe cancellations without importing the gateway DB.
@@ -66,6 +112,11 @@ app.get('/ws', { websocket: true }, (socket) => {
   let sessionId: string | null = null;
   let role: Role | null = null;
   let unsubscribe: (() => void) | null = null;
+  // C1-5: server-derived, CONNECTION-scoped auth context. Held per socket
+  // (never in a session-keyed row) because one durable session may have
+  // several concurrent connections presenting different valid
+  // same-principal surfaces -- §2.13.
+  let connectionAuth: ConnectionAuthContext | null = null;
 
   const sendErr = (code: string, detail?: unknown) =>
     socket.send(JSON.stringify({ type: 'ERROR', code, detail }));
@@ -92,11 +143,20 @@ app.get('/ws', { websocket: true }, (socket) => {
       // verifyToken(token)-only path -- byte-identical (H-2). The binding
       // is ALWAYS server-derived from the verified credential itself, NEVER
       // read off the frame (H-1) -- see collabIdentity.ts.
-      let callerBinding = null as ReturnType<typeof verifySurfaceCredential>;
+      //
+      // C1-5: the surface path now runs the §2.6 ordered gate. Step 2
+      // (surface validity + live gateway projection) happens inside
+      // resolveConnectIdentity; step 3 (assertResumeAllowed / SEC-1) still
+      // happens inside sessions.resolve() below, in that order and
+      // unchanged. A valid C1 surface also yields a connection-scoped
+      // ConnectionAuthContext used for immutable per-task origin capture.
+      let callerBinding: import('./principalBridge.js').PrincipalBinding | null = null;
       let ok: boolean;
       if (collabEnabled() && conn.data.auth?.kind === 'surface') {
-        callerBinding = verifySurfaceCredential(conn.data.auth.credential);
-        ok = callerBinding !== null;
+        const identity = resolveConnectIdentity(conn.data.auth.credential);
+        callerBinding = identity?.binding ?? null;
+        connectionAuth = identity?.auth ?? null;
+        ok = identity !== null;
       } else {
         ok = verifyToken(conn.data.token);
       }
@@ -169,7 +229,25 @@ app.get('/ws', { websocket: true }, (socket) => {
     const sid = sessionId!;
 
     // ── Gate 3: role-based command authorization ──
-    const decision = authorize(role!, cmd.data, { sessionId: sid, lookupTaskSession });
+    // C1-4 / H-1: hand authorize() the presenting surface's own authority
+    // layer so operator authority is INTERSECTED with what THIS surface
+    // actually holds. Built from the server-derived connection context and
+    // read live from state.db at decision time -- never from a client frame,
+    // and never cached across the connection, so a revocation that commits
+    // first is observed by the very next command (§1.4).
+    const surfaceAuthz = connectionAuth === null ? undefined : {
+      surfaceId: connectionAuth.surfaceId,
+      // BOTH of these are LIVE reads, never values captured at connect.
+      // The role especially: a surface demoted from operator to agent
+      // mid-connection must lose `approve` on its very next command, and a
+      // connect-time copy would keep it for the life of the socket.
+      currentRole: () => liveSurfaceSecurity(db, connectionAuth!.surfaceId)?.surfaceRole ?? null,
+      holdsAuthority: (authority: 'approve' | 'cancel' | 'delegate') =>
+        holdsAuthority(db, connectionAuth!.surfaceId, authority),
+    };
+    const decision = authorize(role!, cmd.data, {
+      sessionId: sid, lookupTaskSession, surface: surfaceAuthz,
+    });
     if (!decision.ok) {
       app.log.warn({ role, action: cmd.data.action }, 'authz denied');
       sendErr('UNAUTHORIZED', { action: cmd.data.action, reason: decision.reason });
@@ -196,6 +274,13 @@ app.get('/ws', { websocket: true }, (socket) => {
            profileHash: request.effectiveProfile?.policyHash,
          };
         makeEmitter(sid, request.id, diag.tier)('TIER_SELECTED', diag.reason, diag);
+
+        // C1-5 (§2.13): immutable, request-keyed origin evidence, written
+        // from the PROVEN connection context before dispatch. Server-derived
+        // in full -- no field is ever supplied by the client. Recorded per
+        // request rather than per session so concurrent connections from
+        // different same-principal surfaces cannot overwrite one another.
+        recordTaskOrigin(connectionAuth, request.id, sid);
 
         dispatch(request, diag); // returns immediately
         break;
