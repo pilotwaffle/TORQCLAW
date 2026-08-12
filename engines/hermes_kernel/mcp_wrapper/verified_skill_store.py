@@ -463,7 +463,19 @@ class VerifiedSkillStore:
             if not active:
                 raise SkillStoreError(f"skill is not active: {skill_id}")
             active["enabled"] = False
-            artifact = self._artifact_from_installed(state, skill_id, active["digest"])
+            try:
+                artifact = self._artifact_from_installed(state, skill_id, active["digest"])
+            except SkillStoreError:
+                # Disable must NEVER depend on the installed package still
+                # validating: an invalid, tampered, or legacy pre-F-2
+                # empty-body package is precisely when an operator most needs
+                # to turn a skill OFF, and this read exists only to build the
+                # audit record below (G2A GS-DISABLE finding 3: the F-2 lower
+                # bound made a legacy empty-body skill undisableable through
+                # this seam, with reconcile() then able to manufacture the
+                # exact governance/projection divergence the disable lane
+                # closes). Audit with a degraded record instead of refusing.
+                artifact = {"manifest": {"id": skill_id}, "digest": active["digest"]}
             self._append_audit(state, "disabled", artifact)
             self._save_state(state)
             return {"ok": True, "skillId": skill_id, "digest": active["digest"], "enabled": False}

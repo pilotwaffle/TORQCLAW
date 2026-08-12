@@ -713,3 +713,68 @@ def test_publisher_independently_refuses_an_empty_body():
         skill_publisher.publish_skill(
             package, digest=package_digest(manifest_bytes, skill_bytes)
         )
+
+
+def test_legacy_pre_f2_empty_body_skill_can_still_be_disabled(tmp_path):
+    """G2A GS-DISABLE finding 3 regression: MIN_SKILL_BYTES is retroactive,
+    and disable()'s audit-artifact read used to re-validate the installed
+    package -- making a legacy (pre-F-2) empty-body skill UNDISABLEABLE.
+    The one skill an operator most needs to turn off was the one skill
+    disable refused, and reconcile() could then flip governance off while
+    the projection kept rendering: the exact divergence this lane closes.
+    Legacy state is fabricated directly on disk because the modern pipeline
+    correctly refuses to create it."""
+    import shutil
+    import time
+
+    from mcp_wrapper.verified_skill_store import package_digest
+
+    store = governed_skills._store()
+
+    workspace = tmp_path / "legacy-package"
+    package = governed_skills._build_package(workspace, SID, "")
+    manifest_bytes = (package / "skill.json").read_bytes()
+    digest = package_digest(manifest_bytes, b"")
+
+    version_dir = store.versions_dir / SID / digest
+    version_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(package, version_dir)
+
+    state_path = Path(store.root) / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["installed"].setdefault(SID, {})[digest] = {
+        "version": "1.0.0",
+        "source": "torqclaw:operator-approval",
+        "permissions": ["read"],
+        "digest": digest,
+        "installedAt": time.time_ns(),
+    }
+    state["active"][SID] = {"digest": digest, "enabled": True, "permissions": ["read"]}
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    published_dir = skill_publisher.published_skills_dir() / SID
+    published_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(package / "skill.json", published_dir / "skill.json")
+    shutil.copy(package / "SKILL.md", published_dir / "SKILL.md")
+    (published_dir / skill_publisher.PROVENANCE_FILENAME).write_text(
+        json.dumps({
+            "schemaVersion": 1,
+            "skillId": SID,
+            "digest": digest,
+            "publishedAt": time.time_ns(),
+            "source": "torqclaw:operator-approval",
+        }),
+        encoding="utf-8",
+    )
+    assert skill_publisher.is_published(SID), "precondition: legacy skill published"
+
+    result = skill_rollback.disable(SID)
+
+    assert result["ok"] is True, f"legacy empty-body skill must be disableable: {result}"
+    assert not skill_publisher.is_published(SID)
+    final = _state()
+    assert final["active"][SID]["enabled"] is False
+    disabled_entries = [e for e in final["audit"] if e["action"] == "disabled"]
+    assert disabled_entries, "disable must still be audited (degraded record)"
+    assert disabled_entries[-1]["skillId"] == SID
+    assert disabled_entries[-1]["digest"] == digest

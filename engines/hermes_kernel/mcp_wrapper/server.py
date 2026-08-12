@@ -453,7 +453,9 @@ async def list_skill_versions(skill_id: str) -> dict:
     """GS-ROLLBACK: list a governed skill's installed versions (with
     installedAt and tamper flags) plus its governed-active and published
     digests, so an operator can pick an exact rollback target and see
-    governed/published divergence."""
+    governed/published divergence. GS-DISABLE adds `disabled` and
+    `disabledDigest` so a disabled skill is distinguishable from a
+    never-active one (opposite remedies: rollback vs re-approval)."""
     return skill_rollback.list_versions(skill_id)
 
 

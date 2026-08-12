@@ -283,3 +283,32 @@ retry heals it (the fast path correctly refuses — governance is not yet
 disabled — and the full run re-runs the transaction, whose unpublish is
 idempotent). This is the mirror of rollback's G-1 and is covered by
 `test_enabled_but_unpublished_is_healed_not_short_circuited`.
+
+## 10. G2A round 1 (2026-08-11) — APPROVE-WITH-NOTES, one defect fixed
+
+The disable transaction survived every attack (inverted publish contract,
+conservative-enabled failure direction, lock/idempotency, taxonomy arm
+ordering, probe reproduction, merge-simulated 225-check PRD gate: exactly
+neutral). The one real defect was in F-2's blast radius onto a path this
+lane did not touch:
+
+**Finding 3 (fixed same day): F-2 retroactivity made a legacy empty-body
+skill UNDISABLEABLE.** `MIN_SKILL_BYTES` lives in `_read_package`, and
+`store.disable()` called `_artifact_from_installed` purely to build its
+audit record — so a pre-F-2 empty-body skill (legal when installed) failed
+validation inside `disable()` itself, with `retryable: true` advertising a
+retry that could never succeed, rollback equally refused, and `reconcile()`
+able to flip governance off while the projection kept rendering — the exact
+divergence this lane closes. Fix: the audit-artifact read is now
+fault-tolerant (degraded audit record on `SkillStoreError`); disable never
+depends on the package validating, because an invalid package is precisely
+when disable matters most. Regression:
+`test_legacy_pre_f2_empty_body_skill_can_still_be_disabled` fabricates the
+legacy state directly on disk and drives the production surface. Severity
+was confirmed MINOR for this deployment: the live store held no governed
+skills at fix time (checked empirically).
+
+Other read paths degrade acceptably and are deliberately unchanged:
+`list_versions` flags `tampered: true`, listings keep working, `reconcile`
+tolerates; `get_active`/`list_installed`/`rollback` raise on such a package
+by design (fail-closed reads), with disable as the always-available remedy.
