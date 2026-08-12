@@ -410,6 +410,44 @@ def test_additive_migration_mutations_are_killed(
 
 
 @pytest.mark.parametrize(
+    ("heading", "injected"),
+    [
+        ("## 11. Contradictions found between operator spec and shipped baseline", "DROP TABLE tool_approvals;"),
+        ("## 12. Open questions for the operator (not guessed)", "DROP TABLE tool_approvals;"),
+        ("## 13. Definition of done (for the eventual build, not this PRD)", "DROP TABLE IF EXISTS tool_approvals;"),
+        ("## 12. Open questions for the operator (not guessed)", "ALTER TABLE tool_approvals RENAME TO tool_approvals_v2;"),
+        ("## 12. Open questions for the operator (not guessed)", "UPDATE tool_approvals SET args_json = '{}';"),
+    ],
+    ids=(
+        "drop-in-section-11",
+        "drop-in-section-12",
+        "drop-if-exists-in-section-13",
+        "rename-in-section-12",
+        "history-rewrite-in-section-12",
+    ),
+)
+def test_destructive_sql_outside_section_9_is_killed(
+    tmp_path: Path,
+    heading: str,
+    injected: str,
+) -> None:
+    """§10.4 item 7 requires the destructive-migration scan to cover the whole
+    proposal-level document, not just the text before §9. Before the fix, a
+    `before_s9 = text.split("## 9. Explicitly OUT OF SCOPE", 1)[0]` truncation
+    let a destructive statement placed in §11/§12/§13 slip through undetected.
+    """
+    mutation = lambda text: text.replace(  # noqa: E731
+        heading, f"{heading}\n\n{injected}\n", 1
+    )
+    findings = _findings(_write_mutation(tmp_path, mutation))
+    assert "R4 migration: no rebuild/sentinel/history rewrite" in findings
+    assert (
+        "R4 migration: destructive scan covers §9 onward (§11-§13 regression lock)"
+        in findings
+    )
+
+
+@pytest.mark.parametrize(
     ("mutation", "expected_finding"),
     [
         (
@@ -638,6 +676,67 @@ def test_ctxhash_mutations_are_killed(
 
 
 @pytest.mark.parametrize(
+    ("old", "new", "expected_finding"),
+    [
+        (
+            "The winning transaction consumes the grant",
+            "The winning transaction NOT consumes the grant",
+            "R4 approval: exact grant consumed in dispatch interval",
+        ),
+        (
+            "`rollback_skill` re-enables a disabled skill by design",
+            "`rollback_skill` NOT re-enables a disabled skill by design",
+            "R4 governed tools: rollback re-enables by design",
+        ),
+    ],
+    ids=("grant-consumption-negated", "rollback-reenable-negated"),
+)
+def test_negation_inversions_are_killed(
+    tmp_path: Path,
+    old: str,
+    new: str,
+    expected_finding: str,
+) -> None:
+    """`_paragraph_with` alone checks substring co-occurrence, not sense: an
+    adversarial review showed that inverting a load-bearing positive claim to
+    its negated form (prefixing the key word with "NOT") left several checks
+    green because every required term was still textually present in the
+    paragraph. `_paragraph_with_affirmed` (backed by the previously-dead
+    `near_negation` helper) closes that hole for these two named checks.
+    """
+    assert expected_finding in _findings(_write_mutation(tmp_path, _replace_once(old, new)))
+
+
+def test_paragraph_with_affirmed_ignores_unrelated_prior_sentence_negation() -> None:
+    """Regression for the sentence-scoping fix: a negation in an EARLIER,
+    unrelated sentence of the same paragraph (e.g. "hashes do not consume the
+    grant" describing the mismatch case) must not suppress a later, distinct,
+    unnegated affirmation ("the winning transaction consumes the grant") in
+    the same paragraph. Without sentence-scoping, `near_negation`'s 80-char
+    paragraph-wide window bled across the sentence boundary and produced a
+    false negative on the canonical (unmutated) PRD.
+    """
+    text = (
+        "Unequal action hashes do not consume the grant and return to a new "
+        "approval. The winning transaction consumes the grant and durably "
+        "records dispatch_started."
+    )
+    assert LINTER._paragraph_with_affirmed(
+        text, ("grant", "consum"), "consumes the grant",
+    )
+
+
+def test_paragraph_with_affirmed_requires_unnegated_occurrence() -> None:
+    """Direct unit-level proof that a fully negated paragraph (no unnegated
+    occurrence of the affirmed phrase at all) is correctly rejected.
+    """
+    text = "The winning transaction NOT consumes the grant in this design."
+    assert not LINTER._paragraph_with_affirmed(
+        text, ("grant", "consum"), "consumes the grant",
+    )
+
+
+@pytest.mark.parametrize(
     ("mutation", "expected_finding"),
     [
         (
@@ -813,3 +912,129 @@ def test_canonical_prd_passes_gate_on_a_crlf_checkout(tmp_path: Path) -> None:
         PRD.read_text(encoding="utf-8").replace("\n", "\r\n").encode("utf-8")
     )
     assert _findings(crlf) == set()
+
+
+# ----------------------------------------------------------------------
+# Legacy (Rev-3, original 67-check) mutation coverage.
+#
+# The 67 checks executed before `_run_revision_4_checks` (required-literal
+# presence, CT-2/H-1 phrasing, the "Allow for session" prohibition, forbidden
+# literals, and structural parity) previously had zero mutation tests even
+# though the R4 checks added later were thoroughly covered. This section adds
+# a focused set over the highest-value legacy checks: required-literal
+# removals, a forbidden-literal injection, and structural-parity breaks.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "expected_finding"),
+    [
+        (
+            "NEVER grantable to:** any surface with `surface_role ∈ ('agent','automation')`",
+            "SOMETIMES grantable to:** any surface with `surface_role ∈ ('agent','automation')`",
+            "CT-2 never channel/automation",
+        ),
+        (
+            "principal authority\n  → surface / session authority",
+            "principal authority\n  → surface authority only",
+            "H-1 full corrected layering",
+        ),
+        (
+            '"Allow for session" is PROHIBITED as a shippable grant option',
+            '"Allow for session" is PERMITTED as a shippable grant option',
+            "Allow-for-session prohibition statement present",
+        ),
+    ],
+    ids=(
+        "ct2-never-channel-removed",
+        "h1-layering-broken",
+        "allow-for-session-prohibition-removed",
+    ),
+)
+def test_legacy_required_literal_mutations_are_killed(
+    tmp_path: Path,
+    old: str,
+    new: str,
+    expected_finding: str,
+) -> None:
+    assert expected_finding in _findings(_write_mutation(tmp_path, _replace_once(old, new)))
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "expected_finding"),
+    [
+        ("AR-1", "AR-9", "AR-1 ruling cited"),
+        (
+            "grantable ONLY to operator-kind surfaces",
+            "grantable to any surface",
+            "CT-2 operator-kind-only grant",
+        ),
+        ("CTXHASH_V1", "CTXHASH_V2", "context_hash serializer: CTXHASH_V1"),
+    ],
+    ids=("ar1-removed", "ct2-operator-only-removed", "ctxhash-v1-renamed"),
+)
+def test_legacy_required_literal_full_removal_mutations_are_killed(
+    tmp_path: Path,
+    old: str,
+    new: str,
+    expected_finding: str,
+) -> None:
+    """These literals occur many times across the canonical PRD, so a
+    single-occurrence `_replace_once` mutation would leave other occurrences
+    intact and the required-literal-presence check would stay green — a
+    false pass, not proof the check has teeth. Every occurrence must be
+    mutated to actually remove the literal from the document.
+    """
+    mutation = lambda text: text.replace(old, new)  # noqa: E731
+    assert expected_finding in _findings(_write_mutation(tmp_path, mutation))
+
+
+def test_legacy_forbidden_literal_c3_scope_leak_is_killed(tmp_path: Path) -> None:
+    """Injecting a C3-scoped literal (`collab_events`) into the in-scope body
+    of §3 (the C2 approval-broker section) must trip the C3 scope-leak
+    forbidden-literal check — it is only legitimate inside §9 (out of scope)
+    or as a descriptive quotation inside §10/§10.1.
+    """
+    mutation = lambda text: text.replace(  # noqa: E731
+        "## 4. Source-of-truth matrix",
+        "A stray reference to `collab_events` leaking into scope.\n\n"
+        "## 4. Source-of-truth matrix",
+        1,
+    )
+    assert "forbidden: C3 scope leak (collab_events / channel commands in-scope)" in _findings(
+        _write_mutation(tmp_path, mutation)
+    )
+
+
+def test_legacy_property_row_deletion_is_killed(tmp_path: Path) -> None:
+    """Deleting one of the twelve numbered rows from the §3.3 properties
+    table must break the "all 12 properties present" structural-parity check.
+    """
+    mutation = lambda text: re.sub(  # noqa: E731
+        r"^\| 12 \|[^\n]*\n", "", text, count=1, flags=re.MULTILINE,
+    )
+    assert "§3.3 all 12 properties present" in _findings(_write_mutation(tmp_path, mutation))
+
+
+def test_legacy_adversarial_row_deletion_is_killed(tmp_path: Path) -> None:
+    """Deleting one of the twelve `A#` rows from the §7 adversarial scenario
+    matrix must break the "all 12 adversarial rows present" structural-parity
+    check.
+    """
+    mutation = lambda text: re.sub(  # noqa: E731
+        r"^\| A12 \|[^\n]*\n", "", text, count=1, flags=re.MULTILINE,
+    )
+    assert "§7 all 12 adversarial rows present" in _findings(_write_mutation(tmp_path, mutation))
+
+
+def test_legacy_ticket_ac_deletion_is_killed(tmp_path: Path) -> None:
+    """Stripping the `AC:` clause from a ticket's bullet line must break the
+    "every ticket has an AC: line" structural-parity check without changing
+    the set of ticket IDs present (so the more specific AC-coverage finding,
+    not the ticket-set-equality finding, is what fires).
+    """
+    mutation = _regex_once(
+        r"(- \*\*C2-8[^\n]*?) AC:[^\n]*$",
+        r"\1",
+    )
+    assert "§8 every ticket has an AC: line" in _findings(_write_mutation(tmp_path, mutation))
