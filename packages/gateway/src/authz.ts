@@ -12,7 +12,35 @@ export interface AuthzContext {
   lookupTaskSession: (taskId: string) => string | null;
   /** The commanding connection's own (persisted) session id. */
   sessionId: string;
+  /**
+   * C1-4 / H-1: the surface layer for THIS connection, when the collab
+   * substrate is on and the connection authenticated with a C1 surface.
+   *
+   * Absent (undefined) means "no surface layer to intersect with" — either
+   * the flag is off or this is a legacy/root-token connection — and the
+   * operator short-circuit resolves to today's blanket ALLOW, byte-
+   * identically (§2.7.1 flag semantics).
+   */
+  surface?: SurfaceAuthzContext;
 }
+
+/**
+ * The presenting surface's own authority/capability, read from the live
+ * gateway projection by the caller (server.ts) — never from a client frame.
+ */
+export interface SurfaceAuthzContext {
+  surfaceId: string;
+  surfaceRole: 'operator' | 'agent' | 'automation';
+  /** Live, current-epoch control-plane authority check (holdsAuthority). */
+  holdsAuthority: (authority: 'approve' | 'cancel' | 'delegate') => boolean;
+}
+
+const DENY_SURFACE_NOT_OPERATOR: AuthzDecision = {
+  ok: false, reason: 'presenting surface is not an operator-role surface',
+};
+const DENY_AUTHORITY: AuthzDecision = {
+  ok: false, reason: 'presenting surface does not hold the required control-plane authority',
+};
 
 const DENY_NOT_PERMITTED: AuthzDecision = { ok: false, reason: 'action not permitted for this role' };
 const DENY_NOT_OWNED: AuthzDecision = { ok: false, reason: 'task not owned by this session' };
@@ -97,7 +125,7 @@ export function checkResumeRole(
  *   node     — every action denied.
  */
 export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): AuthzDecision {
-  if (role === 'operator') return ALLOW;
+  if (role === 'operator') return authorizeOperator(cmd, ctx);
   if (role === 'node') return DENY_NOT_PERMITTED;
 
   // role === 'channel'
@@ -125,4 +153,69 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
       // Default deny for any future/unmapped action on a non-operator role.
       return DENY_NOT_PERMITTED;
   }
+}
+
+/**
+ * Ruling H-1 (FROZEN, §2.7.1) — subordinate the operator short-circuit.
+ *
+ * THE HOLE THIS CLOSES
+ * --------------------
+ * `authorize` used to answer `if (role === 'operator') return ALLOW` for
+ * EVERY command, consulting nothing below the principal layer. That is a
+ * blanket, unconditional operator authority class: a compromised operator
+ * SURFACE inherits the principal's full authority, because the check never
+ * looks at which surface is actually presenting.
+ *
+ * The corrected layering (no shortcut may skip a lower layer):
+ *
+ *   principal authority
+ *     -> surface/session authority (what THIS surface actually holds)
+ *       -> requested capability / authority token
+ *         -> specific operation (the ClientCommand action)
+ *           -> specific resource / task
+ *
+ * WHAT INTERSECTION MEANS HERE
+ * -----------------------------
+ * Operator authority is INTERSECTED with the presenting surface's held
+ * authority. An operator principal acting through a limited or compromised
+ * surface gets only what THAT surface holds -- never the full principal
+ * authority.
+ *
+ * `APPROVE_TOOL` is the first command to carry a reserved control-plane
+ * AUTHORITY (`approve`, ruling AR-1). It is gated on the surface being
+ * operator-ROLE *and* holding a live current-epoch `approve` grant, read
+ * from `surface_authorities` -- the authority path, NEVER the execution-
+ * capability path. A surface holding every execution capability still
+ * cannot approve.
+ *
+ * Other operator commands keep today's behaviour: C1 introduces exactly one
+ * authority token, and inventing gates for commands the PRD has not
+ * specified would be scope drift with real lockout risk. They intersect
+ * against a surface layer that currently constrains only `approve`.
+ *
+ * FLAG SEMANTICS (§2.7.1, §1.2 constraint 4)
+ * -------------------------------------------
+ * When `ctx.surface` is absent -- flag off, or a legacy/root-token
+ * connection -- there is no surface authority to intersect, so this
+ * resolves to the legacy blanket ALLOW byte-identically. Enabling a
+ * subsystem and changing security behaviour stay separate, individually
+ * revertable decisions.
+ */
+function authorizeOperator(cmd: ClientCommand, ctx: AuthzContext): AuthzDecision {
+  const surface = ctx.surface;
+
+  // No surface layer => legacy behaviour, unchanged (SI-4).
+  if (!surface) return ALLOW;
+
+  if (cmd.action === 'APPROVE_TOOL') {
+    // CT-2 decision-time enforcement: operator ROLE is required, and role
+    // is the predicate -- never surface kind (§3.14).
+    if (surface.surfaceRole !== 'operator') return DENY_SURFACE_NOT_OPERATOR;
+    // The single authority seam. Absence, revocation, epoch drift, or a
+    // missing/stale projection all resolve to false => deny (fail-closed).
+    if (!surface.holdsAuthority('approve')) return DENY_AUTHORITY;
+    return ALLOW;
+  }
+
+  return ALLOW;
 }

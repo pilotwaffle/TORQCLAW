@@ -25,7 +25,7 @@ import { handlePreviewRoute } from './preview.js';
 import { handleGetSafeExport } from './export.js';
 import { collabEnabled, PrincipalBindingError } from './principalBridge.js';
 import { resolveConnectIdentity, type ConnectionAuthContext } from './collabIdentity.js';
-import { ensureSurfaceSecuritySchema, captureTaskOrigin } from './surfaceSecurity.js';
+import { ensureSurfaceSecuritySchema, captureTaskOrigin, holdsAuthority } from './surfaceSecurity.js';
 
 // C1 (§6.2): additive, idempotent state.db migration. Safe to run with the
 // flag OFF -- the tables are created but never read or written, which is
@@ -228,7 +228,21 @@ app.get('/ws', { websocket: true }, (socket) => {
     const sid = sessionId!;
 
     // ── Gate 3: role-based command authorization ──
-    const decision = authorize(role!, cmd.data, { sessionId: sid, lookupTaskSession });
+    // C1-4 / H-1: hand authorize() the presenting surface's own authority
+    // layer so operator authority is INTERSECTED with what THIS surface
+    // actually holds. Built from the server-derived connection context and
+    // read live from state.db at decision time -- never from a client frame,
+    // and never cached across the connection, so a revocation that commits
+    // first is observed by the very next command (§1.4).
+    const surfaceAuthz = connectionAuth === null ? undefined : {
+      surfaceId: connectionAuth.surfaceId,
+      surfaceRole: connectionAuth.surfaceRole as 'operator' | 'agent' | 'automation',
+      holdsAuthority: (authority: 'approve' | 'cancel' | 'delegate') =>
+        holdsAuthority(db, connectionAuth!.surfaceId, authority),
+    };
+    const decision = authorize(role!, cmd.data, {
+      sessionId: sid, lookupTaskSession, surface: surfaceAuthz,
+    });
     if (!decision.ok) {
       app.log.warn({ role, action: cmd.data.action }, 'authz denied');
       sendErr('UNAUTHORIZED', { action: cmd.data.action, reason: decision.reason });
