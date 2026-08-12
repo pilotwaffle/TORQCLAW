@@ -470,6 +470,7 @@ class TrustEngine:
         self._bundles_dir = self._trust_dir / "bundles"
         self._artifacts_dir = self._trust_dir / "artifacts"
         self._clock_path = self._trust_dir / "clock.json"
+        self._events_log = self._trust_dir / "events.log"
         self._now = now
         self._max_freshness_ms = max_freshness_ms
         self._max_future_skew_ms = max_future_skew_ms
@@ -510,8 +511,17 @@ class TrustEngine:
             self._last_observed_now_ms is not None
             and current < self._last_observed_now_ms - self._max_clock_rollback_ms
         ):
+            was_already_quarantined = self._clock_rollback
             self._clock_rollback = True
             self._persist_clock()
+            if not was_already_quarantined:
+                # Quarantine ENTRY (R-9/§5.6) -- logged once, not on every
+                # subsequent observation while still quarantined.
+                self._log_event(
+                    "clock_rollback_quarantine_entered",
+                    lastObservedNowMs=self._last_observed_now_ms,
+                    observedNowMs=current,
+                )
             return current
         if self._last_observed_now_ms is None or current > self._last_observed_now_ms:
             self._last_observed_now_ms = current
@@ -590,6 +600,64 @@ class TrustEngine:
             self._states.pop(origin, None)
             raise SkillTrustError("stale", "bundle persistence failed")
 
+    # -- P4-7: trust operational log (§5.6 events.log, R-9) ------------------
+
+    def _log_event(self, kind: str, **fields: Any) -> None:
+        """Append one JSON-line record to ``events.log`` (bundle acceptance/
+        refusal, refresh attempts, quarantine entry/exit, per-operation trust
+        verdicts, O-2 revocation-vs-installed reports).
+
+        Observability ONLY -- never read by any control path (SP-8): the
+        1,000-entry fail-closed ``state.json`` ``audit[]`` is reserved for
+        governed lifecycle rows; this is the separate, unbounded-volume trust
+        log R-9 exists to keep out of that array. Rotated at 1 MiB, 4
+        archives retained (events.log.1..4, oldest dropped). Best-effort: a
+        logging failure must never turn a verified request into an
+        unverified failure or vice versa -- swallow any I/O error.
+        """
+        try:
+            self._rotate_events_log_if_needed()
+            record = {"kind": kind, "at": self._now_or_wall(), **fields}
+            line = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            with self._events_log.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError:
+            pass
+
+    def _now_or_wall(self) -> int:
+        try:
+            value = self._now()
+            if isinstance(value, (int, float)) and value == value:
+                return int(value)
+        except Exception:  # noqa: BLE001
+            pass
+        return int(time.time() * 1000)
+
+    _EVENTS_LOG_ROTATE_BYTES = 1024 * 1024  # 1 MiB
+    _EVENTS_LOG_ARCHIVES = 4
+
+    def _rotate_events_log_if_needed(self) -> None:
+        try:
+            size = self._events_log.stat().st_size
+        except FileNotFoundError:
+            return
+        if size < self._EVENTS_LOG_ROTATE_BYTES:
+            return
+        self._events_log.parent.mkdir(parents=True, exist_ok=True)
+        # Shift .3->.4, .2->.3, .1->.2 (oldest, events.log.4, is simply
+        # overwritten -- that is the intended drop), then events.log->.1.
+        oldest = self._events_log.with_name(f"{self._events_log.name}.{self._EVENTS_LOG_ARCHIVES}")
+        try:
+            oldest.unlink()
+        except FileNotFoundError:
+            pass
+        for index in range(self._EVENTS_LOG_ARCHIVES - 1, 0, -1):
+            src = self._events_log.with_name(f"{self._events_log.name}.{index}")
+            dst = self._events_log.with_name(f"{self._events_log.name}.{index + 1}")
+            if src.exists():
+                os.replace(src, dst)
+        os.replace(self._events_log, self._events_log.with_name(f"{self._events_log.name}.1"))
+
     # -- authority / signature helpers --------------------------------------
 
     def _verify_bundle_signature(self, parsed: dict) -> None:
@@ -642,31 +710,46 @@ class TrustEngine:
         Fetched outside all locks; this method takes the trust lock only for the
         accept/persist critical section (SP-9). Raises ``SkillTrustError`` on
         every refusal (fail-closed), so a caller maps the reason uniformly.
+
+        R-9/§5.6: every acceptance or refusal is recorded to ``events.log``
+        (observability only -- never read by any control path, SP-8).
         """
         with self._lock:
-            now = self._observe_clock()
-            if now is None:
-                raise SkillTrustError("clock-unavailable")
             try:
-                parsed = _parse_bundle(bundle) if isinstance(bundle, dict) else _require_exact_keys(bundle, _BUNDLE_KEYS)
-            except SkillTrustError:
+                now = self._observe_clock()
+                if now is None:
+                    raise SkillTrustError("clock-unavailable")
+                try:
+                    parsed = _parse_bundle(bundle) if isinstance(bundle, dict) else _require_exact_keys(bundle, _BUNDLE_KEYS)
+                except SkillTrustError:
+                    raise
+                if parsed["origin"] != expected_origin:
+                    raise SkillTrustError("origin-mismatch")
+                # canonical size bound is enforced inside verify via canonicalize.
+                self._verify_bundle_signature(parsed)
+                self._check_freshness(parsed, now)
+                prev = self._states.get(parsed["origin"])
+                if prev is not None:
+                    if parsed["sequence"] <= prev["bundle"]["sequence"]:
+                        raise SkillTrustError("sequence-not-monotonic")
+                    if _parse_iso_ms(parsed["issuedAt"]) <= _parse_iso_ms(prev["bundle"]["issuedAt"]):
+                        raise SkillTrustError("issued-at-not-monotonic")
+                accepted_at = now
+                self._commit_state(source_id, parsed["origin"], parsed, accepted_at)
+                was_quarantined = self._clock_rollback
+                self._clock_rollback = False
+                self._persist_clock()
+                self._persist_bundle(source_id, parsed["origin"], parsed, accepted_at)
+            except SkillTrustError as exc:
+                self._log_event("bundle_refused", sourceId=source_id, origin=expected_origin, reason=exc.reason)
                 raise
-            if parsed["origin"] != expected_origin:
-                raise SkillTrustError("origin-mismatch")
-            # canonical size bound is enforced inside verify via canonicalize.
-            self._verify_bundle_signature(parsed)
-            self._check_freshness(parsed, now)
-            prev = self._states.get(parsed["origin"])
-            if prev is not None:
-                if parsed["sequence"] <= prev["bundle"]["sequence"]:
-                    raise SkillTrustError("sequence-not-monotonic")
-                if _parse_iso_ms(parsed["issuedAt"]) <= _parse_iso_ms(prev["bundle"]["issuedAt"]):
-                    raise SkillTrustError("issued-at-not-monotonic")
-            accepted_at = now
-            self._commit_state(source_id, parsed["origin"], parsed, accepted_at)
-            self._clock_rollback = False
-            self._persist_clock()
-            self._persist_bundle(source_id, parsed["origin"], parsed, accepted_at)
+            if was_quarantined:
+                # Quarantine EXIT (§5.6/§14.1) -- only a strictly newer signed
+                # bundle can clear it; recorded once, at the clearing accept.
+                self._log_event("clock_rollback_quarantine_cleared", sourceId=source_id, origin=parsed["origin"])
+            self._log_event(
+                "bundle_accepted", sourceId=source_id, origin=parsed["origin"], sequence=parsed["sequence"]
+            )
             return {
                 "accepted": True,
                 "origin": parsed["origin"],
@@ -717,42 +800,52 @@ class TrustEngine:
 
         Fail-closed: raises ``SkillTrustError`` on any refusal. Reads local
         state only.
+
+        R-9/§5.6: the verdict (accepted or the refusal reason) is recorded to
+        ``events.log`` -- observability only.
         """
         with self._lock:
-            state = self.require_fresh_origin(origin)
-            keys = state["keys"]
-            if key_id not in keys:
-                for o, s in self._states.items():
-                    if o != origin and key_id in s["keys"]:
-                        raise SkillTrustError("origin-mismatch")
-                raise SkillTrustError("untrusted-key")
-            if key_id in state["revokedKeyIds"]:
-                raise SkillTrustError("revoked-key")
-            payload = {
-                "digest": digest,
-                "keyId": key_id,
-                "origin": origin,
-                "skillId": skill_id,
-            }
-            if not verify_signature(payload, signature, keys[key_id]):
-                raise SkillTrustError("signature-invalid")
-            # Skill revocation scan (digest-optional) BEFORE pin check -- so a
-            # digest that is both pinned-mismatched and revoked resolves to
-            # revoked-skill (F-2, §5.3).
-            for rev in state["bundle"]["revocations"]:
-                if rev["kind"] != "skill":
-                    continue
-                if rev["skillId"] != skill_id:
-                    continue
-                if "digest" not in rev or rev["digest"] == digest:
-                    raise SkillTrustError("revoked-skill")
-            # Digest pin (anti-rollback, O-1).
-            pins = state["pins"]
-            if skill_id in pins and pins[skill_id] != digest:
-                raise SkillTrustError("digest-not-current")
-            # Capability bound (R-7 pilot).
-            if not set(required_capabilities) <= {"read"}:
-                raise SkillTrustError("capability-unsupported")
+            try:
+                state = self.require_fresh_origin(origin)
+                keys = state["keys"]
+                if key_id not in keys:
+                    for o, s in self._states.items():
+                        if o != origin and key_id in s["keys"]:
+                            raise SkillTrustError("origin-mismatch")
+                    raise SkillTrustError("untrusted-key")
+                if key_id in state["revokedKeyIds"]:
+                    raise SkillTrustError("revoked-key")
+                payload = {
+                    "digest": digest,
+                    "keyId": key_id,
+                    "origin": origin,
+                    "skillId": skill_id,
+                }
+                if not verify_signature(payload, signature, keys[key_id]):
+                    raise SkillTrustError("signature-invalid")
+                # Skill revocation scan (digest-optional) BEFORE pin check --
+                # so a digest that is both pinned-mismatched and revoked
+                # resolves to revoked-skill (F-2, §5.3).
+                for rev in state["bundle"]["revocations"]:
+                    if rev["kind"] != "skill":
+                        continue
+                    if rev["skillId"] != skill_id:
+                        continue
+                    if "digest" not in rev or rev["digest"] == digest:
+                        raise SkillTrustError("revoked-skill")
+                # Digest pin (anti-rollback, O-1).
+                pins = state["pins"]
+                if skill_id in pins and pins[skill_id] != digest:
+                    raise SkillTrustError("digest-not-current")
+                # Capability bound (R-7 pilot).
+                if not set(required_capabilities) <= {"read"}:
+                    raise SkillTrustError("capability-unsupported")
+            except SkillTrustError as exc:
+                self._log_event(
+                    "artifact_refused", origin=origin, skillId=skill_id, digest=digest, reason=exc.reason
+                )
+                raise
+            self._log_event("artifact_verified", origin=origin, skillId=skill_id, digest=digest)
 
     # -- artifact evidence persistence (§5.6) -------------------------------
 
@@ -814,7 +907,11 @@ class TrustEngine:
 
     def scan_revocations_for(self, origin: str, installed: list[dict]) -> list[dict]:
         """Given [{skillId, digest, keyId, active}], return the subset the
-        origin's current bundle revokes or pins-out. Reporting only."""
+        origin's current bundle revokes or pins-out. Reporting only.
+
+        O-2/R-9: the report is also written to ``events.log`` when non-empty
+        (an empty scan is not worth a log line every refresh).
+        """
         with self._lock:
             state = self._states.get(origin)
             if state is None:
@@ -838,6 +935,8 @@ class TrustEngine:
                     affected = True
                 if affected:
                     hits.append({"skillId": sid, "digest": dig, "active": rec.get("active", False)})
+            if hits:
+                self._log_event("revocations_affecting_installed", origin=origin, hits=hits)
             return hits
 
 
