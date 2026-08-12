@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { db } from './storage.js';
 import { publishOnly } from './events.js';
 import { safeMaterializeReceipt } from './receipts.js';
+import { legacyStatusTransition } from './approvalWriter.js';
 
 /** A decided approval row, with everything the re-mint / reject needs. */
 export interface DecidedApproval {
@@ -49,11 +50,17 @@ export function decideApproval(
   decision: 'APPROVE' | 'REJECT',
 ): DecidedApproval | null {
   const status = decision === 'APPROVE' ? 'approved' : 'rejected';
-  const info = db.prepare(
-    `UPDATE tool_approvals
-        SET status = ?, decided_at = CURRENT_TIMESTAMP
-      WHERE approval_id = ? AND status = 'pending'`,
-  ).run(status, approvalId);
+  // M-1/M-2 (§3.1): `tool_approvals.status` has exactly ONE writer, and it
+  // lives in approvalWriter.ts. This legacy (flag-off) path therefore
+  // delegates its guarded transition there rather than issuing a second
+  // UPDATE of its own.
+  //
+  // The predicate is byte-identical to the one this function used to run
+  // inline -- `WHERE approval_id=? AND status='pending'` -- so flag-off
+  // behaviour, including first-decision-wins and replay-harmlessness, is
+  // unchanged. What changes is only WHERE the statement lives, which is
+  // what makes "one centralized writer" auditable rather than aspirational.
+  const info = legacyStatusTransition(db, approvalId, status);
 
   if (info.changes === 0) return null; // unknown or already-decided
 
