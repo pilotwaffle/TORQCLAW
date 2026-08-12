@@ -54,7 +54,12 @@ import {
   type BootstrapDb,
 } from '@torqclaw/collab';
 import type { PrincipalBinding } from './principalBridge.js';
-import { DATA_DIR } from './storage.js';
+import { DATA_DIR, db as stateDb } from './storage.js';
+import {
+  validatePresentingSurface,
+  bindingFor,
+  type ConnectionAuthContext,
+} from './surfaceGate.js';
 
 const PRINCIPAL_PEPPER_SECRET_NAME = 'TORQCLAW/principal-pepper';
 
@@ -131,3 +136,58 @@ export function verifySurfaceCredential(credential: string): PrincipalBinding | 
     return null;
   }
 }
+
+/**
+ * C1-5 — resolve the connect-path identity, preferring a REAL C1 surface.
+ *
+ * This is the seam server.ts calls. It runs step 2 of the §2.6 ordered
+ * gate (`validatePresentingSurface`) against the C1 `surfaces` /
+ * `surface_credentials` tables. On success the caller gets a
+ * `ConnectionAuthContext` — server-derived, connection-scoped, carrying
+ * the auth epoch and capability revision that later seams recheck.
+ *
+ * WHY THE C0.1 FALLBACK REMAINS
+ * ------------------------------
+ * C0.1 credentials live in `principal_credentials` and predate the
+ * `surfaces` table entirely. An installation that authenticated fine
+ * yesterday must keep authenticating today: C1 is additive (§1.5), so a
+ * credential with no C1 surface row falls back to the C0.1 derivation with
+ * its documented `surfaceId = credentialId` stand-in. That path yields no
+ * ConnectionAuthContext, because there is no surface projection to derive
+ * one from — which is correct: such a connection holds no C1 capability
+ * or authority, and every C1 check it meets denies fail-closed.
+ *
+ * Order matters: the C1 path is tried FIRST so a surface that has been
+ * properly provisioned is never silently downgraded to the weaker legacy
+ * derivation.
+ *
+ * Returns null on total failure, which the caller renders as the same
+ * AUTH_FAILED + close(4001) as a bad root token (M-1).
+ */
+export function resolveConnectIdentity(
+  credential: string,
+): { binding: PrincipalBinding; auth: ConnectionAuthContext | null } | null {
+  try {
+    const pepper = getSecretStore().get(PRINCIPAL_PEPPER_SECRET_NAME);
+    if (!pepper) return null;
+
+    const collabDb = getCollabDb() as unknown as Database.Database;
+
+    // C1 path first.
+    const ctx = validatePresentingSurface(
+      { collabDb, stateDb, principalPepper: pepper },
+      credential,
+    );
+    if (ctx !== null) return { binding: bindingFor(ctx), auth: ctx };
+
+    // C0.1 legacy fallback (see above).
+    const legacy = verifySurfaceCredential(credential);
+    if (legacy !== null) return { binding: legacy, auth: null };
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export type { ConnectionAuthContext };
