@@ -157,10 +157,15 @@ bytes and verifying their digest — never governance alone (the GS-ACCEPT F-1
 divergence). **A governed disable/removal surface still does not exist**
 (GS-DISABLE, unscoped); rolling back a disabled skill re-enables it.
 
-It stays **off** unless `TORQCLAW_GOVERNED_SKILLS` is set. It remains off until
-a live acceptance run (GS-ACCEPT) boots a real agent against the shipped binary
-and a soak follows — unit and integration tests alone are not treated as
-sufficient evidence that a control is live.
+**Operator ruling 2026-08-11: governed skills are ON for this deployment**
+(`TORQCLAW_GOVERNED_SKILLS=1` in the operator's user environment). The
+prerequisite evidence existed: GS-ACCEPT booted a real agent against the
+shipped binary (receipt: 8 passed / 2 xfailed at `83690f3`), its blocking
+finding was closed by GS-ROLLBACK, and the acceptance suite re-ran green on
+the merged tree. The operator collapsed the separate soak window into live
+operation — governed mode IS the soak, monitored in use, with flag-off as
+the immediate rollback. The flag itself still defaults off in code: a fresh
+deployment must still opt in explicitly.
 
 Skills reach the queue by operator paste and digest-bound review. **Remote skill
 distribution is not implemented**: no downloader, no HTTPS bounds, no pinned
