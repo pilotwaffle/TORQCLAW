@@ -87,11 +87,25 @@ def _read_bounded(path: Path, limit: int) -> bytes:
     return raw
 
 
-def _looks_like_private_key(value: str) -> bool:
-    # Refuse anything that parses as a private key PEM/DER (public-key-only).
+def _require_public_key(value: str) -> None:
+    # The real public-key-only control: the authority value MUST parse as an
+    # Ed25519 SPKI public key -- the same enforcement the trust engine applies
+    # at construction (skill_trust.load_public_key). A private key (PEM-armored
+    # or raw DER) cannot parse as an SPKI *public* key, so it fails closed here
+    # rather than relying on a "PRIVATE KEY" substring heuristic that a raw-DER
+    # private blob would slip past. G2A residual-risk closure.
+    from . import skill_trust
+
     if "PRIVATE KEY" in value:
-        return True
-    return False
+        # Fast, explicit rejection of the common PEM-armored mistake with a
+        # clearer message than the generic parse failure below.
+        raise SkillRemoteConfigError("private key material is forbidden")
+    try:
+        skill_trust.load_public_key(value)
+    except Exception as exc:  # noqa: BLE001 - any parse/type failure is fatal
+        raise SkillRemoteConfigError(
+            "authority publicKey must be an Ed25519 SPKI public key"
+        ) from exc
 
 
 def load_config() -> dict:
@@ -133,8 +147,7 @@ def load_config() -> dict:
                 raise SkillRemoteConfigError("authority unexpected fields")
             _require_str(auth["keyId"], "keyId", 128)
             pk = _require_str(auth["publicKey"], "publicKey", 256)
-            if _looks_like_private_key(pk):
-                raise SkillRemoteConfigError("private key material is forbidden")
+            _require_public_key(pk)
         for opt in ("connectTimeoutMs", "readTimeoutMs"):
             if opt in spec:
                 v = spec[opt]

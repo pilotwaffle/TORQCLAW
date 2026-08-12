@@ -101,6 +101,40 @@ def test_config_rejects_private_key(data_dir):
         s.load_config()
 
 
+def test_config_rejects_raw_der_private_key(data_dir):
+    # G2A residual-risk closure: a raw base64url-DER private key with NO PEM
+    # armor slips past a "PRIVATE KEY" substring lint, but must still be
+    # refused because it does not parse as an Ed25519 SPKI *public* key.
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding,
+        NoEncryption,
+        PrivateFormat,
+    )
+
+    priv = Ed25519PrivateKey.generate()
+    der = priv.private_bytes(
+        Encoding.DER, PrivateFormat.PKCS8, NoEncryption()
+    )
+    raw_der_b64url = t._encode_b64url(der) if hasattr(t, "_encode_b64url") else (
+        base64.urlsafe_b64encode(der).rstrip(b"=").decode("ascii")
+    )
+    src = _valid_source()
+    src["authorities"][0]["publicKey"] = raw_der_b64url
+    _write_config(data_dir, {"src": src})
+    with pytest.raises(s.SkillRemoteConfigError):
+        s.load_config()
+
+
+def test_config_rejects_garbage_public_key(data_dir):
+    # A value that is neither a private key nor a valid SPKI public key is
+    # refused at config parse (the lint IS the real control now).
+    src = _valid_source()
+    src["authorities"][0]["publicKey"] = "not-a-real-key"
+    _write_config(data_dir, {"src": src})
+    with pytest.raises(s.SkillRemoteConfigError):
+        s.load_config()
+
+
 def test_resolve_unknown_source(data_dir):
     _write_config(data_dir, {"src": _valid_source()})
     config = s.load_config()
