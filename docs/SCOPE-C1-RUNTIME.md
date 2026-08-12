@@ -24,10 +24,10 @@ Operator authorization for the C1 runtime build recorded 2026-08-11.
 
 | Gate | Result |
 |---|---|
-| TS suite | **1506 passed / 0 failed / 73 files** |
+| TS suite | **1529 passed / 0 failed / 74 files** (post-G2A-round-1) |
 | Reachability | **PASS — 99 modules** (baseline 95; +4 C1 modules), `skillTrust.ts` still the only declared dormant |
 | Gateway build | clean (`turbo run build --filter=@torqclaw/gateway...`, 6/6) |
-| Built-artifact (§5(c)) | 3/3 — accept/refuse on booted dist, C1 migration self-run, A11 stale-dist |
+| Built-artifact (§5(c)) | **4/4** — self-migration of BOTH databases, accept/refuse, task-origin schema, A11 stale-dist |
 | SI-4 flag-off | byte-identical wire transcript, **0 rows** in all three C1 state tables |
 | Existing `authz.test.ts` | 61/61 — H-1 preserved every legacy decision |
 
@@ -37,14 +37,19 @@ they gain entry points; all four new modules are transitively reachable from
 
 ### Excluded from the run, with cause
 
-Three files are excluded and are **not** C1 regressions — all three fail
+Two paths are excluded and are **not** C1 regressions — both fail
 identically on `master` in this worktree:
 
 - `tests/failover/**`, `tests/collab-connect-dataflow.test.ts` — the
   worktree's Python venv is broken (`ModuleNotFoundError:
   pywin32_bootstrap`); the same tests fail on the main repo checkout.
-- `tests/collab/harness.test.ts` — a 1M-UUID loop asserting `< 30000ms`,
-  observed at ~48s under parallel load. Machine-speed assertion, not logic.
+
+**Correction (G2A round 1): the round-1 record also excluded
+`tests/collab/harness.test.ts`, and that was an over-claim.** It passes —
+19/19 in G2A's run and in re-verification here, and green in the full suite.
+The single observed failure was a one-off timing blip on a 1M-UUID loop
+under parallel load, not a standing condition. It is now un-excluded and
+counted in the numbers above.
 
 ## 3. Deletion probes
 
@@ -128,9 +133,16 @@ which tests the lock itself, deliberately bypasses the fast path and stays
 5. **Secret-free audit is enforced at write time**, not by convention — a
    forbidden-key walk refuses the write. A documented-only convention is the
    unenforced-claim pattern this repo keeps re-learning.
-6. **Surface context is rebuilt per command**, never cached on the
-   connection, so a revocation committing first is seen by the next command
-   (§1.4).
+6. **Surface context is read LIVE per command** — both the authority check
+   and the role check.
+
+   **Correction (G2A round 1).** The round-1 record claimed this was already
+   true and it was only half true: `holdsAuthority` was always a live
+   closure, but `surfaceRole` was a value copied from `connectionAuth` at
+   connect and never refreshed. The sentence "never cached on the
+   connection" was therefore accurate about the authority and wrong about
+   the role. G2A reproduced the consequence live — see §8. Both are now
+   functions closing over `state.db`.
 
 ## 7. Owed / explicitly out of scope
 
@@ -152,3 +164,90 @@ which tests the lock itself, deliberately bypasses the fast path and stays
 - **Wall-clock timing fixture** for existence-oblivious verify remains OWED
   from C0 — this slice asserts HMAC-operation counts plus the mechanism
   (probe 1), not wall-clock.
+
+## 8. G2A round 1 — APPROVE-WITH-NOTES, two MINOR defects fixed
+
+Verdict: no blocking defects. Two MINOR defects and two cosmetic notes,
+all fixed on `c1-runtime-work`.
+
+### DEFECT 1 (reproduced live by G2A) — stale `surfaceRole` defeated CT-2 demotion
+
+`surfaceAuthz.holdsAuthority` was a live closure, but `surfaceAuthz.surfaceRole`
+was copied from `connectionAuth` at connect (`server.ts:157`) and consumed at
+`authz.ts:213` — never refreshed for the life of the socket.
+
+The reachable consequence: an operator-role surface with a live `approve`
+grant connects; the operator then DEMOTES it to `agent` through
+`activateSurfaceProjection`'s `ON CONFLICT DO UPDATE` path **without**
+revoking. The projection then says `agent`, but `revoked_at` is NULL and the
+epoch is unchanged, so `holdsAuthority` stays true — and the connection's
+stale `'operator'` role sails through the belt-and-suspenders check.
+`authorize()` returned **ALLOW** for `APPROVE_TOOL`.
+
+Fixed structurally on **both** routes G2A offered, belt AND suspenders:
+
+- **(b) at the source.** `activateSurfaceProjection` now bumps `auth_epoch`
+  on ANY role change, inside a transaction that reads the previous row and
+  writes the new one atomically. Because `holdsAuthority` matches on the
+  current epoch, every live grant dies at the authority seam itself — the
+  invalidation no longer depends on each caller remembering to revoke first.
+  The bump is deliberately **surgical**: a re-activation that does not change
+  the role leaves the epoch and grants intact, because gratuitously
+  destroying live grants on ordinary capability widening would make
+  provisioning unusable and teach operators to route around the control.
+- **(a) at the decision.** `SurfaceAuthzContext.surfaceRole` (a value) became
+  `currentRole()` (a function). `server.ts` supplies
+  `liveSurfaceSecurity(db, surfaceId)?.surfaceRole ?? null`; null denies.
+
+Tests: `tests/collab-h1-operator-subordination.test.ts` gained three cases —
+demotion-without-revocation on an already-open connection is refused
+(**RED before fix: `expected true to be false`; GREEN after**), the epoch
+bump kills the grant at the authority seam (**RED before: `expected 1 to be
+greater than 1`; GREEN after**), and a same-role re-activation preserves the
+epoch and grant. The suite's `ctxFor` helper now mirrors production by
+reading the role live; only the deliberate role-mismatch case passes a
+claimed role.
+
+### DEFECT 2 — `collab.db` had no production migration caller
+
+`getCollabDb()` opened the database but never migrated it. Neither C1
+migration — nor **C0's `runCollaborationMigration`** — had any production
+caller, and the built-artifact test had to create all three schemas by hand,
+which is exactly why the gap survived: the test proved the tables could
+exist, not that the shipped artifact could create them.
+
+Fixed at the initialization seam: `getCollabDb()` now runs all **three**
+migrations once, when the handle is first opened, so the fix is not
+C1-partial. Each is independently guarded and idempotent. Failures are
+swallowed by design — this is the connect path, and an unmigrated database
+simply authenticates nobody (AUTH_FAILED, indistinguishable from an unknown
+credential) rather than crashing the gateway.
+
+The built-artifact test was strengthened to match: `bootAndMigrate()` boots
+the real artifact against an empty data dir and asserts it created
+`principals`/`principal_credentials` (C0), `surfaces`/`surface_credentials`
+(C1-1/C1-2), `collab_surface_audit` (C1-6), exactly three rows in
+`collab_schema_migrations`, and all three `state.db` C1 tables — before any
+data is seeded. A second boot proves idempotency (still 3 rows). The collab
+migrations are no longer imported by that test file at all, so the
+hand-seeding cannot quietly return.
+
+### NOTES (both fixed)
+
+- `ops/reachability.mjs:68-78` said C1 "remains a future slice" — stale.
+  Now records that C1 is reachable on its own (`server.ts → collabIdentity
+  → surfaceGate → surfaceSecurity`, plus collab's `surfaces.ts` /
+  `surfaceStore.ts`) while C2/C3/C4 remain future.
+- The excluded-files list over-claimed: `tests/collab/harness.test.ts`
+  passes 19/19. Un-excluded; §2 corrected.
+
+### Post-fix gates
+
+| Gate | Result |
+|---|---|
+| TS suite | **1529 passed / 0 failed / 74 files** |
+| `collab-h1-operator-subordination` | 13/13 (was 10; +3 demotion cases) |
+| `authz.test.ts` | 61/61 |
+| Built-artifact | 4/4 (was 3; +self-migration proof) |
+| Reachability | PASS — 99 modules |
+| Gateway build | clean, 6/6 |

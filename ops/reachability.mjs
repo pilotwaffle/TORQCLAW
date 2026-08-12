@@ -71,11 +71,18 @@ const DORMANT = {
   // imports it via collabIdentity.ts's verifySurfaceCredential (connect-path
   // identity derivation from a verified surface credential). The gate finds
   // it reachable on its own now -- exactly the intended lifecycle this
-  // comment block describes for every entry here. This does NOT mean collab
-  // is fully wired: TORQCLAW_COLLAB_ENABLED still defaults off, and only the
-  // credential-verification slice (collabIdentity.ts/credentials.ts) is
-  // actually exercised on the connect path; C1 surface identity, C2 approval
-  // broker, C3 channels, and C4 task rooms remain future slices.
+  // comment block describes for every entry here.
+  //
+  // C1 (surface identity) has since landed and is likewise reachable on its
+  // own: server.ts -> collabIdentity.ts -> surfaceGate.ts ->
+  // surfaceSecurity.ts, plus collab's surfaces.ts / surfaceStore.ts. The
+  // connect path runs the §2.6 ordered resume gate, collab.db self-migrates
+  // at first open, and authz.ts intersects operator authority with the
+  // presenting surface (H-1).
+  //
+  // This still does NOT mean collab is fully wired: TORQCLAW_COLLAB_ENABLED
+  // defaults off, and C2 (approval broker), C3 (channels) and C4 (task
+  // rooms) remain future slices.
 };
 
 /** Only flag modules with real substance; tiny helpers are noise. */
