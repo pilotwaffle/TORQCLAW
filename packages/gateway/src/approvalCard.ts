@@ -130,16 +130,29 @@ function summarizeValue(key: string, value: unknown): ApprovalCardArgSummary {
   if (typeof value === 'object') {
     return { key, type: 'object', size: Object.keys(value as object).length, withheld: true };
   }
-  if (typeof value === 'boolean') return { key, type: 'boolean', value: String(value) };
-  if (typeof value === 'number') return { key, type: 'number', value: String(value) };
-
+  // THE ALLOWLIST GATE RUNS FIRST, FOR EVERY PRIMITIVE TYPE.
+  //
+  // An earlier version tested `typeof value === 'boolean' | 'number'`
+  // BEFORE this gate and stringified those unconditionally, so
+  // `{ account: 4111111111111111, pin: 123456 }` crossed the wire and
+  // entered the persisted event log verbatim. That was a hole in this
+  // module's own fail-closed contract, opened by the tacit assumption that
+  // "a number cannot be a secret" -- but card numbers, PINs, account ids
+  // and numeric tokens are exactly that.
+  //
+  // The allowlist now decides WHETHER a value is shown; the primitive type
+  // only decides how an already-allowed value is rendered.
+  const type: ApprovalCardArgSummary['type'] =
+    typeof value === 'boolean' ? 'boolean'
+      : typeof value === 'number' ? 'number'
+        : 'string';
   const str = String(value);
   if (!VALUE_VISIBLE_KEYS.has(key)) {
-    // Not allowlisted: report shape only. This is the fail-closed default
-    // that makes an unclassified new key harmless.
-    return { key, type: 'string', size: str.length, withheld: true };
+    // Not allowlisted: report shape only. The fail-closed default that
+    // makes an unclassified new key harmless, whatever its type.
+    return { key, type, size: str.length, withheld: true };
   }
-  return { key, type: 'string', value: capped(redactKnownSecretText(str), MAX_VALUE_CHARS) };
+  return { key, type, value: capped(redactKnownSecretText(str), MAX_VALUE_CHARS) };
 }
 
 /**

@@ -443,8 +443,13 @@ describe('C2-7 delivery projection (props 5/6; A10)', () => {
     expect(actionableForSurface(db, OP_SURFACE)).toHaveLength(1);
     const { dispatchRequestId } = approvedGrant();
     void dispatchRequestId;
-    // the newly approved one is not pending, so it is not actionable
+    // The newly approved one is not pending, so it is not actionable.
+    // D-7: anchor the COUNT first. `.every` on an empty array is vacuously
+    // true, so without this the assertion would still pass if the view had
+    // gone blank entirely -- the opposite of what it claims to check.
     const stillActionable = actionableForSurface(db, OP_SURFACE);
+    expect(stillActionable.length, 'the view must be non-empty for .every to mean anything')
+      .toBe(1);
     expect(stillActionable.every((d) => d.deliveryState === 'pending')).toBe(true);
   });
 });

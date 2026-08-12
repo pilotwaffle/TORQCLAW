@@ -63,6 +63,36 @@ describe('C2-6 card redaction + bounding (prop 8)', () => {
     expect(s.value).not.toContain(SECRET);
   });
 
+  // D-4: numbers and booleans used to bypass the allowlist entirely.
+  it('D-4: a NUMERIC value on a non-allowlisted key is withheld, not stringified', () => {
+    const c = card('{"account":4111111111111111,"pin":123456}');
+    const account = c.argSummaries.find((s) => s.key === 'account')!;
+    expect(account.type).toBe('number');
+    expect(account.withheld, 'a number on an unclassified key must be withheld').toBe(true);
+    expect(account.value).toBeUndefined();
+    expect(c.argSummaries.find((s) => s.key === 'pin')!.withheld).toBe(true);
+    // The decisive check: neither number may appear anywhere in the card.
+    const serialized = JSON.stringify(c);
+    expect(serialized).not.toContain('4111111111111111');
+    expect(serialized).not.toContain('123456');
+  });
+
+  it('D-4: a BOOLEAN on a non-allowlisted key is withheld too', () => {
+    const c = card('{"isAdmin":true}');
+    const s = c.argSummaries[0]!;
+    expect(s.type).toBe('boolean');
+    expect(s.withheld).toBe(true);
+    expect(s.value).toBeUndefined();
+  });
+
+  it('D-4: allowlisted keys still render numbers/booleans normally', () => {
+    // The fix must not withhold everything -- an allowlisted key keeps its
+    // value, which is what makes the card useful at all.
+    const c = card('{"path":"/tmp/x","name":42}');
+    expect(c.argSummaries.find((s) => s.key === 'name')!.value).toBe('42');
+    expect(c.argSummaries.find((s) => s.key === 'path')!.value).toBe('/tmp/x');
+  });
+
   it('nested objects and arrays are withheld wholesale, with a size hint only', () => {
     const c = card('{"payload":{"deep":{"secret":"nope"}},"items":["a","b","c"]}');
     const payload = c.argSummaries.find((s) => s.key === 'payload')!;
