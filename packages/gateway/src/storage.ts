@@ -7,11 +7,6 @@ import { GatewayRequestSchema, type GatewayRequest } from '@torqclaw/contracts';
 import { runPersistedDiagnosticMigrationOnce } from './persistedError.js';
 
 const DATA_DIR = process.env.TORQCLAW_DATA_DIR || join(homedir(), '.torqclaw');
-mkdirSync(DATA_DIR, { recursive: true });
-
-export const db: Database.Database = new Database(join(DATA_DIR, 'state.db'));
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
 
 const here = dirname(fileURLToPath(import.meta.url));
 const schemaText = readFileSync(join(here, '..', 'db', 'schema.sql'), 'utf8');
@@ -22,26 +17,126 @@ const resilienceEnd = schemaText.indexOf(RESILIENCE_END);
 if (resilienceStart < 0 || resilienceEnd < resilienceStart) throw new Error('gateway schema resilience markers are invalid');
 const legacySchemaText = schemaText.slice(0, resilienceStart);
 const resilienceSchemaText = schemaText.slice(resilienceStart, resilienceEnd + RESILIENCE_END.length);
-// Feature-off compatibility: resilience projection DDL is deferred until the
-// feature-on branch explicitly calls ensureResilienceProjection().
-db.exec(isResilienceFlagOn() ? schemaText : legacySchemaText);
 
-// Idempotent migration: add tasks.telemetry_json on an existing dev DB without
-// the column (PRAGMA check, not a bare ALTER that throws on second boot).
-const taskCols = db.prepare(`PRAGMA table_info(tasks)`).all() as { name: string }[];
-if (!taskCols.some((c) => c.name === 'telemetry_json')) {
-  db.exec(`ALTER TABLE tasks ADD COLUMN telemetry_json TEXT`);
+/**
+ * CROSS-CUTTING FINDING 9 — the module-level handle was a test-isolation
+ * hazard, and this is the fix.
+ *
+ * WHAT WAS WRONG
+ * --------------
+ * `export const db = new Database(...)` opened the file as an import side
+ * effect, reading TORQCLAW_DATA_DIR exactly once, at whichever moment the
+ * module graph happened to pull this module in. Consequences:
+ *
+ *   - A test could only choose its data dir by setting the env var BEFORE
+ *     the first transitive import of storage.ts. That ordering is not
+ *     something a test file can actually guarantee, so suites resorted to
+ *     top-of-file `process.env.TORQCLAW_DATA_DIR = mkdtempSync(...)`
+ *     statements above their imports.
+ *   - Once opened, the handle could never be re-pointed, so two test files
+ *     in one worker shared one state.db and could see each other's rows.
+ *     That is the suspected root of the transient parallel-suite flakes.
+ *
+ * THE FIX, AND ITS ONE HARD CONSTRAINT
+ * ------------------------------------
+ * Opening is now LAZY (first property access) and the resolved handle can
+ * be dropped and re-resolved via `resetStateDbForTest()`.
+ *
+ * The hard constraint is that consumers do `import { db }` and then call
+ * `db.prepare(...)` AT MODULE SCOPE (approvals.ts and receipts.ts both
+ * do). So `db` must remain a stable, always-valid object reference even
+ * though what it points at can change. A getter export cannot do that; a
+ * Proxy can. Every property access forwards to the currently-resolved
+ * handle, so existing call sites are untouched and production behaviour is
+ * byte-identical -- the same file, the same pragmas, the same migrations,
+ * in the same order. The only difference is WHEN the open happens, and in
+ * production the first access is at boot either way.
+ *
+ * Methods are bound to the real handle because better-sqlite3 is a native
+ * addon whose methods require their true receiver -- calling them with the
+ * Proxy as `this` would throw.
+ */
+let handle: Database.Database | null = null;
+
+function openStateDb(): Database.Database {
+  const dir = process.env.TORQCLAW_DATA_DIR || DATA_DIR;
+  mkdirSync(dir, { recursive: true });
+  const opened = new Database(join(dir, 'state.db'));
+  opened.pragma('journal_mode = WAL');
+  opened.pragma('foreign_keys = ON');
+
+  // Feature-off compatibility: resilience projection DDL is deferred until
+  // the feature-on branch explicitly calls ensureResilienceProjection().
+  opened.exec(isResilienceFlagOn() ? schemaText : legacySchemaText);
+
+  // Idempotent migration: add tasks.telemetry_json on an existing dev DB
+  // without the column (PRAGMA check, not a bare ALTER that throws on
+  // second boot).
+  const taskCols = opened.prepare(`PRAGMA table_info(tasks)`).all() as { name: string }[];
+  if (!taskCols.some((c) => c.name === 'telemetry_json')) {
+    opened.exec(`ALTER TABLE tasks ADD COLUMN telemetry_json TEXT`);
+  }
+
+  // FIX-H: enforce the at-rest diagnostic boundary for historical rows once.
+  // A versioned marker avoids an O(history) scan on every gateway boot. A
+  // crash before the marker is written safely reruns the idempotent
+  // migration.
+  runPersistedDiagnosticMigrationOnce(opened);
+  return opened;
 }
 
-// FIX-H: enforce the at-rest diagnostic boundary for historical rows once.
-// A versioned marker avoids an O(history) scan on every gateway boot. A crash
-// before the marker is written safely reruns the idempotent migration.
-runPersistedDiagnosticMigrationOnce(db);
+function stateDb(): Database.Database {
+  if (handle === null) handle = openStateDb();
+  return handle;
+}
 
-// FIX-H: enforce the at-rest diagnostic boundary for historical rows once.
-// A versioned marker avoids an O(history) scan on every gateway boot. A crash
-// before the marker is written safely reruns the idempotent migration.
-runPersistedDiagnosticMigrationOnce(db);
+/**
+ * TEST-ONLY: drop the resolved handle so the next access re-opens against
+ * the CURRENT TORQCLAW_DATA_DIR.
+ *
+ * Deliberately not called by any production path -- production opens once
+ * at boot and keeps it for the process lifetime, exactly as before. Closing
+ * is best-effort: a handle that is already closed, or busy, must not turn
+ * test teardown into a failure.
+ */
+export function resetStateDbForTest(options: { close?: boolean } = {}): void {
+  const previous = handle;
+  handle = null;
+  // `close: false` DETACHES without closing: the next access opens a fresh
+  // handle, while work still in flight against the old one keeps a valid
+  // connection to finish on.
+  //
+  // Needed when a test re-points the data dir between cases while an async
+  // dispatch from the previous case is still running -- its terminal event
+  // write would otherwise land on a closed connection and surface as an
+  // unhandled rejection that looks exactly like a defect in the code under
+  // test. Closing stays the DEFAULT, because ordinary teardown should not
+  // leak file handles.
+  if (options.close === false) return;
+  try { previous?.close(); } catch { /* teardown must not throw */ }
+}
+
+export const db: Database.Database = new Proxy({} as Database.Database, {
+  get(_target, prop, receiver) {
+    const real = stateDb();
+    const value = Reflect.get(real as object, prop, receiver);
+    // Native better-sqlite3 methods need their real receiver.
+    return typeof value === 'function' ? value.bind(real) : value;
+  },
+  set(_target, prop, value) {
+    return Reflect.set(stateDb() as object, prop, value);
+  },
+  has(_target, prop) { return Reflect.has(stateDb() as object, prop); },
+  getPrototypeOf() { return Reflect.getPrototypeOf(stateDb() as object); },
+  ownKeys() { return Reflect.ownKeys(stateDb() as object); },
+  getOwnPropertyDescriptor(_target, prop) {
+    const d = Reflect.getOwnPropertyDescriptor(stateDb() as object, prop);
+    // A Proxy may only report a non-configurable descriptor if the target
+    // actually has one; the target here is an empty object, so force
+    // configurable to keep the invariant satisfied.
+    return d ? { ...d, configurable: true } : undefined;
+  },
+});
 
 export { DATA_DIR };
 

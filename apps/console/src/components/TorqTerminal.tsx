@@ -832,7 +832,9 @@ function EventRow({
         {isToolApproval && approvalId && !decision && canRenderAction(event, false) && (
           <ToolPermissionCard
             toolName={String(meta.toolName ?? meta.tool_name ?? '')}
-            args={meta.args}
+            argSummaries={meta.argSummaries}
+            argsTruncated={meta.argsTruncated === true}
+            redactionNote={typeof meta.redactionNote === 'string' ? meta.redactionNote : undefined}
             gate={meta.gate}
             onAllow={() => onDecideTool(approvalId, 'APPROVE')}
             onDeny={() => onDecideTool(approvalId, 'REJECT')}
@@ -1152,11 +1154,26 @@ function SkillApprovalCard({
   );
 }
 
+/** One bounded/redacted argument summary, exactly as the gateway emits it. */
+interface ArgSummary {
+  key: string;
+  type: string;
+  value?: string;
+  size?: number;
+  withheld?: boolean;
+}
+
 function ToolPermissionCard({
-  toolName, args, gate, onAllow, onDeny,
+  toolName, argSummaries, argsTruncated, redactionNote, gate, onAllow, onDeny,
 }: {
   toolName: string;
-  args: unknown;
+  /** C2-6 / property 8: raw proposed args are NEVER sent to a client any
+   *  more. The gateway emits bounded, redacted per-key summaries, so this
+   *  card can no longer display secret material the redactor removed —
+   *  and cannot be made to by a client-side change. */
+  argSummaries?: unknown;
+  argsTruncated?: boolean;
+  redactionNote?: string;
   gate?: unknown;
   onAllow: () => void;
   onDeny: () => void;
@@ -1183,13 +1200,17 @@ function ToolPermissionCard({
     : toolName
   ).replace(/_/g, ' ');
 
-  const pretty = useMemo(() => {
-    try { return JSON.stringify(args ?? {}, null, 2); }
-    catch { return String(args); }
-  }, [args]);
-  const TRUNC = 500;
-  const isLong = pretty.length > TRUNC;
-  const shown = expanded || !isLong ? pretty : pretty.slice(0, TRUNC) + '\n…';
+  // Render only what the gateway chose to send. A summary with no `value`
+  // was withheld by server-side policy; the card says so plainly rather
+  // than rendering an empty line the operator would misread as "no
+  // argument".
+  const summaries: ArgSummary[] = useMemo(
+    () => (Array.isArray(argSummaries) ? (argSummaries as ArgSummary[]) : []),
+    [argSummaries],
+  );
+  const SHOW = 6;
+  const isLong = summaries.length > SHOW;
+  const shownSummaries = expanded || !isLong ? summaries : summaries.slice(0, SHOW);
 
   return (
     <div className="ml-2 mt-2 max-w-2xl rounded border border-[#E24B4A]/40 bg-[#E24B4A]/5 p-3">
@@ -1266,13 +1287,34 @@ function ToolPermissionCard({
           <p className="text-[10px] text-neutral-600">{gateFacts.targetsCaption}</p>
         </dl>
       )}
-      <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded bg-black/40 p-2 text-[11px] text-neutral-400">
-        {shown}
-      </pre>
+      {summaries.length > 0 && (
+        <dl className="mt-2 space-y-1 rounded bg-black/40 p-2 text-[11px]">
+          {shownSummaries.map((s) => (
+            <div key={s.key} className="flex gap-2">
+              <dt className="w-28 shrink-0 break-all font-mono text-neutral-500">{s.key}</dt>
+              <dd className="min-w-0 break-all font-mono text-neutral-400">
+                {s.value !== undefined
+                  ? s.value
+                  : <span className="text-neutral-600">
+                      {`<${s.type}${s.size !== undefined ? `, ${s.size}` : ''} — withheld>`}
+                    </span>}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      )}
       {isLong && (
         <button onClick={() => setExpanded((v) => !v)} className="mt-1 text-[10px] text-neutral-500 hover:text-neutral-300">
-          {expanded ? 'show less' : `show all (${pretty.length} chars)`}
+          {expanded ? 'show less' : `show all (${summaries.length} arguments)`}
         </button>
+      )}
+      {argsTruncated && (
+        <p className="mt-1 text-[10px] text-neutral-600">
+          Some arguments were omitted from this summary.
+        </p>
+      )}
+      {redactionNote && (
+        <p className="mt-1 text-[10px] text-neutral-600">{redactionNote}</p>
       )}
       <div className="mt-3 flex gap-2">
         <button onClick={onAllow} className="rounded border border-[#E24B4A]/50 px-3 py-1 text-[11px] text-[#E24B4A] hover:bg-[#E24B4A]/15">

@@ -14,6 +14,12 @@ import { makeEmitter, taskStore } from './events.js';
 import { sessions } from './sessions.js';
 import { cancellations } from './cancellations.js';
 import { registerApproval } from './approvals.js';
+import { registerApprovalC2 } from './c2Broker.js';
+import { frontierGrantRefusal } from './grantAdmission.js';
+import { collabEnabled } from './principalBridge.js';
+import {
+  summarizeArgs, buildActionLabel, redactCardText, REDACTION_NOTE,
+} from './approvalCard.js';
 import { safeMaterializeReceipt, safeMaterializeReceipt as projectReceiptSafely } from './receipts.js';
 import {
   resolveBudgetWithSource,
@@ -129,7 +135,14 @@ export function buildGateFacts(
   args: unknown,
 ): Record<string, unknown> {
   const facts: Record<string, unknown> = {
-    targets: extractPaths(args, entry?.pathArgKeys),
+    // C2-6: `targets` are values lifted verbatim out of the proposed args,
+    // so they are raw argument content and must cross the boundary under
+    // the same redaction discipline as everything else on the card. The
+    // paths themselves remain the point of the field (an operator needs to
+    // see WHAT is being written), so they are redacted and capped rather
+    // than withheld.
+    targets: extractPaths(args, entry?.pathArgKeys)
+      .map((p) => redactCardText(p)),
     targetsSource: 'path-heuristic',
   };
   if (tier === ComputeTier.FRONTIER) {
@@ -229,6 +242,28 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
     }
   }
 
+  // D-2 / §1.4 — FRONTIER fail-closed at the EXECUTOR, not only at
+  // APPROVE_TOOL. The engine's pre-tool hook grants by tool NAME and never
+  // inspects args, so a FRONTIER run carrying gateway-issued
+  // `grantedTools` cannot satisfy the exact-action invariant: nothing
+  // downstream can prove the args about to execute are the args that were
+  // approved.
+  //
+  // Placed BEFORE the engine-availability check deliberately. A security
+  // refusal must not depend on whether the engine happens to be
+  // reachable: on a box with no engine the availability check would mask
+  // this fence entirely, and the control would look proven while being
+  // untested on exactly the machines where the engine DOES answer.
+  //
+  // This is a second fence -- the APPROVE_TOOL guard already refuses
+  // minting a FRONTIER grant -- because a granted request can also arrive
+  // by replay or from a future caller, and "unwired" must never again be
+  // mistaken for "fail-closed".
+  if (frontierGrantFenced(effectiveReq, diag)) {
+    refuseFrontierGrantedRun(req, emit);
+    return;
+  }
+
   // Graceful frontier degradation: don't throw a bare error if the engine
   // never connected — tell the user plainly and offer a local re-run.
   if (diag.tier === ComputeTier.FRONTIER && !isHermesAvailable()) {
@@ -305,7 +340,20 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
       //     no RESULT and skips storeEpisode, so getContextWindow (USER_PROMPT
       //     + RESULT only) can never surface the aborted attempt.
       if (error instanceof ToolApprovalRequired) {
-        const approvalId = registerApproval(req.id, error.toolName, error.args);
+        // C2-2/C2-5 (G2A D-1): under the flag, registration goes through
+        // the C2 broker, so the row carries origin, a finite expiry, and
+        // an immutable binding. Without that binding no grant can ever be
+        // minted, and every approved re-run would be refused at the
+        // admission seam -- which is exactly the state the first C2 build
+        // shipped in.
+        //
+        // registerApprovalC2 returns null with the flag OFF, or when the
+        // evidence a binding requires is absent. The legacy registration
+        // then runs unchanged, and the resulting unbound row is inert
+        // under the flag (§3.9, reissue-required) rather than open.
+        const approvalId =
+          registerApprovalC2(req, diag, error.toolName, error.args)
+          ?? registerApproval(req.id, error.toolName, error.args);
         taskStore.complete(req.id, '', { blockedOn: error.toolName });
         // TCLAW-5A-1: gate facts ride the SAME terminal frame the card renders.
         // LOCAL_EDGE lookup is by the exact namespaced name ollama.ts gated on,
@@ -315,11 +363,30 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
           diag.tier === ComputeTier.LOCAL_EDGE
             ? getRegistry().find((t) => t.name === error.toolName)
             : undefined;
+        // C2-6 / property 8 (operator prop-8 ruling, §3.1, §3.10): the
+        // card carries a BOUNDED, REDACTED summary -- never the model's
+        // raw proposed args.
+        //
+        // This frame goes to the wire AND into the persisted event log, so
+        // `args: error.args` (the shipped behaviour this replaces) put raw
+        // proposed arguments in both. The raw bytes still exist in
+        // tool_approvals.args_json for audit; they simply never leave the
+        // gateway. Authorization never used this view -- it uses the
+        // separately stored action digest -- so nothing is weakened by
+        // withholding it.
+        const canonicalArgsForCard = (() => {
+          try { return JSON.stringify(error.args ?? {}); } catch { return '{}'; }
+        })();
+        const { summaries, truncated } = summarizeArgs(canonicalArgsForCard);
         emit('PENDING_APPROVAL', `Tool ${error.toolName} requires approval`, {
           approvalId,
           toolName: error.toolName,
           requestId: req.id,
-          args: error.args,
+          argSummaries: summaries,
+          argsTruncated: truncated,
+          actionLabel: buildActionLabel(error.toolName, summaries),
+          redactionNote: REDACTION_NOTE,
+          grantScope: 'one-shot',
           gate: buildGateFacts(diag.tier, entry, error.args),
         });
         safeMaterializeReceipt(req.id);
@@ -410,6 +477,45 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
   })();
 }
 
+/**
+ * The FRONTIER grant fence predicate (§1.4, G2A D-2 / N-1).
+ *
+ * ONE rule, consulted by EVERY executor path, because the round-1 defect
+ * and the round-2 finding were the same mistake made twice: a fence that
+ * guards one route while another route reaches the same engine. Round 1
+ * left `admitToolCall`'s FRONTIER refusal unreachable; round 2 found
+ * `dispatchFailover` bypassing the executor fence entirely.
+ *
+ * True when a FRONTIER run carries a gateway-issued grant under the flag.
+ * Such a run cannot satisfy the exact-action invariant -- the engine's
+ * pre-tool hook grants by tool NAME and never inspects args -- so nothing
+ * downstream can prove the args about to execute are the args approved.
+ */
+function frontierGrantFenced(req: GatewayRequest, diag: RouterDiagnostics): boolean {
+  return diag.tier === ComputeTier.FRONTIER
+    && collabEnabled()
+    && (req.payload.grantedTools?.length ?? 0) > 0;
+}
+
+/**
+ * The shared terminal for a fenced FRONTIER run. Fails the task, emits the
+ * explicit refusal, projects the receipt, and clears cancellation state --
+ * the same terminal discipline every other refusal path uses, so a fenced
+ * run is a first-class outcome rather than a silent drop.
+ */
+function refuseFrontierGrantedRun(req: GatewayRequest, emit: ReturnType<typeof makeEmitter>): void {
+  const refusal = frontierGrantRefusal();
+  taskStore.fail(req.id, `REFUSED: ${refusal.reason}`);
+  emit('ERROR', refusal.detail, {
+    refusedCode: refusal.reason,
+    recovery: ['RETRY_LOCAL', 'COPY_DIAGNOSTIC'],
+    prompt: req.payload.prompt,
+    sideEffectNote: 'Nothing ran — the request never reached the cloud engine.',
+  });
+  safeMaterializeReceipt(req.id);
+  cancellations.clear(req.id);
+}
+
 /** Feature gate is deliberately the first executable branch. The legacy path
  * below is unchanged when the flag is off; failover is dynamically imported so
  * it cannot open resilience projection state or add a poll/delay to legacy
@@ -428,6 +534,23 @@ async function dispatchFailover(req: GatewayRequest, diag: RouterDiagnostics): P
   const effectiveReq: GatewayRequest = budget === undefined
     ? req
     : { ...req, constraints: { ...req.constraints, maxCost: budget } };
+
+  // G2A N-1: the THIRD fence site. `dispatch()` routes FRONTIER +
+  // TORQCLAW_PROVIDER_FAILOVER_ENABLED here INSTEAD of dispatchLegacy, so
+  // the executor fence added in round 2 was bypassed entirely whenever
+  // failover was enabled -- runFailoverTask -> executeHermesAttempt
+  // reached the cloud engine under a name-only grant.
+  //
+  // Placed before `taskStore.create` and before the dynamic import of
+  // failover.js, so a fenced run opens no resilience projection state and
+  // touches no engine: same discipline as the legacy fence, which sits
+  // ahead of the availability check for the same reason.
+  if (frontierGrantFenced(effectiveReq, diag)) {
+    taskStore.create(effectiveReq, diag);   // persist BEFORE the terminal
+    refuseFrontierGrantedRun(req, emit);
+    return;
+  }
+
   taskStore.create(effectiveReq, diag);
   try {
     const { runFailoverTask, FailoverTerminalError } = await import('./failover.js');

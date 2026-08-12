@@ -12,6 +12,29 @@ export function setCancelCheck(fn: CancelCheck): void {
   isCancelled = fn;
 }
 
+/**
+ * C2-8 / PRD §1.4 — the gateway's pre-tool-execution admission seam.
+ *
+ * Injected exactly like `setCancelCheck` above, and for the same reason:
+ * inference must never import the gateway DB. The gateway installs the
+ * real implementation at boot; standalone use keeps the permissive default
+ * so this module stays independently runnable.
+ *
+ * The check lives HERE, immediately before the side effect, rather than at
+ * task dispatch, because this is the first moment the model-generated
+ * arguments actually exist -- task-level dispatch is too early to bind an
+ * exact action. `{ ok: false }` means NO SIDE EFFECT MAY FOLLOW.
+ */
+export type ToolAdmissionCheck = (
+  requestId: string,
+  toolName: string,
+  args: unknown,
+) => { ok: true } | { ok: false; reason: string };
+let admitTool: ToolAdmissionCheck = () => ({ ok: true });
+export function setToolAdmissionCheck(fn: ToolAdmissionCheck): void {
+  admitTool = fn;
+}
+
 const FINALIZE_TIMEOUT_MS = 10_000;
 
 /** P3: cap a tool result to `max` chars keeping the HEAD (60%) and TAIL (40%),
@@ -208,8 +231,22 @@ export async function executeLocalEdge(
   // the env var is set; never active in production.
   const forced = process.env.TORQCLAW_E2E_FORCE_GATED_TOOL;
   if (forced) {
+    const forcedArgs = { e2e: true, prompt: req.payload.prompt };
     if (!req.payload.grantedTools.includes(forced)) {
-      throw new ToolApprovalRequired(forced, { e2e: true, prompt: req.payload.prompt });
+      throw new ToolApprovalRequired(forced, forcedArgs);
+    }
+    // "Honors the grant exactly like a real gated tool" MUST include the
+    // admission seam, or this seam is a hole rather than a mirror: an E2E
+    // built on it would report success while the real admission wire was
+    // broken or absent (G2A D-5 -- that is precisely how D-1 and D-2
+    // survived). The forced path now takes the same admitTool decision the
+    // real tool-call loop takes below.
+    const admission = admitTool(req.id, forced, forcedArgs);
+    if (!admission.ok) {
+      emit('TOOL_CALL', `Refused ${forced}`, { granted: true, refused: admission.reason });
+      return done(
+        `[e2e] refused ${forced}: ${admission.reason}`, start, 1, 0,
+      );
     }
     emit('TOOL_CALL', `Executing ${forced}`, { granted: true });
     return done(`[e2e] executed ${forced} under grant`, start, 1, 1);
@@ -319,6 +356,27 @@ export async function executeLocalEdge(
       const granted = req.payload.grantedTools.includes(realName);
       if (requiresApproval(realName) && !granted) {
         throw new ToolApprovalRequired(realName, toolArgs);
+      }
+
+      // C2-8 / §1.4: the actual pre-tool-execution seam. Under the flag,
+      // a granted tool must ALSO present one unconsumed exact-action grant
+      // matching THESE arguments, validated and consumed in the same
+      // state.db serialization interval. Legacy `grantedTools` membership
+      // alone never authorizes external work once C2 is on.
+      //
+      // Reported back to the model as a tool error rather than thrown: a
+      // refusal here means this call did not happen, which is exactly what
+      // the model needs to know, and throwing would abort a run that may
+      // still have legitimate non-gated work to finish.
+      if (granted && requiresApproval(realName)) {
+        const admission = admitTool(req.id, realName, toolArgs);
+        if (!admission.ok) {
+          messages.push({
+            role: 'tool', tool_call_id: toolCall.id, name: alias,
+            content: `ERROR: tool call refused (${admission.reason}). No action was taken.`,
+          });
+          continue;
+        }
       }
 
       emit('TOOL_CALL', `Executing ${realName}`, { args: toolArgs });
