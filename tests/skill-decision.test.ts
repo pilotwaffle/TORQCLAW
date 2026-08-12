@@ -75,3 +75,89 @@ describe('describeSkillDecision', () => {
     });
   });
 });
+
+/** P4-8 (§5.8/§7.3, O-12): code-specific guidance strings win over the
+ * generic retryable arm. On aa6057b the guidance was a single ternary keyed
+ * on `retryable` FIRST -- which would have emitted the generic busy-wait
+ * wording for SKILL_TRUST_STALE (also retryable, but for a completely
+ * different reason: no Hermes task is involved, refresh_skill_trust is).
+ * These tests pin that the reworked structure checks code-specific strings
+ * before falling through to the retryable/non-retryable generic wording. */
+describe('describeSkillDecision — P4-8 trust guidance ordering (O-12)', () => {
+  it('SKILL_TRUST_STALE (retryable) gets its OWN guidance, not the generic Hermes-busy wording', () => {
+    const event = describeSkillDecision('q1', 'APPROVE', false, {
+      ok: false,
+      code: 'SKILL_TRUST_STALE',
+      retryable: true,
+      status: 'pending',
+      error: 'stale',
+      retryAfter: 'refresh_skill_trust',
+    });
+    expect(event.type).toBe('ERROR');
+    expect(event.message).toContain('refresh_skill_trust');
+    // The generic busy-wait wording (Hermes task language) must NOT appear --
+    // that would be the O-12 regression this test exists to catch.
+    expect(event.message).not.toContain('Hermes task');
+    expect(event.metadata).toMatchObject({ code: 'SKILL_TRUST_STALE', retryable: true });
+  });
+
+  it('SKILL_TRUST_CLOCK_ROLLBACK (non-retryable) names the clock-rollback runbook', () => {
+    const event = describeSkillDecision('q1', 'APPROVE', false, {
+      ok: false,
+      code: 'SKILL_TRUST_CLOCK_ROLLBACK',
+      retryable: false,
+      error: 'clock-rollback',
+    });
+    expect(event.type).toBe('ERROR');
+    expect(event.message).toContain('clock-rollback runbook');
+    expect(event.message).toContain('newer signed trust bundle');
+    // Must not fall through to the generic list_skill_versions wording --
+    // that inspection tool is for governed/published state, not trust state.
+    expect(event.message).not.toContain('list_skill_versions');
+  });
+
+  it('a future-issued/trust-not-yet-valid detail adds the skew-wait note on top of the generic wording', () => {
+    const event = describeSkillDecision('q1', 'APPROVE', false, {
+      ok: false,
+      code: 'SKILL_TRUST_REFUSED',
+      retryable: false,
+      error: 'future-issued',
+    });
+    expect(event.message).toContain('NOT retryable');
+    expect(event.message).toContain('clock-skew');
+  });
+
+  it('every other SKILL_TRUST_* code falls through to the generic non-retryable wording unchanged', () => {
+    for (const code of ['SKILL_TRUST_REVOKED_KEY', 'SKILL_TRUST_REVOKED_SKILL', 'SKILL_TRUST_CAPABILITY_UNSUPPORTED', 'SKILL_TRUST_REFUSED']) {
+      const event = describeSkillDecision('q1', 'APPROVE', false, {
+        ok: false, code, retryable: false, error: 'refused',
+      });
+      expect(event.message).toContain('NOT retryable');
+      expect(event.message).toContain('list_skill_versions');
+    }
+  });
+
+  it('SKILL_REMOTE_EDIT_REFUSED (non-retryable, unmapped code) falls through to the generic wording', () => {
+    const event = describeSkillDecision('q1', 'APPROVE', false, {
+      ok: false,
+      code: 'SKILL_REMOTE_EDIT_REFUSED',
+      retryable: false,
+      status: 'pending',
+      error: 'edited_markdown is refused for a remote (signed) skill',
+    });
+    expect(event.type).toBe('ERROR');
+    expect(event.message).toContain('SKILL_REMOTE_EDIT_REFUSED');
+    expect(event.message).toContain('NOT retryable');
+  });
+
+  it('flag-off parity: SKILL_REMOTE_SOURCES_DISABLED behaves like any other non-retryable refusal', () => {
+    const event = describeSkillDecision('q1', 'APPROVE', false, {
+      ok: false,
+      code: 'SKILL_REMOTE_SOURCES_DISABLED',
+      retryable: false,
+      error: 'remote skill sources are disabled',
+    });
+    expect(event.type).toBe('ERROR');
+    expect(event.metadata).toMatchObject({ code: 'SKILL_REMOTE_SOURCES_DISABLED', retryable: false });
+  });
+});

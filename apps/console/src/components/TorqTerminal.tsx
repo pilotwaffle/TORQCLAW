@@ -825,6 +825,10 @@ function EventRow({
             fetchedDraft={draftsByQueue[queueId]}
             onGetDraft={() => onGetDraft(queueId)}
             onDecide={onDecideSkill}
+            sourceOrigin={typeof meta.sourceOrigin === 'string' ? meta.sourceOrigin : undefined}
+            keyId={typeof meta.keyId === 'string' ? meta.keyId : undefined}
+            digest={typeof meta.digest === 'string' ? meta.digest : undefined}
+            verificationStatus={typeof meta.verificationStatus === 'string' ? meta.verificationStatus : undefined}
           />
         )}
 
@@ -1050,9 +1054,21 @@ function ReceiptCard({ receipt, tools }: { receipt: any; tools: string[] }) {
  *  (invariant 6). Allow once -> APPROVE_TOOL re-runs the task with the grant. */
 /** P4 skill approval: allow as-is, deny, or edit-and-approve. The editor is a
  *  plain textarea (no Monaco) with Tab->2-spaces so Python indentation is
- *  editable; an inline line-diff shows the operator's changes vs the draft. */
+ *  editable; an inline line-diff shows the operator's changes vs the draft.
+ *
+ *  Phase 4 (§7.1(b), R-10b): a REMOTE (signed) skill's PENDING_APPROVAL
+ *  metadata additionally carries {sourceOrigin, keyId, digest,
+ *  verificationStatus}. Rendered as plain facts next to name/draft --
+ *  adopting the P2 tool card's "ONLY facts the system knows" discipline
+ *  (L1048-1050 above), never an invented risk assessment. The Edit
+ *  affordance is disabled for these rows: the kernel refuses
+ *  edited_markdown on a remote row with SKILL_REMOTE_EDIT_REFUSED
+ *  (§6.2, O-17) because the signature covers exact bytes, so the UI should
+ *  not offer what the kernel will refuse. Local rows (no trust facts) are
+ *  completely unaffected -- byte-identical to pre-Phase-4 rendering. */
 function SkillApprovalCard({
   queueId, skillName, draft, fetchedDraft, onGetDraft, onDecide,
+  sourceOrigin, keyId, digest, verificationStatus,
 }: {
   queueId: string;
   skillName: string;
@@ -1060,10 +1076,18 @@ function SkillApprovalCard({
   fetchedDraft?: string;   // fetched via GET_SKILL_DRAFT (large)
   onGetDraft: () => void;
   onDecide: (queueId: string, decision: 'APPROVE' | 'REJECT', editedMarkdown?: string) => void;
+  sourceOrigin?: string;
+  keyId?: string;
+  digest?: string;
+  verificationStatus?: string;
 }) {
   const original = draft ?? fetchedDraft;
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState('');
+  // A remote (signed) row is identified by the presence of ANY trust fact --
+  // sourceOrigin is the primary signal, matching how get_draft/PENDING_
+  // APPROVAL only ever emit these keys together for remote rows.
+  const isRemote = sourceOrigin !== undefined;
 
   const startEdit = () => {
     if (original === undefined) { onGetDraft(); return; } // fetch then user clicks again
@@ -1100,6 +1124,16 @@ function SkillApprovalCard({
         Learned a new skill: <span className="font-semibold text-neutral-100">{skillName}</span> — review before it can be used.
       </p>
 
+      {isRemote && (
+        <dl className="mt-2 grid grid-cols-[max-content_1fr] gap-x-2 gap-y-0.5 rounded bg-black/30 p-2 text-[11px] text-neutral-400">
+          <dt className="text-neutral-500">source</dt>
+          <dd className="truncate text-neutral-300">{sourceOrigin}</dd>
+          {keyId !== undefined && (<><dt className="text-neutral-500">key</dt><dd className="truncate text-neutral-300">{keyId}</dd></>)}
+          {digest !== undefined && (<><dt className="text-neutral-500">digest</dt><dd className="truncate font-mono text-neutral-300">{digest}</dd></>)}
+          {verificationStatus !== undefined && (<><dt className="text-neutral-500">verification</dt><dd className="text-neutral-300">{verificationStatus}</dd></>)}
+        </dl>
+      )}
+
       {editing && (
         <>
           <textarea
@@ -1135,7 +1169,11 @@ function SkillApprovalCard({
         >
           {editing ? 'Approve with edits' : 'Allow'}
         </button>
-        {!editing && (
+        {/* Phase 4 (§6.2/§7.2, O-17): the kernel refuses edited_markdown on a
+            remote (signed) row -- the signature covers exact bytes, so an
+            edit would sever it. The UI should not offer what the kernel
+            will refuse; local rows (isRemote===false) are unaffected. */}
+        {!editing && !isRemote && (
           <button
             onClick={startEdit}
             className="rounded border border-neutral-700 px-3 py-1 text-[11px] text-neutral-300 hover:border-neutral-500"
