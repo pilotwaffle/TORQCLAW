@@ -580,10 +580,13 @@ def test_ac17_revocation_vs_active_reporting(tmp_path, monkeypatch):
     assert any(h["skillId"] == "active.skill" and h["active"] is True for h in hits)
 
     # The skill remains governed-active -- refresh never auto-disables.
+    # list_versions() returns the projected shape (activeDigest), not the raw
+    # state["active"] mapping; a live activeDigest == the installed digest is
+    # the proof that the revocation report did NOT quarantine the skill.
     from mcp_wrapper import skill_rollback
 
     versions = skill_rollback.list_versions("active.skill")
-    assert versions["active"]["digest"] == digest
+    assert versions["activeDigest"] == digest
 
 
 def _row_remote_json(queue_id: str) -> str:
