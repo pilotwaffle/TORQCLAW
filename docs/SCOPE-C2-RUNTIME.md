@@ -21,20 +21,21 @@ requires C2 to extend it. A9 is C3 and was deliberately not built.
 | C2-4 expiry | `119d717` | one canonical clock, one writer, sweep + lazy materialization, legacy NULL rows inert |
 | C2-6 redacted card | `09d2e9d` | allowlist card projection, raw-args emit replaced, console updated, built-artifact gate |
 | C2-7 delivery projection | `2d517b1` | rebuildable/droppable `approval_deliveries`, eligibility re-evaluated at rebuild |
-| C2-8 grant admission | `2d517b1` | one-shot exact-action consumption at the real pre-tool seam, FRONTIER fail-closed |
-| (SI-4) flag-off identity | `HEAD` | approval-bearing transcript proven byte-identical flag-off |
+| C2-8 grant admission | `2d517b1` | one-shot exact-action consumption at the real pre-tool seam |
+| (SI-4) flag-off identity | `c837e6d` | approval-bearing transcript proven byte-identical flag-off |
+| **G2A round 1 fixes** | `94db711`, `a15b414` | D-1 producer wiring, D-2 FRONTIER fences, D-3 APPROVE leg, D-4 primitive allowlist, D-5 admission-aware E2E seam, D-7 count anchor |
 
 ## 2. Gates
 
 | Gate | Result |
 |---|---|
-| TS suite (**no exclusions**) | **93 files / 1723 tests, ALL PASS** |
-| TS suite (briefed exclusion set) | 83 files / 1660 tests, all pass (baseline 75/1536) |
-| Reachability | **PASS — 106 modules** (baseline 100; +6 C2 modules), `skillTrust.ts` still the only declared dormant |
+| TS suite (**no exclusions**) | **94 files / 1730 tests, ALL PASS** |
+| Reachability | **PASS — 107 modules** (baseline 100; +7 C2 modules), `skillTrust.ts` still the only declared dormant |
 | Build | 8/8 successful |
 | PRD gate | **PASS 225 checks / 0 failed** — unchanged from baseline (kernel-adjacent files stayed neutral) |
 | Built-artifact (§5(c)) | 5/5 — boot migration, idempotent re-boot, raw-args-never-on-wire, flag-off inertness |
-| SI-4 flag-off | byte-identical approval transcript, **0 rows** in all three C2 tables, all six columns NULL, legacy REJECT still transitions |
+| **Flag-ON built-artifact E2E** | **3/3** — pending -> C2 binding -> APPROVE mints one grant -> re-run admitted once -> replay mints no second grant; plus both FRONTIER fences |
+| SI-4 flag-off | **both decision legs** byte-identical (REJECT and APPROVE), **0 rows** in all three C2 tables, all six columns NULL, the decision still transitions |
 
 ### A note on the briefed exclusions
 
@@ -47,7 +48,9 @@ run, which is the stronger claim.
 
 ## 3. Deletion probes (sabotage → RED → restore)
 
-Six controls, each sabotaged, each confirmed RED, each restored green.
+Eight controls, each sabotaged, each confirmed RED, each restored green.
+Probes 7 and 8 target the NEW wiring and are the ones that would have
+caught the G2A round-1 defects.
 
 | # | Control | Sabotage | Result |
 |---|---|---|---|
@@ -55,8 +58,17 @@ Six controls, each sabotaged, each confirmed RED, each restored green.
 | 2 | `CTXHASH_V1` framing | use JS char length instead of UTF-8 byte length | **4 RED** — both frozen digests + the byte-length assertions |
 | 3 | Single writer / live role read | remove the live `surfaceRole !== 'operator'` check | **2 RED** — the demotion attack and deny-first revocation |
 | 4 | Redaction (prop 8) | restore `args: error.args` on the emit | **3 RED** — including the **booted-artifact** gate |
-| 5 | FRONTIER fail-closed | remove the `path === 'FRONTIER'` refusal | **3 RED** — all three obligation-5 tests |
+| 5 | FRONTIER refusal (unit) | remove the `path === 'FRONTIER'` refusal in `admitToolCall` | **3 RED** — all three obligation-5 unit tests |
 | 6 | Grant consumption | stop writing `consumed_at` | **2 RED** — durable consumption + one-shot |
+| 7 | **C2 producer wiring (D-1)** | revert `dispatch.ts` to the legacy-only `registerApproval` — the exact original defect | **RED** — flag-on E2E fails "registration MUST write a C2 binding" |
+| 8 | **FRONTIER fences (D-2)** | remove BOTH the APPROVE_TOOL guard and the `dispatchLegacy` executor fence | **2 RED** — the booted-artifact refusal and the shipped-guard assertion |
+
+Probe 8 is also the reason the executor fence sits **before** the
+engine-availability check. With the fence placed after it, this probe stayed
+GREEN on a box with no reachable Hermes engine: `FRONTIER_UNAVAILABLE` masked
+the missing control entirely. A security refusal that only fires when the
+engine happens to be down is not a control, and the first version of that
+test would have shipped the hole a second time.
 
 ## 4. Pre-registered obligations
 
@@ -66,7 +78,7 @@ Six controls, each sabotaged, each confirmed RED, each restored green.
 | 2 | Raw-args emit replaced, proven on the built artifact | **DONE** | `dispatch.ts` emit replaced; `collab-c2-built-artifact.test.ts` drives a real gated call and asserts the prompt arg is `withheld` |
 | 3 | `gateway_profile_delegations` + `delegation_id` in origin capture | **DONE** | `surfaceSecurity.ts` ledger + four guarded columns on `gateway_task_origins` |
 | 4 | storage.ts singleton test-isolation hazard | **DONE** | own commit `1fbf209`, 5 tests, production behaviour unchanged |
-| 5 | FRONTIER fail-closed at the grant seam | **DONE** | `grantAdmission.ts` refuses by name before touching state; 3 tests incl. "consumes nothing" |
+| 5 | FRONTIER fail-closed at the grant seam | **DONE (corrected after G2A D-2)** | `grantAdmission.ts` refuses by name; **and, because that function was unreachable from the real FRONTIER path, two live fences now exist** — the APPROVE_TOOL guard and the `dispatchLegacy` executor fence, sharing one exported refusal. Pinned by the booted-artifact test in `collab-c2-flag-on-e2e.test.ts` |
 
 ## 5. Findings worth recording
 
@@ -94,6 +106,40 @@ Expiry now commits in its own transaction before the decision opens.
 nothing. Both now sit on real paths (boot recovery; the LOCAL_EDGE admission
 injection). Green units on an unreachable module prove nothing.
 
+**THE ROUND-1 VERDICT, RECORDED PLAINLY.** G2A rejected the first C2
+submission with two blocking defects, and both were the same failure:
+**controls that existed but were connected to nothing.**
+
+- **D-1:** `registerC2Approval` / `decideC2Approval` had ZERO production
+  callers. Every C2 unit test was green, every built-artifact test was
+  green, and the slice was 100% non-functional flag-on — the live flow
+  still ran the legacy register/decide, so no grant was ever minted and
+  every approved LOCAL_EDGE re-run would have been refused `grant-missing`.
+- **D-2:** `refuseFrontier` was reachable only through `admitToolCall`,
+  which the FRONTIER path never calls. It was dead code, the tier was
+  **unwired-and-OPEN**, and §6 of this document asserted it was
+  "explicitly fail-closed rather than unwired" — **which was false as a
+  runtime statement.** That sentence has been removed and replaced below.
+
+What let both survive a full green review: there was no **flag-ON**
+end-to-end test. Every gate ran either flag-off or against modules in
+isolation, so "the machine works" was never actually asserted. The
+mandatory flag-on E2E added here (`collab-c2-flag-on-e2e.test.ts`) fails
+loudly under both defects, and probes 7 and 8 prove it.
+
+**Two real bugs the new flag-on E2E immediately found**, neither of which
+any unit test could have surfaced:
+
+1. The re-minted task row is written inside the decision transaction (the
+   grant's FK requires it) and `dispatch` then created it again — a UNIQUE
+   violation that **killed the gateway process**. `taskStore.create` is now
+   idempotent, using DO NOTHING rather than upsert so the authoritative
+   pre-execution record is never silently rewritten.
+2. Fencing admission on `collabEnabled()` alone refused *legacy* flag-on
+   traffic with `grant-missing` — a genuine SI-4 break, caught only because
+   D-3 forced the APPROVE leg into the identity transcript. The fence now
+   requires both the flag and an actual grant row for that dispatch request.
+
 **Scope note on prop 8.** The operator's typed prompt *does* still appear in
 the `USER_PROMPT` echo, because they typed it themselves and the gateway
 echoes submitted prompts back to the submitting session. That is separate
@@ -111,8 +157,22 @@ assertion is scoped accordingly and the reasoning is recorded in the test.
   measured or ratified; §6.10 makes this a runtime-authorization blocker.
 - **The BRIDGE executor path** is accepted by `admitToolCall` but only the
   LOCAL_EDGE loop is wired to call it. Every bridge executor must traverse
-  the same seam before C2-8's AC is fully discharged; FRONTIER is explicitly
-  fail-closed rather than unwired.
+  the same seam before C2-8's AC is fully discharged.
+- **FRONTIER is refused, not fenced.** Stated precisely, because the
+  earlier wording here was false: there is no args-aware admission on the
+  FRONTIER path, and none is claimed. Instead, under the flag, a FRONTIER
+  approval is **refused at two points** — APPROVE_TOOL will not dispatch a
+  FRONTIER re-mint, and `dispatchLegacy` refuses a FRONTIER run carrying
+  `grantedTools` before the engine is reached. The tier is therefore
+  unusable for gated tools under the flag, which is the intended
+  fail-closed posture; making it *usable* requires the separately
+  authorized Hermes structured-grant protocol (PRD §3.4.2 step 5).
+- **D-6 (C3 obligation):** `approvalDelivery.actionableForSurface` does not
+  re-check surface eligibility at read time — it filters on the approval
+  still being pending, not on the target still being an eligible operator
+  surface. Harmless until C3 gives the projection a real transport (rebuild
+  does re-check), but it MUST be closed before any card is actually
+  delivered to a surface.
 - **`registry_enforcement_hash` is stored and compared but not yet computed
   from the live registry** — the §2.13 formula needs a real producer at
   provisioning time. Comparison is exact, so a wrong value denies; it cannot
@@ -121,3 +181,28 @@ assertion is scoped accordingly and the reasoning is recorded in the test.
 - **Delivery transport** — `approval_deliveries` is written and rebuilt, but
   nothing yet pushes a card to a surface over the wire; that is the C3
   channel-adapter lane.
+- **Delivery transport** — `approval_deliveries` is written and rebuilt, but
+  nothing yet pushes a card to a surface over the wire; that is the C3
+  channel-adapter lane.
+
+### Noted by G2A, judgment applied, not fixed here
+
+- **`GRANT_TTL_SECONDS = 60` measured from the DECISION clock** can expire a
+  legitimately approved action behind slow local inference — on this box a
+  cold re-run takes multiple seconds, so the margin is real but not
+  comfortable. Left as-is deliberately: changing when the clock starts (e.g.
+  at delivery) is a semantic change to the §1.4 invariant and belongs with
+  the OQ-5 ratification, not in a defect-fix pass. **Operator remedy is
+  re-approval**, which is safe by construction (a fresh approval mints a
+  fresh grant). Flagged for OQ-5.
+- **`resetStateDbForTest` leaves module-scope prepared statements bound to
+  the old handle.** Test-only, and the isolation tests pass because they
+  exercise the Proxy rather than a captured statement. Fixing it properly
+  means making those statements lazy too — worth doing, but it is a
+  test-ergonomics change with real blast radius across every consumer, so it
+  is not being folded into a security-defect pass.
+- **The channel-kind deny-list is triplicated** (`approvalWriter.ts:58`,
+  `surfaceSecurity.ts:45`, `approvalDelivery.ts:64`). All three agree today
+  and each is independently tested. Consolidating is correct, but the same
+  three-copy pattern is what makes each seam readable in isolation; recorded
+  so the next lane can unify it deliberately rather than discovering it.

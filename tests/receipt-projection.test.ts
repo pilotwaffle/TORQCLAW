@@ -214,9 +214,11 @@ describe('TCLAW-4A run receipt projection', () => {
     expect(bareCalls.length).toBe(0);
 
     const guardedCalls = src.match(/safeMaterializeReceipt\(/g) ?? [];
-    // 6 call sites: SUCCESS, BLOCKED, FAILED, CAP_EXCEEDED (TCLAW-1A-core),
-    // FRONTIER_UNAVAILABLE, emitToolDenied.
-    expect(guardedCalls.length).toBe(6);
+    // 7 call sites: SUCCESS, BLOCKED, FAILED, CAP_EXCEEDED (TCLAW-1A-core),
+    // FRONTIER_UNAVAILABLE, emitToolDenied, and C2's FRONTIER
+    // structured-grant refusal (§1.4, G2A D-2) -- a terminal outcome like
+    // any other, so it projects a receipt like any other.
+    expect(guardedCalls.length).toBe(7);
   });
 
   it('(d) no-fabrication: failed task with NULL telemetry -> cost/iterations/elapsed NULL', () => {
