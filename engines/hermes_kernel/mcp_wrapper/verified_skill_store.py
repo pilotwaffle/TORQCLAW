@@ -136,13 +136,25 @@ def file_digest(value: bytes) -> str:
 class VerifiedSkillStore:
     """Bounded local package store with staged, atomic activation."""
 
-    def __init__(self, root: str | os.PathLike[str]):
+    def __init__(
+        self,
+        root: str | os.PathLike[str],
+        *,
+        trust_evaluator: Any = None,
+    ):
         self.root = Path(root).absolute()
         self._lock = threading.RLock()
         self.staging_dir = self.root / "staging"
         self.versions_dir = self.root / "versions"
         self.transactions_dir = self.root / "transactions"
         self.state_path = self.root / "state.json"
+        # Phase 4 (O-5): the trust evaluator is constructor-injected at the
+        # single production construction site (governed_skills._store()). When
+        # it is None AND a remote-sourced manifest reaches the policy seam with
+        # the remote flag on, _enforce_activation_policy fails closed
+        # (trust-engine-unavailable) rather than skipping -- the sixth
+        # unenforced-claim guard. Never captured at import.
+        self._trust_evaluator = trust_evaluator
         self._ensure_layout()
         self.reconcile()
 
@@ -276,7 +288,12 @@ class VerifiedSkillStore:
         with self._lock:
             state = self._load_state()
             artifact = self._resolve_artifact(staged)
-            _enforce_activation_policy(artifact["manifest"], active_profile)
+            _enforce_activation_policy(
+                artifact["manifest"],
+                active_profile,
+                trust_evaluator=self._trust_evaluator,
+                digest=artifact["digest"],
+            )
             self._check_approval(state, artifact, approval)
             skill_id = artifact["manifest"]["id"]
             digest = artifact["digest"]
@@ -506,7 +523,12 @@ class VerifiedSkillStore:
             target_dir = self.versions_dir / skill_id / digest
             _ensure_contained(self.versions_dir, target_dir)
             artifact = _read_package(target_dir, self.root, expected_id=skill_id, expected_digest=digest)
-            _enforce_activation_policy(artifact["manifest"], active_profile)
+            _enforce_activation_policy(
+                artifact["manifest"],
+                active_profile,
+                trust_evaluator=self._trust_evaluator,
+                digest=digest,
+            )
             current = self._current_permissions(skill_id)
             added = sorted(set(artifact["manifest"]["requiredCapabilities"]) - set(current))
             if added:
@@ -1137,8 +1159,47 @@ def _parse_manifest(raw: bytes) -> dict[str, Any]:
     return value
 
 
-def _enforce_activation_policy(manifest: Mapping[str, Any], active_profile: str | None) -> None:
-    """Apply profile compatibility and the remote-source fail-closed rule."""
+def _remote_flag_on() -> bool:
+    """Read TORQCLAW_REMOTE_SKILL_SOURCES per-call (never captured at import).
+
+    Mirrors the governed-skills `_TRUTHY` pattern. Kept here (not imported from
+    a config module) so the store has no new import edge; the config module
+    reuses the same predicate for its own gate.
+    """
+    return os.environ.get("TORQCLAW_REMOTE_SKILL_SOURCES", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _is_remote_sourced(manifest: Mapping[str, Any]) -> bool:
+    source = manifest.get("source")
+    return isinstance(source, str) and source.startswith("https://")
+
+
+def _enforce_activation_policy(
+    manifest: Mapping[str, Any],
+    active_profile: str | None,
+    *,
+    trust_evaluator: Any = None,
+    digest: str | None = None,
+) -> None:
+    """Apply profile compatibility and the remote-source trust rule.
+
+    Phase 4 (§6.3): for a remote-sourced manifest (source starts with
+    ``https://``) with the remote flag ON, this performs FULL trust evaluation
+    against local trust state -- bundle freshness, key trust/revocation, skill
+    revocation, digest-pin, signature over the recomputed digest, and the
+    capability bound. It reads only local trust state (RS-4); it never fetches.
+
+    Seam partition (F-3): exactly two dispositions for a remote manifest --
+    (a) flag on => full evaluation, refusing ``trust-engine-unavailable`` when
+    no evaluator is attached (O-5); (b) flag off => the trust hook is skipped
+    (the caller marks ``trustUnenforced``). There is no third path. Local
+    manifests skip the trust arm entirely -- flag-off/local byte-identical.
+    """
     profiles = manifest.get("compatibleProfiles", [])
     if active_profile is not None and active_profile not in profiles:
         raise SkillApprovalError(
@@ -1151,6 +1212,31 @@ def _enforce_activation_policy(manifest: Mapping[str, Any], active_profile: str 
             raise SkillApprovalError("remote skills require HTTPS")
         if not isinstance(signature, Mapping) or signature.get("algorithm") != "Ed25519":
             raise SkillApprovalError("remote skills require Ed25519 signature metadata")
+
+    # Trust hook (remote-sourced manifests only, flag-gated).
+    if not _is_remote_sourced(manifest):
+        return
+    if not _remote_flag_on():
+        # Disposition (b): the whole subsystem is off; skip the trust hook.
+        # Previously installed remote versions behave as local (§12 rule 6).
+        return
+    # Disposition (a): flag on. An unwired seam fails closed (O-5).
+    from .skill_trust import SkillTrustError  # local import: no module cycle
+
+    if trust_evaluator is None:
+        raise SkillTrustError("trust-engine-unavailable")
+    if digest is None:
+        raise SkillTrustError(
+            "trust-engine-unavailable", "no digest threaded to policy seam"
+        )
+    # The origin is read from the durable artifact record inside
+    # evaluate_installed (R-6/§5.6): a missing record refuses
+    # artifact-record-missing. The seam never has to independently resolve it.
+    trust_evaluator.evaluate_installed(
+        skill_id=manifest["id"],
+        digest=digest,
+        required_capabilities=list(manifest.get("requiredCapabilities", [])),
+    )
 
 
 def _validate_string_list(value: Any, name: str) -> None:

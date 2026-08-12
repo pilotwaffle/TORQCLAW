@@ -177,8 +177,40 @@ def _store() -> VerifiedSkillStore:
     with _MUTATION_LOCK:
         with _STORE_SINGLETON_LOCK:
             if _STORE is None:
-                _STORE = VerifiedSkillStore(_data_dir() / "verified_skills")
+                _STORE = VerifiedSkillStore(
+                    _data_dir() / "verified_skills",
+                    trust_evaluator=_build_trust_evaluator(),
+                )
             return _STORE
+
+
+def _build_trust_evaluator():
+    """Construct the Phase-4 trust engine, or return None (O-5).
+
+    Constructed ONLY when the remote flag is on AND skill_sources.json parses.
+    Flag off (or config absent/invalid) => None: the store's policy seam then
+    fails closed only if a remote-sourced manifest actually reaches it with the
+    flag on (``trust-engine-unavailable``); the purely-local/flag-off path never
+    touches the trust arm, so flag-off behavior stays byte-identical (RS-7).
+
+    Bound once at first store construction (the singleton is cached), matching
+    every other per-process handle. An operator who edits config or flips the
+    flag after first construction re-resolves via ``_reset_for_test`` semantics
+    or a process restart -- the same lifecycle the store handle already has.
+    """
+    from . import skill_sources
+    from .skill_trust import TrustEngine
+
+    if not skill_sources.remote_flag_on():
+        return None
+    try:
+        config = skill_sources.load_config()
+    except Exception:  # noqa: BLE001 - absent/invalid config => no evaluator
+        return None
+    return TrustEngine(
+        skill_sources.trust_dir(),
+        skill_sources.authorities_map(config),
+    )
 
 
 def _store_locked() -> VerifiedSkillStore:

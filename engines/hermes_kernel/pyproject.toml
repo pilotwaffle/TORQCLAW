@@ -24,6 +24,11 @@ dependencies = [
     "packaging==26.0",
     "Markdown==3.10.2",
     "PyJWT[crypto]==2.13.0",
+    # Phase 4 signed remote skill sources: Ed25519 verification runs in the
+    # kernel. `cryptography` is present transitively via PyJWT[crypto], but
+    # relying on a transitive extra for a security control is itself an
+    # unenforced claim (PRD R-1) -- pin it explicitly.
+    "cryptography>=44,<50",
     "urllib3>=2.7.0,<3",
     "tzdata==2025.3; sys_platform == 'win32'",
     "psutil==7.2.2",
