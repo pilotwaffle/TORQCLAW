@@ -621,7 +621,8 @@ def rollback_governed_skill(skill_id: str, digest: str) -> dict[str, Any]:
         # its own lock either way; this just keeps "unknown digest" from
         # costing a publish/restore round-trip.
         raise GovernedSkillError(
-            f"rollback target is not an installed version: {sid}@{target_digest}"
+            f"rollback target is not an installed version: {sid}@{target_digest}; "
+            "call list_skill_versions to see the installed digests"
         )
 
     if _already_active_and_published(sid, target_digest):
@@ -693,7 +694,9 @@ def rollback_governed_skill(skill_id: str, digest: str) -> dict[str, Any]:
                     f"digest {commit_holder['previous'].get('digest') if commit_holder['previous'] else None!r} "
                     "after a failed rollback, but restoring the prior "
                     "published projection then failed; TORQCLAW cannot prove "
-                    "what is currently published on disk for this skill id"
+                    "what is currently published on disk for this skill id; "
+                    "inspect with list_skill_versions (publishedDigest / "
+                    "publishedVerified) before deciding again"
                 ) from exc
             raise
 
@@ -895,7 +898,9 @@ def disable_governed_skill(skill_id: str) -> dict[str, Any]:
                     f"enabled at digest {commit_holder['previous'].get('digest') if commit_holder['previous'] else None!r} "
                     "after a failed disable, but restoring the retained "
                     "published projection then failed; TORQCLAW cannot prove "
-                    "what is currently published on disk for this skill id"
+                    "what is currently published on disk for this skill id; "
+                    "inspect with list_skill_versions (publishedDigest / "
+                    "publishedVerified) before deciding again"
                 ) from exc
             raise
 

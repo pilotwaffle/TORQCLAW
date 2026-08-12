@@ -176,10 +176,11 @@ queue by operator paste or an agent draft (`queue_skill`); the console
 approval card drives `APPROVE_SKILL`, which runs the full governed install
 and now reports the kernel's real outcome — a busy engine or a
 failed/unproven activation surfaces as an explicit ERROR event with retry
-guidance, never as a silent success. Rollback and version listing exist
-today as MCP tools only (`rollback_skill`, `list_skill_versions` on the
-engine server) — there is no console button for them yet; disabling a skill
-is its own in-flight lane (GS-DISABLE).
+guidance, never as a silent success. Rollback, disable, and version listing exist
+today as MCP tools only (`rollback_skill`, `disable_skill`,
+`list_skill_versions` on the engine server) — there is no console button
+for them yet. Disable un-publishes and turns governance off together;
+re-enabling is `rollback_skill` to the digest you want back.
 
 **Operator ruling 2026-08-11: governed skills are ON for this deployment**
 (`TORQCLAW_GOVERNED_SKILLS=1` in the operator's user environment). The
