@@ -192,18 +192,26 @@ operation — governed mode IS the soak, monitored in use, with flag-off as
 the immediate rollback. The flag itself still defaults off in code: a fresh
 deployment must still opt in explicitly.
 
-Skills reach the queue by operator paste and digest-bound review. **Remote skill
-distribution is not implemented**: no downloader, no HTTPS bounds, no pinned
-upgrades, no revocation refresh. `skill.json` accepts optional Ed25519 signature
-metadata and the store validates its *shape only* — it performs no cryptographic
-verification, and signatures are not required.
+Skills reach the queue by operator paste and digest-bound review, OR — behind
+`TORQCLAW_REMOTE_SKILL_SOURCES` (default off) — by a signed remote fetch
+(`install_remote_skill`). The kernel (`engines/hermes_kernel/mcp_wrapper/
+skill_trust.py`) fetches over bounded HTTPS (no redirects, connect/read
+timeouts, `limit+1` streaming), independently computes the package digest
+from the fetched bytes, and verifies an Ed25519 signature over that digest
+against an origin-scoped, operator-configured trust root with signed
+revocation bundles — colocated with the install authority, so the process
+that installs is the process that verifies. On the local (non-remote) path,
+`skill.json` still accepts optional Ed25519 signature metadata for shape
+validation only; no cryptographic verification runs there and signatures
+are not required.
 
-Ed25519 origin trust bundles live in `packages/gateway/src/skillTrust.ts`. That
-module is **dormant by declaration** — 662 lines with no consumer until remote
-sources exist, recorded in `ops/reachability.mjs` and enforced by
-`pnpm reachability`, which fails CI on any substantial module that is neither
-reachable nor explicitly declared. Nothing in TORQCLAW verifies a skill
-signature today.
+The former `packages/gateway/src/skillTrust.ts` (Ed25519 origin trust
+bundles, 661 lines, zero production importers) was **deleted** rather than
+wired: two implementations of canonical JSON is a signature-forgery seam
+waiting for a divergence, so its *model* — not its lines — was ported into
+the Python trust engine above. `ops/reachability.mjs`'s `DORMANT` map and
+`pnpm reachability` record the retirement; `tests/reachability.test.ts`
+pins that the file never reappears.
 
 Two further caveats recorded with the checkpoint: Phase-1 failover evidence
 rests on a deterministic loopback/fake-provider fixture rather than a live
