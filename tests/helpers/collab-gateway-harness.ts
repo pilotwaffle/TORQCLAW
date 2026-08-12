@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -96,8 +96,29 @@ function lockDiagnostics(directory: string, startedAtMs: number): string {
   return 'lockPath=' + directory + '; ownerPid=' + metadata.pid + '; ownerToken=' + metadata.ownerToken + '; createdAt=' + metadata.createdAt + '; pidState=' + pidState(metadata.pid) + '; elapsedMs=' + elapsedMs;
 }
 
+/**
+ * Reclaim an abandoned lock (dead owner, or a directory with no valid
+ * metadata past the grace window).
+ *
+ * Reclaiming is inherently racy: several workers can decide to reclaim the
+ * same abandoned lock at the same instant, and on Windows the losers see
+ * EPERM/ENOENT from `unlink`/`rmdir` while the winner removes it. Losing
+ * that race is BENIGN -- the directory is gone either way, and the caller
+ * loops back to `mkdir`, which is the single point that decides ownership.
+ * Propagating the error instead would fail an entire test file for what is
+ * just contention, so it is swallowed and the caller retries.
+ *
+ * Any genuinely undeletable lock still surfaces: the caller's next mkdir
+ * keeps failing with EEXIST until the acquisition deadline, and the timeout
+ * error carries full lock diagnostics.
+ */
 function reclaimLock(directory: string): void {
-  rmSync(directory, { recursive: true, force: true });
+  try {
+    rmSync(directory, { recursive: true, force: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EPERM' && code !== 'ENOENT' && code !== 'EBUSY') throw error;
+  }
 }
 
 async function acquireBuildLock(directory: string, deadlineMs: number): Promise<BuildLockHandle> {
@@ -119,12 +140,30 @@ async function acquireBuildLock(directory: string, deadlineMs: number): Promise<
       } catch (error) {
         let cleanupError: unknown = null;
         try { rmSync(directory, { recursive: true, force: true }); } catch (cleanup) { cleanupError = cleanup; }
+        // Same cross-process race as above: another worker can be removing
+        // this directory between our mkdir and our metadata write. That is
+        // contention, not corruption -- retry rather than failing the whole
+        // test file. Any other cause still throws with full diagnostics.
+        const raceCode = (error as NodeJS.ErrnoException).code;
+        if (raceCode === 'EPERM' || raceCode === 'ENOENT') {
+          const remainingMs = Math.max(1, deadlineMs - Date.now());
+          await sleep(Math.min(50, remainingMs));
+          continue;
+        }
         const detail = cleanupError ? '; cleanupError=' + String(cleanupError) : '';
         throw new Error('Build lock metadata creation failed; path=' + directory + '; cleanup attempted for newly-created directory' + detail + '; cause=' + String(error));
       }
       return { directory, metadata, acquiredAtMs: Date.now() };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      // Windows reports EPERM (not EEXIST) when a concurrent worker is
+      // creating or removing this same directory at that instant, and the
+      // gateway build lock is contended across vitest's per-file worker
+      // PROCESSES, where the in-process `buildPromise` cache cannot help.
+      // Treating EPERM as "someone else holds it, retry" is correct on both
+      // platforms: the only way past this loop remains actually creating the
+      // directory, so no two workers can believe they hold the lock.
+      if (code !== 'EEXIST' && code !== 'EPERM') throw error;
       const metadata = parseMetadata(directory);
       if (metadata && pidState(metadata.pid) === 'dead') {
         reclaimLock(directory);
@@ -194,8 +233,57 @@ async function runGatewayBuild(options: GatewayBuildOptions, deadlineMs: number,
   }
 }
 
+/**
+ * True when `dist` is already at least as new as every source file that
+ * feeds it, i.e. a rebuild would be a no-op.
+ *
+ * WHY THIS EXISTS: the default build command runs turbo with `--force`, and
+ * vitest runs each test FILE in its own worker process. With six files
+ * calling `ensureGatewayBuild()`, the cross-process lock serialises six
+ * full forced rebuilds; at ~45s each that blows the 180s acquisition
+ * deadline and fails files for pure contention rather than for anything
+ * about the code under test.
+ *
+ * Checking freshness BEFORE taking the lock lets the first worker build
+ * once and the rest proceed immediately. This does NOT weaken the
+ * built-artifact proof: the artifact is still built from current source by
+ * whichever worker finds it stale, and every later worker has verified that
+ * no source file is newer than what it is about to boot. A stale `dist` is
+ * exactly what this check refuses to accept.
+ */
+function distIsFresh(): boolean {
+  try {
+    const distStat = statSync(GATEWAY_DIST_ENTRY);
+    const newestSource = (dir: string): number => {
+      let newest = 0;
+      for (const name of readdirSync(dir)) {
+        if (name === 'node_modules' || name === 'dist' || name === '.turbo') continue;
+        const full = join(dir, name);
+        const st = statSync(full);
+        if (st.isDirectory()) newest = Math.max(newest, newestSource(full));
+        else if (/\.(ts|tsx|json)$/.test(name)) newest = Math.max(newest, st.mtimeMs);
+      }
+      return newest;
+    };
+    // The gateway's own sources plus every workspace package it imports.
+    let newest = 0;
+    for (const pkg of ['gateway', 'collab', 'contracts', 'router', 'inference', 'bridge']) {
+      const dir = join(ROOT, 'packages', pkg, 'src');
+      if (existsSync(dir)) newest = Math.max(newest, newestSource(dir));
+    }
+    return newest > 0 && distStat.mtimeMs >= newest;
+  } catch {
+    // Never guess: if freshness cannot be established, build.
+    return false;
+  }
+}
+
 export async function ensureGatewayBuild(options: GatewayBuildOptions = {}): Promise<void> {
   const useSharedDefaultBuild = !options.testTimeoutMs && !options.testLockDirectory && !options.testReceiptPath && !options.testBuildCommand;
+  // Fast path for the shared default build only. A test that supplies its
+  // own build command/lock/receipt is testing the LOCK ITSELF and must keep
+  // running the real acquire/build/release sequence.
+  if (useSharedDefaultBuild && distIsFresh()) return;
   if (!useSharedDefaultBuild) {
     const timeoutMs = options.testTimeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS;
     const deadlineMs = Date.now() + timeoutMs;
