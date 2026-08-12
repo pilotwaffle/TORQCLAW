@@ -16,7 +16,7 @@ import { router } from '@torqclaw/router';
 import { connectBridge, approveSkill, getSkillDraft, cancelHermesTask } from '@torqclaw/bridge';
 import { describeSkillDecision } from './skillDecision.js';
 import { assertResolvedProfile, constrainTier } from './profileResolver.js';
-import { setCancelCheck } from '@torqclaw/inference';
+import { setCancelCheck, setToolAdmissionCheck } from '@torqclaw/inference';
 import { cancellations } from './cancellations.js';
 import { authorize, checkResumeRole, type Role } from './authz.js';
 import { db } from './storage.js';
@@ -28,6 +28,9 @@ import { collabEnabled, PrincipalBindingError } from './principalBridge.js';
 import { resolveConnectIdentity, type ConnectionAuthContext } from './collabIdentity.js';
 import { ensureSurfaceSecuritySchema, captureTaskOrigin, holdsAuthority, liveSurfaceSecurity } from './surfaceSecurity.js';
 import { ensureApprovalBrokerSchema } from './approvalSchema.js';
+import { sweepExpiredApprovals, sweepExpiredGrants } from './approvalWriter.js';
+import { rebuildDeliveryProjection } from './approvalDelivery.js';
+import { revokeInertGrants, admitToolCall } from './grantAdmission.js';
 
 // C1 (§6.2): additive, idempotent state.db migration. Safe to run with the
 // flag OFF -- the tables are created but never read or written, which is
@@ -92,6 +95,22 @@ function recordTaskOrigin(
 
 // Let the LOCAL_EDGE loop observe cancellations without importing the gateway DB.
 setCancelCheck((requestId) => cancellations.isCancelled(requestId));
+
+// C2-8 / §1.4: install the real pre-tool-execution admission seam. The
+// LOCAL_EDGE loop calls this immediately before any gated side effect,
+// with the ACTUAL model-generated arguments.
+//
+// Flag-off returns ok unconditionally, so the legacy path is byte-identical
+// (SI-4): no grant table is read and `grantedTools` alone still authorizes,
+// exactly as today. Flag-on, one unconsumed exact-action grant must
+// validate and be consumed in the same serialization interval.
+setToolAdmissionCheck((requestId, toolName, args) => {
+  if (!collabEnabled()) return { ok: true };
+  const result = admitToolCall(db, {
+    dispatchRequestId: requestId, toolName, args, path: 'LOCAL_EDGE',
+  });
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason };
+});
 
 // Port deliberately != 18789 so TORQCLAW can coexist with a stock OpenClaw
 // install on the same box during comparison testing.
@@ -457,6 +476,41 @@ app.get('/ws', { websocket: true }, (socket) => {
 });
 
 await connectBridge(); // discover + namespace MCP servers before traffic
+
+// C2 startup recovery + projection rebuild (§1.4, §3.13, §6.6, A10).
+//
+// Gated on the flag: with collab off, no C2 table is read or written, which
+// is the SI-4 requirement. With it on, this runs BEFORE the listener opens
+// so no client can observe a half-recovered state:
+//
+//   1. Revoke grants left inert by a crash between decision and admission.
+//      Recovery only ever REDUCES authority -- it never completes,
+//      dispatches, or reissues a grant (§6.6).
+//   2. Sweep approvals past their deadline through the one centralized
+//      writer, so a restart cannot leave a stale row indefinitely
+//      actionable.
+//   3. Rebuild the delivery projection against CURRENTLY eligible operator
+//      surfaces, so a surface that lost authority while the gateway was
+//      down is not re-targeted (A10).
+if (collabEnabled()) {
+  try {
+    const revokedInert = revokeInertGrants(db);
+    const expired = sweepExpiredApprovals(db);
+    sweepExpiredGrants(db);
+    const projection = rebuildDeliveryProjection(db);
+    console.log(
+      `[torqclaw] C2 recovery: ${revokedInert} inert grant(s) revoked, `
+      + `${expired} approval(s) expired, ${projection.created} delivery row(s) projected`
+      + (projection.reason ? ` (${projection.reason})` : ''),
+    );
+  } catch (error) {
+    // Recovery must never prevent the gateway from starting: every C2
+    // consumer already fails closed without its evidence, so a failed
+    // rebuild denies rather than opens.
+    console.error('[torqclaw] C2 recovery failed (continuing fail-closed):', error);
+  }
+}
+
 if (process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED?.toLowerCase() === 'true') {
   const { ensureResilienceProjection, reconcileGatewayProjection } = await import('./storage.js');
   const { pageOutbox } = await import('@torqclaw/bridge');
