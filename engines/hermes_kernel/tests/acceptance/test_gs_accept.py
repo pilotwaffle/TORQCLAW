@@ -279,10 +279,10 @@ def test_steps_09_to_11_rolled_back_version_is_not_usable(env, monkeypatch):
     path to call -- that WAS the finding) and xfailed on the divergence it
     left; both the xfail and the direct store call are gone deliberately.
 
-    NOTE ON SCOPE (still true, recorded rather than papered over): the
-    governed path exposes no *disable/removal* API. Step 9's "roll back /
-    disable" is satisfied on the rollback half only; disable is the
-    GS-DISABLE lane.
+    As of GS-DISABLE step 9's "roll back / disable" is satisfied on BOTH
+    halves: the disable half is asserted in
+    ``test_step_09b_disabled_skill_leaves_the_rendered_prompt`` below,
+    against the same rendered-prompt surface.
     """
     monkeypatch.setenv("TORQCLAW_GOVERNED_SKILLS", "1")
     governed = _reload_stack()
@@ -335,6 +335,66 @@ def test_steps_09_to_11_rolled_back_version_is_not_usable(env, monkeypatch):
     assert SKILL_ID in rendered and "furlongs to metres" in rendered, (
         "the rolled-back v1 skill is absent from the rendered system prompt; "
         "rollback must re-publish the prior projection, not merely remove v2."
+    )
+
+
+def test_step_09b_disabled_skill_leaves_the_rendered_prompt(env, monkeypatch):
+    """The disable half of step 9, closed by GS-DISABLE.
+
+    ``VerifiedSkillStore.disable()`` had the same defect shape F-1 found in
+    ``rollback()``: governance-only, no production caller, so a "disabled"
+    skill kept being rendered into every system prompt. This drives the
+    PRODUCTION OPERATOR SURFACE (``skill_rollback.disable`` -- what the
+    ``disable_skill`` MCP tool calls), never the bare store, and asserts on
+    the rendered index a freshly booted agent would receive.
+    """
+    monkeypatch.setenv("TORQCLAW_GOVERNED_SKILLS", "1")
+    governed = _reload_stack()
+
+    digest = governed.install_approved_skill(SKILL_ID, SKILL_MD)["digest"]
+    assert SKILL_ID in _rendered_skill_index(), "precondition: the skill renders"
+
+    # 9 (disable half): through the shipped operator surface.
+    import mcp_wrapper.skill_rollback as skill_rollback
+
+    importlib.reload(skill_rollback)
+    result = skill_rollback.disable(SKILL_ID)
+    assert result["ok"] is True, result
+    assert result["disabled"] is True and result["published"] is False
+
+    # A genuinely fresh agent construction, exactly as steps 7/10 require.
+    from run_agent import AIAgent
+
+    AIAgent(
+        model=os.environ["HERMES_MODEL"],
+        provider=os.environ["HERMES_PROVIDER"],
+        api_key=os.environ["HERMES_API_KEY"],
+        base_url=os.environ["HERMES_BASE_URL"],
+        max_iterations=1,
+        enabled_toolsets=["skills"],
+    )
+
+    # The assertion the store-only disable could never make: the skill is
+    # gone from the surface the model's turn actually consumes.
+    rendered = _rendered_skill_index()
+    assert SKILL_ID not in rendered, (
+        "disable reported success but the skill is STILL in the rendered "
+        f"system prompt. Rendered index was:\n{rendered[:2000]}"
+    )
+    assert "furlong" not in rendered.lower()
+
+    # Governance says disabled; the installed digest history survives, which
+    # is what keeps rollback available as the re-enable path.
+    state = json.loads((env["data"] / "verified_skills" / "state.json").read_text())
+    assert state["active"][SKILL_ID]["enabled"] is False
+    assert digest in state["installed"][SKILL_ID]
+    assert not (env["published"] / SKILL_ID).exists()
+
+    # And the documented inverse works: rollback re-enables AND republishes.
+    governed.rollback_governed_skill(SKILL_ID, digest)
+    assert SKILL_ID in _rendered_skill_index(), (
+        "rollback is the documented inverse of disable; it must restore the "
+        "model's index"
     )
 
 
@@ -393,26 +453,31 @@ def test_step_14b_malformed_skill_id_is_refused(env, monkeypatch):
     assert not any(env["published"].iterdir()), "a rejected id still published something"
 
 
-@pytest.mark.xfail(
-    reason=(
-        "GS-ACCEPT FINDING (minor, recorded not fixed): an EMPTY skill body is "
-        "accepted and published as a 0-byte SKILL.md. Validation bounds package "
-        "size from ABOVE (MAX_SKILL_BYTES, verified_skill_store.py:963) but has "
-        "no lower bound, so empty content is structurally valid -- digests match "
-        "and the manifest is consistent. Not a security hole: it requires an "
-        "operator to approve an empty skill, and an empty SKILL.md renders "
-        "nothing into the prompt. Fixing it is a product change needing its own "
-        "G1R/G2A cycle, so it is pinned here as a known gap rather than "
-        "silently dropped."
-    ),
-    strict=True,
-)
-def test_step_14b_empty_skill_body_should_be_refused(env, monkeypatch):
+def test_step_14b_empty_skill_body_is_refused(env, monkeypatch):
+    """GS-ACCEPT finding F-2, CLOSED by GS-DISABLE's second deliverable.
+
+    Validation bounded package size from ABOVE only (``MAX_SKILL_BYTES``),
+    so an EMPTY body was structurally valid -- digests matched, the
+    manifest was consistent, and a 0-byte ``SKILL.md`` was published that
+    renders nothing into the prompt. Not a security hole, but a governance
+    lie: the approval record claimed a capability that provably did not
+    exist. ``MIN_SKILL_BYTES`` now enforces a lower bound at the package
+    validation seam, so every read path is covered, not just install.
+    """
     monkeypatch.setenv("TORQCLAW_GOVERNED_SKILLS", "1")
     governed = _reload_stack()
 
-    with pytest.raises(Exception):
+    from mcp_wrapper.verified_skill_store import SkillEmptyBodyError
+
+    with pytest.raises(SkillEmptyBodyError):
         governed.install_approved_skill(SKILL_ID, "")
+
+    # Whitespace-only is equally inert and equally refused.
+    with pytest.raises(SkillEmptyBodyError):
+        governed.install_approved_skill(SKILL_ID, "   \n\n  ")
+
+    # Nothing partial was left behind by either refusal.
+    assert not (env["published"] / SKILL_ID).exists()
 
 
 def test_step_14c_digest_changed_after_approval_is_refused(env, monkeypatch):

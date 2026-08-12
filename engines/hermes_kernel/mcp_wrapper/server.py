@@ -436,11 +436,26 @@ async def rollback_skill(skill_id: str, digest: str) -> dict:
 
 
 @mcp.tool()
+async def disable_skill(skill_id: str) -> dict:
+    """GS-DISABLE: disable a governed skill end to end -- the published
+    projection is removed, the prompt cache is invalidated, and governance
+    is marked disabled in ONE transaction, so a fresh agent boot no longer
+    renders it (the store-only disable had the same governance/projection
+    divergence GS-ACCEPT F-1 found in rollback). Installed digest history is
+    preserved. Governed-only: refuses when TORQCLAW_GOVERNED_SKILLS is off.
+    NOTE: to re-enable, use rollback_skill with the digest you want back --
+    that re-enables AND re-publishes in one digest-bound step."""
+    return skill_rollback.disable(skill_id)
+
+
+@mcp.tool()
 async def list_skill_versions(skill_id: str) -> dict:
     """GS-ROLLBACK: list a governed skill's installed versions (with
     installedAt and tamper flags) plus its governed-active and published
     digests, so an operator can pick an exact rollback target and see
-    governed/published divergence."""
+    governed/published divergence. GS-DISABLE adds `disabled` and
+    `disabledDigest` so a disabled skill is distinguishable from a
+    never-active one (opposite remedies: rollback vs re-approval)."""
     return skill_rollback.list_versions(skill_id)
 
 

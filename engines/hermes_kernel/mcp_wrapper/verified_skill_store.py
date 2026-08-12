@@ -32,6 +32,16 @@ from typing import Any
 
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_SKILL_BYTES = 512 * 1024
+#: Lower bound on SKILL.md, closing GS-ACCEPT finding F-2. Package
+#: validation bounded size from ABOVE only, so an EMPTY body was
+#: structurally valid -- digests matched, the manifest was consistent, and
+#: the store happily published a 0-byte SKILL.md that renders nothing into
+#: the prompt. An operator approving a skill and getting a silently inert
+#: one is a governance lie, however minor: the approval record claims a
+#: capability that provably does not exist. Enforced as "at least one
+#: non-whitespace byte" rather than "len > 0" so a body of nothing but
+#: newlines/spaces -- equally inert -- is refused too.
+MIN_SKILL_BYTES = 1
 MAX_PACKAGE_BYTES = 2 * 1024 * 1024
 MAX_STATE_BYTES = 2 * 1024 * 1024
 MAX_ID_LENGTH = 64
@@ -73,6 +83,19 @@ class SkillStoreError(Exception):
 
 class SkillValidationError(SkillStoreError, ValueError):
     """The package or an operation input violates a bounded contract."""
+
+
+class SkillEmptyBodyError(SkillValidationError):
+    """``SKILL.md`` is empty or contains nothing but whitespace (F-2).
+
+    A subclass of :class:`SkillValidationError` -- not a peer -- because it
+    IS a bounded-contract violation (the lower bound, ``MIN_SKILL_BYTES``),
+    so every existing handler that already treats package validation as
+    fail-closed keeps working unchanged. It is nonetheless typed
+    separately so an operator surface can say "your skill body is empty"
+    instead of a generic "package is invalid", which is the difference
+    between an actionable message and a support ticket.
+    """
 
 
 class SkillIntegrityError(SkillStoreError):
@@ -440,7 +463,19 @@ class VerifiedSkillStore:
             if not active:
                 raise SkillStoreError(f"skill is not active: {skill_id}")
             active["enabled"] = False
-            artifact = self._artifact_from_installed(state, skill_id, active["digest"])
+            try:
+                artifact = self._artifact_from_installed(state, skill_id, active["digest"])
+            except SkillStoreError:
+                # Disable must NEVER depend on the installed package still
+                # validating: an invalid, tampered, or legacy pre-F-2
+                # empty-body package is precisely when an operator most needs
+                # to turn a skill OFF, and this read exists only to build the
+                # audit record below (G2A GS-DISABLE finding 3: the F-2 lower
+                # bound made a legacy empty-body skill undisableable through
+                # this seam, with reconcile() then able to manufacture the
+                # exact governance/projection divergence the disable lane
+                # closes). Audit with a degraded record instead of refusing.
+                artifact = {"manifest": {"id": skill_id}, "digest": active["digest"]}
             self._append_audit(state, "disabled", artifact)
             self._save_state(state)
             return {"ok": True, "skillId": skill_id, "digest": active["digest"], "enabled": False}
@@ -1033,6 +1068,18 @@ def _read_package(
     skill_path = package_dir / "SKILL.md"
     manifest_bytes = _read_bounded(manifest_path, MAX_MANIFEST_BYTES)
     skill_bytes = _read_bounded(skill_path, MAX_SKILL_BYTES)
+    # F-2 lower bound, enforced HERE rather than at the install seam so it
+    # covers every path that reads a package -- stage, activate, rollback,
+    # get_active, list_installed, reconcile -- not just the one caller that
+    # happens to exist today. A validation rule placed at a single caller is
+    # the unenforced-claim pattern in miniature: the next path added would
+    # silently bypass it.
+    if len(skill_bytes.strip()) < MIN_SKILL_BYTES:
+        raise SkillEmptyBodyError(
+            "SKILL.md is empty or whitespace-only; an approved skill must "
+            "have a body (a 0-byte skill renders nothing into the prompt, "
+            "so approving it would record a capability that does not exist)"
+        )
     if len(manifest_bytes) + len(skill_bytes) > MAX_PACKAGE_BYTES:
         raise SkillValidationError("package exceeds total byte limit")
     manifest = _parse_manifest(manifest_bytes)
