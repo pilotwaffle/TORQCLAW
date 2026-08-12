@@ -14,6 +14,7 @@ import { decideApproval, handleListApprovals } from './approvals.js';
 import { makeEmitter, sessionBus, persistAndPublish } from './events.js';
 import { router } from '@torqclaw/router';
 import { connectBridge, approveSkill, getSkillDraft, cancelHermesTask } from '@torqclaw/bridge';
+import { describeSkillDecision } from './skillDecision.js';
 import { assertResolvedProfile, constrainTier } from './profileResolver.js';
 import { setCancelCheck } from '@torqclaw/inference';
 import { cancellations } from './cancellations.js';
@@ -200,12 +201,10 @@ app.get('/ws', { websocket: true }, (socket) => {
         break;
       }
       case 'APPROVE_SKILL': {
-        await approveSkill(cmd.data.queueId, cmd.data.decision, cmd.data.editedMarkdown);
+        const result = await approveSkill(cmd.data.queueId, cmd.data.decision, cmd.data.editedMarkdown);
         const edited = cmd.data.decision === 'APPROVE' && cmd.data.editedMarkdown !== undefined;
-        makeEmitter(sid, null, null)(
-          'SYSTEM',
-          `Skill ${cmd.data.queueId}: ${cmd.data.decision}${edited ? ' (with edits)' : ''}`,
-        );
+        const event = describeSkillDecision(cmd.data.queueId, cmd.data.decision, edited, result);
+        makeEmitter(sid, null, null)(event.type, event.message, event.metadata);
         break;
       }
       case 'GET_SKILL_DRAFT': {

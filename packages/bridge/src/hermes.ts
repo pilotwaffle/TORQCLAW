@@ -205,13 +205,17 @@ export async function approveSkill(
   queueId: string,
   decision: 'APPROVE' | 'REJECT',
   editedMarkdown?: string,
-) {
+): Promise<Record<string, unknown>> {
   const client = getClient('hermes');
   const args: Record<string, unknown> = { queue_id: queueId, decision };
   if (decision === 'APPROVE' && editedMarkdown !== undefined) {
     args.edited_markdown = editedMarkdown;
   }
-  await client.callTool({ name: 'decide_skill', arguments: args });
+  // decide_skill NEVER raises for a governed refusal — busy, activation
+  // failure, and the two non-retryable UNPROVEN states all come back as
+  // ok:false data. Discarding this result (the old behavior here) turned
+  // every one of them into a claimed success upstream.
+  return parseToolResult(await client.callTool({ name: 'decide_skill', arguments: args }));
 }
 
 /** P4: fetch a skill draft's full markdown for the console editor. */

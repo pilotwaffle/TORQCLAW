@@ -138,7 +138,7 @@ Default profile by task type: `DATA_EXTRACTION` and `SUMMARIZATION` →
 `read_only`; `ROUTINE_AUTOMATION` → `workspace_write`; `AUTONOMOUS_RESEARCH` →
 `browser_research`; `COMPLEX_CODING` → `terminal_power`.
 
-### Verified skills — wired, gated, default off
+### Verified skills — wired, gated, code-default off (this deployment: ON)
 
 `engines/hermes_kernel/mcp_wrapper/verified_skill_store.py` implements atomic
 staging, digest-bound approval, activation, rollback, and journal recovery. As
@@ -156,6 +156,17 @@ runs the same coordinator transaction, re-publishing the target version's
 bytes and verifying their digest — never governance alone (the GS-ACCEPT F-1
 divergence). **A governed disable/removal surface still does not exist**
 (GS-DISABLE, unscoped); rolling back a disabled skill re-enables it.
+
+**Using governed skills (operator flow):** set `TORQCLAW_GOVERNED_SKILLS=1`
+(this deployment already has it in the user environment). A skill reaches the
+queue by operator paste or an agent draft (`queue_skill`); the console
+approval card drives `APPROVE_SKILL`, which runs the full governed install
+and now reports the kernel's real outcome — a busy engine or a
+failed/unproven activation surfaces as an explicit ERROR event with retry
+guidance, never as a silent success. Rollback and version listing exist
+today as MCP tools only (`rollback_skill`, `list_skill_versions` on the
+engine server) — there is no console button for them yet; disabling a skill
+is its own in-flight lane (GS-DISABLE).
 
 **Operator ruling 2026-08-11: governed skills are ON for this deployment**
 (`TORQCLAW_GOVERNED_SKILLS=1` in the operator's user environment). The
@@ -403,7 +414,7 @@ Completed:
 
 In progress:
 
-- Resilient extensibility — provider failover and execution profiles landed; verified skills not integrated. See the section above for per-slice status and exit criteria.
+- Resilient extensibility — provider failover and execution profiles landed; the local verified-skill lifecycle (install, activation, rollback) is integrated end to end and ON for this deployment (see "Verified skills" above). Remaining from that PRD: a governed disable surface (in flight) and Phase 4 signed remote sources (deferred until after C1/C2).
 
 Not started:
 
