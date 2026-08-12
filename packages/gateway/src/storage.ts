@@ -99,9 +99,20 @@ function stateDb(): Database.Database {
  * is best-effort: a handle that is already closed, or busy, must not turn
  * test teardown into a failure.
  */
-export function resetStateDbForTest(): void {
+export function resetStateDbForTest(options: { close?: boolean } = {}): void {
   const previous = handle;
   handle = null;
+  // `close: false` DETACHES without closing: the next access opens a fresh
+  // handle, while work still in flight against the old one keeps a valid
+  // connection to finish on.
+  //
+  // Needed when a test re-points the data dir between cases while an async
+  // dispatch from the previous case is still running -- its terminal event
+  // write would otherwise land on a closed connection and surface as an
+  // unhandled rejection that looks exactly like a defect in the code under
+  // test. Closing stays the DEFAULT, because ordinary teardown should not
+  // leak file handles.
+  if (options.close === false) return;
   try { previous?.close(); } catch { /* teardown must not throw */ }
 }
 

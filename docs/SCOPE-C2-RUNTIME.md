@@ -79,6 +79,7 @@ caught the G2A round-1 defects.
 | 6 | Grant consumption | stop writing `consumed_at` | **2 RED** — durable consumption + one-shot |
 | 7 | **C2 producer wiring (D-1)** | revert `dispatch.ts` to the legacy-only `registerApproval` — the exact original defect | **RED** — flag-on E2E fails "registration MUST write a C2 binding" |
 | 8 | **FRONTIER fences (D-2)** | remove BOTH the APPROVE_TOOL guard and the `dispatchLegacy` executor fence | **2 RED** — the booted-artifact refusal and the shipped-guard assertion |
+| 8c | **Failover fence (N-1)** | remove ONLY the `dispatchFailover` fence, leaving the legacy one intact | **RED** — the failover case terminates `FAILOVER: failover_failed` instead of the refusal, while the legacy case stays green |
 
 Probe 8 is also the reason the executor fence sits **before** the
 engine-availability check. With the fence placed after it, this probe stayed
@@ -157,6 +158,18 @@ any unit test could have surfaced:
    D-3 forced the APPROVE leg into the identity transcript. The fence now
    requires both the flag and an actual grant row for that dispatch request.
 
+**Round 2 (G2A N-1): the same mistake, one route over.** Round 1's D-2 was
+a FRONTIER refusal that no path reached. Round 2 found the executor fence
+added to fix it guarding only ONE of the two routes `dispatch()` can take —
+`TORQCLAW_PROVIDER_FAILOVER_ENABLED=true` sends FRONTIER to
+`dispatchFailover`, which had no fencing at all, so a flag-on legacy/unbound
+approval re-minted to FRONTIER reached the cloud engine under a name-only
+grant. The fix factors the predicate and the terminal into one shared pair
+consulted by both routes, because "add another copy of the check" is how
+this defect keeps regenerating. `hasC2Binding` was deleted in the same pass
+(N-2): it had no caller and its comment claimed an enforcement role it never
+had, which is worse than absent in a security module.
+
 **Scope note on prop 8.** The operator's typed prompt *does* still appear in
 the `USER_PROMPT` echo, because they typed it themselves and the gateway
 echoes submitted prompts back to the submitting session. That is separate
@@ -175,15 +188,29 @@ assertion is scoped accordingly and the reasoning is recorded in the test.
 - **The BRIDGE executor path** is accepted by `admitToolCall` but only the
   LOCAL_EDGE loop is wired to call it. Every bridge executor must traverse
   the same seam before C2-8's AC is fully discharged.
-- **FRONTIER is refused, not fenced.** Stated precisely, because the
-  earlier wording here was false: there is no args-aware admission on the
-  FRONTIER path, and none is claimed. Instead, under the flag, a FRONTIER
-  approval is **refused at two points** — APPROVE_TOOL will not dispatch a
-  FRONTIER re-mint, and `dispatchLegacy` refuses a FRONTIER run carrying
-  `grantedTools` before the engine is reached. The tier is therefore
-  unusable for gated tools under the flag, which is the intended
-  fail-closed posture; making it *usable* requires the separately
-  authorized Hermes structured-grant protocol (PRD §3.4.2 step 5).
+- **FRONTIER is refused, not fenced.** Stated precisely, because earlier
+  wordings here were twice false. There is no args-aware admission on the
+  FRONTIER path and none is claimed. Instead, under the flag, a FRONTIER
+  run carrying a gateway-issued grant is **refused at three sites**,
+  covering every route that can reach the engine:
+
+  | Site | Path it closes |
+  |---|---|
+  | `server.ts` APPROVE_TOOL guard | a C2-bound approval never dispatches a FRONTIER re-mint |
+  | `dispatchLegacy` executor fence | a granted FRONTIER run with failover **off** |
+  | `dispatchFailover` executor fence | a granted FRONTIER run with `TORQCLAW_PROVIDER_FAILOVER_ENABLED=true` (G2A N-1) |
+
+  The two executor fences share one predicate (`frontierGrantFenced`) and
+  one terminal (`refuseFrontierGrantedRun`), so they cannot drift apart,
+  and each is placed before any engine or projection side effect on its
+  route. Both are pinned by the parameterized booted-artifact test, and
+  deletion probe 8 sabotages each site independently.
+
+  With all three closed, the tier is genuinely unusable for gated tools
+  under the flag — the intended fail-closed posture. Making it *usable*
+  requires the separately authorized Hermes structured-grant protocol
+  (PRD §3.4.2 step 5). **BRIDGE executors remain owed** (above): they are
+  accepted by `admitToolCall` but nothing yet routes them through it.
 - **D-6 (C3 obligation):** `approvalDelivery.actionableForSurface` does not
   re-check surface eligibility at read time — it filters on the approval
   still being pending, not on the target still being an eligible operator
@@ -212,12 +239,20 @@ assertion is scoped accordingly and the reasoning is recorded in the test.
   the OQ-5 ratification, not in a defect-fix pass. **Operator remedy is
   re-approval**, which is safe by construction (a fresh approval mints a
   fresh grant). Flagged for OQ-5.
-- **`resetStateDbForTest` leaves module-scope prepared statements bound to
-  the old handle.** Test-only, and the isolation tests pass because they
-  exercise the Proxy rather than a captured statement. Fixing it properly
-  means making those statements lazy too — worth doing, but it is a
-  test-ergonomics change with real blast radius across every consumer, so it
-  is not being folded into a security-defect pass.
+- **`resetStateDbForTest` and module-scope prepared statements — now FIXED
+  for the one statement that mattered.** This bit during the N-1 work: the
+  parameterized FRONTIER test re-points the data dir between cases, and
+  `events.ts` had prepared its `INSERT INTO events` at import time. A
+  prepared statement is bound to the connection it was prepared on, so
+  events kept going to the OLD database while the test seeded its session
+  into the NEW one — surfacing as an unhandled `FOREIGN KEY constraint
+  failed` that looked exactly like a defect in the fence under test.
+  `insertEvent` is now prepared lazily and re-prepared when the handle
+  changes; production is unaffected (the handle resolves once at boot, so
+  it still prepares exactly once). `resetStateDbForTest` also gained a
+  `{ close: false }` detach mode for the case where in-flight async work
+  still needs the old connection. Other module-scope statements elsewhere
+  remain, but none is on a path that re-points mid-process today.
 - **The channel-kind deny-list is triplicated** (`approvalWriter.ts:58`,
   `surfaceSecurity.ts:45`, `approvalDelivery.ts:64`). All three agree today
   and each is independently tested. Consolidating is correct, but the same

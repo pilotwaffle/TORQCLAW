@@ -259,21 +259,8 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
   // minting a FRONTIER grant -- because a granted request can also arrive
   // by replay or from a future caller, and "unwired" must never again be
   // mistaken for "fail-closed".
-  if (
-    diag.tier === ComputeTier.FRONTIER
-    && collabEnabled()
-    && (effectiveReq.payload.grantedTools?.length ?? 0) > 0
-  ) {
-    const refusal = frontierGrantRefusal();
-    taskStore.fail(req.id, `REFUSED: ${refusal.reason}`);
-    emit('ERROR', refusal.detail, {
-      refusedCode: refusal.reason,
-      recovery: ['RETRY_LOCAL', 'COPY_DIAGNOSTIC'],
-      prompt: req.payload.prompt,
-      sideEffectNote: 'Nothing ran — the request never reached the cloud engine.',
-    });
-    safeMaterializeReceipt(req.id);
-    cancellations.clear(req.id);
+  if (frontierGrantFenced(effectiveReq, diag)) {
+    refuseFrontierGrantedRun(req, emit);
     return;
   }
 
@@ -490,6 +477,45 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
   })();
 }
 
+/**
+ * The FRONTIER grant fence predicate (§1.4, G2A D-2 / N-1).
+ *
+ * ONE rule, consulted by EVERY executor path, because the round-1 defect
+ * and the round-2 finding were the same mistake made twice: a fence that
+ * guards one route while another route reaches the same engine. Round 1
+ * left `admitToolCall`'s FRONTIER refusal unreachable; round 2 found
+ * `dispatchFailover` bypassing the executor fence entirely.
+ *
+ * True when a FRONTIER run carries a gateway-issued grant under the flag.
+ * Such a run cannot satisfy the exact-action invariant -- the engine's
+ * pre-tool hook grants by tool NAME and never inspects args -- so nothing
+ * downstream can prove the args about to execute are the args approved.
+ */
+function frontierGrantFenced(req: GatewayRequest, diag: RouterDiagnostics): boolean {
+  return diag.tier === ComputeTier.FRONTIER
+    && collabEnabled()
+    && (req.payload.grantedTools?.length ?? 0) > 0;
+}
+
+/**
+ * The shared terminal for a fenced FRONTIER run. Fails the task, emits the
+ * explicit refusal, projects the receipt, and clears cancellation state --
+ * the same terminal discipline every other refusal path uses, so a fenced
+ * run is a first-class outcome rather than a silent drop.
+ */
+function refuseFrontierGrantedRun(req: GatewayRequest, emit: ReturnType<typeof makeEmitter>): void {
+  const refusal = frontierGrantRefusal();
+  taskStore.fail(req.id, `REFUSED: ${refusal.reason}`);
+  emit('ERROR', refusal.detail, {
+    refusedCode: refusal.reason,
+    recovery: ['RETRY_LOCAL', 'COPY_DIAGNOSTIC'],
+    prompt: req.payload.prompt,
+    sideEffectNote: 'Nothing ran — the request never reached the cloud engine.',
+  });
+  safeMaterializeReceipt(req.id);
+  cancellations.clear(req.id);
+}
+
 /** Feature gate is deliberately the first executable branch. The legacy path
  * below is unchanged when the flag is off; failover is dynamically imported so
  * it cannot open resilience projection state or add a poll/delay to legacy
@@ -508,6 +534,23 @@ async function dispatchFailover(req: GatewayRequest, diag: RouterDiagnostics): P
   const effectiveReq: GatewayRequest = budget === undefined
     ? req
     : { ...req, constraints: { ...req.constraints, maxCost: budget } };
+
+  // G2A N-1: the THIRD fence site. `dispatch()` routes FRONTIER +
+  // TORQCLAW_PROVIDER_FAILOVER_ENABLED here INSTEAD of dispatchLegacy, so
+  // the executor fence added in round 2 was bypassed entirely whenever
+  // failover was enabled -- runFailoverTask -> executeHermesAttempt
+  // reached the cloud engine under a name-only grant.
+  //
+  // Placed before `taskStore.create` and before the dynamic import of
+  // failover.js, so a fenced run opens no resilience projection state and
+  // touches no engine: same discipline as the legacy fence, which sits
+  // ahead of the availability check for the same reason.
+  if (frontierGrantFenced(effectiveReq, diag)) {
+    taskStore.create(effectiveReq, diag);   // persist BEFORE the terminal
+    refuseFrontierGrantedRun(req, emit);
+    return;
+  }
+
   taskStore.create(effectiveReq, diag);
   try {
     const { runFailoverTask, FailoverTerminalError } = await import('./failover.js');

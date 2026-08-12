@@ -27,10 +27,41 @@ export const sessionBus = {
   },
 };
 
-const insertEvent = db.prepare(
-  `INSERT INTO events (id, session_id, request_id, tier, type, message, metadata)
-   VALUES (?, ?, ?, ?, ?, ?, ?)`,
-);
+/**
+ * Prepared LAZILY, not at module scope.
+ *
+ * better-sqlite3 binds a prepared statement to the connection it was
+ * prepared on. Preparing at import time captured whichever handle existed
+ * then, so after `resetStateDbForTest` re-pointed `db` at a different
+ * database this statement kept writing to (or failing against) the old
+ * one -- the stale-prepared-statement caveat on that reset, which showed
+ * up as a FOREIGN KEY failure when a test seeded its session through the
+ * NEW handle while events still went to the OLD one.
+ *
+ * Preparing on first use, and re-preparing when the handle changes, makes
+ * the reset actually mean what it says. Production is unaffected: the
+ * handle is resolved once at boot and never changes, so this prepares
+ * exactly once, on the first event.
+ */
+type InsertEventStatement = {
+  run: (...params: unknown[]) => { lastInsertRowid: number | bigint };
+};
+let insertEventStmt: InsertEventStatement | null = null;
+let insertEventHandle: unknown = null;
+
+function insertEventStatement(): InsertEventStatement {
+  // `db` is a Proxy over the live handle; comparing the underlying
+  // connection object is what detects a reset.
+  const current = (db as unknown as { name?: unknown }).name;
+  if (insertEventStmt === null || insertEventHandle !== current) {
+    insertEventStmt = db.prepare(
+      `INSERT INTO events (id, session_id, request_id, tier, type, message, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ) as unknown as InsertEventStatement;
+    insertEventHandle = current;
+  }
+  return insertEventStmt;
+}
 
 export function persistAndPublish(event: Omit<GatewayEvent, 'seq'>): GatewayEvent {
   // ERROR text can originate in provider/tool exceptions. Apply the same
@@ -40,7 +71,7 @@ export function persistAndPublish(event: Omit<GatewayEvent, 'seq'>): GatewayEven
     ? { ...event, message: sanitizePersistedError(event.message) }
     : event;
   const validated = GatewayEventSchema.parse(prepared); // gateway obeys its own contract
-  const info = insertEvent.run(
+  const info = insertEventStatement().run(
     validated.id, validated.sessionId, validated.requestId, validated.tier,
     validated.type, validated.message,
     validated.metadata === undefined ? null : JSON.stringify(validated.metadata),

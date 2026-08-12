@@ -254,7 +254,16 @@ describe('C2 FLAG-ON end-to-end on the booted artifact (D-1, D-5)', () => {
 });
 
 describe('C2 FLAG-ON FRONTIER fail-closed on the booted artifact (D-2)', () => {
-  it('a flag-on FRONTIER re-run carrying a grant is REFUSED before the engine', async () => {
+  // BOTH executor routes. `dispatch()` sends FRONTIER to dispatchFailover
+  // when TORQCLAW_PROVIDER_FAILOVER_ENABLED=true and to dispatchLegacy
+  // otherwise, so fencing only one of them leaves the other reaching the
+  // cloud engine under a name-only grant -- exactly the G2A N-1 finding.
+  it.each([
+    ['legacy dispatch', 'false'],
+    ['provider failover', 'true'],
+  ] as const)(
+    'a flag-on FRONTIER re-run carrying a grant is REFUSED before the engine (%s)',
+    async (_label, failoverEnabled) => {
     // This drives the EXECUTOR fence in dispatch.ts directly, because the
     // router will not select FRONTIER on this machine (no reachable engine,
     // and LOCAL_ONLY/CLOUD_OK both resolve local here). Relying on routing
@@ -272,18 +281,45 @@ describe('C2 FLAG-ON FRONTIER fail-closed on the booted artifact (D-2)', () => {
     const distDir = join(GATEWAY_DIST_ENTRY, '..');
     const prevFlag = process.env.TORQCLAW_COLLAB_ENABLED;
     const prevDir = process.env.TORQCLAW_DATA_DIR;
+    const prevFailover = process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED;
     process.env.TORQCLAW_COLLAB_ENABLED = '1';
     process.env.TORQCLAW_DATA_DIR = dataDir;
+    process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED = failoverEnabled;
     try {
+      // Re-point the dist module's state.db handle at THIS case's data
+      // dir BEFORE importing dispatch. ESM caches modules across both
+      // parameterized cases, so without this the second case writes into
+      // the FIRST case's database and its task row is never found.
+      //
+      // Order matters and is the reason this reads awkwardly: modules like
+      // events.ts prepare statements at module scope, and a statement
+      // prepared against a closed handle throws "database connection is
+      // not open". Resetting first, then importing, means every
+      // module-scope statement binds to the handle this case will use.
+      // (This is the G2A-noted stale-prepared-statement caveat on
+      // resetStateDbForTest, met in practice.)
+      const { resetStateDbForTest } = await import(
+        pathToFileURL(join(distDir, 'storage.js')).href
+      ) as { resetStateDbForTest: (o?: { close?: boolean }) => void };
+      // DETACH, do not close: the previous case's async dispatch may still
+      // be writing its terminal event, and closing under it would raise an
+      // unhandled rejection that mimics a real defect.
+      resetStateDbForTest({ close: false });
       const { dispatch } = await import(pathToFileURL(join(distDir, 'dispatch.js')).href);
       const { ComputeTier } = await import('@torqclaw/contracts');
 
       const sessionId = randomUUID();
       const requestId = randomUUID();
-      const state = new Database(join(dataDir, 'state.db'));
-      state.prepare("INSERT INTO sessions (id, role, client_name) VALUES (?, 'operator','t')")
+      // Seed through the SAME handle the dispatch module will use, not a
+      // second connection. Two connections to a WAL database are two
+      // snapshots: a row committed on one is not necessarily visible to a
+      // reader that began earlier on the other, and the FK check on the
+      // event insert then fails against a session it cannot see.
+      const { db: liveDb } = await import(
+        pathToFileURL(join(distDir, 'storage.js')).href
+      ) as { db: import('better-sqlite3').Database };
+      liveDb.prepare("INSERT INTO sessions (id, role, client_name) VALUES (?, 'operator','t')")
         .run(sessionId);
-      state.close();
 
       const req = {
         id: requestId,
@@ -302,22 +338,35 @@ describe('C2 FLAG-ON FRONTIER fail-closed on the booted artifact (D-2)', () => {
       const diag = { tier: ComputeTier.FRONTIER, reason: 'test', ruleId: null } as any;
 
       dispatch(req, diag);
-      await new Promise((r) => setTimeout(r, 1500));
+      // The failover route is async (dynamic import before the fence), so
+      // it needs longer than the synchronous legacy route. Poll rather
+      // than guess: a fixed sleep that is slightly too short reads a row
+      // that has not been written yet and reports a working fence as
+      // broken -- which is exactly what happened on the first run.
+      let task: { state: string; error: string | null } | undefined;
+      for (let attempt = 0; attempt < 40 && task === undefined; attempt += 1) {
+        await new Promise((r) => setTimeout(r, 250));
+        const poll = new Database(join(dataDir, 'state.db'), { readonly: true });
+        task = poll.prepare('SELECT state, error FROM tasks WHERE request_id=?')
+          .get(requestId) as { state: string; error: string | null } | undefined;
+        poll.close();
+      }
 
-      const check = new Database(join(dataDir, 'state.db'), { readonly: true });
-      const task = check.prepare('SELECT state, error FROM tasks WHERE request_id=?')
-        .get(requestId) as { state: string; error: string | null } | undefined;
       expect(task, 'the task row must exist').toBeDefined();
       // The decisive assertion: the run was REFUSED, and refused for the
       // FRONTIER structured-grant reason specifically.
       expect(task!.state).toBe('failed');
       expect(task!.error).toContain('frontier-structured-grant-unavailable');
-      check.close();
     } finally {
       if (prevFlag === undefined) delete process.env.TORQCLAW_COLLAB_ENABLED;
       else process.env.TORQCLAW_COLLAB_ENABLED = prevFlag;
       if (prevDir === undefined) delete process.env.TORQCLAW_DATA_DIR;
       else process.env.TORQCLAW_DATA_DIR = prevDir;
+      if (prevFailover === undefined) delete process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED;
+      else process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED = prevFailover;
+      // Let this case's in-flight async dispatch finish writing before the
+      // next case re-points the handle.
+      await new Promise((r) => setTimeout(r, 750));
     }
   }, 180000);
 

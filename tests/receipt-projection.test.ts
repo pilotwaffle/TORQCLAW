@@ -216,8 +216,13 @@ describe('TCLAW-4A run receipt projection', () => {
     const guardedCalls = src.match(/safeMaterializeReceipt\(/g) ?? [];
     // 7 call sites: SUCCESS, BLOCKED, FAILED, CAP_EXCEEDED (TCLAW-1A-core),
     // FRONTIER_UNAVAILABLE, emitToolDenied, and C2's FRONTIER
-    // structured-grant refusal (§1.4, G2A D-2) -- a terminal outcome like
-    // any other, so it projects a receipt like any other.
+    // structured-grant refusal (§1.4, G2A D-2/N-1) -- a terminal outcome
+    // like any other, so it projects a receipt like any other.
+    //
+    // That C2 refusal is ONE site even though it fences TWO executor
+    // routes (dispatchLegacy and dispatchFailover): both call the shared
+    // refuseFrontierGrantedRun terminal. That is the point of factoring it
+    // out -- one rule, one terminal, no drift between the routes.
     expect(guardedCalls.length).toBe(7);
   });
 

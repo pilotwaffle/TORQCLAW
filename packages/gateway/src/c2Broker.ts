@@ -295,16 +295,14 @@ export function decideApprovalC2(
   }
 }
 
-/**
- * Does this approval carry a C2 binding? Used by the FRONTIER guard in
- * server.ts, which must refuse a tier it cannot fence (D-2).
- */
-export function hasC2Binding(approvalId: string): boolean {
-  try {
-    return db.prepare(
-      'SELECT 1 FROM gateway_approval_bindings WHERE approval_id = ?',
-    ).get(approvalId) !== undefined;
-  } catch {
-    return false;
-  }
-}
+// G2A N-2: `hasC2Binding` was removed here. It had no production caller,
+// and its doc comment claimed it was "used by the FRONTIER guard in
+// server.ts" -- which was false: that guard keys on `diag.tier`, never on
+// whether a binding exists.
+//
+// Deleted rather than wired, deliberately. An inaccurate comment about
+// where enforcement happens is worse than a missing helper: the next
+// reader auditing the FRONTIER path would have gone looking for a check
+// that was never there. The binding lookup this function duplicated
+// already lives inline in `decideApprovalC2` above, at the one seam that
+// actually needs it.
