@@ -27,6 +27,7 @@ import { handleGetSafeExport } from './export.js';
 import { collabEnabled, PrincipalBindingError } from './principalBridge.js';
 import { resolveConnectIdentity, type ConnectionAuthContext } from './collabIdentity.js';
 import { ensureSurfaceSecuritySchema, captureTaskOrigin, holdsAuthority, liveSurfaceSecurity } from './surfaceSecurity.js';
+import { ensureApprovalBrokerSchema } from './approvalSchema.js';
 
 // C1 (§6.2): additive, idempotent state.db migration. Safe to run with the
 // flag OFF -- the tables are created but never read or written, which is
@@ -34,6 +35,13 @@ import { ensureSurfaceSecuritySchema, captureTaskOrigin, holdsAuthority, liveSur
 // Running it unconditionally at boot means a flag flip needs no migration
 // step, and re-running it is a no-op.
 ensureSurfaceSecuritySchema(db);
+
+// C2-1 (§3.1, §6.2): additive approval-broker migration -- the six guarded
+// nullable columns on canonical `tool_approvals`, its one declared index,
+// and the three additive sidecars. Same posture as C1 above: unconditional
+// at boot, idempotent, and inert while the flag is off (no C2 path reads or
+// writes any of it unless collabEnabled()).
+ensureApprovalBrokerSchema(db);
 
 // Read helper for authz's task-ownership check. Kept inline here (not in
 // events.ts taskStore) per scope: this ticket may only touch authz.ts,
