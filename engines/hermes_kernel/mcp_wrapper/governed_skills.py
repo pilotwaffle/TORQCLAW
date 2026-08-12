@@ -1105,11 +1105,33 @@ def map_activation_failure(exc: Exception, *, queue_status: str | None) -> dict[
     - anything else: retryable ``SKILL_ACTIVATION_FAILED`` -- the
       coordinator's restore path guarantees nothing partial is left
       published or governed-active, so a retry starts from a clean slate.
+
+    Phase 4 (O-13, normative): a ``SkillTrustError`` arm is checked FIRST,
+    BEFORE every arm above -- the subclass-ordering pitfall ``skill_rollback.
+    py:64-73`` documents (a subclass swallowed by an earlier parent arm
+    mislabels the one failure that needs operator inspection). Every reason
+    in the frozen §5.8 registry maps to its own code; retryable ONLY for
+    ``stale`` (with ``retryAfter: "refresh_skill_trust"``, O-12); every other
+    reason -- specially mapped or not -- is non-retryable. An out-of-registry
+    reason maps to non-retryable ``SKILL_TRUST_REFUSED`` rather than falling
+    through to the generic retryable ``SKILL_ACTIVATION_FAILED`` (never
+    silently treated as a transient failure).
     """
     from .runtime_quiescence import (
         SkillActivationRestoredButCacheUnprovenError,
         SkillRuntimeBusyError,
     )
+    from .skill_trust import SkillTrustError
+
+    if isinstance(exc, SkillTrustError):
+        code, retryable = _TRUST_REASON_CODES.get(exc.reason, ("SKILL_TRUST_REFUSED", False))
+        result = {"ok": False, "code": code, "retryable": retryable}
+        if queue_status is not None:
+            result["status"] = queue_status
+        result["error"] = str(exc)
+        if retryable:
+            result["retryAfter"] = "refresh_skill_trust"
+        return result
 
     if isinstance(exc, SkillRuntimeBusyError):
         from .hermes_runner import RUNNING
@@ -1142,3 +1164,34 @@ def map_activation_failure(exc: Exception, *, queue_status: str | None) -> dict[
         result["status"] = queue_status
     result["error"] = str(exc)
     return result
+
+
+#: §5.8 frozen registry -> (operator code, retryable). Reasons not listed
+#: here (including any future/unknown reason) map to the fallback
+#: ``("SKILL_TRUST_REFUSED", False)`` in ``map_activation_failure`` above --
+#: never to the generic retryable arm (O-13 exhaustiveness).
+_TRUST_REASON_CODES: dict[str, tuple[str, bool]] = {
+    "stale": ("SKILL_TRUST_STALE", True),
+    "revoked-key": ("SKILL_TRUST_REVOKED_KEY", False),
+    "revoked-skill": ("SKILL_TRUST_REVOKED_SKILL", False),
+    "clock-rollback": ("SKILL_TRUST_CLOCK_ROLLBACK", False),
+    "clock-unavailable": ("SKILL_TRUST_CLOCK_ROLLBACK", False),
+    "capability-unsupported": ("SKILL_TRUST_CAPABILITY_UNSUPPORTED", False),
+    "signature-invalid": ("SKILL_TRUST_REFUSED", False),
+    "digest-mismatch": ("SKILL_TRUST_REFUSED", False),
+    "digest-not-current": ("SKILL_TRUST_REFUSED", False),
+    "trust-engine-unavailable": ("SKILL_TRUST_REFUSED", False),
+    "invalid-schema": ("SKILL_TRUST_REFUSED", False),
+    "payload-too-large": ("SKILL_TRUST_REFUSED", False),
+    "origin-mismatch": ("SKILL_TRUST_REFUSED", False),
+    "unknown-authority-key": ("SKILL_TRUST_REFUSED", False),
+    "unknown-origin": ("SKILL_TRUST_REFUSED", False),
+    "untrusted-key": ("SKILL_TRUST_REFUSED", False),
+    "invalid-key": ("SKILL_TRUST_REFUSED", False),
+    "invalid-freshness": ("SKILL_TRUST_REFUSED", False),
+    "future-issued": ("SKILL_TRUST_REFUSED", False),
+    "trust-not-yet-valid": ("SKILL_TRUST_REFUSED", False),
+    "sequence-not-monotonic": ("SKILL_TRUST_REFUSED", False),
+    "issued-at-not-monotonic": ("SKILL_TRUST_REFUSED", False),
+    "artifact-record-missing": ("SKILL_TRUST_REFUSED", False),
+}

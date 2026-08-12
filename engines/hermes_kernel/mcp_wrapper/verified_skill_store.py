@@ -121,6 +121,20 @@ class SkillAuditCapacityError(SkillStoreError):
     """
 
 
+#: Phase 4 (R-9/F-1): headroom a REMOTE transaction requires before it may
+#: begin -- room for the action row AND one potential revert row. Gated
+#: behind the remote flag and scoped to remote transactions ONLY (never the
+#: purely-local path), so the local audit-capacity boundary stays exactly
+#: where ``aa6057b`` put it (``len(audit) >= MAX_AUDIT_ENTRIES`` inside
+#: ``_append_audit``) -- an unconditional headroom check would refuse the
+#: local path two entries earlier, which the frozen flag-off transcript test
+#: (AC-7/SP-1) exists specifically to catch. G-1 (PRD §18): this assumes at
+#: most one revert row per transaction; if a future path ever appends a
+#: revert AND a second audit-bearing mutation in one transaction, this
+#: constant must grow to match.
+REMOTE_AUDIT_HEADROOM = MAX_AUDIT_ENTRIES - 2
+
+
 def package_digest(manifest_bytes: bytes, skill_bytes: bytes) -> str:
     """Return the exact digest bound to a package's raw two-file contents."""
 
@@ -258,12 +272,37 @@ class VerifiedSkillStore:
                 "permissionDeltaApproved": explicit,
             }
 
+    def check_remote_audit_headroom(self) -> None:
+        """R-9/F-1: a REMOTE transaction requires headroom before it may
+        begin -- ``len(audit) <= MAX_AUDIT_ENTRIES - 2`` (room for the action
+        row AND a potential revert row). Raises ``SkillAuditCapacityError``
+        fail-closed, BEFORE any mutation, if the log is already too full.
+
+        Callable both outside the lock (the pre-transaction check a remote
+        install/rollback caller runs before entering the coordinator) and
+        re-checked under ``self._lock`` inside ``activate``/``rollback``
+        themselves for a remote transaction. Never called for a local
+        transaction -- the local path's capacity boundary is untouched
+        (RS-7/SP-1): it still fails only at the unconditional 1000-entry
+        check inside ``_append_audit``.
+        """
+        with self._lock:
+            state = self._load_state()
+            audit = state.get("audit", [])
+            if not isinstance(audit, list) or len(audit) > REMOTE_AUDIT_HEADROOM:
+                raise SkillAuditCapacityError(
+                    "verified skill audit capacity reached; remote transactions "
+                    "require headroom for an action row and a potential revert "
+                    "row before they may begin"
+                )
+
     def activate(
         self,
         staged: Mapping[str, Any] | str | os.PathLike[str],
         approval: Mapping[str, Any],
         *,
         active_profile: str | None = None,
+        remote_meta: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Install a staged package and atomically make its digest active.
 
@@ -283,9 +322,18 @@ class VerifiedSkillStore:
         The journal is deleted only after ``_save_state`` returns and the tx
         file itself is removed -- that deletion is the durable "done" signal,
         not any phase value.
+
+        ``remote_meta`` (Phase 4, R-6): ``{"origin": ..., "keyId": ...}`` for
+        a remote-sourced activation -- additive, optional, absent for local
+        installs. When present, this is a REMOTE transaction: the R-9/F-1
+        headroom check is re-run here under ``self._lock`` (the caller
+        already ran it once outside the lock, before staging/coordinator
+        entry -- this is the "re-checked under it" half of that contract).
         """
 
         with self._lock:
+            if remote_meta is not None:
+                self.check_remote_audit_headroom()
             state = self._load_state()
             artifact = self._resolve_artifact(staged)
             _enforce_activation_policy(
@@ -327,14 +375,16 @@ class VerifiedSkillStore:
 
                 state = self._load_state()
                 self._check_approval(state, artifact, approval)
-                state["installed"].setdefault(skill_id, {})[digest] = _installed_record(artifact)
+                state["installed"].setdefault(skill_id, {})[digest] = _installed_record(
+                    artifact, remote_meta=remote_meta
+                )
                 state["active"][skill_id] = {
                     "digest": digest,
                     "enabled": True,
                     "permissions": list(artifact["manifest"]["requiredCapabilities"]),
                 }
                 state["approvals"][approval["token"]]["consumed"] = True
-                self._append_audit(state, "activated", artifact)
+                self._append_audit(state, "activated", artifact, remote_meta=remote_meta)
 
                 # `committing`: written BEFORE _save_state, per the intent-log
                 # protocol. A crash between this write and _save_state
@@ -374,6 +424,8 @@ class VerifiedSkillStore:
         digest: str,
         approval_token: str | None,
         previous: Mapping[str, Any] | None,
+        *,
+        remote_meta: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Undo exactly what a single prior ``activate()`` call committed,
         using the ``previous`` active-state snapshot ``activate()`` itself
@@ -411,6 +463,28 @@ class VerifiedSkillStore:
         this exact digest for this skill -- e.g. because a later, unrelated
         mutation already superseded it, or a previous revert attempt already
         completed. This makes the operation safe to retry.
+
+        R-9/F-1 (this method's own fix, distinct from the REMOTE headroom
+        check on ``activate``/``rollback``): the audit write below now routes
+        through ``_append_audit``'s fail-closed capacity check instead of the
+        old ``if len(audit) < MAX_AUDIT_ENTRIES: audit.append(...)`` silent
+        drop -- O-9's bug. This touches ONLY this revert/restore arm, never
+        ``activate()``'s success path, so a local success at
+        ``audit == 999`` stays byte-identical to ``aa6057b`` (RS-7).
+
+        - Local revert (``remote_meta`` is ``None``) at capacity now fails
+          CLOSED: the ``SkillAuditCapacityError`` propagates, nothing here is
+          committed. This is the fail-closed direction P2-1h mandates,
+          replacing the old silent-drop-and-commit behaviour.
+        - Remote revert (``remote_meta`` is not ``None``) is defense-in-depth
+          only, unreachable once the REMOTE headroom pre-check exists: a
+          restore path must not strand a failed activation as
+          governed-active over an audit row, so the revert still commits and
+          the dropped record is diverted to
+          ``$TORQCLAW_DATA_DIR/skill_audit_overflow.log`` (O-9, deliberately
+          OUTSIDE ``skill_trust/``), with the result carrying
+          ``"auditOverflow": True`` as a red-flag signal that the headroom
+          check was bypassed.
         """
         _validate_id(skill_id)
         digest = _normalize_digest(digest)
@@ -436,6 +510,7 @@ class VerifiedSkillStore:
                 "phase": "prepared",
             }
             _atomic_write_json(tx_path, tx)
+            audit_overflow = False
             try:
                 if previous is None:
                     del state["active"][skill_id]
@@ -444,14 +519,37 @@ class VerifiedSkillStore:
                 stored_approval = state.get("approvals", {}).get(approval_token)
                 if isinstance(stored_approval, dict):
                     stored_approval["consumed"] = False
-                audit = state.setdefault("audit", [])
-                if isinstance(audit, list) and len(audit) < MAX_AUDIT_ENTRIES:
-                    audit.append({
-                        "action": "activation_reverted",
-                        "skillId": skill_id,
-                        "digest": digest,
-                        "at": time.time_ns(),
-                    })
+                revert_artifact = {"manifest": {"id": skill_id}, "digest": digest}
+                try:
+                    self._append_audit(
+                        state, "activation_reverted", revert_artifact, remote_meta=remote_meta
+                    )
+                except SkillAuditCapacityError:
+                    if remote_meta is None:
+                        # Local path: fail closed outright. Propagate so
+                        # nothing here commits -- no diversion, no partial
+                        # state. Discard the (unfilled) journal on the way
+                        # out via the except-block below.
+                        raise
+                    # Remote path: defense-in-depth diversion (O-9). The
+                    # revert MUST still commit -- stranding a failed
+                    # activation as governed-active over an audit row would
+                    # be worse than losing one audit record to the overflow
+                    # log. This arm is unreachable once the REMOTE headroom
+                    # pre-check (check_remote_audit_headroom) is in place;
+                    # reaching it is itself a red flag (§14.4).
+                    _write_audit_overflow_record(
+                        self.root.parent / "skill_audit_overflow.log",
+                        {
+                            "action": "activation_reverted",
+                            "skillId": skill_id,
+                            "digest": digest,
+                            "origin": remote_meta.get("origin"),
+                            "keyId": remote_meta.get("keyId"),
+                            "at": time.time_ns(),
+                        },
+                    )
+                    audit_overflow = True
                 # `committing`: written BEFORE _save_state, matching
                 # activate()'s protocol exactly.
                 tx["phase"] = "committing"
@@ -468,6 +566,8 @@ class VerifiedSkillStore:
                     _remove_file_if_safe(tx_path, self.transactions_dir)
                 raise
             _remove_file_if_safe(tx_path, self.transactions_dir)
+            if audit_overflow:
+                return {"ok": True, "skillId": skill_id, "reverted": True, "auditOverflow": True}
             return {"ok": True, "skillId": skill_id, "reverted": True}
 
     def disable(self, skill_id: str) -> dict[str, Any]:
@@ -520,6 +620,17 @@ class VerifiedSkillStore:
             record = state["installed"].get(skill_id, {}).get(digest)
             if record is None:
                 raise SkillStoreError("rollback requires an exact installed digest")
+            # R-6: a remote-sourced installed record carries origin/keyId from
+            # its original activation. Rollback re-derives remote_meta from
+            # THAT record rather than taking a caller-supplied one -- there is
+            # no other trustworthy source of "which origin" for an exact,
+            # already-installed digest, and it makes rollback's remote-ness
+            # self-determining rather than caller-asserted.
+            remote_meta: dict[str, str] | None = None
+            if isinstance(record, Mapping) and "origin" in record and "keyId" in record:
+                remote_meta = {"origin": record["origin"], "keyId": record["keyId"]}
+            if remote_meta is not None:
+                self.check_remote_audit_headroom()
             target_dir = self.versions_dir / skill_id / digest
             _ensure_contained(self.versions_dir, target_dir)
             artifact = _read_package(target_dir, self.root, expected_id=skill_id, expected_digest=digest)
@@ -564,7 +675,7 @@ class VerifiedSkillStore:
                 if approval:
                     self._check_approval(state, artifact, approval)
                     state["approvals"][approval["token"]]["consumed"] = True
-                self._append_audit(state, "rolled_back", artifact)
+                self._append_audit(state, "rolled_back", artifact, remote_meta=remote_meta)
 
                 # `committing`: written BEFORE _save_state -- see activate()'s
                 # docstring for the full protocol rationale.
@@ -955,6 +1066,7 @@ class VerifiedSkillStore:
             or not isinstance(state["audit"], list)
         ):
             raise SkillRecoveryError("state.json indexes are invalid")
+        _validate_remote_meta_fields(state["installed"])
         return state
 
     def _save_state(self, state: dict[str, Any]) -> None:
@@ -1011,7 +1123,14 @@ class VerifiedSkillStore:
             expected_digest=digest,
         )
 
-    def _append_audit(self, state: dict[str, Any], action: str, artifact: Mapping[str, Any]) -> None:
+    def _append_audit(
+        self,
+        state: dict[str, Any],
+        action: str,
+        artifact: Mapping[str, Any],
+        *,
+        remote_meta: Mapping[str, str] | None = None,
+    ) -> None:
         audit = state.setdefault("audit", [])
         if not isinstance(audit, list):
             raise SkillRecoveryError("audit state is invalid")
@@ -1022,17 +1141,30 @@ class VerifiedSkillStore:
         # method returns, so raising here guarantees the in-memory governed
         # mutation the caller just made is discarded unsaved and no partial
         # write reaches state.json.
+        #
+        # This is the UNCONDITIONAL per-call capacity check (unchanged from
+        # aa6057b: len(audit) >= MAX_AUDIT_ENTRIES, i.e. it fires only once
+        # the log is genuinely full at 1000). The REMOTE-scoped headroom
+        # pre-check (R-9/F-1, MAX_AUDIT_ENTRIES - 2) is a SEPARATE, additional
+        # gate that only remote transactions run, before this method is ever
+        # reached -- see install_remote_staged's pre-transaction check. This
+        # method's own boundary is deliberately untouched so a local success
+        # at audit == 999 behaves exactly as it did before Phase 4.
         if len(audit) >= MAX_AUDIT_ENTRIES:
             raise SkillAuditCapacityError(
                 "verified skill audit capacity reached; "
                 "no historical records were deleted"
             )
-        audit.append({
+        row: dict[str, Any] = {
             "action": action,
             "skillId": artifact["manifest"]["id"],
             "digest": artifact["digest"],
             "at": time.time_ns(),
-        })
+        }
+        if remote_meta is not None:
+            row["origin"] = remote_meta["origin"]
+            row["keyId"] = remote_meta["keyId"]
+        audit.append(row)
 
 
 def _empty_state() -> dict[str, Any]:
@@ -1054,15 +1186,61 @@ def _public_artifact(artifact: Mapping[str, Any], *, stage_id: str | None = None
     return result
 
 
-def _installed_record(artifact: Mapping[str, Any]) -> dict[str, Any]:
+def _installed_record(
+    artifact: Mapping[str, Any], *, remote_meta: Mapping[str, str] | None = None
+) -> dict[str, Any]:
+    """Build the ``state.json`` ``installed[skillId][digest]`` record.
+
+    Phase 4 (R-6): ``remote_meta`` -- ``{"origin": ..., "keyId": ...}`` -- is
+    additive and OPTIONAL. Absent for local installs (byte-identical to
+    ``aa6057b``); present only for remote-sourced activations, so a rollback
+    of a remote-installed digest can later resolve which origin/key to
+    re-evaluate at the §6.3 seam without threading it through a second path.
+    """
     manifest = artifact["manifest"]
-    return {
+    record = {
         "version": manifest["version"],
         "source": manifest["source"],
         "permissions": list(manifest["requiredCapabilities"]),
         "digest": artifact["digest"],
         "installedAt": time.time_ns(),
     }
+    if remote_meta is not None:
+        record["origin"] = remote_meta["origin"]
+        record["keyId"] = remote_meta["keyId"]
+    return record
+
+
+def _validate_remote_meta_fields(installed: Mapping[str, Any]) -> None:
+    """R-6 state validator tolerance: ``origin``/``keyId`` on an installed
+    record are additive and OPTIONAL -- absent is legal (every pre-Phase-4
+    record and every local record), present-but-malformed fails closed as
+    ``SkillRecoveryError``. Both fields must be present together (an
+    origin-without-keyId or vice versa is not a state Phase 4 ever writes).
+    """
+    for skill_id, digests in installed.items():
+        if not isinstance(digests, Mapping):
+            continue
+        for digest, record in digests.items():
+            if not isinstance(record, Mapping):
+                continue
+            has_origin = "origin" in record
+            has_key_id = "keyId" in record
+            if not has_origin and not has_key_id:
+                continue
+            if has_origin != has_key_id:
+                raise SkillRecoveryError(
+                    f"state.json installed[{skill_id!r}][{digest!r}] has "
+                    "origin/keyId present without its pair"
+                )
+            if not isinstance(record["origin"], str) or not record["origin"].startswith("https://"):
+                raise SkillRecoveryError(
+                    f"state.json installed[{skill_id!r}][{digest!r}].origin is invalid"
+                )
+            if not isinstance(record["keyId"], str) or not record["keyId"]:
+                raise SkillRecoveryError(
+                    f"state.json installed[{skill_id!r}][{digest!r}].keyId is invalid"
+                )
 
 
 def _read_package(
@@ -1411,6 +1589,30 @@ def _atomic_write_json(path: Path, value: Any) -> None:
     except Exception:
         _remove_file_if_safe(temp, path.parent)
         raise
+
+
+def _write_audit_overflow_record(path: Path, record: dict[str, Any]) -> None:
+    """R-9/O-9: append one JSON-line record to the remote-only overflow log.
+
+    Deliberately OUTSIDE ``skill_trust/`` and outside ``verified_skills/``
+    (``path`` is ``$TORQCLAW_DATA_DIR/skill_audit_overflow.log``, a sibling of
+    both) -- last-resort defense-in-depth for a REMOTE ``revert_activation``
+    that hit ``SkillAuditCapacityError`` despite the R-9 headroom pre-check
+    (unreachable in the normal case; reaching it is itself a signal to file a
+    defect). This is a plain append, not the atomic-replace idiom the rest of
+    this module uses for STATE -- it is an observability log, never read by
+    any control path, so partial-line loss on a crash mid-write is
+    acceptable in exchange for not blocking the revert on log rotation
+    machinery. Best-effort: a failure to write this record must never mask
+    or replace the revert's own success -- swallow any I/O error here.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
 
 
 def _remove_file_if_safe(path: Path, containment: Path) -> None:
