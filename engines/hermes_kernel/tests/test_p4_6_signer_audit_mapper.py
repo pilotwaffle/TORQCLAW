@@ -69,7 +69,7 @@ def _make_engine(tmp_path: Path, origin: str, authority_key, *, now_ms: int):
     return engine, clock
 
 
-def _accept_bundle(engine, clock, origin, authority_key, publisher_key, *, sequence=1, skills=None):
+def _accept_bundle(engine, clock, origin, authority_key, publisher_key, *, sequence=1, skills=None, revocations=None):
     issued = clock.now_ms
     bundle = {
         "version": 1,
@@ -80,7 +80,7 @@ def _accept_bundle(engine, clock, origin, authority_key, publisher_key, *, seque
         "trustedKeys": [
             {"origin": origin, "keyId": "pub-1", "publicKey": t.public_key_spki_b64url(publisher_key.public_key())}
         ],
-        "revocations": [],
+        "revocations": revocations or [],
         "signingKeyId": "auth-1",
     }
     if skills:
@@ -219,6 +219,45 @@ def test_dp5_removing_signer_fields_breaks_rollback_eligibility_resolution(tmp_p
     record = state["installed"]["remote.skill"][list(state["installed"]["remote.skill"])[0]]
     # This is the exact predicate rollback() uses to decide remote_meta.
     assert "origin" in record and "keyId" in record
+
+
+def test_ac4_dp4_revoked_key_rollback_ineligible_at_the_seam(tmp_path: Path, monkeypatch):
+    """AC-4/DP-4: install and activate a remote version, accept a newer
+    bundle revoking its key, then rollback to that exact digest is refused
+    with revoked-key at the _enforce_activation_policy seam (§6.3) --
+    proven through rollback(), not by calling the trust engine directly.
+
+    This is also the DP-4 live-fire probe target: dropping the trust
+    evaluation call from _enforce_activation_policy's remote arm makes this
+    exact rollback wrongly SUCCEED (confirmed manually during the P4 build:
+    with the evaluate_installed() call removed, this assertion goes RED --
+    the revoked-key rollback silently completes instead of refusing)."""
+    monkeypatch.setenv("TORQCLAW_REMOTE_SKILL_SOURCES", "1")
+    origin = "https://skills.example.com"
+    authority = Ed25519PrivateKey.generate()
+    publisher = Ed25519PrivateKey.generate()
+    now = 1_700_000_000_000
+    engine, clock = _make_engine(tmp_path, origin, authority, now_ms=now)
+    _accept_bundle(engine, clock, origin, authority, publisher, sequence=1)
+    store = VerifiedSkillStore(tmp_path / "store", trust_evaluator=engine)
+
+    result, digest = _activate_remote(
+        store, engine, tmp_path, skill_id="revocable.skill", origin=origin, publisher_key=publisher
+    )
+    assert result["enabled"] is True
+
+    store.disable("revocable.skill")
+
+    # A newer bundle revokes the publisher key.
+    clock.now_ms += 1000
+    _accept_bundle(
+        engine, clock, origin, authority, publisher, sequence=2,
+        revocations=[{"kind": "key", "keyId": "pub-1", "revokedAt": _iso(clock.now_ms)}],
+    )
+
+    with pytest.raises(t.SkillTrustError) as exc:
+        store.rollback("revocable.skill", digest)
+    assert exc.value.reason == "revoked-key"
 
 
 # ---------------------------------------------------------------------------
