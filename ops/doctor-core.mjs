@@ -182,6 +182,26 @@ export async function runDoctor({
         : record('preflight.hermes-api-key', 'error', 'fail', 'Live Hermes API key is required'));
     }
 
+    // Phase 4 remote skill sources (R-5): conditional preflight in the same
+    // env-gated idiom above. When TORQCLAW_REMOTE_SKILL_SOURCES is truthy,
+    // skill_sources.json must parse, every authority publicKey must parse as a
+    // valid Ed25519 SPKI key (N-4), and $TORQCLAW_DATA_DIR/skill_trust/ must be
+    // writable. When the flag is OFF the record is ABSENT (not a pass) so
+    // flag-off doctor output is byte-identical (AC-8).
+    const remoteFlag = String(env.TORQCLAW_REMOTE_SKILL_SOURCES ?? '').trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(remoteFlag)) {
+      const preflightOk = safeCommand(spawnImpl, venvPython,
+        ['-m', 'mcp_wrapper.remote_preflight'], {
+          cwd: path.join(root, 'engines/hermes_kernel'), env, shell: false,
+          stdio: 'ignore', windowsHide: true,
+        });
+      records.push(preflightOk
+        ? record('preflight.remote-skill-sources', 'info', 'pass',
+          'Remote skill sources config parses; authority keys valid; trust store writable')
+        : record('preflight.remote-skill-sources', 'error', 'fail',
+          'Remote skill sources preflight failed (config invalid, authority key invalid, or trust store not writable)'));
+    }
+
     let config;
     try {
       config = buildLauncherConfig(env, { production });

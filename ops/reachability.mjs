@@ -58,7 +58,19 @@ const ENTRY_POINTS = [
  * module gets wired is how the debt actually gets paid down.
  */
 const DORMANT = {
-  'packages/gateway/src/skillTrust.ts': 'Ed25519 skill signing, pre-loaded for Phase 4 remote skill sources. No consumer until remote sources are enabled.',
+  // packages/gateway/src/skillTrust.ts was listed here (Ed25519 skill
+  // signing, pre-loaded for Phase 4, zero production importers) until P4-2
+  // DELETED it outright rather than wiring it: PRD-TCLAW-REMOTE-SKILL-
+  // SOURCES-005 R-1 ports its MODEL, not its lines, into a new Python trust
+  // engine (engines/hermes_kernel/mcp_wrapper/skill_trust.py) colocated
+  // with the install authority, so the process that installs is the
+  // process that verifies -- an IPC verdict crossing from the gateway to
+  // the kernel would be a claim, not proof, the same defect
+  // governed_skills._already_active_and_published's provenance-sidecar
+  // comment documents at process scale. Reintroducing this entry (or the
+  // file) turns tests/reachability.test.ts's inverted skillTrust.ts
+  // expectation red -- that inversion is the deletion probe (DP-8).
+  //
   // verified_skill_store.py, skill_publisher.py and runtime_quiescence.py were
   // listed here until Phase 1 wired them through governed_skills.py into
   // skill_queue.decide(). They are now transitively reachable from

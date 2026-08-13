@@ -202,6 +202,51 @@ describe('TorqTerminal live affordances (TCLAW-QA-2 — mounts the REAL TorqTerm
     });
   });
 
+  describe('B2. P4-8 remote (signed) skill approval card', () => {
+    it('renders trust facts and disables Edit for a remote row', () => {
+      stream.events = [
+        ev({
+          type: 'PENDING_APPROVAL', requestId: 'r1',
+          metadata: {
+            queueId: 'queue-1', skillName: 'remote-thing', skillMarkdown: '# draft',
+            sourceOrigin: 'https://skills.example.com', keyId: 'pub-1',
+            digest: 'a'.repeat(64), verificationStatus: 'verified',
+          },
+        }),
+      ];
+      render(<TorqTerminal />);
+
+      expect(screen.getByText('https://skills.example.com')).toBeInTheDocument();
+      expect(screen.getByText('pub-1')).toBeInTheDocument();
+      expect(screen.getByText('a'.repeat(64))).toBeInTheDocument();
+      expect(screen.getByText('verified')).toBeInTheDocument();
+
+      // O-17: the kernel refuses edited_markdown on a remote row -- the UI
+      // must not offer what it will refuse. Neither the "Edit" label nor
+      // the fetch-first "load draft to edit" label should appear.
+      expect(screen.queryByText('Edit')).not.toBeInTheDocument();
+      expect(screen.queryByText('load draft to edit')).not.toBeInTheDocument();
+
+      // Allow (unedited) still works normally for a remote row.
+      fireEvent.click(screen.getByText('Allow'));
+      expect(stream.sendCommand).toHaveBeenCalledWith({
+        action: 'APPROVE_SKILL', queueId: 'queue-1', decision: 'APPROVE',
+      });
+    });
+
+    it('a local row (no trust facts) renders NO trust-fact block, byte-identical to pre-Phase-4', () => {
+      stream.events = [
+        ev({ type: 'PENDING_APPROVAL', requestId: 'r1', metadata: { queueId: 'queue-1', skillName: 'do-thing', skillMarkdown: '# draft' } }),
+      ];
+      render(<TorqTerminal />);
+
+      expect(screen.queryByText('source')).not.toBeInTheDocument();
+      expect(screen.queryByText('verification')).not.toBeInTheDocument();
+      // Edit remains available for a local row.
+      expect(screen.getByText('Edit')).toBeInTheDocument();
+    });
+  });
+
   describe('C. skill draft fetch', () => {
     it('load draft to edit dispatches GET_SKILL_DRAFT and renders no textarea (fetch-then-edit flow)', () => {
       stream.events = [

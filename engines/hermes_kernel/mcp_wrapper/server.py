@@ -17,6 +17,7 @@ from starlette.responses import JSONResponse
 from . import skill_queue, skill_rollback, task_store
 from .contracts import validate_gateway_request
 from . import failover_runtime
+from . import governed_skills, skill_sources
 
 @asynccontextmanager
 async def _resilience_lifespan(_server):
@@ -457,6 +458,71 @@ async def list_skill_versions(skill_id: str) -> dict:
     `disabledDigest` so a disabled skill is distinguishable from a
     never-active one (opposite remedies: rollback vs re-approval)."""
     return skill_rollback.list_versions(skill_id)
+
+
+@mcp.tool()
+async def install_remote_skill(source_id: str, skill_id: str,
+                               source_task_id: str | None = None) -> dict:
+    """P4-5 (§6.1): fetch, verify, and stage a signed remote skill, then
+    queue it `pending` for operator review -- the SAME queue/decide surface
+    as draft_and_queue_skill, never a bypass. Refuses (never partially
+    stages or queues) when TORQCLAW_REMOTE_SKILL_SOURCES is off, the source
+    is unknown, the config is invalid, or ANY step of trust verification
+    fails (bad signature, wrong digest, revoked key/skill, stale bundle,
+    unsupported capability) -- see PRD-TCLAW-REMOTE-SKILL-SOURCES-005 §5.8
+    for the full typed-reason registry. This is the AC-1 seam: a
+    bad-signature package is refused HERE with an operator-visible reason,
+    proven at this tool call, not by calling the trust engine directly.
+    NOTE (O-19): this tool is operator-invoked; the kernel MCP surface does
+    not distinguish callers on this codebase, matching rollback_skill /
+    disable_skill's existing reachability boundary."""
+    from . import remote_skills
+
+    try:
+        return remote_skills.install_remote_skill(source_id, skill_id, source_task_id)
+    except remote_skills.SkillRemoteSourcesDisabled:
+        return {"ok": False, "code": "SKILL_REMOTE_SOURCES_DISABLED", "retryable": False,
+                "error": "remote skill sources are disabled"}
+    except skill_sources.SkillRemoteSourceUnknown as exc:
+        return {"ok": False, "code": "SKILL_REMOTE_SOURCE_UNKNOWN", "retryable": False,
+                "error": f"unknown source: {exc}"}
+    except skill_sources.SkillRemoteConfigError as exc:
+        return {"ok": False, "code": "SKILL_REMOTE_CONFIG_INVALID", "retryable": False,
+                "error": str(exc)}
+    except skill_sources.SkillRemoteFetchError as exc:
+        return {"ok": False, "code": "SKILL_REMOTE_FETCH_FAILED", "retryable": True,
+                "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - trust/store errors mapped uniformly
+        return governed_skills.map_activation_failure(exc, queue_status=None)
+
+
+@mcp.tool()
+async def refresh_skill_trust(source_id: str) -> dict:
+    """P4-5 (§6.5): fetch and accept the origin's current signed trust
+    bundle on demand. The retry remedy for SKILL_TRUST_STALE and the
+    recovery vehicle for clock-rollback quarantine. Reporting only (O-2):
+    if the newly accepted bundle revokes the key or digest of an installed,
+    ACTIVE skill, the result's `revocationsAffectingInstalled` names it --
+    this call never auto-disables or mutates governed state; the operator
+    must run disable_skill (or rollback_skill) themselves."""
+    from . import remote_skills
+
+    try:
+        return remote_skills.refresh_skill_trust(source_id)
+    except remote_skills.SkillRemoteSourcesDisabled:
+        return {"ok": False, "code": "SKILL_REMOTE_SOURCES_DISABLED", "retryable": False,
+                "error": "remote skill sources are disabled"}
+    except skill_sources.SkillRemoteSourceUnknown as exc:
+        return {"ok": False, "code": "SKILL_REMOTE_SOURCE_UNKNOWN", "retryable": False,
+                "error": f"unknown source: {exc}"}
+    except skill_sources.SkillRemoteConfigError as exc:
+        return {"ok": False, "code": "SKILL_REMOTE_CONFIG_INVALID", "retryable": False,
+                "error": str(exc)}
+    except skill_sources.SkillRemoteFetchError as exc:
+        return {"ok": False, "code": "SKILL_REMOTE_FETCH_FAILED", "retryable": True,
+                "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - trust/store errors mapped uniformly
+        return governed_skills.map_activation_failure(exc, queue_status=None)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,32 @@ export interface SkillDecisionEvent {
   metadata?: Record<string, unknown>;
 }
 
+/** Phase 4 (§5.8/§7.3, O-12): code-specific guidance strings, checked BEFORE
+ * the generic retryable/non-retryable arms below. On aa6057b the guidance
+ * was a single three-way ternary keyed on `retryable` first, which would
+ * have emitted the generic "retry when the running Hermes task(s) finish"
+ * wording for SKILL_TRUST_STALE — wrong, because the real remedy is
+ * refresh_skill_trust, not waiting out a busy Hermes run. Named codes win;
+ * everything else falls through to the pre-existing retryable/non-retryable
+ * wording, unchanged. */
+const SKILL_DECISION_GUIDANCE: Record<string, string> = {
+  SKILL_TRUST_STALE:
+    ' Run refresh_skill_trust for the source, then decide again.',
+  SKILL_TRUST_CLOCK_ROLLBACK:
+    ' See the clock-rollback runbook; a newer signed trust bundle is required to clear quarantine.',
+};
+
+/** future-issued / trust-not-yet-valid refusals ride the generic
+ * SKILL_TRUST_REFUSED code (§5.8's registry has no dedicated code for
+ * them), so they are distinguished by matching the `error` detail text
+ * rather than the `code` field -- the skew-wait note is added on top of
+ * the generic non-retryable wording rather than replacing it. */
+function skewWaitNote(detail: string): string {
+  return /future-issued|trust-not-yet-valid/.test(detail)
+    ? ' This is a clock-skew condition (≤ 2 minutes); wait briefly and retry.'
+    : '';
+}
+
 export function describeSkillDecision(
   queueId: string,
   decision: 'APPROVE' | 'REJECT',
@@ -34,11 +60,16 @@ export function describeSkillDecision(
     // Guidance must name the next action, not just the failure class: with no
     // console chrome for the governed tools yet, this message is the only
     // thing telling the operator what to actually do.
-    const guidance = retryable
-      ? ' The approval stays pending; retry when the running Hermes task(s) finish.'
-      : code === 'SKILL_DECISION_FAILED'
-        ? ' The decision did not take effect.'
-        : ' NOT retryable: inspect published skill state (list_skill_versions) before deciding again.';
+    //
+    // O-12 ordering: code-specific strings are checked FIRST, before the
+    // generic retryable/non-retryable arms.
+    const guidance =
+      SKILL_DECISION_GUIDANCE[code] ??
+      (retryable
+        ? ' The approval stays pending; retry when the running Hermes task(s) finish.'
+        : code === 'SKILL_DECISION_FAILED'
+          ? ' The decision did not take effect.'
+          : ` NOT retryable: inspect published skill state (list_skill_versions) before deciding again.${skewWaitNote(detail)}`);
     return {
       type: 'ERROR',
       message: `Skill ${queueId}: ${decision} failed — ${code}.${detail}${guidance}`,

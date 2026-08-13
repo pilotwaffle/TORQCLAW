@@ -80,11 +80,17 @@ describe('reachability gate', () => {
     }
   });
 
-  it('reports the known-dormant modules with their declared reasons', () => {
-    // Dormancy must stay visible. If someone silently drops an entry from
-    // DORMANT to make the gate green, that is the defect returning.
+  it('no longer lists skillTrust.ts as dormant (P4-2 deleted it)', () => {
+    // packages/gateway/src/skillTrust.ts was DECLARED dormant (Ed25519
+    // skill signing, zero production importers) until P4-2 deleted it
+    // outright: PRD-TCLAW-REMOTE-SKILL-SOURCES-005 R-1 ports its MODEL,
+    // never its lines, into engines/hermes_kernel/mcp_wrapper/skill_trust.py
+    // instead. Inverted from the prior "stays visible while dormant"
+    // expectation (the same inversion pattern used below at L90-98 for the
+    // wired skill pipeline): reintroducing the file OR the DORMANT entry is
+    // the DP-8 deletion probe -- it must turn this test red.
     const { out } = runGate();
-    expect(out).toContain('skillTrust.ts');
+    expect(out).not.toContain('skillTrust.ts');
   });
 
   it('no longer lists the skill pipeline as dormant (Phase 1 wired it)', () => {
