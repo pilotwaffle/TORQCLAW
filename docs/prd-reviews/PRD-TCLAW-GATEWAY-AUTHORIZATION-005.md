@@ -11,6 +11,8 @@
 
 **Gate 1 clarification (approved by fresh Sol G1R):** Section 9.2.1 and the Phase 1 item below resolve the V1-marker/final-schema compatibility issue and the collision-safe qualified-catalog fence. Phase 1 subsequently passed fresh GPT-5.5 verification and fresh Sol G2A; it remains local and does not activate V2.
 
+**Phase 2A clarification:** **PROPOSED / SOL G1R PENDING / NO IMPLEMENTATION AUTHORITY.** It is limited to offline/inert schema migration and non-authoritative reconciliation diagnostics; it issues no caller and creates no V2 session binding.
+
 ## 1. Decision, invariant, and scope
 
 TORQCLAW should implement this architecture, subject to the operator gates in Section 18. The present gateway accepts a shared root token and persists a client-selected role for a fresh session; the console bundle reads that root token. This is not an acceptable authority boundary.
@@ -156,7 +158,7 @@ It contains no wire role, token, credential, session ID, capability, or resume s
 
 ## 8. Sessions and SI-3
 
-A V2 session binding records principal and immutable derived role. It does not use a session-stored mutable surface authority. On every socket attach, caller verification and binding checks require:
+A later Phase 3/4 V2 session binding records principal and immutable derived role. It does not use a session-stored mutable surface authority. On every socket attach, caller verification and binding checks require:
 
 1. valid current `AuthenticatedCaller` tuple, `connection_class_revision`, `surface_auth_epoch`, and capability revision;
 2. caller principal equal to session principal; and
@@ -164,7 +166,7 @@ A V2 session binding records principal and immutable derived role. It does not u
 
 This preserves SI-3: two valid operator surfaces for one principal can concurrently resume the same operator session. Their live command authority remains separately checked per socket. A channel or node cannot resume it because role equality fails. `sessions.role` remains legacy/audit data, never V2 authority.
 
-For browser fresh creation, gateway consumes the capability in one state `BEGIN IMMEDIATE` transaction, creates `sessions`, creates the V2 binding with the caller's `connection_class_revision`, and creates the browser-to-gateway session binding before commit. Crash before commit leaves no partial session; crash after commit leaves a complete resumable binding. Reconciliation compares the exact collab and state tuple including `connection_class_revision`; any mismatch denies before listener startup.
+For browser fresh creation, a later Phase 4 gateway consumes the capability in one state `BEGIN IMMEDIATE` transaction, creates `sessions`, creates the V2 binding with the caller's `connection_class_revision`, and creates the browser-to-gateway session binding before commit. Crash before commit leaves no partial session; crash after commit leaves a complete resumable binding. This is not Phase 2A behavior.
 
 ## 9. Exact migrations and durable schema
 
@@ -245,8 +247,21 @@ Immediately after `new Database(state.db)`, and **before** `journal_mode`, `fore
 
 Migration ID is `gateway-auth-foundation-001`. Its expected lowercase SHA-256 is a checked-in constant over the UTF-8 migration ID bytes, followed by **one LF byte (`0x0A`)**, followed by the LF-normalized canonical SQL bytes of exactly the two displayed Phase 1 `CREATE TABLE IF NOT EXISTS` statements (with no marker insert or later-phase DDL). In one `BEGIN IMMEDIATE` transaction it executes the full validation/revalidation sequence above, inserts the exact V1 row and checksum receipt only when both objects were absent, otherwise no-ops only on exact matching state, and rolls back/refuses every partial or mismatch state. It never repairs, deletes, overwrites, or downgrades a marker.
 
+### 9.2.2 Proposed Phase 2A migration and diagnostic clarification
+
+Phase 2A is offline/inert migration plus diagnostics only. It creates no `AuthenticatedCaller`, `WeakSet` factory, verified carrier, V2 session binding, launcher generation, lifetime mutex, or freshness authority. `gateway_v2_session_bindings` and `auth_reconciliation_receipts` are Phase 3+ objects; their later authority semantics must not be inferred from the Phase 2A diagnostic table.
+
+The Phase 2A state migration ID is `gateway-auth-identity-reconciliation-002`; the collab migration ID is `collab-auth-identity-reconciliation-002`. `collab_auth_schema_migrations` is separate from, and never mutates, shipped `collab_schema_migrations`. The new Phase 2A binary accepts exactly two state-ledger sets while `auth_runtime_state` remains the exact schema-1 V1 row: `{gateway-auth-foundation-001}` and `{gateway-auth-foundation-001,gateway-auth-identity-reconciliation-002}`. Every partial, missing, duplicate, checksum-mismatched, or extra state-ledger mixture refuses. `runAuthFoundationMigration` no-ops on either complete set. The Phase 1 `37667e9` binary rejects the second set by design.
+
+Each Phase 2A checksum is SHA-256 over UTF-8 migration-ID bytes, one `0x0A` byte, then LF-normalized canonical migration-program bytes. The program contains only its guarded collab/state DDL and exact catalog-shape assertions in execution order; it explicitly excludes the ledger-receipt insert and any diagnostic-row insert. Source publishes a golden vector `{id, programUtf8Hex, sha256Hex}` for each migration and unit tests recompute the digest byte-for-byte. Canonical tuple hashing uses UTF-8 length-prefixed fields in order `(principal_id,surface_id,surface_kind,surface_role,connection_class,connection_class_revision)`; no delimiter encoding is allowed.
+
+Only an operator-supplied offline invocation may run Phase 2A. The tool obtains exclusive write locking separately for each database and refuses when it cannot acquire either lock; it neither claims a cross-database snapshot nor attempts to prove all production services are stopped. It performs collab migration first and commits, then state migration and commits; no DB transactions overlap. A crash or state failure after collab commit leaves an idempotent rerun; it creates at most an informational `non_authoritative=1` diagnostic record. Hash divergence is `MISMATCH`/`INVALID` diagnostic evidence only: it never changes V1 startup, authority, surface state, credentials, provisioning, revocation, or repair behavior.
+
+Diagnostic tuple eligibility is explicit: principal `status='active'`, surface `state='active'`, positive class revision, and the Section 5 kind/role/class mapping. `none` is recorded as legacy/ineligible. Because no non-`none` production producer exists in Phase 2A, a real diagnostic may legitimately contain zero eligible tuples. `fixture_operator` is excluded from production diagnostics; it may appear only in a test-only fixture database marked `fixture_mode=1`, and is never a production diagnostic or authority input.
+
 ```sql
 
+-- Phase 3+ authority receipt; Phase 2A does not create or consume this table.
 CREATE TABLE auth_coordinator_runtime (
   singleton INTEGER PRIMARY KEY CHECK(singleton=1),
   installation_id TEXT NOT NULL UNIQUE,
@@ -267,6 +282,21 @@ CREATE TABLE auth_reconciliation_receipts (
   state_projection_sha256 TEXT NOT NULL,
   reconciled_at TEXT NOT NULL
 );
+
+-- Phase 2A-only diagnostic record. It is never authority and is never
+-- consumed by gateway runtime, a caller factory, binding logic, or startup.
+CREATE TABLE IF NOT EXISTS auth_reconciliation_diagnostics (
+  diagnostic_id TEXT PRIMARY KEY,
+  non_authoritative INTEGER NOT NULL CHECK(non_authoritative=1),
+  status TEXT NOT NULL CHECK(status IN ('MATCH','MISMATCH','INVALID')),
+  collab_auth_ledger_sha256 TEXT NOT NULL,
+  collab_tuple_sha256 TEXT NOT NULL,
+  state_projection_sha256 TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  detail_code TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auth_reconciliation_diagnostics_observed
+  ON auth_reconciliation_diagnostics(observed_at);
 
 CREATE TABLE enrollment_authorizations (
   authorization_id TEXT PRIMARY KEY,
@@ -442,7 +472,7 @@ BEGIN SELECT RAISE(ABORT,'invalid_auth_cutover_phase_transition'); END;
 
 The browser-session row holds only HMACs; the cookie, CSRF secret, upgrade nonce, and gateway capability are raw only in their intended memory hop. `gateway_v2_session_bindings` is written in the same `BEGIN IMMEDIATE` state transaction that consumes the capability, inserts/reuses `sessions`, and records `browser_gateway_sessions`; a crash therefore yields neither a usable capability nor a partially browser-bound session. `surface_id`, `principal_id`, and journal `credential_id` carried between `state.db` and `collab.db` are application-validated cross-database references, never fictitious SQLite foreign keys. All displayed same-database references are `ON DELETE RESTRICT`; cleanup is terminal-only. Every authorization migration uses `collab_auth_schema_migrations` or `gateway_schema_migrations`, plus `PRAGMA table_info`, index inspection, and `sqlite_master` validation before its ledger row is written. Shipped `collab_schema_migrations` is preserved untouched. Old `none` class rows are valid only in V1_COMPAT and deny in V2.
 
-Under the lifetime mutex, reconciliation first reads and commits a normalized collab snapshot of `(surface_id, principal_id, surface_kind, surface_role, connection_class, connection_class_revision)` and the `collab_auth_schema_migrations` checksum. It then uses one state `BEGIN IMMEDIATE` transaction to update/read `gateway_surface_security`, calculate the identical state projection checksum, and replace the singleton receipt. Startup independently rereads both committed snapshots and requires exact equality with `auth_reconciliation_receipts`; a changed class/revision, missing projection, or checksum disagreement refuses before listener bind. `surface_auth_epoch`, capability revision, and launcher generation are excluded from this class-mapping checksum and validated live under their own rules.
+Phase 2A diagnostics read normalized collab and state tuples separately after their independent migrations, calculate the canonical hashes, and persist only `auth_reconciliation_diagnostics.non_authoritative=1`. They claim neither a cross-DB snapshot nor freshness, are not consumed by startup/runtime/caller/binding code, and treat divergence only as informational `MISMATCH`/`INVALID`. A later Phase 3 authority coordinator may introduce lifetime locking, an authoritative receipt, live epoch/revision checks, and startup refusal only after separate Gate 1 approval.
 
 The coordinator, and only the coordinator, runs retention under the installation mutex. Every 15 minutes it deletes expired `webauthn_challenges`, `enrollment_authorizations`, `enrollment_journal` rows in terminal failed/expired states, consumed `ws_upgrade_tickets`, and consumed/expired `gateway_ws_capabilities` only after `expires_at + 24 hours`; it deletes revoked browser-session rows only after `revoked_at + 30 days`. Foreign keys are enabled in every connection, cleanup is `RESTRICT` (never cascade), and a row with a non-terminal journal or live binding is refused rather than deleted. Credentials, revocation evidence, `auth_events`, cutover rows/transitions, and both migration ledgers are retained indefinitely.
 
@@ -504,8 +534,8 @@ Migrate console, channel HTTP, doctor, acceptance, benchmark, E2E, and launcher 
 ## 14. Phased implementation and exit gates
 
 1. **Downgrade-fence/foundation:** state-only V1 marker reader/migration ledger, gateway-local inert `v2Contracts`/`strictWire`, and protected Phase-4 semantic manifest. The reader runs before any write-capable DB action; no V2 production parser or behavior is wired. Exit: a current-compatible binary refuses every non-V1/incompatible marker before any write or listener bind.
-2. **Identity/reconciliation:** class/revision migration, two-db reconcile, opaque caller factory, V2 bindings/SI-3 tests. Exit: mismatch refuses before listener.
-3. **Coordinator/enrollment:** mutex, pipe/job object, Credential Manager, CA/TLS, WebAuthn enrollment/recovery/journal. Exit: crash/race fixtures green.
+2. **Identity/reconciliation diagnostics (Phase 2A):** class/revision migration and offline, non-authoritative two-DB diagnostics only. No caller, binding, live parser, startup refusal, repair, or provisioning. Exit: exact per-DB migration/diagnostic evidence while V1 bytes and startup remain unchanged.
+3. **Authority coordinator/enrollment:** separately reviewed lifetime coordinator, verified carrier/freshness authority, opaque caller issuance, V2 bindings, mutex/pipe/job object, Credential Manager, CA/TLS, and WebAuthn enrollment/recovery/journal. Exit: crash/race fixtures green.
 4. **Console edge/BFF:** CSRF, ticket subprotocol, server-only capability, fresh/resume browser flow. Exit: built artifact scan and browser E2E.
 5. **Dedicated callers and C2:** carrier migration and Section 11 hardening. Exit: complete C2 route/mutation matrix.
 6. **V2_TEST:** fixture-only deployment, root rejection, restart/revocation soak. Exit: 24h or 10,000 auth attempts, whichever is later.
@@ -546,6 +576,9 @@ The console provides visible and `aria-live` states for enrollment, authenticati
 
 Required tests include:
 
+- Phase 2A per-DB migration cases: fresh/legacy/idempotent/partial/corrupt/checksum-tampered/extra-ledger/missing-column states; collab-first then state failure/crash and idempotent rerun; no overlapping transactions or cross-DB authority claim.
+- Phase 2A diagnostic cases: exact length-prefixed hash golden vectors; active-principal/active-surface/class-matrix eligibility; `none` ineligible; `fixture_operator` excluded outside `fixture_mode=1`; zero eligible real tuple result; mismatch/invalid result is a `non_authoritative=1` record only and leaves V1 startup/authority/surface/credential/provisioning/revocation unchanged.
+- Phase 2A isolation evidence: migration/diagnostic modules are unreachable from `server.ts`, live C1 helpers, `sessions.resolve()`, and V1 root-token flow; no caller/factory/binding production module or `ForTest` authority API exists.
 - Phase 1 verbose-trace unit matrix covers both reserved identifiers in exact/mixed case; every `table`/`view`/`index`/`trigger` collision by `name` and `tbl_name`; missing/extra inherent autoindex; malformed SQL/shape/index-list/index-info/FK list; TEMP shadow through exact `sqlite_temp_schema`; attached database; corrupt duplicate/cardinality result; every extra/unrecognized ledger row; and schema-2/non-V1 marker. Each initial refusal proves no `BEGIN`, DDL, DML, writable PRAGMA, bridge discovery, or bind occurred.
 - Catalog-SQL tests derive the expected stored bytes from canonical Phase 1 DDL on the supported SQLite version, then assert rejection for alternative **stored** bytes: whitespace drift, quoted identifier drift, CRLF drift when SQLite preserves it, and constraint-literal drift. Keyword-case-only input is accepted exactly when SQLite stores byte-identical expected catalog SQL. Each source-input mutation helper begins from the exact anchors `CREATE TABLE IF NOT EXISTS gateway_schema_migrations` and `CREATE TABLE IF NOT EXISTS auth_runtime_state`, asserts `mutatedInput !== canonicalInput` before execution, and separately asserts `storedSql !== expectedStoredSql` before it expects a rejection; this prevents a no-op replacement from creating a false test.
 - Phase 1 built persistent-main collision matrix leaves state bytes, catalog bytes, and WAL/journal artifacts unchanged for every initial collision, and proves no bridge discovery or port bind. It includes wrong-case canonical-looking tables, canonical views, attached index/trigger owners, and TEMP shadows.
@@ -573,7 +606,7 @@ Required tests include:
 - Cutover phase crash matrix, stale secret/config mismatch refusal, downgrade-fence, and built artifact secret scans.
 - Keyboard/screen-reader enrollment/reconnect/recovery paths.
 
-Named mutants must make tests red when they move the Phase 1 marker reader after a writable action; use case-sensitive, table-only, or `name`-only collision discovery; omit exact `sqlite_temp_schema`, database-list, or attachment checks; make an unqualified catalog/pragma/marker read; weaken cardinality, expected-stored-catalog-SQL, autoindex, index-list/index-info, or FK validation; treat a no-op source mutation as an alternative catalog form; skip the post-BEGIN full scan; accept non-V1/malformed/checksum-mismatched state; write on refusal; weaken strict parsing or escape-equivalent duplicate-key rejection; wire an inert V2 parser into production; trust V2 wire authority; allow binary/compression; widen a class/role matrix cell; make ticket/capability consumption non-atomic; expose capability to browser; widen cookie path; skip TLS/WebAuthn origin verification; bypass mutex/fate shutdown; downgrade C2-bound work to legacy; omit exact admission rechecks; remove Phase-4 `APPROVE_SKILL` predicate; or permit V1/root after final cutover.
+Named mutants must make tests red when they treat a Phase 2A diagnostic as authority, issue an `AuthenticatedCaller`/binding, use a cross-DB snapshot or lifetime-mutex claim, accept an incomplete/extra Phase 2 ledger set, include ledger receipt/diagnostic inserts in checksum-program bytes, use delimiter-ambiguous tuple hashing, include inactive or unapproved-class tuples, admit `fixture_operator` outside fixture mode, repair/provision/revoke to force convergence, or reach live V1 server helpers; when they move the Phase 1 marker reader after a writable action; use case-sensitive, table-only, or `name`-only collision discovery; omit exact `sqlite_temp_schema`, database-list, or attachment checks; make an unqualified catalog/pragma/marker read; weaken cardinality, expected-stored-catalog-SQL, autoindex, index-list/index-info, or FK validation; treat a no-op source mutation as an alternative catalog form; skip the post-BEGIN full scan; accept non-V1/malformed/checksum-mismatched state; write on refusal; weaken strict parsing or escape-equivalent duplicate-key rejection; wire an inert V2 parser into production; trust V2 wire authority; allow binary/compression; widen a class/role matrix cell; make ticket/capability consumption non-atomic; expose capability to browser; widen cookie path; skip TLS/WebAuthn origin verification; bypass mutex/fate shutdown; downgrade C2-bound work to legacy; omit exact admission rechecks; remove Phase-4 `APPROVE_SKILL` predicate; or permit V1/root after final cutover.
 
 Accepted residual risks: successful same-origin XSS can act through the active browser session; same-user malware may attack its user’s desktop; a local administrator can replace release binaries; Firefox is unsupported; and V1 remains known-insecure only while explicitly in V1_COMPAT before final cutover.
 
