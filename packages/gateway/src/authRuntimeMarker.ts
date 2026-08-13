@@ -1,6 +1,31 @@
 import { createHash } from 'node:crypto';
 import type Database from 'better-sqlite3';
 
+// Kept literal in this foundation module so the direct Node/strip-types
+// Phase 1 worker path has no Phase 2A module-resolution dependency.
+const GATEWAY_AUTH_IDENTITY_MIGRATION_ID = 'gateway-auth-identity-reconciliation-002';
+const GATEWAY_AUTH_IDENTITY_MIGRATION_CHECKSUM = 'b0fc3b85b8851a1f3f79615f0270e056c4fdd3992e1d89973250dbf9506b0028';
+const PHASE2A_SECURITY_INDEX_SQL = 'CREATE UNIQUE INDEX idx_gateway_surface_security_v2_tuple ON gateway_surface_security(surface_id,surface_kind,surface_role,connection_class,connection_class_revision)';
+const PHASE2A_SECURITY_TABLE_SQL = `CREATE TABLE gateway_surface_security (
+    surface_id                      TEXT PRIMARY KEY,
+    principal_id                    TEXT NOT NULL,
+    surface_kind                    TEXT NOT NULL CHECK (surface_kind IN
+                                      ('desktop','mobile','http','telegram','slack','automation')),
+    surface_role                    TEXT NOT NULL
+                                      CHECK (surface_role IN ('operator','agent','automation')),
+    state                           TEXT NOT NULL DEFAULT 'revoked'
+                                      CHECK (state IN ('active','revoked')),
+    auth_epoch                      INTEGER NOT NULL CHECK (auth_epoch > 0),
+    allowed_capability_classes_json TEXT NOT NULL DEFAULT '[]',
+    allowed_operation_ids_json      TEXT NOT NULL DEFAULT '[]',
+    capability_revision             INTEGER NOT NULL CHECK (capability_revision > 0),
+    source_identity_revision        TEXT NOT NULL,
+    activated_at                    DATETIME,
+    revoked_at                      DATETIME
+, connection_class TEXT NOT NULL DEFAULT 'none' CHECK(connection_class IN ('none','browser_bff','channel_dedicated','agent_node','diagnostic','benchmark_submit','acceptance_submit','fixture_operator')), connection_class_revision INTEGER NOT NULL DEFAULT 1 CHECK(connection_class_revision > 0))`;
+const PHASE2A_DIAGNOSTIC_TABLE_SQL = "CREATE TABLE auth_reconciliation_diagnostics (\n  diagnostic_id TEXT PRIMARY KEY,\n  non_authoritative INTEGER NOT NULL CHECK(non_authoritative=1),\n  status TEXT NOT NULL CHECK(status IN ('MATCH','MISMATCH','INVALID')),\n  collab_auth_ledger_sha256 TEXT NOT NULL,\n  collab_tuple_sha256 TEXT NOT NULL,\n  state_projection_sha256 TEXT NOT NULL,\n  observed_at TEXT NOT NULL,\n  detail_code TEXT NOT NULL\n)";
+const PHASE2A_DIAGNOSTIC_INDEX_SQL = 'CREATE INDEX idx_auth_reconciliation_diagnostics_observed ON auth_reconciliation_diagnostics(observed_at)';
+
 /**
  * Phase 1 foundation marker and downgrade fence.
  *
@@ -227,6 +252,7 @@ function validateFoundation(db: Database.Database, trace: string[]): void {
 function validateState(db: Database.Database, trace: string[]): AuthRuntimeFenceResult {
   assertDatabaseTopology(db, trace);
   const inventory = schemaInventory(db);
+  if (phase2aTempReservedObjects(db).length !== 0) fail(AUTH_RUNTIME_MARKER_TEMP_SHADOW);
   const hasLedger = inventory.main.some((row) => row.type === 'table' && row.name === 'gateway_schema_migrations');
   const hasMarker = inventory.main.some((row) => row.type === 'table' && row.name === 'auth_runtime_state');
   validateSchemaInventory(inventory, trace, hasLedger && hasMarker);
@@ -235,6 +261,14 @@ function validateState(db: Database.Database, trace: string[]): AuthRuntimeFence
   }
   if (!hasLedger || !hasMarker) fail();
   validateFoundation(db, trace);
+  const ledgerState = readLedgerState(db);
+  if (ledgerState === 'foundation') {
+    if (phase2aReservedObjects(db).length !== 0 || phase2aColumnPresence(db).length !== 0) fail();
+  } else if (ledgerState === 'phase2a') {
+    validatePhase2ASchema(db, trace);
+  } else {
+    fail();
+  }
   return { state: 'v1' };
 }
 
@@ -270,6 +304,106 @@ function readFoundationReceipt(db: Database.Database): boolean {
   const rows = db.prepare(
     `SELECT id, checksum_sha256, applied_at FROM main.gateway_schema_migrations`,
   ).all() as Array<{ id: string; checksum_sha256: string; applied_at: string }>;
+  if (readExactFoundationReceipt(rows)) return true;
+  if (rows.length !== 2) return false;
+  const foundation = rows.find((row) => row.id === AUTH_FOUNDATION_MIGRATION_ID);
+  if (!foundation || foundation.checksum_sha256 !== AUTH_FOUNDATION_MIGRATION_CHECKSUM || !isUtcIso(foundation.applied_at)) return false;
+  const identity = rows.find((row) => row.id === GATEWAY_AUTH_IDENTITY_MIGRATION_ID);
+  return identity !== undefined
+    && identity.checksum_sha256 === GATEWAY_AUTH_IDENTITY_MIGRATION_CHECKSUM
+    && isUtcIso(identity.applied_at);
+}
+
+function readLedgerState(db: Database.Database): 'foundation' | 'phase2a' | null {
+  const rows = db.prepare('SELECT id, checksum_sha256, applied_at FROM main.gateway_schema_migrations ORDER BY id COLLATE BINARY').all() as Array<{ id: string; checksum_sha256: string; applied_at: string }>;
+  if (readExactFoundationReceipt(rows)) return 'foundation';
+  if (rows.length !== 2) return null;
+  const foundation = rows.find((row) => row.id === AUTH_FOUNDATION_MIGRATION_ID);
+  const phase2a = rows.find((row) => row.id === GATEWAY_AUTH_IDENTITY_MIGRATION_ID);
+  if (!foundation || !phase2a
+    || foundation.checksum_sha256 !== AUTH_FOUNDATION_MIGRATION_CHECKSUM
+    || phase2a.checksum_sha256 !== GATEWAY_AUTH_IDENTITY_MIGRATION_CHECKSUM
+    || !isUtcIso(foundation.applied_at) || !isUtcIso(phase2a.applied_at)) return null;
+  return 'phase2a';
+}
+
+type PhaseObject = { type: string; name: string; tbl_name: string; sql: string | null };
+
+function phase2aReservedObjects(db: Database.Database): PhaseObject[] {
+  return db.prepare(`SELECT type,name,tbl_name,sql FROM main.sqlite_schema
+    WHERE lower(name) IN ('idx_gateway_surface_security_v2_tuple','auth_reconciliation_diagnostics','idx_auth_reconciliation_diagnostics_observed')
+       OR lower(tbl_name) IN ('idx_gateway_surface_security_v2_tuple','auth_reconciliation_diagnostics')
+       OR lower(name) LIKE 'idx_gateway_surface_security_v2_tuple_%'
+       OR lower(name) LIKE 'idx_auth_reconciliation_diagnostics_observed_%'
+       OR lower(name) LIKE 'auth_reconciliation_diagnostics_%'
+       OR (type='index' AND lower(tbl_name)='gateway_surface_security' AND lower(name) <> 'sqlite_autoindex_gateway_surface_security_1')
+       OR (type='trigger' AND lower(tbl_name)='gateway_surface_security')
+    ORDER BY type COLLATE BINARY,name COLLATE BINARY,tbl_name COLLATE BINARY`).all() as PhaseObject[];
+}
+
+function phase2aTempReservedObjects(db: Database.Database): PhaseObject[] {
+  return db.prepare(`SELECT type,name,tbl_name,sql FROM sqlite_temp_schema
+    WHERE lower(name) IN ('gateway_surface_security','idx_gateway_surface_security_v2_tuple','auth_reconciliation_diagnostics','idx_auth_reconciliation_diagnostics_observed')
+       OR lower(tbl_name) IN ('gateway_surface_security','idx_gateway_surface_security_v2_tuple','auth_reconciliation_diagnostics')
+       OR lower(name) LIKE 'sqlite_autoindex_gateway_surface_security_%'
+       OR lower(name) LIKE 'sqlite_autoindex_auth_reconciliation_diagnostics_%'
+       OR (type='trigger' AND lower(tbl_name) IN ('gateway_surface_security','auth_reconciliation_diagnostics'))`).all() as PhaseObject[];
+}
+
+function phase2aColumnPresence(db: Database.Database): string[] {
+  const table = db.prepare("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='gateway_surface_security'").get();
+  if (!table) return [];
+  const columns = db.prepare('PRAGMA main.table_info(gateway_surface_security)').all() as Array<{ name: string }>;
+  return columns.filter((column) => ['connection_class', 'connection_class_revision'].includes(column.name.toLowerCase())).map((column) => column.name);
+}
+
+function validatePhase2ASchema(db: Database.Database, trace: string[]): void {
+  trace.push('phase2a-schema');
+  const reserved = phase2aReservedObjects(db);
+  const expectedReserved = new Set([
+    'index:idx_gateway_surface_security_v2_tuple:gateway_surface_security',
+    'table:auth_reconciliation_diagnostics:auth_reconciliation_diagnostics',
+    'index:sqlite_autoindex_auth_reconciliation_diagnostics_1:auth_reconciliation_diagnostics',
+    'index:idx_auth_reconciliation_diagnostics_observed:auth_reconciliation_diagnostics',
+  ]);
+  if (reserved.length !== expectedReserved.size || reserved.some((row) => !expectedReserved.has(`${row.type}:${row.name}:${row.tbl_name}`))) fail();
+  const security = db.prepare("SELECT type,name,tbl_name FROM main.sqlite_schema WHERE type='table' AND name='gateway_surface_security'").all() as Array<{ type: string; name: string; tbl_name: string }>;
+  if (security.length !== 1 || security[0]?.tbl_name !== 'gateway_surface_security') fail();
+  const securityCatalog = db.prepare("SELECT sql FROM main.sqlite_schema WHERE type='table' AND name='gateway_surface_security'").get() as { sql: string | null } | undefined;
+  if (!securityCatalog || securityCatalog.sql !== PHASE2A_SECURITY_TABLE_SQL) fail();
+  const columns = db.prepare('PRAGMA main.table_info(gateway_surface_security)').all() as Array<{ cid: number; name: string; type: string; notnull: number; dflt_value: string | null; pk: number }>;
+  const expectedSecurity = [['surface_id', 'TEXT', 0, null, 1], ['principal_id', 'TEXT', 1, null, 0], ['surface_kind', 'TEXT', 1, null, 0], ['surface_role', 'TEXT', 1, null, 0], ['state', 'TEXT', 1, "'revoked'", 0], ['auth_epoch', 'INTEGER', 1, null, 0], ['allowed_capability_classes_json', 'TEXT', 1, "'[]'", 0], ['allowed_operation_ids_json', 'TEXT', 1, "'[]'", 0], ['capability_revision', 'INTEGER', 1, null, 0], ['source_identity_revision', 'TEXT', 1, null, 0], ['activated_at', 'DATETIME', 0, null, 0], ['revoked_at', 'DATETIME', 0, null, 0], ['connection_class', 'TEXT', 1, "'none'", 0], ['connection_class_revision', 'INTEGER', 1, '1', 0]] as const;
+  if (columns.length !== expectedSecurity.length || columns.some((column, index) => [column.name, column.type, column.notnull, column.dflt_value, column.pk].some((value, field) => value !== expectedSecurity[index]![field]))) fail();
+  const indexes = db.prepare("PRAGMA main.index_list('gateway_surface_security')").all() as Array<{ seq: number; name: string; unique: number; origin: string; partial: number }>;
+  if (indexes.length !== 2
+    || !indexes.some((index) => index.name === 'sqlite_autoindex_gateway_surface_security_1' && index.unique === 1 && index.origin === 'pk' && index.partial === 0)) fail();
+  const phaseIndex = indexes.find((index) => index.name === 'idx_gateway_surface_security_v2_tuple');
+  if (!phaseIndex || phaseIndex.unique !== 1 || phaseIndex.origin !== 'c' || phaseIndex.partial !== 0) fail();
+  const phaseInfo = db.prepare("PRAGMA main.index_info('idx_gateway_surface_security_v2_tuple')").all() as Array<{ seqno: number; name: string }>;
+  if (phaseInfo.length !== 5 || phaseInfo.map((row) => row.name).join('|') !== 'surface_id|surface_kind|surface_role|connection_class|connection_class_revision') fail();
+  const phaseCatalog = phase2aReservedObjects(db).filter((row) => row.type === 'index' && row.name === 'idx_gateway_surface_security_v2_tuple');
+  if (phaseCatalog.length !== 1 || phaseCatalog[0]?.tbl_name !== 'gateway_surface_security' || phaseCatalog[0]?.sql !== PHASE2A_SECURITY_INDEX_SQL) fail();
+  const pkInfo = db.prepare("PRAGMA main.index_info('sqlite_autoindex_gateway_surface_security_1')").all() as Array<{ seqno: number; cid: number; name: string }>;
+  if (pkInfo.length !== 1 || pkInfo[0]?.seqno !== 0 || pkInfo[0]?.cid !== 0 || pkInfo[0]?.name !== 'surface_id') fail();
+  const diagnostics = db.prepare("SELECT type,name,tbl_name,sql FROM main.sqlite_schema WHERE lower(name)='auth_reconciliation_diagnostics' OR lower(tbl_name)='auth_reconciliation_diagnostics'").all() as PhaseObject[];
+  if (diagnostics.length !== 3
+    || !diagnostics.some((row) => row.type === 'table' && row.name === 'auth_reconciliation_diagnostics' && row.tbl_name === 'auth_reconciliation_diagnostics' && row.sql === PHASE2A_DIAGNOSTIC_TABLE_SQL)
+    || !diagnostics.some((row) => row.type === 'index' && row.name === 'sqlite_autoindex_auth_reconciliation_diagnostics_1' && row.sql === null)
+    || !diagnostics.some((row) => row.type === 'index' && row.name === 'idx_auth_reconciliation_diagnostics_observed' && row.tbl_name === 'auth_reconciliation_diagnostics' && row.sql === PHASE2A_DIAGNOSTIC_INDEX_SQL)) fail();
+  const diagnosticColumns = db.prepare('PRAGMA main.table_info(auth_reconciliation_diagnostics)').all() as Array<{ cid: number; name: string; type: string; notnull: number; dflt_value: string | null; pk: number }>;
+  const expected = [['diagnostic_id', 'TEXT', 0, null, 1], ['non_authoritative', 'INTEGER', 1, null, 0], ['status', 'TEXT', 1, null, 0], ['collab_auth_ledger_sha256', 'TEXT', 1, null, 0], ['collab_tuple_sha256', 'TEXT', 1, null, 0], ['state_projection_sha256', 'TEXT', 1, null, 0], ['observed_at', 'TEXT', 1, null, 0], ['detail_code', 'TEXT', 1, null, 0]] as const;
+  if (diagnosticColumns.length !== expected.length || diagnosticColumns.some((column, index) => [column.cid, column.name, column.type, column.notnull, column.dflt_value, column.pk].some((value, field) => value !== [index, ...expected[index]!][field]))) fail();
+  const diagnosticIndexes = db.prepare("PRAGMA main.index_list('auth_reconciliation_diagnostics')").all() as Array<{ name: string; unique: number; origin: string; partial: number }>;
+  if (diagnosticIndexes.length !== 2 || !diagnosticIndexes.some((index) => index.name === 'sqlite_autoindex_auth_reconciliation_diagnostics_1' && index.unique === 1 && index.origin === 'pk' && index.partial === 0) || !diagnosticIndexes.some((index) => index.name === 'idx_auth_reconciliation_diagnostics_observed' && index.unique === 0 && index.origin === 'c' && index.partial === 0)) fail();
+  const observedInfo = db.prepare("PRAGMA main.index_info('idx_auth_reconciliation_diagnostics_observed')").all() as Array<{ seqno: number; name: string }>;
+  if (observedInfo.length !== 1 || observedInfo[0]?.seqno !== 0 || observedInfo[0]?.name !== 'observed_at') fail();
+  const diagnosticAutoInfo = db.prepare("PRAGMA main.index_info('sqlite_autoindex_auth_reconciliation_diagnostics_1')").all() as Array<{ seqno: number; cid: number; name: string }>;
+  if (diagnosticAutoInfo.length !== 1 || diagnosticAutoInfo[0]?.seqno !== 0 || diagnosticAutoInfo[0]?.cid !== 0 || diagnosticAutoInfo[0]?.name !== 'diagnostic_id') fail();
+  if ((db.prepare("PRAGMA main.foreign_key_list('gateway_surface_security')").all() as unknown[]).length !== 0
+    || (db.prepare("PRAGMA main.foreign_key_list('auth_reconciliation_diagnostics')").all() as unknown[]).length !== 0) fail();
+}
+
+function readExactFoundationReceipt(rows: Array<{ id: string; checksum_sha256: string; applied_at: string }>): boolean {
   if (rows.length !== 1) return false;
   const row = rows[0]!;
   return row.id === AUTH_FOUNDATION_MIGRATION_ID

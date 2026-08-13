@@ -107,12 +107,12 @@ const mutants: Mutant[] = [
   },
   {
     name: 'unqualified-catalog',
-    mutate: (source) => ({ ...source, marker: replaceOnce(source.marker, 'main.sqlite_schema', 'sqlite_schema') }),
+    mutate: (source) => ({ ...source, marker: source.marker.replaceAll('main.sqlite_schema', 'sqlite_schema') }),
     assertion: (source) => expect(source.marker).toContain('main.sqlite_schema'),
   },
   {
     name: 'unqualified-pragma',
-    mutate: (source) => ({ ...source, marker: replaceOnce(source.marker, 'PRAGMA main.', 'PRAGMA ') }),
+    mutate: (source) => ({ ...source, marker: source.marker.replaceAll('PRAGMA main.', 'PRAGMA ') }),
     assertion: (source) => expect(source.marker).toContain('PRAGMA main.'),
   },
   {

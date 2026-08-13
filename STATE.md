@@ -25,6 +25,28 @@ Actual thread/model roles: Terra G1D `auth_prd_c2850_g1d`; fresh Sol G1R `auth00
 
 Remaining operator actions: review the local commit; merge/push separately if approved; later Phase 2+ work needs a new bounded sequence. V2_FINAL, cutover, credentials, certificate work, and deploy remain unauthorized. Phase 4 worktree cleanup is unsafe until submodule metadata and unique-file classification are complete. PR #45 and PR #68 were not merged or acted on here and are out of scope for this change.
 
+## LOCAL ONLY: AUTH-005 Phase 2A offline identity reconciliation — completed, verified, SOL G2A approved
+
+**Status as of 2026-08-13:** AUTH-005 Phase 2A is **COMPLETED + VERIFIED + SOL G2A APPROVED** on local branch `codex/auth-v2-005` only. It is **unmerged, unpushed, inert, and not shipped**. Phase 1 commit `37667e9` and the Phase 2A Gate 1 design commit `29f435d` remain based on public baseline `c2850f5ac755444d42b930034de536938f31ae22`.
+
+**Controlling invariant:** Phase 2A may only perform explicit offline, strictly additive, exact-schema migrations and write non-authoritative reconciliation diagnostics. It cannot create an `AuthenticatedCaller`, bind or resume a session, grant authority, activate V2, repair ambiguous state, or enter the live gateway import graph.
+
+Main outcome: exact c2850f5 collab and gateway foundations are validated before and again inside the relevant `BEGIN IMMEDIATE` intervals; executable ordered migration manifests are independently golden-pinned; partial, malformed, downgrade, catalog, ledger, TEMP, revision-affinity, and cross-database recovery cases fail closed. The offline CLI closes the collab handle before opening the state transaction and exposes only an opt-in, bounded, identifier-free stdout trace. Reconciliation output is explicitly non-authoritative.
+
+Final evidence from the fresh independent verifier and fresh isolated G2A:
+
+- Focused Phase 1 + Phase 2A + mutant + reachability gate: **127/127** from the final verifier; prior correction gate **124/124**.
+- Full suite: **1861/1861** on the verifier's longer retry. Sol G2A observed **1860/1861** because the known load-sensitive failover timeout exceeded 30 seconds; its isolated rerun passed **7/7**.
+- Workspace typecheck: **14/14** tasks; contracts: **8** schemas; reachability: **111** live modules plus exactly **3** reviewed dormant Phase 2A modules; Graphify fitness passed.
+- Literal gateway program golden independently recomputed to **2050 UTF-8 bytes / 4100 hex characters**, SHA-256 `b0fc3b85b8851a1f3f79615f0270e056c4fdd3992e1d89973250dbf9506b0028`.
+- Protected server, session, authorization, C1/C2, Phase 4, Hermes, contracts/generated, and console paths had zero Phase 2A changes.
+
+Actual model/thread roles: Terra G1D/orchestrator `/root`; Sol G1R `/root/auth005_phase2a_g1r`; Luna correction Builders `/root/auth005_phase2a_builder_r2`, `/root/auth005_phase2a_builder_r4`, and `/root/auth005_phase2a_builder_r5`; final fresh GPT-5.5 verifier `/root/auth005_phase2a_verifier_final6` returned `READY_FOR_G2A`; final fresh isolated Sol G2A `/root/auth005_phase2a_g2a_final5` returned `APPROVE`. Earlier isolated G2A rounds rejected incomplete foundation validation, self-derived evidence, missing migration matrices, unsafe trace-file authority, and fixture-exclusion precedence; each was corrected and freshly re-verified before final approval.
+
+Accepted limitations: the named-mutant gate is the repository's executable source-sentinel approach rather than an external mutation framework; `--offline` is an explicit operator assertion rather than proof that production processes are stopped; Phase 2A modules remain intentionally dormant until a later authorized cutover phase.
+
+Remaining operator actions: review the local Phase 2A commit, then separately authorize any rebase/merge or push. Phase 2B+, live caller/session wiring, browser authentication, credential and certificate provisioning, cutover, real-database operational runs, deployment, and release remain unauthorized.
+
 ## SHIPPED: GS-COORD — coordinated governed skill activation
 
 **Status: G2A-APPROVED (round 3), MERGED (`c824bcd`, `--no-ff`) and PUSHED to

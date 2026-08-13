@@ -58,6 +58,12 @@ const ENTRY_POINTS = [
  * module gets wired is how the debt actually gets paid down.
  */
 const DORMANT = {
+  // AUTH-005 Phase 2A is deliberately offline/inert. These modules are
+  // reached only by scripts/auth-phase2a-offline.mjs (an explicit operator
+  // entrypoint), never by server/storage/sessions or another live helper.
+  'packages/gateway/src/authIdentityMigration.ts': 'AUTH-005 Phase 2A Gate 1: offline state migration only; standalone CLI entrypoint.',
+  'packages/gateway/src/authReconciliationDiagnostic.ts': 'AUTH-005 Phase 2A Gate 1: non-authoritative offline evidence only; standalone CLI entrypoint.',
+  'packages/collab/src/authIdentityMigration.ts': 'AUTH-005 Phase 2A Gate 1: offline collab migration only; standalone CLI entrypoint.',
   // packages/gateway/src/skillTrust.ts was listed here (Ed25519 skill
   // signing, pre-loaded for Phase 4, zero production importers) until P4-2
   // DELETED it outright rather than wiring it: PRD-TCLAW-REMOTE-SKILL-

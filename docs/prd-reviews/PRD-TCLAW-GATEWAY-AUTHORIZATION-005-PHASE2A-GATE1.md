@@ -1,6 +1,6 @@
 # Phase 2A Gate 1 packet — inert identity schema and diagnostics
 
-**Status:** **G1R APPROVED / IMPLEMENTATION AUTHORIZED LOCALLY / NOT SHIPPED**
+**Status:** **IMPLEMENTED + VERIFIED + SOL G2A APPROVED LOCALLY / UNMERGED + UNPUSHED / INERT AND NOT SHIPPED**
 
 **Basis:** local, verified-but-unmerged/unpushed Phase 1 commit `37667e9`. Phase 2A starts only from that commit. This packet supersedes the earlier Phase 2 caller/reconciliation proposal.
 
@@ -62,6 +62,8 @@ CREATE INDEX IF NOT EXISTS idx_auth_reconciliation_diagnostics_observed
 
 Both DB migrations validate exact ledger/catalog/`PRAGMA table_info` state before each guarded change. Existing rows become `connection_class='none'`, revision `1`, preserving V1 but rendering them diagnostically ineligible. A wrong-shape column, partial receipt, extra ledger row, or checksum mismatch refuses. Phase 2A creates neither `gateway_v2_session_bindings` nor `auth_reconciliation_receipts`; those authority objects are deferred to Phase 3/4. State declares no cross-DB foreign key.
 
+The collab offline seam supports only the shipped c2850f5 Collaboration Substrate v1 baseline: exact `principals` catalog/columns, the `principals_single_operator` partial index, the self-referential `principals(id)` foreign key, and the exact two recognized `collab_schema_migrations` rows (`20260806_001_collaboration_v1` and `20260811_002_surface_identity_c1`) with valid UTC receipts. Missing, extra, malformed, or ambiguous base objects refuse before the Phase 2A migration, snapshot, or diagnostic write; this validator does not invent or repair a second collab schema truth.
+
 ## 4. Canonical checksums and diagnostic hashes
 
 Each migration checksum is exactly:
@@ -70,7 +72,7 @@ Each migration checksum is exactly:
 UTF-8(migrationId) || 0x0A || UTF-8(LF-normalized canonicalProgram)
 ```
 
-`canonicalProgram` includes only its guarded DDL/catalog assertions in execution order. It excludes ledger-receipt inserts, diagnostic-row inserts, wall-clock values, DB paths, and runtime values. Source publishes literal golden vectors `{id, programUtf8Hex, sha256Hex}` and tests recompute byte-for-byte. CRLF, separator, ordering, or receipt-inclusion drift fails.
+`canonicalProgram` is the deterministic `AUTH_PHASE2A_PROGRAM_V1` serialization of the ordered manifest. Each step frames `kind`, UTF-8 byte length/name, and LF-pinned UTF-8 payload; `assert` payloads identify the exact versioned validator, `ddl` payloads are the exact statements executed, and the empty `receipt-boundary` step binds the receipt position without including its SQL or values. It excludes ledger-receipt inserts, diagnostic-row inserts, wall-clock values, DB paths, and runtime values. Source publishes literal golden vectors `{id, programUtf8Hex, sha256Hex}` and tests recompute byte-for-byte. CRLF, separator, ordering, or receipt-inclusion drift fails.
 
 Tuple diagnostics are non-authoritative. Hash each eligible tuple in field order `principal_id,surface_id,surface_kind,surface_role,connection_class,connection_class_revision`; each field is `u32be(utf8ByteLength)||utf8Bytes`; rows sort by that binary encoding, then SHA-256 applies. Revisions require SQLite `typeof(...)='integer'`, fall in the checked safe positive range, and encode as canonical base-10 ASCII. TEXT or REAL revisions refuse rather than coerce. No delimiter, JSON, locale collation, or numeric coercion is allowed. Ledger hashes use the same length-prefix encoding.
 
@@ -88,7 +90,7 @@ Eligible only: principal `status='active'`, surface `state='active'`, positive i
 | `acceptance_submit` | `http` / `agent` | channel |
 | `none` | legacy | ineligible |
 
-An inactive row or `none` row is ineligible. A data row with a bad non-`none` class mapping produces a diagnostic `INVALID`. Schema or ledger invalidity refuses before any diagnostic write. `fixture_operator` is excluded from every production diagnostic. It may exist only in an isolated test fixture whose test helper supplies `fixtureMode: true`; this is not a production database field, environment switch, CLI option, or authority input.
+An inactive row or `none` row is ineligible. A data row with a bad non-`none` class mapping produces a diagnostic `INVALID`. Schema or ledger invalidity refuses before any diagnostic write. `fixture_operator` is unconditionally excluded from every production diagnostic. It may exist only through an isolated test helper; this is not a production database field, environment switch, CLI option, or authority input.
 
 No Phase 2A producer writes a non-`none` production class, so zero eligible real tuples is an expected successful diagnostic.
 
