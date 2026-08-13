@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { GatewayRequestSchema, type GatewayRequest } from '@torqclaw/contracts';
 import { runPersistedDiagnosticMigrationOnce } from './persistedError.js';
+import { assertV1CompatibleState, runAuthFoundationMigration } from './authRuntimeMarker.js';
 
 const DATA_DIR = process.env.TORQCLAW_DATA_DIR || join(homedir(), '.torqclaw');
 
@@ -62,27 +63,41 @@ function openStateDb(): Database.Database {
   const dir = process.env.TORQCLAW_DATA_DIR || DATA_DIR;
   mkdirSync(dir, { recursive: true });
   const opened = new Database(join(dir, 'state.db'));
-  opened.pragma('journal_mode = WAL');
-  opened.pragma('foreign_keys = ON');
+  try {
+    // Phase 1 downgrade fence: this is the first operation after the
+    // constructor, before writable pragmas, schema work, or listener setup.
+    assertV1CompatibleState(opened);
 
-  // Feature-off compatibility: resilience projection DDL is deferred until
-  // the feature-on branch explicitly calls ensureResilienceProjection().
-  opened.exec(isResilienceFlagOn() ? schemaText : legacySchemaText);
+    // Rechecks the fence under BEGIN IMMEDIATE before any writable pragma or
+    // legacy schema work, so a concurrent marker change cannot be overwritten
+    // or downgraded.
+    runAuthFoundationMigration(opened);
 
-  // Idempotent migration: add tasks.telemetry_json on an existing dev DB
-  // without the column (PRAGMA check, not a bare ALTER that throws on
-  // second boot).
-  const taskCols = opened.prepare(`PRAGMA table_info(tasks)`).all() as { name: string }[];
-  if (!taskCols.some((c) => c.name === 'telemetry_json')) {
-    opened.exec(`ALTER TABLE tasks ADD COLUMN telemetry_json TEXT`);
+    opened.pragma('journal_mode = WAL');
+    opened.pragma('foreign_keys = ON');
+
+    // Feature-off compatibility: resilience projection DDL is deferred until
+    // the feature-on branch explicitly calls ensureResilienceProjection().
+    opened.exec(isResilienceFlagOn() ? schemaText : legacySchemaText);
+
+    // Idempotent migration: add tasks.telemetry_json on an existing dev DB
+    // without the column (PRAGMA check, not a bare ALTER that throws on
+    // second boot).
+    const taskCols = opened.prepare(`PRAGMA table_info(tasks)`).all() as { name: string }[];
+    if (!taskCols.some((c) => c.name === 'telemetry_json')) {
+      opened.exec(`ALTER TABLE tasks ADD COLUMN telemetry_json TEXT`);
+    }
+
+    // FIX-H: enforce the at-rest diagnostic boundary for historical rows once.
+    // A versioned marker avoids an O(history) scan on every gateway boot. A
+    // crash before the marker is written safely reruns the idempotent
+    // migration.
+    runPersistedDiagnosticMigrationOnce(opened);
+    return opened;
+  } catch (error) {
+    try { opened.close(); } catch { /* preserve refusal/failure */ }
+    throw error;
   }
-
-  // FIX-H: enforce the at-rest diagnostic boundary for historical rows once.
-  // A versioned marker avoids an O(history) scan on every gateway boot. A
-  // crash before the marker is written safely reruns the idempotent
-  // migration.
-  runPersistedDiagnosticMigrationOnce(opened);
-  return opened;
 }
 
 function stateDb(): Database.Database {

@@ -2,7 +2,28 @@
 
 Single-file program state, updated only after meaningful progress with tests + independent verifier passing. Detailed history lives in `docs/prd-reviews/*` and the per-project memory index.
 
-_Last updated: 2026-08-09 (GS-COORD merged and pushed; GS-ACCEPT is next)._
+_Last updated: 2026-08-13._
+
+## LOCAL ONLY: AUTH-005 Phase 1 downgrade-fence/foundation — completed, verified, SOL G2A approved
+
+**Status as of 2026-08-13:** AUTH-005 Phase 1 is **COMPLETED + VERIFIED + SOL G2A APPROVED** on local branch `codex/auth-v2-005` only. It is **unmerged, unpushed, and inactive**. Baseline: `c2850f5ac755444d42b930034de536938f31ae22`.
+
+**Controlling invariant:** every accepted V2 connection has exactly one immutable, server-produced `AuthenticatedCaller`; wire fields may only assert equality and can never create, select, widen, or transfer authority.
+
+Main outcome: the downgrade-fence/foundation landed without V2 activation. V2 definitions are gateway-local and inert; current runtime remains V1 marker only. No V2_FINAL/cutover/credential/certificate/deploy work was authorized.
+
+Final evidence recorded by fresh verifier/adjudicator:
+
+- Focused Phase 1 suite plus mutants: **81/81**.
+- Full suite: **1823/1823** from verifier.
+- Contracts: **8** passing.
+- Reachability: **111** passing.
+- Gateway/root build and typecheck passed.
+- Protected paths had no deletions.
+
+Actual thread/model roles: Terra G1D `auth_prd_c2850_g1d`; fresh Sol G1R `auth005_phase1_g1r_fresh` and `schema_collision`; Luna Builder `auth005_luna_qualification`; final fresh GPT-5.5 verifier `auth005_phase1_evidence_r8` returned READY_FOR_G2A; final fresh Sol G2A `auth005_phase1_g2a_r5` returned APPROVE. Earlier G2A rounds rejected real defects, and those defects were corrected before approval.
+
+Remaining operator actions: review the local commit; merge/push separately if approved; later Phase 2+ work needs a new bounded sequence. V2_FINAL, cutover, credentials, certificate work, and deploy remain unauthorized. Phase 4 worktree cleanup is unsafe until submodule metadata and unique-file classification are complete. PR #45 and PR #68 were not merged or acted on here and are out of scope for this change.
 
 ## SHIPPED: GS-COORD — coordinated governed skill activation
 
