@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -10,6 +10,10 @@ if (evidenceFlag < 0 || !process.argv[evidenceFlag + 1]) {
 }
 const evidenceDir = resolve(process.argv[evidenceFlag + 1]);
 mkdirSync(evidenceDir, { recursive: true });
+const vitestEntrypoint = resolve(root, 'node_modules', 'vitest', 'vitest.mjs');
+if (!existsSync(vitestEntrypoint)) {
+  throw new Error(`repo-local Vitest entrypoint is absent: ${vitestEntrypoint}`);
+}
 
 const mutations = [
   {
@@ -102,7 +106,17 @@ function occurrences(text, needle) {
 }
 
 function run(command, args) {
-  return spawnSync(command, args, { cwd: root, encoding: 'utf8', shell: false, maxBuffer: 64 * 1024 * 1024 });
+  const result = spawnSync(command, args, {
+    cwd: root,
+    encoding: 'utf8',
+    shell: false,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  return {
+    ...result,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+  };
 }
 
 function createReceipt(name, content) {
@@ -130,13 +144,26 @@ for (const mutation of mutations) {
     const diff = run('git', ['diff', '--', mutation.file]);
     createReceipt(`${mutation.id}.diff`, `${diff.stdout}${diff.stderr}`);
 
-    const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
-    const test = run(pnpm, ['exec', 'vitest', 'run', mutation.testFile, '-t', mutation.testName]);
+    const test = run(process.execPath, [
+      vitestEntrypoint,
+      'run',
+      mutation.testFile,
+      '-t',
+      mutation.testName,
+    ]);
     const output = `${test.stdout}${test.stderr}`;
     createReceipt(`${mutation.id}.test.log`, output);
     createReceipt(`${mutation.id}.test.exit.txt`, `EXIT_CODE=${test.status}\n`);
     const plain = output.replace(/\u001b\[[0-9;]*m/g, '');
-    if (test.status === 0 || !plain.includes('Failed Tests') || !plain.includes(mutation.redNeedle)) {
+    if (test.error || test.signal || test.status === null) {
+      throw new Error(`${mutation.id}: Vitest spawn failed (${test.error ?? test.signal ?? 'null status'})`);
+    }
+    if (
+      test.status === 0
+      || !plain.includes('Failed Tests')
+      || !plain.includes(mutation.testName)
+      || !plain.includes(mutation.redNeedle)
+    ) {
       throw new Error(`${mutation.id}: targeted test did not prove the relevant assertion RED (exit ${test.status})`);
     }
   } finally {
