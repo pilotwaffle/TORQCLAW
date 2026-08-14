@@ -1,6 +1,7 @@
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BUILT_IN_PROFILE_DEFINITIONS, type ProfileId } from '../packages/contracts/src/profile.js';
+import { BUILT_IN_PROFILE_DEFINITIONS, type ProfileId } from '@torqclaw/contracts';
 import { checkPath, extractPaths } from '../packages/bridge/src/pathScope.js';
 import {
   assertCurrentPolicy,
@@ -20,41 +21,96 @@ import {
 
 let originalRegistry: RegisteredTool[];
 const ACTIVE_MUTANT = process.env.TORQ_PROFILE_CONFORMANCE_MUTANT;
-const DEFINITION_MUTANTS = new Set(['P1b', 'P2-capability', 'P2-side-effect']);
+const RECOGNIZED_MUTANTS = new Set(['P1b', 'P2-namespace', 'P2-capability', 'P2-side-effect']);
+const SOURCE_ALIAS_MUTANTS = new Set(['P1b', 'P2-capability', 'P2-side-effect']);
+const SOURCE_MARKER_EXPORT = '__TORQ_PROFILE_CONFORMANCE_SOURCE_MARKER__';
+const REQUIRED_POLICY_EXPORTS = [
+  'BUILT_IN_PROFILE_DEFINITIONS',
+  'EffectiveProfileSchema',
+  'PROFILE_CONTRACT_VERSION',
+  'ProfileIdSchema',
+  'TOOL_REGISTRY_VERSION',
+] as const;
 
-type ContractModule = typeof import('../packages/contracts/src/profile.js');
-
-async function freshPolicyForMutant(mutant: string) {
-  vi.resetModules();
-  vi.doUnmock('@torqclaw/contracts');
-  if (ACTIVE_MUTANT === mutant && DEFINITION_MUTANTS.has(mutant)) {
-    const actual = await vi.importActual<ContractModule>('@torqclaw/contracts');
-    const definitions = structuredClone(actual.BUILT_IN_PROFILE_DEFINITIONS);
-    const expected = structuredClone(actual.BUILT_IN_PROFILE_DEFINITIONS);
-    if (mutant === 'P1b') {
-      definitions.read_only.allowedCapabilities.push('write');
-      definitions.read_only.allowedSideEffects.push('process');
-      expected.read_only.allowedCapabilities = ['read', 'write'];
-      expected.read_only.allowedSideEffects = ['none', 'process'];
-    } else if (mutant === 'P2-capability') {
-      definitions.read_only.allowedSideEffects.push('filesystem_write');
-      expected.read_only.allowedSideEffects = ['none', 'filesystem_write'];
-    } else if (mutant === 'P2-side-effect') {
-      definitions.workspace_write.allowedSideEffects = ['none'];
-      expected.workspace_write.allowedSideEffects = ['none'];
-    }
-    expect(definitions, `${mutant} changes only its declared semantic delta`).toEqual(expected);
-    vi.doMock('@torqclaw/contracts', () => ({
-      ...actual,
-      BUILT_IN_PROFILE_DEFINITIONS: definitions,
-    }));
-  }
-  return import('../packages/bridge/src/profilePolicy.js');
+if (ACTIVE_MUTANT && !RECOGNIZED_MUTANTS.has(ACTIVE_MUTANT)) {
+  throw new Error(`Unknown TORQ_PROFILE_CONFORMANCE_MUTANT '${ACTIVE_MUTANT}'`);
 }
 
-async function withoutContractMock<T>(run: () => Promise<T>): Promise<T> {
+type ContractModule = typeof import('../packages/contracts/src/profile.js');
+type PolicyModule = typeof import('../packages/bridge/src/profilePolicy.js');
+type RegistryModule = typeof import('../packages/bridge/src/registry.js');
+type ContractAlias = Pick<ContractModule, typeof REQUIRED_POLICY_EXPORTS[number]> & {
+  [SOURCE_MARKER_EXPORT]: Readonly<{ sourceProfilePath: string }>;
+};
+
+function normalizedModulePath(url: string): string {
+  return fileURLToPath(url).replaceAll('\\', '/');
+}
+
+const MODULE_PATHS = Object.freeze({
+  builtEntry: normalizedModulePath(new URL('../packages/contracts/dist/index.js', import.meta.url).href),
+  sourceProfile: normalizedModulePath(new URL('../packages/contracts/src/profile.ts', import.meta.url).href),
+  policyModule: normalizedModulePath(new URL('../packages/bridge/src/profilePolicy.ts', import.meta.url).href),
+});
+const SOURCE_MARKER = Object.freeze({ sourceProfilePath: MODULE_PATHS.sourceProfile });
+
+function assertRequiredPolicyExports(module: Record<string, unknown>, label: string): void {
+  for (const name of REQUIRED_POLICY_EXPORTS) {
+    expect(Object.hasOwn(module, name), `${label} provides runtime export ${name}`).toBe(true);
+  }
+}
+
+async function withFreshSourceContracts<T>(
+  run: (modules: {
+    contracts: ContractAlias;
+    policy: PolicyModule;
+    registry: RegistryModule;
+  }) => Promise<T>,
+): Promise<T> {
+  vi.resetModules();
+  vi.doUnmock('@torqclaw/contracts');
   try {
-    return await run();
+    vi.doMock('@torqclaw/contracts', async () => {
+      const source = await import('../packages/contracts/src/profile.js');
+      assertRequiredPolicyExports(source as unknown as Record<string, unknown>, 'fresh source profile module');
+      return Object.freeze({
+        BUILT_IN_PROFILE_DEFINITIONS: source.BUILT_IN_PROFILE_DEFINITIONS,
+        EffectiveProfileSchema: source.EffectiveProfileSchema,
+        PROFILE_CONTRACT_VERSION: source.PROFILE_CONTRACT_VERSION,
+        ProfileIdSchema: source.ProfileIdSchema,
+        TOOL_REGISTRY_VERSION: source.TOOL_REGISTRY_VERSION,
+        [SOURCE_MARKER_EXPORT]: SOURCE_MARKER,
+      });
+    });
+    const contracts = await import('@torqclaw/contracts') as unknown as ContractAlias;
+    assertRequiredPolicyExports(contracts as unknown as Record<string, unknown>, 'source-backed package alias');
+    expect(contracts[SOURCE_MARKER_EXPORT], 'source alias carries its frozen path marker').toBe(SOURCE_MARKER);
+    expect(Object.isFrozen(contracts[SOURCE_MARKER_EXPORT]), 'source path marker is frozen').toBe(true);
+    const policy = await import('../packages/bridge/src/profilePolicy.js');
+    const registry = await import('../packages/bridge/src/registry.js');
+    return await run({ contracts, policy, registry });
+  } finally {
+    vi.doUnmock('@torqclaw/contracts');
+    vi.resetModules();
+  }
+}
+
+async function withFreshBuiltContracts<T>(
+  run: (modules: {
+    contracts: Record<string, unknown>;
+    policy: PolicyModule;
+    registry: RegistryModule;
+  }) => Promise<T>,
+): Promise<T> {
+  vi.resetModules();
+  vi.doUnmock('@torqclaw/contracts');
+  try {
+    const contracts = await import('@torqclaw/contracts') as unknown as Record<string, unknown>;
+    assertRequiredPolicyExports(contracts, 'fresh built contracts package');
+    expect(Object.hasOwn(contracts, SOURCE_MARKER_EXPORT), 'fresh built package has no source marker').toBe(false);
+    const policy = await import('../packages/bridge/src/profilePolicy.js');
+    const registry = await import('../packages/bridge/src/registry.js');
+    return await run({ contracts, policy, registry });
   } finally {
     vi.doUnmock('@torqclaw/contracts');
     vi.resetModules();
@@ -192,65 +248,144 @@ describe('AC-7 path semantics (no arbitrary shell/process containment claim)', (
   });
 });
 
-// Mutation-only fresh-module cases intentionally run after every permanent
-// static-module assertion. vi.resetModules() therefore cannot split the live
-// registry used by the permanent executeTool checks above.
-describe('mutation-only conjunct isolation', () => {
-  it('P2 namespace conjunct: terminal_power denies an unreviewed write/process tool', async () => {
-    await withoutContractMock(async () => {
-      const policy = await freshPolicyForMutant('P2-namespace');
-      const unreviewed = frozenTool('unreviewed__write', 'write', true);
-      const terminal = policy.resolveEffectiveProfile('terminal_power', [unreviewed] as RegisteredTool[]);
-      expect(terminal.allowedOperationIds).not.toContain(unreviewed.name);
+describe('contract-module provenance controls', () => {
+  it('source-backed policy is semantically equivalent for all four profiles and records normalized paths', async () => {
+    const tools = immutableSnapshot(SYNTHETIC_TOOLS as readonly RegisteredTool[]);
+    const ids = Object.keys(BUILT_IN_PROFILE_DEFINITIONS) as ProfileId[];
+    const builtPolicies = Object.fromEntries(ids.map((id) => [id, resolveEffectiveProfile(id, tools)]));
+    const builtContracts = await import('@torqclaw/contracts');
+    assertRequiredPolicyExports(builtContracts as unknown as Record<string, unknown>, 'built contracts package');
+
+    await withFreshSourceContracts(async ({ contracts, policy }) => {
+      expect(contracts.BUILT_IN_PROFILE_DEFINITIONS, 'source and built definitions have the same four-profile snapshot')
+        .toEqual(BUILT_IN_PROFILE_DEFINITIONS);
+      const sourcePolicies = Object.fromEntries(ids.map((id) => [id, policy.resolveEffectiveProfile(id, tools)]));
+      expect(sourcePolicies, 'source-backed and built policies are semantically equal for all four profiles')
+        .toEqual(builtPolicies);
     });
+
+    expect(Object.values(MODULE_PATHS).every((path) => !path.includes('\\')), 'module paths are normalized').toBe(true);
+    expect(MODULE_PATHS.builtEntry.endsWith('/packages/contracts/dist/index.js')).toBe(true);
+    expect(MODULE_PATHS.sourceProfile.endsWith('/packages/contracts/src/profile.ts')).toBe(true);
+    expect(MODULE_PATHS.policyModule.endsWith('/packages/bridge/src/profilePolicy.ts')).toBe(true);
+    console.log(`PROFILE_CONFORMANCE_MODULE_PATHS ${JSON.stringify(MODULE_PATHS)}`);
+  });
+
+  it('source alias cleanup restores marker-free built-package behavior', async () => {
+    await withFreshSourceContracts(async ({ contracts }) => {
+      expect(Object.hasOwn(contracts, SOURCE_MARKER_EXPORT)).toBe(true);
+    });
+    await withFreshBuiltContracts(async ({ contracts, policy }) => {
+      expect(Object.hasOwn(contracts, SOURCE_MARKER_EXPORT), 'source provenance marker does not leak').toBe(false);
+      expect(policy.resolveEffectiveProfile('read_only', SYNTHETIC_TOOLS as readonly RegisteredTool[]))
+        .toEqual(resolveEffectiveProfile('read_only', SYNTHETIC_TOOLS as readonly RegisteredTool[]));
+    });
+  });
+});
+
+// Mutation-only fresh-module cases intentionally run after every permanent
+// static-module assertion. The package alias is redirected only under the
+// three definition-mutant environments, and cleanup always unsets that mock.
+describe('mutation-only conjunct isolation', () => {
+  it('P2 namespace conjunct: terminal_power denies an unreviewed write/process tool', () => {
+    const unreviewed = frozenTool('unreviewed__write', 'write', true);
+    const terminal = resolveEffectiveProfile('terminal_power', [unreviewed] as RegisteredTool[]);
+    expect(
+      terminal.allowedOperationIds,
+      'P2_NAMESPACE_DENIAL: terminal_power must exclude unreviewed__write',
+    ).not.toContain(unreviewed.name);
   });
 
   it('P2 capability conjunct: read_only denies filesystem write when every other conjunct is admitted', async () => {
-    await withoutContractMock(async () => {
-      const policy = await freshPolicyForMutant('P2-capability');
+    if (ACTIVE_MUTANT !== 'P2-capability') {
+      const write = frozenTool('filesystem__write_file', 'write', true);
+      expect(resolveEffectiveProfile('read_only', [write] as RegisteredTool[]).allowedOperationIds).not.toContain(write.name);
+      return;
+    }
+    expect(SOURCE_ALIAS_MUTANTS.has(ACTIVE_MUTANT)).toBe(true);
+    await withFreshSourceContracts(async ({ contracts, policy }) => {
       const write = frozenTool('filesystem__write_file', 'write', true);
       const readOnly = policy.resolveEffectiveProfile('read_only', [write] as RegisteredTool[]);
-      expect(readOnly.allowedOperationIds).not.toContain(write.name);
+      const setupActive = contracts.BUILT_IN_PROFILE_DEFINITIONS.read_only.allowedSideEffects.includes('filesystem_write');
+      expect(
+        readOnly.allowedOperationIds,
+        setupActive
+          ? 'P2_CAPABILITY_DENIAL: read_only capability gate must exclude filesystem__write_file'
+          : 'P2_CAPABILITY_BASELINE: unmodified read_only must exclude filesystem__write_file',
+      ).not.toContain(write.name);
     });
   });
 
-  it('P2 side-effect conjunct: workspace_write exposure changes only when filesystem effect is removed', async () => {
-    await withoutContractMock(async () => {
-      const policy = await freshPolicyForMutant('P2-side-effect');
+  it('P2 side-effect conjunct: workspace_write denies filesystem write when only its effect is disallowed', async () => {
+    if (ACTIVE_MUTANT !== 'P2-side-effect') {
+      const write = frozenTool('filesystem__write_file', 'write', true);
+      expect(resolveEffectiveProfile('workspace_write', [write] as RegisteredTool[]).allowedOperationIds).toContain(write.name);
+      return;
+    }
+    expect(SOURCE_ALIAS_MUTANTS.has(ACTIVE_MUTANT)).toBe(true);
+    await withFreshSourceContracts(async ({ contracts, policy }) => {
       const write = frozenTool('filesystem__write_file', 'write', true);
       const workspace = policy.resolveEffectiveProfile('workspace_write', [write] as RegisteredTool[]);
-      if (ACTIVE_MUTANT !== 'P2-side-effect') {
-        expect(workspace.allowedOperationIds).toContain(write.name);
+      const setupActive = !contracts.BUILT_IN_PROFILE_DEFINITIONS.workspace_write.allowedSideEffects.includes('filesystem_write');
+      if (!setupActive) {
+        expect(
+          workspace.allowedOperationIds,
+          'P2_SIDE_EFFECT_BASELINE: unmodified workspace_write must include filesystem__write_file',
+        ).toContain(write.name);
         return;
       }
-      expect(workspace.allowedOperationIds).not.toContain(write.name);
+      expect(
+        workspace.allowedOperationIds,
+        'P2_SIDE_EFFECT_DENIAL: workspace_write effect gate must exclude filesystem__write_file',
+      ).not.toContain(write.name);
     });
   });
 });
 
 describe('P1b control-plane and direct-execution exposure', () => {
   it('P1b control-plane exposure denies shell write under read_only', async () => {
-    await withoutContractMock(async () => {
-      const policy = await freshPolicyForMutant('P1b');
+    const assertDenied = (policy: PolicyModule): void => {
       const shellWrite = frozenTool('shell__write', 'write', true);
       const readOnly = policy.resolveEffectiveProfile('read_only', [shellWrite] as RegisteredTool[]);
-      expect(readOnly.allowedOperationIds).not.toContain(shellWrite.name);
-    });
+      expect(
+        readOnly.allowedOperationIds,
+        'P1B_CONTROL_DENIAL: read_only control plane must exclude shell__write',
+      ).not.toContain(shellWrite.name);
+    };
+    if (ACTIVE_MUTANT === 'P1b') {
+      expect(SOURCE_ALIAS_MUTANTS.has(ACTIVE_MUTANT)).toBe(true);
+      await withFreshSourceContracts(async ({ policy }) => assertDenied(policy));
+    } else {
+      assertDenied({ resolveEffectiveProfile } as PolicyModule);
+    }
   });
 
   it('P1b direct-execution denies shell write before client lookup', async () => {
-    await withoutContractMock(async () => {
-      const policy = await freshPolicyForMutant('P1b');
-      const registryModule = await import('../packages/bridge/src/registry.js');
+    const assertDenied = async (policy: PolicyModule, registry: RegistryModule): Promise<void> => {
+      const snapshot = [...registry.getRegistry()];
       const shellWrite = { ...frozenTool('shell__write', 'write', true) };
-      registryModule.getRegistry().push(shellWrite);
+      registry.getRegistry().push(shellWrite);
       try {
         const readOnly = policy.resolveEffectiveProfile('read_only');
-        await expect(registryModule.executeTool(shellWrite.name, {}, readOnly)).rejects
-          .toThrow("outside effective profile 'read_only'");
+        let actualBoundary = 'NO_ERROR';
+        try {
+          await registry.executeTool(shellWrite.name, {}, readOnly);
+        } catch (error) {
+          actualBoundary = String(error);
+        }
+        expect(
+          actualBoundary,
+          'P1B_DIRECT_DENIAL: read_only execution must stop before shell client lookup',
+        ).toContain("outside effective profile 'read_only'");
       } finally {
-        registryModule.getRegistry().splice(0, registryModule.getRegistry().length);
+        registry.getRegistry().splice(0, registry.getRegistry().length, ...snapshot);
       }
-    });
+    };
+    if (ACTIVE_MUTANT === 'P1b') {
+      expect(SOURCE_ALIAS_MUTANTS.has(ACTIVE_MUTANT)).toBe(true);
+      await withFreshSourceContracts(async ({ policy, registry }) => assertDenied(policy, registry));
+    } else {
+      await withFreshBuiltContracts(async ({ policy, registry }) => assertDenied(policy, registry));
+    }
   });
 });
