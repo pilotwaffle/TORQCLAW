@@ -27,39 +27,46 @@ const mutations = [
   },
   {
     id: 'P1b',
-    file: 'docs/security/profile-conformance.md',
-    before: '| read_only | * | read | none | LOCAL_EDGE |',
-    after: '| read_only | * | read, write | none | LOCAL_EDGE |',
-    testFile: 'tests/profile-conformance-declared.test.ts',
-    testName: 'AC-1 documentation',
-    redNeedle: 'marker-delimited GFM table',
+    file: 'packages/contracts/src/profile.ts',
+    before: "    allowedCapabilities: ['read'],\n    allowedSideEffects: ['none'],\n    allowedTiers: ['LOCAL_EDGE'],",
+    after: "    allowedCapabilities: ['read', 'write'],\n    allowedSideEffects: ['none', 'process'],\n    allowedTiers: ['LOCAL_EDGE'],",
+    testFile: 'tests/profile-conformance-runtime.test.ts',
+    testName: 'P1b',
+    redNeedles: [
+      'P1b control-plane exposure denies shell write under read_only',
+      'P1b direct-execution denies shell write before client lookup',
+    ],
+    mutant: 'P1b',
   },
   {
     id: 'P2-namespace',
-    file: 'packages/contracts/src/profile.ts',
-    before: "  workspace_write: {\n    profileId: 'workspace_write',\n    profileVersion: PROFILE_VERSION,\n    allowedNamespaces: ['filesystem'],",
-    after: "  workspace_write: {\n    profileId: 'workspace_write',\n    profileVersion: PROFILE_VERSION,\n    allowedNamespaces: ['filesystem', 'shell'],",
+    file: 'packages/bridge/src/profilePolicy.ts',
+    before: "  return namespaces.includes('*') || namespaces.includes(namespace);",
+    after: "  return namespaces.includes('*') || namespaces.includes(namespace) || namespace === 'unreviewed';",
     testFile: 'tests/profile-conformance-runtime.test.ts',
     testName: 'P2 namespace conjunct',
-    redNeedle: 'all built-ins match an immutable',
+    redNeedle: 'terminal_power denies an unreviewed write/process tool',
+    mutant: 'P2-namespace',
   },
   {
     id: 'P2-capability',
-    file: 'packages/contracts/src/profile.ts',
-    before: "    allowedCapabilities: ['read', 'write'],\n    allowedSideEffects: ['none', 'filesystem_write'],",
-    after: "    allowedCapabilities: ['read'],\n    allowedSideEffects: ['none', 'filesystem_write'],",
+    file: 'packages/bridge/src/profilePolicy.ts',
+    before: "        definition.allowedCapabilities.includes(tool.capability as CapabilityClass) &&",
+    after: "        true && // MUTANT: capability conjunct removed",
     testFile: 'tests/profile-conformance-runtime.test.ts',
     testName: 'P2 capability conjunct',
-    redNeedle: 'namespace match cannot bypass',
+    redNeedle: 'read_only denies filesystem write when every other conjunct is admitted',
+    mutant: 'P2-capability',
   },
   {
     id: 'P2-side-effect',
-    file: 'packages/contracts/src/profile.ts',
-    before: "    allowedCapabilities: ['read', 'write'],\n    allowedSideEffects: ['none', 'filesystem_write'],",
-    after: "    allowedCapabilities: ['read', 'write'],\n    allowedSideEffects: ['none'],",
+    file: 'packages/bridge/src/profilePolicy.ts',
+    before: "        definition.allowedSideEffects.includes(sideEffectFor(tool)),",
+    after: "        true, // MUTANT: side-effect conjunct removed",
     testFile: 'tests/profile-conformance-runtime.test.ts',
     testName: 'P2 side-effect conjunct',
-    redNeedle: 'matching namespace and capability',
+    redNeedle: 'workspace_write exposure changes only when filesystem effect is removed',
+    mutant: 'P2-side-effect',
   },
   {
     id: 'P3a',
@@ -72,9 +79,9 @@ const mutations = [
   },
   {
     id: 'P3b',
-    file: 'packages/contracts/src/profile.ts',
-    before: "export const TOOL_REGISTRY_VERSION = 'torqclaw.tools/v1' as const;",
-    after: "export const TOOL_REGISTRY_VERSION = 'torqclaw.tools/v2' as const;",
+    file: 'packages/bridge/src/profilePolicy.ts',
+    before: "  return createHash('sha256').update(canonicalizePolicy(material)).digest('hex');",
+    after: "  return createHash('sha256').update('PROFILE_POLICY_V2\\0').update(canonicalizePolicy(material)).digest('hex');",
     testFile: 'tests/profile-conformance-c2.test.ts',
     testName: 'AC-C2-0 fixed checked-in',
     redNeedle: 'fixed checked-in UTF-8 preimage',
@@ -105,12 +112,13 @@ function occurrences(text, needle) {
   return count;
 }
 
-function run(command, args) {
+function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: root,
     encoding: 'utf8',
     shell: false,
     maxBuffer: 64 * 1024 * 1024,
+    ...options,
   });
   return {
     ...result,
@@ -150,7 +158,11 @@ for (const mutation of mutations) {
       mutation.testFile,
       '-t',
       mutation.testName,
-    ]);
+    ], {
+      env: mutation.mutant
+        ? { ...process.env, TORQ_PROFILE_CONFORMANCE_MUTANT: mutation.mutant }
+        : { ...process.env },
+    });
     const output = `${test.stdout}${test.stderr}`;
     createReceipt(`${mutation.id}.test.log`, output);
     createReceipt(`${mutation.id}.test.exit.txt`, `EXIT_CODE=${test.status}\n`);
@@ -158,11 +170,12 @@ for (const mutation of mutations) {
     if (test.error || test.signal || test.status === null) {
       throw new Error(`${mutation.id}: Vitest spawn failed (${test.error ?? test.signal ?? 'null status'})`);
     }
+    const redNeedles = mutation.redNeedles ?? [mutation.redNeedle];
     if (
       test.status === 0
       || !plain.includes('Failed Tests')
       || !plain.includes(mutation.testName)
-      || !plain.includes(mutation.redNeedle)
+      || redNeedles.some((needle) => !plain.includes(needle))
     ) {
       throw new Error(`${mutation.id}: targeted test did not prove the relevant assertion RED (exit ${test.status})`);
     }

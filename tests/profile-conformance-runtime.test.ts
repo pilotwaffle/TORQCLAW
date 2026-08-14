@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BUILT_IN_PROFILE_DEFINITIONS, type ProfileId } from '../packages/contracts/src/profile.js';
 import { checkPath, extractPaths } from '../packages/bridge/src/pathScope.js';
 import {
@@ -19,6 +19,47 @@ import {
 } from './helpers/profile-conformance.js';
 
 let originalRegistry: RegisteredTool[];
+const ACTIVE_MUTANT = process.env.TORQ_PROFILE_CONFORMANCE_MUTANT;
+const DEFINITION_MUTANTS = new Set(['P1b', 'P2-capability', 'P2-side-effect']);
+
+type ContractModule = typeof import('../packages/contracts/src/profile.js');
+
+async function freshPolicyForMutant(mutant: string) {
+  vi.resetModules();
+  vi.doUnmock('@torqclaw/contracts');
+  if (ACTIVE_MUTANT === mutant && DEFINITION_MUTANTS.has(mutant)) {
+    const actual = await vi.importActual<ContractModule>('@torqclaw/contracts');
+    const definitions = structuredClone(actual.BUILT_IN_PROFILE_DEFINITIONS);
+    const expected = structuredClone(actual.BUILT_IN_PROFILE_DEFINITIONS);
+    if (mutant === 'P1b') {
+      definitions.read_only.allowedCapabilities.push('write');
+      definitions.read_only.allowedSideEffects.push('process');
+      expected.read_only.allowedCapabilities = ['read', 'write'];
+      expected.read_only.allowedSideEffects = ['none', 'process'];
+    } else if (mutant === 'P2-capability') {
+      definitions.read_only.allowedSideEffects.push('filesystem_write');
+      expected.read_only.allowedSideEffects = ['none', 'filesystem_write'];
+    } else if (mutant === 'P2-side-effect') {
+      definitions.workspace_write.allowedSideEffects = ['none'];
+      expected.workspace_write.allowedSideEffects = ['none'];
+    }
+    expect(definitions, `${mutant} changes only its declared semantic delta`).toEqual(expected);
+    vi.doMock('@torqclaw/contracts', () => ({
+      ...actual,
+      BUILT_IN_PROFILE_DEFINITIONS: definitions,
+    }));
+  }
+  return import('../packages/bridge/src/profilePolicy.js');
+}
+
+async function withoutContractMock<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } finally {
+    vi.doUnmock('@torqclaw/contracts');
+    vi.resetModules();
+  }
+}
 
 beforeEach(() => {
   originalRegistry = [...getRegistry()];
@@ -30,7 +71,7 @@ afterEach(() => {
 });
 
 describe('AC-3/AC-4 conjunctive profile admission', () => {
-  it('P2 namespace conjunct: all built-ins match an immutable independently-derived exposure matrix', () => {
+  it('all built-ins match an immutable independently-derived exposure matrix', () => {
     const tools = immutableSnapshot(SYNTHETIC_TOOLS as readonly RegisteredTool[]);
     for (const [profileId, definition] of Object.entries(readGolden().profiles) as [ProfileId, typeof BUILT_IN_PROFILE_DEFINITIONS[ProfileId]][]) {
       const profile = resolveEffectiveProfile(profileId, tools as readonly RegisteredTool[]);
@@ -41,7 +82,7 @@ describe('AC-3/AC-4 conjunctive profile admission', () => {
     }
   });
 
-  it('P2 capability conjunct: a namespace match cannot bypass a capability mismatch', () => {
+  it('a namespace match cannot bypass a capability mismatch', () => {
     const workspace = resolveEffectiveProfile('workspace_write', SYNTHETIC_TOOLS as readonly RegisteredTool[]);
     expect(workspace.allowedOperationIds).toContain('filesystem__write_file');
     expect(workspace.allowedOperationIds).not.toContain('shell__run_command');
@@ -51,7 +92,7 @@ describe('AC-3/AC-4 conjunctive profile admission', () => {
     expect(browser.allowedOperationIds).not.toContain('playwright__fill');
   });
 
-  it('P2 side-effect conjunct: matching namespace and capability still require the derived effect', () => {
+  it('matching namespace and capability still require the derived effect', () => {
     const terminal = resolveEffectiveProfile('terminal_power', SYNTHETIC_TOOLS as readonly RegisteredTool[]);
     expect(terminal.allowedOperationIds).toContain('terminal__set_option');
     const workspace = resolveEffectiveProfile('workspace_write', SYNTHETIC_TOOLS as readonly RegisteredTool[]);
@@ -148,5 +189,68 @@ describe('AC-7 path semantics (no arbitrary shell/process containment claim)', (
     expect(extractPaths({ path: outside, filename: blocked }).sort()).toEqual([blocked, outside].sort()); // no common path key skipped
     expect(extractPaths({ artifactLocation: outside })).toEqual([]); // nonstandard without hint missed
     expect(extractPaths({ artifactLocation: outside }, ['artifactLocation'])).toEqual([outside]); // hint checked
+  });
+});
+
+// Mutation-only fresh-module cases intentionally run after every permanent
+// static-module assertion. vi.resetModules() therefore cannot split the live
+// registry used by the permanent executeTool checks above.
+describe('mutation-only conjunct isolation', () => {
+  it('P2 namespace conjunct: terminal_power denies an unreviewed write/process tool', async () => {
+    await withoutContractMock(async () => {
+      const policy = await freshPolicyForMutant('P2-namespace');
+      const unreviewed = frozenTool('unreviewed__write', 'write', true);
+      const terminal = policy.resolveEffectiveProfile('terminal_power', [unreviewed] as RegisteredTool[]);
+      expect(terminal.allowedOperationIds).not.toContain(unreviewed.name);
+    });
+  });
+
+  it('P2 capability conjunct: read_only denies filesystem write when every other conjunct is admitted', async () => {
+    await withoutContractMock(async () => {
+      const policy = await freshPolicyForMutant('P2-capability');
+      const write = frozenTool('filesystem__write_file', 'write', true);
+      const readOnly = policy.resolveEffectiveProfile('read_only', [write] as RegisteredTool[]);
+      expect(readOnly.allowedOperationIds).not.toContain(write.name);
+    });
+  });
+
+  it('P2 side-effect conjunct: workspace_write exposure changes only when filesystem effect is removed', async () => {
+    await withoutContractMock(async () => {
+      const policy = await freshPolicyForMutant('P2-side-effect');
+      const write = frozenTool('filesystem__write_file', 'write', true);
+      const workspace = policy.resolveEffectiveProfile('workspace_write', [write] as RegisteredTool[]);
+      if (ACTIVE_MUTANT !== 'P2-side-effect') {
+        expect(workspace.allowedOperationIds).toContain(write.name);
+        return;
+      }
+      expect(workspace.allowedOperationIds).not.toContain(write.name);
+    });
+  });
+});
+
+describe('P1b control-plane and direct-execution exposure', () => {
+  it('P1b control-plane exposure denies shell write under read_only', async () => {
+    await withoutContractMock(async () => {
+      const policy = await freshPolicyForMutant('P1b');
+      const shellWrite = frozenTool('shell__write', 'write', true);
+      const readOnly = policy.resolveEffectiveProfile('read_only', [shellWrite] as RegisteredTool[]);
+      expect(readOnly.allowedOperationIds).not.toContain(shellWrite.name);
+    });
+  });
+
+  it('P1b direct-execution denies shell write before client lookup', async () => {
+    await withoutContractMock(async () => {
+      const policy = await freshPolicyForMutant('P1b');
+      const registryModule = await import('../packages/bridge/src/registry.js');
+      const shellWrite = { ...frozenTool('shell__write', 'write', true) };
+      registryModule.getRegistry().push(shellWrite);
+      try {
+        const readOnly = policy.resolveEffectiveProfile('read_only');
+        await expect(registryModule.executeTool(shellWrite.name, {}, readOnly)).rejects
+          .toThrow("outside effective profile 'read_only'");
+      } finally {
+        registryModule.getRegistry().splice(0, registryModule.getRegistry().length);
+      }
+    });
   });
 });
