@@ -1,0 +1,118 @@
+{
+  "pin": "c2850f5ac755444d42b930034de536938f31ae22",
+  "profiles": {
+    "read_only": {
+      "profileId": "read_only",
+      "profileVersion": 1,
+      "allowedNamespaces": [
+        "*"
+      ],
+      "allowedCapabilities": [
+        "read"
+      ],
+      "allowedSideEffects": [
+        "none"
+      ],
+      "allowedTiers": [
+        "LOCAL_EDGE"
+      ],
+      "scopes": {
+        "path": "none",
+        "network": "none"
+      },
+      "approvalRequirements": {
+        "write": false,
+        "exec": false,
+        "send": false
+      }
+    },
+    "workspace_write": {
+      "profileId": "workspace_write",
+      "profileVersion": 1,
+      "allowedNamespaces": [
+        "filesystem"
+      ],
+      "allowedCapabilities": [
+        "read",
+        "write"
+      ],
+      "allowedSideEffects": [
+        "none",
+        "filesystem_write"
+      ],
+      "allowedTiers": [
+        "LOCAL_EDGE",
+        "FRONTIER"
+      ],
+      "scopes": {
+        "path": "workspace",
+        "network": "none"
+      },
+      "approvalRequirements": {
+        "write": true,
+        "exec": false,
+        "send": false
+      }
+    },
+    "browser_research": {
+      "profileId": "browser_research",
+      "profileVersion": 1,
+      "allowedNamespaces": [
+        "browser",
+        "playwright",
+        "websearch"
+      ],
+      "allowedCapabilities": [
+        "read"
+      ],
+      "allowedSideEffects": [
+        "none"
+      ],
+      "allowedTiers": [
+        "LOCAL_EDGE",
+        "FRONTIER"
+      ],
+      "scopes": {
+        "path": "none",
+        "network": "browser"
+      },
+      "approvalRequirements": {
+        "write": false,
+        "exec": false,
+        "send": false
+      }
+    },
+    "terminal_power": {
+      "profileId": "terminal_power",
+      "profileVersion": 1,
+      "allowedNamespaces": [
+        "desktop_commander",
+        "sandbox",
+        "shell",
+        "terminal"
+      ],
+      "allowedCapabilities": [
+        "read",
+        "write",
+        "exec"
+      ],
+      "allowedSideEffects": [
+        "none",
+        "process"
+      ],
+      "allowedTiers": [
+        "LOCAL_EDGE",
+        "FRONTIER"
+      ],
+      "scopes": {
+        "path": "configured",
+        "network": "configured"
+      },
+      "approvalRequirements": {
+        "write": true,
+        "exec": true,
+        "send": false
+      }
+    }
+  }
+}
