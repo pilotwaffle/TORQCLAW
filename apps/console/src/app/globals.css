@@ -1,7 +1,64 @@
 @import "tailwindcss";
 
-/* TORQ design tokens */
+/* TORQ design tokens — single source of truth for the console redesign.
+   Red is reserved for destructive/error ONLY (token rule; the legacy
+   --torq-accent red is deliberately gone). */
 :root {
-  --torq-base: #0a0a0a;
-  --torq-accent: #E24B4A;
+  --bg: #0a0b0d;
+  --panel: #121316;
+  --panel-2: #17191d;
+  --border: #23262c;
+  --text: #f4f5f6;
+  --muted: #a7adb8;
+  --faint: #6a717c;
+  --torque: #ff9e40; /* brand accent, interactive focus */
+  --cloud: #22d3ee;
+  --good: #34d399;
+  --mem: #a78bfa;
+  --bad: #f87171;
+}
+
+/* Tailwind v4 utility mapping — utilities (bg-panel, text-muted, border-edge,
+   font-chrome…) resolve to the :root tokens above, never to raw hex. */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-edge: var(--border);
+  --color-ink: var(--text);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-torque: var(--torque);
+  --color-cloud: var(--cloud);
+  --color-good: var(--good);
+  --color-mem: var(--mem);
+  --color-bad: var(--bad);
+
+  /* JetBrains Mono = UI chrome/labels/data; Inter = answer body + long
+     reading. The --font-* values are set by next/font in layout.tsx. */
+  --font-chrome: var(--font-jetbrains), ui-monospace, monospace;
+  --font-reading: var(--font-inter), ui-sans-serif, sans-serif;
+}
+
+/* Chrome surfaces default to JetBrains Mono; long-form answer blocks opt into
+   Inter via font-reading. */
+body {
+  font-family: var(--font-chrome);
+}
+
+/* Subtle 3px scanline overlay — part of the look. Pure texture: never
+   intercepts input (pointer-events: none), sits above every panel. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 0px,
+    rgba(0, 0, 0, 0) 2px,
+    rgba(0, 0, 0, 0.12) 2px,
+    rgba(0, 0, 0, 0.12) 3px
+  );
 }
