@@ -38,6 +38,7 @@ import {
   fenceBlock,
   groupStreamIntoTasks,
   derivePreflightEstimate,
+  approvalTierFromGate,
   type ReceiptLike,
   type ApprovalSummaryLike,
   type SafeExportLike,
@@ -1506,6 +1507,34 @@ describe('derivePreflightEstimate (redesign 4/7) — the composer pre-flight chi
   it('cloud tier without a token estimate -> bare route label, no invented number', () => {
     const est = derivePreflightEstimate(previewFrame({ previewOf: 'n', diagnostics: { tier: 'API_EXTERNAL' } }));
     expect(est).toEqual({ route: 'cloud', label: 'cloud route', estimatedTokens: null });
+  });
+});
+
+describe('approvalTierFromGate (redesign 6/7) — mechanical severity tiers', () => {
+  it('absent / null / non-object gate -> unknown (registry never consulted — no tier may be shown)', () => {
+    expect(approvalTierFromGate(undefined)).toBe('unknown');
+    expect(approvalTierFromGate(null)).toBe('unknown');
+    expect(approvalTierFromGate('write')).toBe('unknown');
+    expect(approvalTierFromGate(7)).toBe('unknown');
+  });
+
+  it('capability read -> read tier (one-click)', () => {
+    expect(approvalTierFromGate({ capability: 'read', rule: 'approval-pattern' })).toBe('read');
+  });
+
+  it('capability write -> spend tier', () => {
+    expect(approvalTierFromGate({ capability: 'write', rule: 'write-class-capability' })).toBe('spend');
+  });
+
+  it('capability exec/send -> destructive tier', () => {
+    expect(approvalTierFromGate({ capability: 'exec', rule: 'write-class-capability' })).toBe('destructive');
+    expect(approvalTierFromGate({ capability: 'send', rule: 'write-class-capability' })).toBe('destructive');
+  });
+
+  it('no capability (registry miss OR engine hook) -> destructive, fail-closed: unknown never means read', () => {
+    expect(approvalTierFromGate({ targets: [], targetsSource: 'path-heuristic' })).toBe('destructive');
+    expect(approvalTierFromGate({ targets: [], rule: 'engine-approval-hook' })).toBe('destructive');
+    expect(approvalTierFromGate({})).toBe('destructive');
   });
 });
 

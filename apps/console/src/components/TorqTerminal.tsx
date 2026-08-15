@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GatewayEvent, ClientCommand, RouterDiagnostics } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
-import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, groupStreamIntoTasks, derivePreflightEstimate, type SafeExportFrameLike, type TaskGroup, type PreflightEstimate } from './friendly';
+import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, groupStreamIntoTasks, derivePreflightEstimate, approvalTierFromGate, type SafeExportFrameLike, type TaskGroup, type PreflightEstimate } from './friendly';
 import { selectTurnStartMs, selectLastSyncedMs, isStale, selectCostSummaryMeta, selectLivePhase, isPhaseStuck, STALE_AFTER_MS } from './presence';
 import { LiveDuration } from './LiveDuration';
 import { LivenessChip } from './LivenessChip';
@@ -521,6 +521,17 @@ export default function TorqTerminal() {
     () => selectCostSummaryMeta(events) as Record<string, any> | null,
     [events],
   );
+  // Redesign 6/7: budget context for the spend tier's approval cards — real
+  // costSummary facts only (null when no frame has landed, never a guess).
+  const budgetLine = useMemo(() => {
+    if (!costMeta) return null;
+    const remaining = typeof costMeta.sessionRemaining === 'number' ? costMeta.sessionRemaining : null;
+    const cap = typeof costMeta.sessionCap === 'number' ? costMeta.sessionCap : null;
+    if (remaining === null) return null;
+    return cap !== null
+      ? `$${remaining.toFixed(2)} remaining of $${cap.toFixed(2)} session cap`
+      : `$${remaining.toFixed(2)} session budget remaining (no cap)`;
+  }, [costMeta]);
 
   const simulateRoute = () => {
     const prompt = input.trim();
@@ -673,6 +684,7 @@ export default function TorqTerminal() {
                 safeExportChipCopied={ev.requestId ? !!safeExportChipCopied[ev.requestId] : false}
                 onGetSafeExportChip={requestSafeExportChip}
                 onCopySafeExportChip={copySafeExportChip}
+                budgetLine={budgetLine}
               />
             );
           }
@@ -695,6 +707,7 @@ export default function TorqTerminal() {
               safeExportChipCopied={safeExportChipCopied}
               onGetSafeExportChip={requestSafeExportChip}
               onCopySafeExportChip={copySafeExportChip}
+              budgetLine={budgetLine}
             />
           );
         })}
@@ -1052,7 +1065,7 @@ function TaskCard({
   group, decided, toolsByRequest, draftsByQueue, onDecideSkill, onGetDraft,
   onDecideTool, onResendLocal, onResendCloud, onRetry, onCopyDiagnostic,
   safeExportViewByTaskId, safeExportChipPhase, safeExportChipCopied,
-  onGetSafeExportChip, onCopySafeExportChip,
+  onGetSafeExportChip, onCopySafeExportChip, budgetLine,
 }: {
   group: TaskGroup;
   decided: Record<string, 'APPROVE' | 'REJECT'>;
@@ -1070,6 +1083,7 @@ function TaskCard({
   safeExportChipCopied: Record<string, boolean>;
   onGetSafeExportChip: (taskId: string) => void;
   onCopySafeExportChip: (taskId: string) => void;
+  budgetLine: string | null;
 }) {
   const [stepsOpen, setStepsOpen] = useState(false);
   const tier = group.tier ? tierLabel(group.tier) : null;
@@ -1093,6 +1107,7 @@ function TaskCard({
     safeExportChipCopied: ev.requestId ? !!safeExportChipCopied[ev.requestId] : false,
     onGetSafeExportChip,
     onCopySafeExportChip,
+    budgetLine,
   });
 
   return (
@@ -1170,6 +1185,7 @@ function EventRow({
   onDecideTool, onResendLocal, onResendCloud, onRetry, onCopyDiagnostic,
   safeExportFrame, safeExportChipPhase, safeExportChipCopied, onGetSafeExportChip, onCopySafeExportChip,
   hideTimestamp = false,
+  budgetLine = null,
 }: {
   event: GatewayEvent;
   decided: Record<string, 'APPROVE' | 'REJECT'>;
@@ -1192,6 +1208,8 @@ function EventRow({
   /** Redesign 3/7: rows inside a task card hide their per-row clock — the
    *  card header carries the ONE timestamp for the whole task. */
   hideTimestamp?: boolean;
+  /** Redesign 6/7: recorded session-budget context for the spend tier. */
+  budgetLine?: string | null;
 }) {
   const tier = tierLabel(event.tier);
   const meta = (event.metadata ?? {}) as Record<string, any>;
@@ -1280,6 +1298,7 @@ function EventRow({
             toolName={String(meta.toolName ?? meta.tool_name ?? '')}
             args={meta.args}
             gate={meta.gate}
+            budgetLine={budgetLine}
             onAllow={() => onDecideTool(approvalId, 'APPROVE')}
             onDeny={() => onDecideTool(approvalId, 'REJECT')}
           />
@@ -1612,16 +1631,22 @@ function SkillApprovalCard({
 }
 
 function ToolPermissionCard({
-  toolName, args, gate, onAllow, onDeny,
+  toolName, args, gate, onAllow, onDeny, budgetLine = null,
 }: {
   toolName: string;
   args: unknown;
   gate?: unknown;
   onAllow: () => void;
   onDeny: () => void;
+  /** Redesign 6/7: recorded session-budget context (remaining vs cap) for
+   *  the spend tier — real costSummary facts only, null when no frame has
+   *  landed (never fabricated). */
+  budgetLine?: string | null;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [targetsExpanded, setTargetsExpanded] = useState(false);
+  // Redesign 6/7: destructive tier arms only when the operator types DELETE.
+  const [confirmText, setConfirmText] = useState('');
 
   // TCLAW-5A-2 HONESTY FORK 1 (absent gate !== registry miss): the caller
   // passes meta.gate straight through, so `gate === undefined` means the
@@ -1634,6 +1659,20 @@ function ToolPermissionCard({
   // routing every non-undefined value through formatGateFacts is what makes
   // gate:null safe.
   const gateFacts = gate === undefined ? null : formatGateFacts(gate);
+
+  // Redesign 6/7: severity tier from the gate facts (pure selector, friendly.ts).
+  // unknown = gate absent/null/malformed — the registry was never consulted,
+  // so the card keeps its exact pre-redesign look (honesty forks 1+2).
+  const tier = approvalTierFromGate(gate);
+  const tierChrome =
+    tier === 'read' ? 'border-good/40 bg-good/5'
+    : tier === 'spend' ? 'border-torque/40 bg-torque/5'
+    : tier === 'destructive' ? 'border-bad/40 bg-bad/5'
+    : 'border-[#E24B4A]/40 bg-[#E24B4A]/5';
+  const armed = confirmText === 'DELETE';
+  const rawGate = gate !== undefined && gate !== null && typeof gate === 'object'
+    ? (gate as Record<string, unknown>)
+    : null;
 
   // Friendly verb: take the segment after the last "__", underscores -> spaces.
   // Use lastIndexOf (not a \w+ regex) so hyphenated/dotted MCP names survive.
@@ -1651,7 +1690,7 @@ function ToolPermissionCard({
   const shown = expanded || !isLong ? pretty : pretty.slice(0, TRUNC) + '\n…';
 
   return (
-    <div className="ml-2 mt-2 max-w-2xl rounded border border-[#E24B4A]/40 bg-[#E24B4A]/5 p-3">
+    <div className={`ml-2 mt-2 max-w-2xl rounded border p-3 ${tierChrome}`}>
       <p className="text-neutral-200">
         This task wants to <span className="font-semibold text-neutral-100">{friendly}</span> to finish.
       </p>
@@ -1733,8 +1772,57 @@ function ToolPermissionCard({
           {expanded ? 'show less' : `show all (${pretty.length} chars)`}
         </button>
       )}
+      {/* Redesign 6/7 — spend tier: recorded budget context inline. Real
+          costSummary facts only (null -> renders nothing, never a guess). */}
+      {tier === 'spend' && budgetLine && (
+        <p className="mt-2 text-[10px] text-neutral-500">budget: {budgetLine}</p>
+      )}
+
+      {/* Redesign 6/7 — destructive tier: risk list, checkpoint truth, and
+          type-to-confirm. Every line is derived from gate facts or kernel
+          reality — no invented risk scores. */}
+      {tier === 'destructive' && (
+        <div className="mt-2 space-y-1.5 text-[10px]">
+          <ul className="list-disc space-y-0.5 pl-4 text-neutral-400">
+            {rawGate?.capability === 'exec' && (
+              <li>runs code with this machine&apos;s privileges — effects are not bounded by the gateway</li>
+            )}
+            {rawGate?.capability === 'send' && (
+              <li>sends data off this machine — outbound transfers cannot be recalled</li>
+            )}
+            {rawGate?.capability === undefined && (
+              <li>the kernel could not classify this action — treat it as irreversible</li>
+            )}
+          </ul>
+          <p className="text-bad">
+            not covered by any checkpoint — the kernel exposes no checkpoint/rollback surface
+          </p>
+          <label className="block text-neutral-500">
+            type DELETE to arm approve
+            <input
+              value={confirmText}
+              onChange={(e) => setConfirmText(e.target.value)}
+              placeholder="DELETE"
+              aria-label="type DELETE to arm approve"
+              spellCheck={false}
+              className="mt-1 block w-40 rounded border border-neutral-700 bg-black/40 px-2 py-1 font-mono text-[11px] text-neutral-200 focus:outline-none"
+            />
+          </label>
+        </div>
+      )}
+
       <div className="mt-3 flex gap-2">
-        <button onClick={onAllow} className="rounded border border-[#E24B4A]/50 px-3 py-1 text-[11px] text-[#E24B4A] hover:bg-[#E24B4A]/15">
+        <button
+          onClick={onAllow}
+          disabled={tier === 'destructive' && !armed}
+          title={tier === 'destructive' && !armed ? 'type DELETE to arm' : undefined}
+          className={`rounded border px-3 py-1 text-[11px] disabled:opacity-40 ${
+            tier === 'read' ? 'border-good/50 text-good hover:bg-good/10'
+            : tier === 'spend' ? 'border-torque/50 text-torque hover:bg-torque/10'
+            : tier === 'destructive' ? 'border-bad/50 text-bad hover:bg-bad/10'
+            : 'border-[#E24B4A]/50 text-[#E24B4A] hover:bg-[#E24B4A]/15'
+          }`}
+        >
           Allow once
         </button>
         <button onClick={onDeny} className="rounded border border-neutral-700 px-3 py-1 text-[11px] text-neutral-400 hover:bg-neutral-800">

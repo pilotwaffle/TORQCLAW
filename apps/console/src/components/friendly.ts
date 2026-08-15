@@ -491,6 +491,36 @@ export function groupStreamIntoTasks(events: GatewayEvent[]): StreamItem[] {
   return items;
 }
 
+/** Redesign 6/7: severity tier for a tool approval, derived MECHANICALLY
+ *  from the gate facts built by dispatch.ts (buildGateFacts) — never a
+ *  client-side re-classification, never a guess. PURE.
+ *
+ *    read        capability === 'read'                  -> one-click approve
+ *    spend       capability === 'write'                 -> approve + budget
+ *                                                          context inline
+ *    destructive capability === 'exec' | 'send'         -> risk list +
+ *    (fail-closed) OR no capability at all: an engine      type-to-confirm
+ *                    approval hook (frontier) or a
+ *                    registry miss — the kernel's rule is
+ *                    UNKNOWN NEVER MEANS READ, so the
+ *                    console escalates unknown to the
+ *                    destructive UX
+ *    unknown     gate ABSENT (undefined), null, or a    -> the pre-redesign
+ *                non-object (pre-5A-1 backlog frames /     card, unchanged
+ *                malformed): the registry was never        (honesty forks 1+2
+ *                consulted, so no tier may be shown        in ToolPermissionCard)
+ */
+export type ApprovalTier = 'read' | 'spend' | 'destructive' | 'unknown';
+
+export function approvalTierFromGate(gate: unknown): ApprovalTier {
+  if (gate === null || gate === undefined || typeof gate !== 'object') return 'unknown';
+  const cap = (gate as Record<string, unknown>).capability;
+  if (cap === 'read') return 'read';
+  if (cap === 'write') return 'spend';
+  if (cap === 'exec' || cap === 'send') return 'destructive';
+  return 'destructive'; // fail-closed: unknown never means read
+}
+
 /** Redesign 4/7: the composer's pre-flight estimate, derived from a
  *  PREVIEW_ROUTE response frame — the kernel's REAL sizing pass (enrichment +
  *  router evaluation, no dispatch; preview.ts). PURE.
