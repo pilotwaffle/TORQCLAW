@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GatewayEvent, ClientCommand, RouterDiagnostics } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
-import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, type SafeExportFrameLike } from './friendly';
+import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, groupStreamIntoTasks, type SafeExportFrameLike, type TaskGroup } from './friendly';
 import { selectTurnStartMs, selectLastSyncedMs, isStale, selectCostSummaryMeta, selectLivePhase, isPhaseStuck, STALE_AFTER_MS } from './presence';
 import { LiveDuration } from './LiveDuration';
 import { LivenessChip } from './LivenessChip';
@@ -261,6 +261,11 @@ export default function TorqTerminal() {
     }
     return map;
   }, [events]);
+
+  // Redesign 3/7: the raw log stream grouped into per-task cards. Pure
+  // selector (friendly.ts) — events with a requestId join their task's card;
+  // session-level frames stay loose and render exactly as before.
+  const streamItems = useMemo(() => groupStreamIntoTasks(events), [events]);
 
   // Privacy SUGGESTION (suggest-only — never sets the flag, never blocks).
   // Debounced 500ms so the regex pass never runs on the keystroke hot path,
@@ -534,27 +539,53 @@ export default function TorqTerminal() {
             or keep a task local with the controls under the box.
           </p>
         )}
-        {events.map((ev) => (
-          <EventRow
-            key={ev.id}
-            event={ev}
-            decided={decided}
-            toolsByRequest={toolsByRequest}
-            draftsByQueue={draftsByQueue}
-            onDecideSkill={decideSkill}
-            onGetDraft={getDraft}
-            onDecideTool={decideTool}
-            onResendLocal={resendLocal}
-            onResendCloud={resendCloud}
-            onRetry={retry}
-            onCopyDiagnostic={copyDiagnostic}
-            safeExportFrame={ev.requestId ? (safeExportViewByTaskId[ev.requestId] ?? null) : null}
-            safeExportChipPhase={ev.requestId ? (safeExportChipPhase[ev.requestId] ?? 'initial') : 'initial'}
-            safeExportChipCopied={ev.requestId ? !!safeExportChipCopied[ev.requestId] : false}
-            onGetSafeExportChip={requestSafeExportChip}
-            onCopySafeExportChip={copySafeExportChip}
-          />
-        ))}
+        {streamItems.map((item) => {
+          if (item.kind === 'loose') {
+            const ev = item.event;
+            return (
+              <EventRow
+                key={ev.id}
+                event={ev}
+                decided={decided}
+                toolsByRequest={toolsByRequest}
+                draftsByQueue={draftsByQueue}
+                onDecideSkill={decideSkill}
+                onGetDraft={getDraft}
+                onDecideTool={decideTool}
+                onResendLocal={resendLocal}
+                onResendCloud={resendCloud}
+                onRetry={retry}
+                onCopyDiagnostic={copyDiagnostic}
+                safeExportFrame={ev.requestId ? (safeExportViewByTaskId[ev.requestId] ?? null) : null}
+                safeExportChipPhase={ev.requestId ? (safeExportChipPhase[ev.requestId] ?? 'initial') : 'initial'}
+                safeExportChipCopied={ev.requestId ? !!safeExportChipCopied[ev.requestId] : false}
+                onGetSafeExportChip={requestSafeExportChip}
+                onCopySafeExportChip={copySafeExportChip}
+              />
+            );
+          }
+          return (
+            <TaskCard
+              key={item.group.requestId}
+              group={item.group}
+              decided={decided}
+              toolsByRequest={toolsByRequest}
+              draftsByQueue={draftsByQueue}
+              onDecideSkill={decideSkill}
+              onGetDraft={getDraft}
+              onDecideTool={decideTool}
+              onResendLocal={resendLocal}
+              onResendCloud={resendCloud}
+              onRetry={retry}
+              onCopyDiagnostic={copyDiagnostic}
+              safeExportViewByTaskId={safeExportViewByTaskId}
+              safeExportChipPhase={safeExportChipPhase}
+              safeExportChipCopied={safeExportChipCopied}
+              onGetSafeExportChip={requestSafeExportChip}
+              onCopySafeExportChip={copySafeExportChip}
+            />
+          );
+        })}
         {busy && (
           <>
           <p className="flex items-center gap-3 px-2 py-1 text-neutral-500">
@@ -809,10 +840,150 @@ function useNow(intervalMs: number) {
   return now;
 }
 
+/** Redesign 3/7: the answer is the visual hero of a task card — Inter for
+ *  long reading, a 72ch measure, the amber accent edge, and a mono ANSWER
+ *  eyebrow. Same friendlyMessage text the raw row always rendered; only the
+ *  presentation is elevated. */
+function AnswerHero({ event }: { event: GatewayEvent }) {
+  return (
+    <div className="mt-2 border-l-2 border-torque pl-4">
+      <p className="font-chrome text-[9px] tracking-[0.22em] text-faint">ANSWER</p>
+      <div className="mt-1 max-w-[72ch] font-reading text-[14.5px] leading-[1.72] text-ink">
+        {friendlyMessage(event)}
+      </div>
+    </div>
+  );
+}
+
+/** Redesign 3/7: one task = one card. Header carries the user prompt (600
+ *  weight), the token-colored route chip (cloud=cyan / local=green), and the
+ *  ONE timestamp for the whole task. ROUTING/TIER_SELECTED/TOOL_CALL/SYSTEM
+ *  plumbing collapses into a "N STEPS" row (default collapsed). Approvals,
+ *  errors, the answer, and the receipt stay visible — action surfaces are
+ *  never hidden inside a collapse. Every row keeps its exact pre-redesign
+ *  behavior and dispatch surface; only the grouping/presentation changed. */
+function TaskCard({
+  group, decided, toolsByRequest, draftsByQueue, onDecideSkill, onGetDraft,
+  onDecideTool, onResendLocal, onResendCloud, onRetry, onCopyDiagnostic,
+  safeExportViewByTaskId, safeExportChipPhase, safeExportChipCopied,
+  onGetSafeExportChip, onCopySafeExportChip,
+}: {
+  group: TaskGroup;
+  decided: Record<string, 'APPROVE' | 'REJECT'>;
+  toolsByRequest: Record<string, string[]>;
+  draftsByQueue: Record<string, string>;
+  onDecideSkill: (queueId: string, decision: 'APPROVE' | 'REJECT', editedMarkdown?: string) => void;
+  onGetDraft: (queueId: string) => void;
+  onDecideTool: (approvalId: string, decision: 'APPROVE' | 'REJECT') => void;
+  onResendLocal: (prompt: string) => void;
+  onResendCloud: (prompt: string) => void;
+  onRetry: (prompt: string, suggestedBudget?: number) => void;
+  onCopyDiagnostic: (errEvent: GatewayEvent) => void;
+  safeExportViewByTaskId: Record<string, SafeExportFrameLike>;
+  safeExportChipPhase: Record<string, 'initial' | 'pending' | 'ready' | 'sendFailed' | 'timeout'>;
+  safeExportChipCopied: Record<string, boolean>;
+  onGetSafeExportChip: (taskId: string) => void;
+  onCopySafeExportChip: (taskId: string) => void;
+}) {
+  const [stepsOpen, setStepsOpen] = useState(false);
+  const tier = group.tier ? tierLabel(group.tier) : null;
+  const isCloud = group.tier === 'API_EXTERNAL';
+
+  const rowProps = (ev: GatewayEvent) => ({
+    event: ev,
+    hideTimestamp: true,
+    decided,
+    toolsByRequest,
+    draftsByQueue,
+    onDecideSkill,
+    onGetDraft,
+    onDecideTool,
+    onResendLocal,
+    onResendCloud,
+    onRetry,
+    onCopyDiagnostic,
+    safeExportFrame: ev.requestId ? (safeExportViewByTaskId[ev.requestId] ?? null) : null,
+    safeExportChipPhase: ev.requestId ? (safeExportChipPhase[ev.requestId] ?? 'initial') : 'initial',
+    safeExportChipCopied: ev.requestId ? !!safeExportChipCopied[ev.requestId] : false,
+    onGetSafeExportChip,
+    onCopySafeExportChip,
+  });
+
+  return (
+    <article className="rounded border border-edge bg-panel px-3 py-2">
+      <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        {tier && (
+          <span
+            title={tier.hint}
+            className={`rounded border px-1.5 py-0.5 text-[10px] tracking-wide ${
+              isCloud
+                ? 'border-cloud/40 bg-cloud/10 text-cloud'
+                : 'border-good/40 bg-good/10 text-good'
+            }`}
+          >
+            {tier.text}
+          </span>
+        )}
+        {group.prompt && (
+          <span className="min-w-0 flex-1 font-reading text-[13px] font-semibold text-ink">
+            {group.prompt}
+          </span>
+        )}
+        {group.startMs !== null && (
+          <time
+            className="shrink-0 text-[10px] tabular-nums text-faint"
+            title={new Date(group.startMs).toISOString()}
+          >
+            {new Date(group.startMs).toLocaleTimeString([], { hour12: false })}
+          </time>
+        )}
+      </header>
+
+      {group.plumbing.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setStepsOpen((v) => !v)}
+          aria-expanded={stepsOpen}
+          className="mt-1.5 text-[10px] uppercase tracking-widest text-faint transition-colors hover:text-muted"
+        >
+          {group.plumbing.length} {group.plumbing.length === 1 ? 'step' : 'steps'} {stepsOpen ? '▾' : '▸'}
+        </button>
+      )}
+      {stepsOpen && (
+        <div className="mt-1 space-y-1">
+          {group.plumbing.map((ev) => (
+            <EventRow key={ev.id} {...rowProps(ev)} />
+          ))}
+        </div>
+      )}
+
+      {group.visible.length > 0 && (
+        <div className="mt-1 space-y-1">
+          {group.visible.map((ev) => {
+            const meta = (ev.metadata ?? {}) as Record<string, any>;
+            if (ev.type === 'SYSTEM' && meta.receipt) {
+              return (
+                <ReceiptCard
+                  key={ev.id}
+                  receipt={meta.receipt}
+                  tools={ev.requestId ? (toolsByRequest[ev.requestId] ?? []) : []}
+                />
+              );
+            }
+            if (ev.type === 'RESULT') return <AnswerHero key={ev.id} event={ev} />;
+            return <EventRow key={ev.id} {...rowProps(ev)} />;
+          })}
+        </div>
+      )}
+    </article>
+  );
+}
+
 function EventRow({
   event, decided, toolsByRequest, draftsByQueue, onDecideSkill, onGetDraft,
   onDecideTool, onResendLocal, onResendCloud, onRetry, onCopyDiagnostic,
   safeExportFrame, safeExportChipPhase, safeExportChipCopied, onGetSafeExportChip, onCopySafeExportChip,
+  hideTimestamp = false,
 }: {
   event: GatewayEvent;
   decided: Record<string, 'APPROVE' | 'REJECT'>;
@@ -832,6 +1003,9 @@ function EventRow({
   safeExportChipCopied: boolean;
   onGetSafeExportChip: (taskId: string) => void;
   onCopySafeExportChip: (taskId: string) => void;
+  /** Redesign 3/7: rows inside a task card hide their per-row clock — the
+   *  card header carries the ONE timestamp for the whole task. */
+  hideTimestamp?: boolean;
 }) {
   const tier = tierLabel(event.tier);
   const meta = (event.metadata ?? {}) as Record<string, any>;
@@ -865,9 +1039,11 @@ function EventRow({
       }`}
       title={`${event.type}${meta.reason ? ` — ${meta.reason}` : ''}`}
     >
-      <time className="shrink-0 tabular-nums text-neutral-600">
-        {new Date(event.timestamp).toLocaleTimeString([], { hour12: false })}
-      </time>
+      {!hideTimestamp && (
+        <time className="shrink-0 tabular-nums text-neutral-600">
+          {new Date(event.timestamp).toLocaleTimeString([], { hour12: false })}
+        </time>
+      )}
       <div className="min-w-0 flex-1">
         {tier && (
           <span
@@ -1087,8 +1263,15 @@ function SafeExportChip({
   );
 }
 
-/** P2.5 receipt footer: a compact "what happened" line from REAL telemetry
- *  only. Renders whichever fields are present; never invents (invariant 6). */
+/** P2.5 receipt footer, restyled as a chip row (redesign 3/7): a compact
+ *  "what happened" line from REAL telemetry only. Renders whichever fields
+ *  are present; never invents (invariant 6).
+ *
+ *  KERNEL GAP (redesign 3/7): the snapshot chip + UNDO button belong on this
+ *  row for tasks that touched files — but the gateway exposes NO
+ *  checkpoint/rollback command (packages/contracts has none; STATE.md F-1
+ *  confirms governed rollback has no operator surface). Deliberately absent
+ *  here until the kernel ships the API — never faked. */
 function ReceiptCard({ receipt, tools }: { receipt: any; tools: string[] }) {
   const [showCtx, setShowCtx] = useState(false);
   const where = receipt.tier === 'OLLAMA_LOCAL' ? 'local' : 'cloud';
@@ -1107,13 +1290,19 @@ function ReceiptCard({ receipt, tools }: { receipt: any; tools: string[] }) {
   const ctx: string | undefined = typeof receipt.assembledContext === 'string' ? receipt.assembledContext : undefined;
 
   return (
-    <article className="ml-14 mt-1 max-w-3xl rounded border border-neutral-800 bg-neutral-900/40 px-3 py-1 text-[11px] text-neutral-500">
-      <div className="flex flex-wrap items-center gap-x-2">
-        <span className="text-neutral-400">Done</span>
-        <span className="text-neutral-700">·</span>
-        <span>{parts.join(' · ')}</span>
+    <div className="mt-2">
+      <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+        <span className="rounded border border-edge bg-panel-2 px-1.5 py-0.5 font-semibold text-muted">Done</span>
+        {parts.map((p, i) => (
+          <span key={i} className="rounded border border-edge bg-panel-2 px-1.5 py-0.5 tabular-nums text-faint">
+            {p}
+          </span>
+        ))}
         {ctx && (
-          <button onClick={() => setShowCtx((v) => !v)} className="ml-2 text-neutral-500 underline hover:text-neutral-300">
+          <button
+            onClick={() => setShowCtx((v) => !v)}
+            className="rounded border border-transparent px-1.5 py-0.5 text-faint transition-colors hover:border-edge hover:text-muted"
+          >
             {showCtx ? 'hide context' : 'view context used'}
           </button>
         )}
@@ -1123,7 +1312,7 @@ function ReceiptCard({ receipt, tools }: { receipt: any; tools: string[] }) {
           {ctx}
         </pre>
       )}
-    </article>
+    </div>
   );
 }
 

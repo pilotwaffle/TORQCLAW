@@ -81,9 +81,10 @@ describe('TorqTerminal — global liveness chip', () => {
     render(<TorqTerminal />);
 
     // Phase = the freshest task event's humanized message (the wire has no
-    // ACTION_STATUS type — never an invented label). The text also renders in
-    // the stream row — the chip is an additional reader, so allow both.
-    expect(screen.getAllByText('Using read file (filesystem)').length).toBeGreaterThanOrEqual(2);
+    // ACTION_STATUS type — never an invented label). Since redesign 3/7 the
+    // TOOL_CALL row lives collapsed inside the task card, so the chip is the
+    // guaranteed-visible reader of the phase — exactly its purpose.
+    expect(screen.getAllByText('Using read file (filesystem)').length).toBeGreaterThanOrEqual(1);
     // Turn tag for debuggability (unique to the chip).
     expect(screen.getByText('turn r1')).toBeInTheDocument();
     // Spinner present (role=status) — the chip is the kernel-status surface.

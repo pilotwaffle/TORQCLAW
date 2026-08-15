@@ -420,6 +420,77 @@ export function isBusyNeutralEvent(ev: GatewayEvent): boolean {
   return ev.type === 'SYSTEM';
 }
 
+/** Redesign 3/7: per-task stream grouping. PURE — events in, ordered items
+ *  out, no React. Every event carrying a requestId joins that task's group
+ *  (a card); events without one stay loose and render exactly as before.
+ *
+ *  Inside a group:
+ *   - USER_PROMPT becomes the card header (never a row);
+ *   - ROUTING/TIER_SELECTED/TOOL_CALL/non-receipt SYSTEM frames are
+ *     collapsible plumbing (the "N STEPS" row, collapsed by default);
+ *   - PENDING_APPROVAL/ERROR/RESULT and the Done-receipt frame stay visible —
+ *     action surfaces and the answer are never hidden inside a collapse.
+ *   - Panel SYSTEM frames (isPanelSystemFrame) render nothing anywhere, so
+ *     they join NEITHER bucket and never inflate the step count. */
+export interface TaskGroup {
+  requestId: string;
+  /** Latest USER_PROMPT message — the card header line. */
+  prompt: string | null;
+  /** Earliest event timestamp (epoch ms) — the ONE timestamp the card shows. */
+  startMs: number | null;
+  /** Tier from the newest TIER_SELECTED — the route chip's color source. */
+  tier: GatewayEvent['tier'];
+  plumbing: GatewayEvent[];
+  visible: GatewayEvent[];
+}
+
+export type StreamItem =
+  | { kind: 'task'; group: TaskGroup }
+  | { kind: 'loose'; event: GatewayEvent };
+
+export function groupStreamIntoTasks(events: GatewayEvent[]): StreamItem[] {
+  const items: StreamItem[] = [];
+  const byId = new Map<string, TaskGroup>();
+  for (const ev of events) {
+    if (!ev.requestId) {
+      items.push({ kind: 'loose', event: ev });
+      continue;
+    }
+    let g = byId.get(ev.requestId);
+    if (!g) {
+      g = { requestId: ev.requestId, prompt: null, startMs: null, tier: null, plumbing: [], visible: [] };
+      byId.set(ev.requestId, g);
+      items.push({ kind: 'task', group: g }); // card order = first-event order
+    }
+    const t = Date.parse(ev.timestamp);
+    const ms = Number.isNaN(t) ? null : t;
+    if (ms !== null && (g.startMs === null || ms < g.startMs)) g.startMs = ms;
+    switch (ev.type) {
+      case 'USER_PROMPT':
+        g.prompt = ev.message;
+        break;
+      case 'TIER_SELECTED':
+        g.tier = ev.tier;
+        g.plumbing.push(ev);
+        break;
+      case 'ROUTING':
+      case 'TOOL_CALL':
+        g.plumbing.push(ev);
+        break;
+      case 'SYSTEM': {
+        if (((ev.metadata ?? {}) as Record<string, unknown>).receipt) g.visible.push(ev);
+        else if (!isPanelSystemFrame(ev)) g.plumbing.push(ev);
+        break;
+      }
+      default:
+        // RESULT, ERROR, PENDING_APPROVAL (CONNECTED carries no requestId).
+        g.visible.push(ev);
+        break;
+    }
+  }
+  return items;
+}
+
 /** Plain data row a replay-only event renders — NO callbacks, NO dispatch
  *  surface of any kind. This is the type-level half of the structural
  *  boundary: even if a future edit tried to add a handler field here, the

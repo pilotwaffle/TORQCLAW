@@ -36,6 +36,7 @@ import {
   renderSafeExportMarkdown,
   escInline,
   fenceBlock,
+  groupStreamIntoTasks,
   type ReceiptLike,
   type ApprovalSummaryLike,
   type SafeExportLike,
@@ -1463,5 +1464,92 @@ describe('renderSafeExportMarkdown', () => {
     expect(out).not.toMatch(/\bsecure\b/i);
     expect(out).not.toMatch(/\bguaranteed\b/i);
     expect(out).not.toMatch(/\bclean\b/i);
+  });
+});
+
+describe('groupStreamIntoTasks (redesign 3/7) — per-task card grouping', () => {
+  it('events without a requestId stay loose, in stream order', () => {
+    const a = ev({ type: 'CONNECTED', message: 'hi' });
+    const b = ev({ type: 'SYSTEM', message: 'Memory: 1 episode(s) this session', metadata: { memory: 'SHOW' } });
+    const items = groupStreamIntoTasks([a, b]);
+    expect(items).toHaveLength(2);
+    expect(items.every((i) => i.kind === 'loose')).toBe(true);
+  });
+
+  it('groups by requestId; card order = first-event order', () => {
+    const items = groupStreamIntoTasks([
+      ev({ type: 'USER_PROMPT', requestId: 't1', message: 'first task' }),
+      ev({ type: 'USER_PROMPT', requestId: 't2', message: 'second task' }),
+      ev({ type: 'TOOL_CALL', requestId: 't1', message: 'Executing filesystem__read_file' }),
+    ]);
+    expect(items.map((i) => i.kind)).toEqual(['task', 'task']);
+    const [g1, g2] = items as Array<{ kind: 'task'; group: { requestId: string; plumbing: unknown[] } }>;
+    expect(g1.group.requestId).toBe('t1');
+    expect(g2.group.requestId).toBe('t2');
+    expect(g1.group.plumbing).toHaveLength(1); // the late TOOL_CALL still joins t1
+  });
+
+  it('USER_PROMPT becomes the header prompt, never a row', () => {
+    const [item] = groupStreamIntoTasks([
+      ev({ type: 'USER_PROMPT', requestId: 't1', message: 'do the thing' }),
+    ]);
+    if (item.kind !== 'task') throw new Error('expected task item');
+    expect(item.group.prompt).toBe('do the thing');
+    expect(item.group.plumbing).toHaveLength(0);
+    expect(item.group.visible).toHaveLength(0);
+  });
+
+  it('startMs is the EARLIEST event timestamp; tier comes from the newest TIER_SELECTED', () => {
+    const [item] = groupStreamIntoTasks([
+      ev({ type: 'TIER_SELECTED', requestId: 't1', tier: 'OLLAMA_LOCAL', timestamp: '2026-01-01T00:00:05.000Z' }),
+      ev({ type: 'TOOL_CALL', requestId: 't1', timestamp: '2026-01-01T00:00:02.000Z' }), // out of order
+      ev({ type: 'TIER_SELECTED', requestId: 't1', tier: 'API_EXTERNAL', timestamp: '2026-01-01T00:00:06.000Z' }),
+    ]);
+    if (item.kind !== 'task') throw new Error('expected task item');
+    expect(item.group.startMs).toBe(Date.parse('2026-01-01T00:00:02.000Z'));
+    expect(item.group.tier).toBe('API_EXTERNAL');
+    expect(item.group.plumbing).toHaveLength(3);
+  });
+
+  it('ROUTING/TOOL_CALL/non-receipt SYSTEM collapse to plumbing; approvals/errors/results/receipts stay visible', () => {
+    const [item] = groupStreamIntoTasks([
+      ev({ type: 'ROUTING', requestId: 't1' }),
+      ev({ type: 'TOOL_CALL', requestId: 't1' }),
+      ev({ type: 'SYSTEM', requestId: 't1', message: 'KERNEL accepted task t1' }),
+      ev({ type: 'SYSTEM', requestId: 't1', message: 'Done', metadata: { receipt: { taskId: 't1' } } }),
+      ev({ type: 'PENDING_APPROVAL', requestId: 't1', metadata: { approvalId: 'a1' } }),
+      ev({ type: 'ERROR', requestId: 't1', message: 'boom' }),
+      ev({ type: 'RESULT', requestId: 't1', message: 'answer' }),
+    ]);
+    if (item.kind !== 'task') throw new Error('expected task item');
+    expect(item.group.plumbing.map((e) => e.type)).toEqual(['ROUTING', 'TOOL_CALL', 'SYSTEM']);
+    expect(item.group.visible.map((e) => e.type)).toEqual(['SYSTEM', 'PENDING_APPROVAL', 'ERROR', 'RESULT']);
+  });
+
+  it('panel SYSTEM frames join NEITHER bucket — they render nothing and never inflate the step count', () => {
+    const [item] = groupStreamIntoTasks([
+      ev({ type: 'TOOL_CALL', requestId: 't1' }),
+      ev({ type: 'SYSTEM', requestId: 't1', message: 'Cost summary', metadata: { costSummary: true } }),
+      ev({ type: 'SYSTEM', requestId: 't1', message: 'Receipts', metadata: { receiptList: true, items: [] } }),
+    ]);
+    if (item.kind !== 'task') throw new Error('expected task item');
+    expect(item.group.plumbing).toHaveLength(1); // only the TOOL_CALL
+    expect(item.group.visible).toHaveLength(0);
+  });
+
+  it('interleaved tasks never cross-contaminate', () => {
+    const items = groupStreamIntoTasks([
+      ev({ type: 'TOOL_CALL', requestId: 't1', message: 'a' }),
+      ev({ type: 'TOOL_CALL', requestId: 't2', message: 'b' }),
+      ev({ type: 'RESULT', requestId: 't1', message: 'done a' }),
+    ]);
+    expect(items).toHaveLength(2);
+    const t1 = items[0]!;
+    const t2 = items[1]!;
+    if (t1.kind !== 'task' || t2.kind !== 'task') throw new Error('expected task items');
+    expect(t1.group.plumbing).toHaveLength(1);
+    expect(t1.group.visible).toHaveLength(1);
+    expect(t2.group.plumbing).toHaveLength(1);
+    expect(t2.group.visible).toHaveLength(0);
   });
 });
