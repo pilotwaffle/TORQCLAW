@@ -278,7 +278,7 @@ _FRONTIER_TOOLSETS = {
     "SUMMARIZATION": ["web"],
     "DATA_EXTRACTION": ["web"],
     "ROUTINE_AUTOMATION": ["web"],
-    "COMPLEX_CODING": ["web", "files", "terminal", "code_execution"],
+    "COMPLEX_CODING": ["web", "file", "terminal", "code_execution"],
 }
 
 
@@ -314,13 +314,13 @@ def _frontier_enabled_toolsets(
         # heuristics or file-intent detection would otherwise add tools.
         "read_only": ["web"],
         "browser_research": ["web"],
-        "workspace_write": ["files"],
-        "terminal_power": ["web", "files", "terminal", "code_execution"],
+        "workspace_write": ["file"],
+        "terminal_power": ["web", "file", "terminal", "code_execution"],
     }
     base = list(profile_toolsets.get(profile_id, _FRONTIER_TOOLSETS.get(task_type, ["web"])))
     # File-intent override: add the (gated) files toolset so the task can act.
-    if profile_id not in {"read_only", "browser_research"} and _FILE_INTENT.search(prompt or "") and "files" not in base:
-        base.append("files")
+    if profile_id not in {"read_only", "browser_research"} and _FILE_INTENT.search(prompt or "") and "file" not in base:
+        base.append("file")
     return base
 
 
