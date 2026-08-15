@@ -19,10 +19,11 @@ if (typeof Element !== 'undefined' && !Element.prototype.scrollTo) {
 
 // MODULE-SCOPE mock object (vi.mock is hoisted; the factory must reference a
 // hoisted-safe holder). Use a mutable object the tests reassign .events on.
-const stream: { events: GatewayEvent[]; isConnected: boolean; sendCommand: ReturnType<typeof vi.fn> } = {
+const stream: { events: GatewayEvent[]; isConnected: boolean; sendCommand: ReturnType<typeof vi.fn>; reconnect: ReturnType<typeof vi.fn> } = {
   events: [],
   isConnected: true,
   sendCommand: vi.fn(() => true),
+  reconnect: vi.fn(),
 };
 vi.mock('../apps/console/src/components/useGatewayStream.js', () => ({
   useGatewayStream: () => stream,

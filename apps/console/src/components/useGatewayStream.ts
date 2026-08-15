@@ -18,6 +18,7 @@ export function useGatewayStream(url: string, token: string) {
   const wsRef = useRef<WebSocket | null>(null);
   const attemptRef = useRef(0);
   const closedByUser = useRef(false);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const connect = useCallback(() => {
     const ws = new WebSocket(url);
@@ -58,10 +59,11 @@ export function useGatewayStream(url: string, token: string) {
       setIsConnected(false);
       if (closedByUser.current) return;
       // Exponential backoff reconnect — an enterprise console that dies
-      // permanently on a gateway restart isn't one.
+      // permanently on a gateway restart isn't one. Tracked in a ref so a
+      // user-triggered reconnect() can cancel a pending backoff timer.
       const delay = Math.min(1_000 * 2 ** attemptRef.current, 30_000);
       attemptRef.current++;
-      setTimeout(connect, delay);
+      reconnectTimerRef.current = setTimeout(connect, delay);
     };
   }, [url, token]);
 
@@ -76,6 +78,39 @@ export function useGatewayStream(url: string, token: string) {
       if (ws.readyState === WebSocket.OPEN) ws.close();
       else ws.onopen = () => ws.close();
     };
+  }, [connect]);
+
+  // Human-triggerable immediate reconnect, surfaced by the staleness badge.
+  // A dead/stale WS is the ONE case the user can act on from the UI, so pure
+  // display with no affordance would be a dead end. Resets the backoff so the
+  // retry fires immediately instead of waiting out the exponential delay.
+  const reconnect = useCallback(() => {
+    closedByUser.current = false;
+    attemptRef.current = 0;
+    // Cancel any pending backoff auto-reconnect so it cannot fire a second
+    // connect() in parallel with the one below.
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    const ws = wsRef.current;
+    if (ws) {
+      // Detach EVERY handler, not just onclose: a zombie socket still in
+      // CONNECTING could otherwise complete its handshake later, fire onopen
+      // (re-authenticating) and onmessage (appending into the same events
+      // ring) and duplicate the event stream alongside the fresh socket.
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
+      try {
+        ws.close();
+      } catch {
+        /* already closed / CONNECTING — closing is not guaranteed safe */
+      }
+    }
+    wsRef.current = null;
+    connect();
   }, [connect]);
 
   // Returns true if the command was actually sent. A dropped send (socket not
@@ -98,5 +133,5 @@ export function useGatewayStream(url: string, token: string) {
     return false;
   }, []);
 
-  return { events, isConnected, sendCommand };
+  return { events, isConnected, sendCommand, reconnect };
 }

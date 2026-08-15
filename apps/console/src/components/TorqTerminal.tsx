@@ -4,6 +4,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GatewayEvent, ClientCommand, RouterDiagnostics } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
 import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, type SafeExportFrameLike } from './friendly';
+import { selectTurnStartMs, selectLastSyncedMs, isStale, selectCostSummaryMeta, STALE_AFTER_MS } from './presence';
+import { LiveDuration } from './LiveDuration';
+import PresenceCard from './PresenceCard';
 import ReceiptsPanel from './ReceiptsPanel';
 import CostPanel from './CostPanel';
 import ApprovalHistoryPanel from './ApprovalHistoryPanel';
@@ -96,7 +99,7 @@ function buildSubmit(prompt: string, c: Controls): Extract<ClientCommand, { acti
 }
 
 export default function TorqTerminal() {
-  const { events, isConnected, sendCommand } = useGatewayStream(GATEWAY_URL, GATEWAY_TOKEN);
+  const { events, isConnected, sendCommand, reconnect } = useGatewayStream(GATEWAY_URL, GATEWAY_TOKEN);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [input, setInput] = useState('');
   const [debouncedInput, setDebouncedInput] = useState('');
@@ -205,6 +208,32 @@ export default function TorqTerminal() {
       break;
     }
     return !!last && !['RESULT', 'ERROR', 'CONNECTED', 'PENDING_APPROVAL'].includes(last.type);
+  }, [events]);
+
+  // Live-turn liveness anchor: real task start read from event timestamps, so
+  // a mid-task remount never resets the elapsed clock (see LiveDuration). The
+  // anchor is a property of the task, not of this component's mount.
+  const turnStartMs = useMemo(
+    () => selectTurnStartMs(events, activeRequestId),
+    [events, activeRequestId],
+  );
+
+  // Staleness: the newest event's timestamp vs now. The console is push-based,
+  // so there is nothing to refetch — this is derived state from data already
+  // in memory. `stale` is only surfaced as a warning while a task should be
+  // producing events (`busy`) or the socket is down; an idle healthy console
+  // is not "out of date".
+  const lastSyncedMs = useMemo(() => selectLastSyncedMs(events), [events]);
+  const nowMs = useNow(5000);
+  const stale = isStale(lastSyncedMs, nowMs, STALE_AFTER_MS);
+  const showStaleWarning = stale && (busy || !isConnected);
+
+  // Presence meta for the current task: budget remaining from the live
+  // costSummary frame (display-only — never fetches, never writes a cap).
+  const budgetRemaining = useMemo(() => {
+    const meta = selectCostSummaryMeta(events);
+    const r = meta ? meta.sessionRemaining : null;
+    return typeof r === 'number' ? (r as number) : null;
   }, [events]);
 
   // P2.5: friendly tool names actually executed, per request — reconstructed
@@ -449,6 +478,22 @@ export default function TorqTerminal() {
         <span className="text-[10px] uppercase tracking-widest text-neutral-500">
           {isConnected ? 'connected' : 'reconnecting — your work is safe'}
         </span>
+        {lastSyncedMs !== null && (
+          <span
+            className="text-[10px] tabular-nums text-neutral-600"
+            title={new Date(lastSyncedMs).toISOString()}
+          >
+            {stale ? 'stale' : `synced ${Math.max(0, Math.round((nowMs - lastSyncedMs) / 1000))}s ago`}
+          </span>
+        )}
+        {showStaleWarning && (
+          <button
+            onClick={reconnect}
+            className="rounded border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400 transition-colors hover:border-[#E24B4A]/60 hover:text-[#E24B4A]"
+          >
+            reconnect
+          </button>
+        )}
       </header>
 
       <div className="relative flex-1 overflow-hidden">
@@ -482,11 +527,12 @@ export default function TorqTerminal() {
           />
         ))}
         {busy && (
+          <>
           <p className="flex items-center gap-3 px-2 py-1 text-neutral-500">
             <span className="inline-block animate-pulse">
               {stopState === 'requested' ? 'stopping…' : 'working…'}
             </span>
-            <Elapsed />
+            <LiveDuration since={turnStartMs} />
             <button
               onClick={stop}
               disabled={stopState === 'requested'}
@@ -500,6 +546,13 @@ export default function TorqTerminal() {
               </span>
             )}
           </p>
+          <PresenceCard
+            tier={chipDiag ? (tierLabel(chipDiag.tier)?.text ?? null) : null}
+            lock={chipDiag ? (formatLockState(chipDiag)?.value ?? null) : null}
+            turnStartMs={turnStartMs}
+            budgetRemaining={budgetRemaining}
+          />
+          </>
         )}
         {/* TCLAW-2C: live current-task route chip.
             Gated on activeRequestId (NOT busy): busy excludes PENDING_APPROVAL, but a
@@ -715,14 +768,16 @@ export default function TorqTerminal() {
   );
 }
 
-/** Elapsed-time ticker on the working indicator (lifecycle clarity). */
-function Elapsed() {
-  const [s, setS] = useState(0);
+/** Ticking wall-clock — drives staleness/last-synced without wiring a timer
+ *  into render. Re-renders on an interval; the interval itself polls nothing
+ *  (the console is push-based), it only re-reads `Date.now()`. */
+function useNow(intervalMs: number) {
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const t = setInterval(() => setS((n) => n + 1), 1000);
+    const t = setInterval(() => setNow(Date.now()), intervalMs);
     return () => clearInterval(t);
-  }, []);
-  return <span className="tabular-nums text-neutral-600">{s}s</span>;
+  }, [intervalMs]);
+  return now;
 }
 
 function EventRow({
