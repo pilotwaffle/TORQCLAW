@@ -285,10 +285,14 @@ _FRONTIER_TOOLSETS = {
 # Intent signals that a task needs to touch the filesystem even when the
 # classifier labeled it research/summarize/extract. Without this, "write a file"
 # lands in a web-only toolset and can NEVER succeed (it has no write_file). The
-# `files` toolset IS approval-gated (P6 pre_tool_call hook), so granting it stays
+# `file` toolset IS approval-gated (P6 pre_tool_call hook), so granting it stays
 # safe — a write still requires the human's Allow once.
+# Screen-artifact nouns (board/dashboard/chart/.html/screen...) are included so
+# "create a kanban board showing X on the screen" gets a file tool — otherwise
+# the model can only dump HTML into chat and truthfully report it cannot write.
 _FILE_INTENT = re.compile(
-    r"\b(write|save|create|append|edit|update|delete|read|open)\b.{0,40}\b(file|notes?|\.txt|\.md|\.json|\.csv|workspace|document)",
+    r"\b(write|save|create|append|edit|update|delete|read|open|build|generate|make|draw)\b"
+    r".{0,40}\b(file|notes?|\.txt|\.md|\.json|\.csv|\.html|workspace|document|board|dashboard|chart|graph|screen|diagram|report)",
     re.IGNORECASE,
 )
 

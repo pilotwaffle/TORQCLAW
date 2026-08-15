@@ -137,6 +137,27 @@ def test_frontier_toolsets_file_intent_prompt_adds_files(monkeypatch):
     assert result == ["web", "file"]
 
 
+def test_frontier_toolsets_screen_artifact_intent_adds_file(monkeypatch):
+    """Regression: "create a kanban board ... on the screen" previously matched
+    no file-intent signal, so the model got web-only tools and could only dump
+    HTML into chat instead of writing the artifact."""
+    monkeypatch.delenv("HERMES_FRONTIER_TOOLSETS", raising=False)
+    result = hermes_runner._frontier_enabled_toolsets(
+        "AUTONOMOUS_RESEARCH",
+        "create a kanban board showing the price of btc, eth and ada on it on the screen",
+    )
+    assert result == ["web", "file"]
+
+
+def test_frontier_toolsets_no_intent_stays_web_only(monkeypatch):
+    """The expanded regex must not fire on plain research prompts."""
+    monkeypatch.delenv("HERMES_FRONTIER_TOOLSETS", raising=False)
+    result = hermes_runner._frontier_enabled_toolsets(
+        "AUTONOMOUS_RESEARCH", "summarize the latest research on scaling laws"
+    )
+    assert result == ["web"]
+
+
 def test_frontier_toolsets_respects_effective_profile_before_task_heuristics(monkeypatch):
     monkeypatch.delenv("HERMES_FRONTIER_TOOLSETS", raising=False)
     assert hermes_runner._frontier_enabled_toolsets(
