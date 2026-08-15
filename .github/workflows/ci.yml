@@ -52,6 +52,15 @@ jobs:
 
       - run: pnpm typecheck
 
+      # vitest aliases resolve into packages/*/dist, and
+      # scripts/auth-phase2a-offline.mjs dynamically imports
+      # packages/{collab,gateway}/dist at runtime. Without this build the
+      # first test worker races the lazy in-test turbo build from
+      # tests/helpers/collab-gateway-harness.ts and fails deterministically
+      # on a cold runner (the phase2a CLI trace collapses to
+      # ['state:REFUSED'] because its dynamic import throws pre-collab:OPEN).
+      - run: pnpm --filter @torqclaw/gateway... build
+
       - run: pnpm test
 
       - name: python - hermes kernel unit tests
