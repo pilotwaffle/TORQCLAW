@@ -6,7 +6,7 @@
 [![Node](https://img.shields.io/badge/node-%E2%89%A520.9-339933?logo=node.js)](https://nodejs.org)
 [![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Gateway tests](https://img.shields.io/badge/tests-991%2F991%20TS%20%C2%B7%20186%20Python-brightgreen)](#verification)
+[![Gateway tests](https://img.shields.io/badge/tests-1860%20passed%20TS%20%C2%B7%20477%20Python-brightgreen)](#verification)
 
 ![A write-capable tool call is blocked, the operator approves once, the run produces a receipt](docs/demo.gif)
 
@@ -94,7 +94,7 @@ Before any non-loopback deployment, replace both `TORQCLAW_GATEWAY_TOKEN=change-
 | Phase 1 — Visible Trust MVP | **Complete** |
 | Phase 2 — Governed Learning MVP | **Not started** |
 | Resilient extensibility (PRD-TCLAW-RESILIENT-EXTENSIBILITY-001) | **Partially landed** — see [Resilient extensibility](#resilient-extensibility-partially-landed) |
-| Current master | `e3ae332` (PR #37), CI green |
+| Current master | `faefb62`, CI green |
 | Verified gate on `e3ae332` | `991/991` TypeScript tests across 43 files · `186` passed / `1` skipped Python engine tests · typecheck `12/12` · contracts drift OK (8 schemas, 2 dirs) · build `7/7` |
 
 Gate figures above were reproduced from a clean checkout of `e3ae332`, not copied from a pre-merge worktree.
