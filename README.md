@@ -1,8 +1,13 @@
 # TORQCLAW
 
-**TORQCLAW TrustOS** is a governed local/cloud AI agent control plane: a TypeScript gateway, router, MCP bridge, and console UI wrapped around a forked Hermes Python execution engine.
+**A governed control plane for AI agents: local when private, cloud when needed, approval before action, receipts after every run.**
 
-It is built around one product thesis:
+[![CI](https://github.com/pilotwaffle/TORQCLAW/actions/workflows/ci.yml/badge.svg)](https://github.com/pilotwaffle/TORQCLAW/actions/workflows/ci.yml)
+[![Node](https://img.shields.io/badge/node-%E2%89%A520.9-339933?logo=node.js)](https://nodejs.org)
+[![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org)
+[![Gateway tests](https://img.shields.io/badge/tests-991%2F991%20TS%20%C2%B7%20186%20Python-brightgreen)](#verification)
+
+Most agent frameworks optimize for autonomy. TORQCLAW optimizes for **trust**: every agent runs behind a gateway that enforces what the operator decided, not what the model wants.
 
 ```text
 Local when private.
@@ -12,6 +17,72 @@ Budget before spend.
 Receipts after every run.
 Learning that is measurable, governed, and reversible.
 ```
+
+**TORQCLAW TrustOS** is a TypeScript gateway, router, MCP bridge, and console UI wrapped around a forked Hermes Python execution engine.
+
+## Why TORQCLAW
+
+- **Approval before write.** A write-capable tool never runs without operator approval — on both the local and cloud tiers. [How approvals work](#tool-approvals)
+- **Budget before spend.** Cloud tasks carry an explicit budget; a breach cancels execution. Provider-reported spend is the enforcement source of truth. [Cost control](#what-is-implemented)
+- **Receipts after every run.** Terminal tasks produce queryable receipts from real telemetry — absent facts are distinguished from known facts, never invented. [Receipts and replay](#what-is-implemented)
+- **Privacy beats routing confidence.** Private and local-only tasks stay local, and the lock is visible in the route explanation — not silently overridden. [Design invariants](#design-invariants)
+
+## Architecture
+
+```text
+ [ Console / HTTP channel / future channel adapters ]
+                  │
+                  ▼
+ ┌─────────────────────────────────────────────┐
+ │ TypeScript Control Plane                    │
+ │ Fastify gateway :18790 · sessions · authz   │
+ │ enrich → route → dispatch → receipts        │
+ └───────────────┬─────────────────────────────┘
+                 │
+        ┌────────┴────────┐
+        ▼                 ▼
+ ┌──────────────┐   ┌──────────────────────────┐
+ │ LOCAL_EDGE   │   │ FRONTIER / Hermes Engine │
+ │ Ollama /v1   │   │ Python · MCP wrapper     │
+ │ tool loop    │   │ streamable-http          │
+ └──────┬───────┘   └──────────┬───────────────┘
+        │                      │
+        └──────────┬───────────┘
+                   ▼
+ ┌─────────────────────────────────────────────┐
+ │ Universal MCP Bridge                        │
+ │ namespaced tools · capability policy        │
+ │ path scope · approval-gated writes          │
+ └─────────────────────────────────────────────┘
+```
+
+## Quickstart
+
+Requires [Node.js ≥ 20.9](https://nodejs.org), [pnpm](https://pnpm.io), [uv](https://docs.astral.sh/uv/), and Git.
+
+```bash
+git clone https://github.com/pilotwaffle/TORQCLAW.git
+cd TORQCLAW
+ops/install-torqclaw.cmd       # Windows
+# or: sh ops/install-torqclaw.sh
+copy .env.example .env         # Windows; use cp on POSIX
+```
+
+Then start the stack:
+
+```bash
+pnpm doctor                    # preflight check
+pnpm start                     # or ops/start-torqclaw.cmd / sh ops/start-torqclaw.sh
+```
+
+Console: `http://127.0.0.1:3000` · Gateway: `127.0.0.1:18790` · Engine health: `127.0.0.1:8000/health`
+
+The install wrappers run the submodule, frozen pnpm, contracts build, `uv sync --locked`, vendored Hermes editable install, and Hermes import checks. They never create or overwrite `.env`. Everything runs on loopback, and the engine defaults to stub mode — the stack comes up with **zero API keys and zero cloud spend**. Add a provider (`HERMES_PROVIDER`, `HERMES_MODEL`, `HERMES_API_KEY`) only when you want the FRONTIER tier. See [Configuration](#configuration).
+
+Before any non-loopback deployment, replace both `TORQCLAW_GATEWAY_TOKEN=change-me` and `NEXT_PUBLIC_GATEWAY_TOKEN=change-me` with the same non-placeholder value.
+
+<!-- demo GIF placeholder: record the console approving a write-capable tool (10s, <5MB) and drop it here -->
+<!-- ![TORQCLAW approval card in action](docs/demo.gif) -->
 
 ## Program status
 
@@ -222,36 +293,7 @@ canonicalizer without RFC 8785 interoperability vectors.
 
 Graphify project profile files are present on `master` through governed Graphify PRs and are accepted current repository state. Graphify relocation or cleanup remains a separate operator-lane item and is not part of TrustOS Phase 1.
 
-## Architecture
-
-```text
- [ Console / HTTP channel / future channel adapters ]
-                  │
-                  ▼
- ┌─────────────────────────────────────────────┐
- │ TypeScript Control Plane                    │
- │ Fastify gateway :18790 · sessions · authz   │
- │ enrich → route → dispatch → receipts        │
- └───────────────┬─────────────────────────────┘
-                 │
-        ┌────────┴────────┐
-        ▼                 ▼
- ┌──────────────┐   ┌──────────────────────────┐
- │ LOCAL_EDGE   │   │ FRONTIER / Hermes Engine │
- │ Ollama /v1   │   │ Python · MCP wrapper     │
- │ tool loop    │   │ streamable-http          │
- └──────┬───────┘   └──────────┬───────────────┘
-        │                      │
-        └──────────┬───────────┘
-                   ▼
- ┌─────────────────────────────────────────────┐
- │ Universal MCP Bridge                        │
- │ namespaced tools · capability policy        │
- │ path scope · approval-gated writes          │
- └─────────────────────────────────────────────┘
-```
-
-## Layout
+## Repository layout
 
 | Path | What |
 |---|---|
@@ -266,35 +308,6 @@ Graphify project profile files are present on `master` through governed Graphify
 | `ops/` | Portable install/start wrappers, doctor, readiness, e2e and live-acceptance harnesses |
 | `docs/TRUSTOS-BUILD-LEDGER.md` | Implementation ledger and phase closeout record |
 | `docs/PRD-TCLAW-RESILIENT-EXTENSIBILITY-001.md` | Failover / profiles / verified-skills program spec |
-
-## Quickstart
-
-```bash
-git clone https://github.com/pilotwaffle/TORQCLAW.git
-cd TORQCLAW
-ops/install-torqclaw.cmd       # Windows
-# or: sh ops/install-torqclaw.sh
-copy .env.example .env         # Windows; use cp on POSIX
-```
-
-The install wrappers run the submodule, frozen pnpm, contracts build, `uv sync --locked`, vendored Hermes editable install, and Hermes import checks. They never create or overwrite `.env`.
-
-Before production start, replace both `TORQCLAW_GATEWAY_TOKEN=change-me` and `NEXT_PUBLIC_GATEWAY_TOKEN=change-me` with the same non-placeholder value.
-
-Before starting, run `node --env-file=.env ops/doctor.mjs --preflight --production` (or `pnpm doctor`). Start the portable production path with `ops/start-torqclaw.cmd`, `sh ops/start-torqclaw.sh`, or `pnpm start`. The wrappers can be launched from any current directory and keep the stack on loopback.
-
-Console: `http://127.0.0.1:3000`  
-Gateway: `127.0.0.1:18790`  
-Engine health: `127.0.0.1:8000/health`
-
-For a real provider acceptance run, configure non-placeholder matching gateway tokens plus `HERMES_MODEL`, `HERMES_PROVIDER`, and `HERMES_API_KEY`, start the stack, then run:
-
-```bash
-node --env-file=.env ops/doctor.mjs --runtime --production
-pnpm acceptance:live
-```
-
-Live acceptance is deliberately not part of public CI and never succeeds by skipping, stubbing, or accepting a pending/error result. Public CI uses a synthetic-token, stub-mode production-launch e2e instead.
 
 ## Configuration
 
@@ -411,6 +424,15 @@ timeout as a real regression.
 
 Historical Phase-1 closeout gate, for reference only — `805/805` TypeScript and
 `75/75` Python tests at commit `f5fbee7`.
+
+For a real provider acceptance run, configure non-placeholder matching gateway tokens plus `HERMES_MODEL`, `HERMES_PROVIDER`, and `HERMES_API_KEY`, start the stack, then run:
+
+```bash
+node --env-file=.env ops/doctor.mjs --runtime --production
+pnpm acceptance:live
+```
+
+Live acceptance is deliberately not part of public CI and never succeeds by skipping, stubbing, or accepting a pending/error result. Public CI uses a synthetic-token, stub-mode production-launch e2e instead.
 
 ## Design invariants
 
