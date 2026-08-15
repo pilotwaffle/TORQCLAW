@@ -21,6 +21,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+          # Full history: tests/auth-v2-phase1+2a pin historical SHAs and
+          # `git show <sha>:...` them; a depth-1 clone makes those fail.
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v6
 
