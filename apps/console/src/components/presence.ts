@@ -1,4 +1,5 @@
 import type { GatewayEvent } from '@torqclaw/contracts';
+import { friendlyMessage } from './friendly.js';
 
 /**
  * Presence / liveness helpers for the terminal. Everything here is PURE (no
@@ -87,4 +88,66 @@ export function selectCostSummaryMeta(
     if (meta.costSummary === true) return meta;
   }
   return null;
+}
+
+/**
+ * The live-phase anchor for the global liveness chip (redesign 2/7).
+ *
+ * `text` — the human phase line, derived from the NEWEST non-SYSTEM event on
+ * the active request (SYSTEM frames are busy-neutral per the UI-FIX-1
+ * invariant: they carry information, never work-truth). Terminal RESULT/ERROR
+ * events are skipped defensively — when one lands, the caller's activeRequestId
+ * clears in the same render and the chip unmounts anyway.
+ *
+ * `lastEventMs` — the newest event timestamp of ANY type on the request. This
+ * is the stuck anchor: "no output" means the stream went quiet, SYSTEM notes
+ * included — a task emitting only SYSTEM frames is still emitting.
+ *
+ * Both fields are facts already on the wire. The phase text is NEVER an
+ * invented label: the gateway wire has no ACTION_STATUS event type, so the
+ * honest phase is the freshest task event's humanized message.
+ */
+export interface LivePhase {
+  text: string;
+  lastEventMs: number;
+  /** True when the freshest work-truth event is PENDING_APPROVAL — the task
+   *  waits on the OPERATOR, so the chip's stuck warning must stay silent. */
+  waitingOnApproval: boolean;
+}
+
+export function selectLivePhase(
+  events: GatewayEvent[],
+  activeRequestId: string | null,
+): LivePhase | null {
+  if (!activeRequestId) return null;
+  let text: string | null = null;
+  let waitingOnApproval = false;
+  let lastEventMs: number | null = null;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i]!;
+    if (ev.requestId !== activeRequestId) continue;
+    const t = eventMs(ev);
+    if (t !== null && (lastEventMs === null || t > lastEventMs)) lastEventMs = t;
+    if (text !== null) continue; // phase found; keep scanning for the max ts
+    if (ev.type === 'SYSTEM') continue;
+    if (ev.type === 'RESULT' || ev.type === 'ERROR') continue;
+    text = friendlyMessage(ev);
+    waitingOnApproval = ev.type === 'PENDING_APPROVAL';
+  }
+  if (text === null || lastEventMs === null) return null;
+  return { text, lastEventMs, waitingOnApproval };
+}
+
+/**
+ * True when the active request's stream has been quiet for longer than the
+ * stuck threshold. A task paused on approval is NEVER stuck — the bottleneck
+ * is the operator, and flagging it as a kernel stall would be a lie.
+ */
+export function isPhaseStuck(
+  phase: LivePhase | null,
+  nowMs: number,
+  thresholdMs: number = STALE_AFTER_MS,
+): boolean {
+  if (!phase || phase.waitingOnApproval) return false;
+  return nowMs - phase.lastEventMs > thresholdMs;
 }

@@ -4,8 +4,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GatewayEvent, ClientCommand, RouterDiagnostics } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
 import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, type SafeExportFrameLike } from './friendly';
-import { selectTurnStartMs, selectLastSyncedMs, isStale, selectCostSummaryMeta, STALE_AFTER_MS } from './presence';
+import { selectTurnStartMs, selectLastSyncedMs, isStale, selectCostSummaryMeta, selectLivePhase, isPhaseStuck, STALE_AFTER_MS } from './presence';
 import { LiveDuration } from './LiveDuration';
+import { LivenessChip } from './LivenessChip';
 import PresenceCard from './PresenceCard';
 import ReceiptsPanel from './ReceiptsPanel';
 import CostPanel from './CostPanel';
@@ -218,6 +219,15 @@ export default function TorqTerminal() {
     [events, activeRequestId],
   );
 
+  // Global liveness chip (redesign 2/7): phase text from the freshest kernel
+  // event of the active task. Gated on activeRequestId (NOT busy) — a task
+  // paused for approval is still in flight and the chip must say so, exactly
+  // like the route chip's gating invariant below.
+  const livePhase = useMemo(
+    () => selectLivePhase(events, activeRequestId),
+    [events, activeRequestId],
+  );
+
   // Staleness: the newest event's timestamp vs now. The console is push-based,
   // so there is nothing to refetch — this is derived state from data already
   // in memory. `stale` is only surfaced as a warning while a task should be
@@ -227,6 +237,9 @@ export default function TorqTerminal() {
   const nowMs = useNow(5000);
   const stale = isStale(lastSyncedMs, nowMs, STALE_AFTER_MS);
   const showStaleWarning = stale && (busy || !isConnected);
+  // Chip stuck-state: the active task's own stream quiet for 30s+. Never fires
+  // while the task waits on the operator (see isPhaseStuck).
+  const phaseStuck = isPhaseStuck(livePhase, nowMs);
 
   // Presence meta for the current task: budget remaining from the live
   // costSummary frame (display-only — never fetches, never writes a cap).
@@ -465,7 +478,7 @@ export default function TorqTerminal() {
 
   return (
     <section className="flex h-screen flex-col bg-[#0a0a0a] p-4 font-mono text-sm text-neutral-300">
-      <header className="mb-4 flex items-center justify-between border-b border-neutral-800 pb-4">
+      <header className="mb-4 flex items-center justify-between gap-3 border-b border-neutral-800 pb-4">
         <div className="flex items-center gap-3">
           <span
             className={`h-2 w-2 rounded-full ${isConnected ? 'bg-[#E24B4A]' : 'animate-pulse bg-neutral-600'}`}
@@ -475,25 +488,41 @@ export default function TorqTerminal() {
             TORQCLAW <span className="text-[#E24B4A]">//</span> ORCHESTRATOR
           </h1>
         </div>
-        <span className="text-[10px] uppercase tracking-widest text-neutral-500">
-          {isConnected ? 'connected' : 'reconnecting — your work is safe'}
-        </span>
-        {lastSyncedMs !== null && (
-          <span
-            className="text-[10px] tabular-nums text-neutral-600"
-            title={new Date(lastSyncedMs).toISOString()}
-          >
-            {stale ? 'stale' : `synced ${Math.max(0, Math.round((nowMs - lastSyncedMs) / 1000))}s ago`}
+        {/* Global liveness chip (redesign 2/7): visible on EVERY view while a
+            task is in flight — header stays clear of the panel overlays. Reads
+            the SAME turnStartMs anchor as the in-stream presence block. */}
+        {livePhase && activeRequestId && (
+          <LivenessChip
+            phase={livePhase.text}
+            stuck={phaseStuck}
+            turnStartMs={turnStartMs}
+            turnId={activeRequestId}
+            onScrollToTask={() =>
+              scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
+            }
+          />
+        )}
+        <div className="flex items-center gap-3">
+          <span className="text-[10px] uppercase tracking-widest text-neutral-500">
+            {isConnected ? 'connected' : 'reconnecting — your work is safe'}
           </span>
-        )}
-        {showStaleWarning && (
-          <button
-            onClick={reconnect}
-            className="rounded border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400 transition-colors hover:border-[#E24B4A]/60 hover:text-[#E24B4A]"
-          >
-            reconnect
-          </button>
-        )}
+          {lastSyncedMs !== null && (
+            <span
+              className="text-[10px] tabular-nums text-neutral-600"
+              title={new Date(lastSyncedMs).toISOString()}
+            >
+              {stale ? 'stale' : `synced ${Math.max(0, Math.round((nowMs - lastSyncedMs) / 1000))}s ago`}
+            </span>
+          )}
+          {showStaleWarning && (
+            <button
+              onClick={reconnect}
+              className="rounded border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400 transition-colors hover:border-[#E24B4A]/60 hover:text-[#E24B4A]"
+            >
+              reconnect
+            </button>
+          )}
+        </div>
       </header>
 
       <div className="relative flex-1 overflow-hidden">
