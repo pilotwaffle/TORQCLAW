@@ -5,6 +5,7 @@
 [![CI](https://github.com/pilotwaffle/TORQCLAW/actions/workflows/ci.yml/badge.svg)](https://github.com/pilotwaffle/TORQCLAW/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%E2%89%A520.9-339933?logo=node.js)](https://nodejs.org)
 [![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Gateway tests](https://img.shields.io/badge/tests-991%2F991%20TS%20%C2%B7%20186%20Python-brightgreen)](#verification)
 
 Most agent frameworks optimize for autonomy. TORQCLAW optimizes for **trust**: every agent runs behind a gateway that enforces what the operator decided, not what the model wants.
@@ -467,3 +468,7 @@ Not started:
 Filed non-blocking residuals:
 
 - `TCLAW-GRAPHIFY-CLEANUP` — Graphify cleanup/relocation operator lane.
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE). The vendored Hermes engine (`engines/hermes_kernel/vendor/hermes-agent`) is MIT, Copyright (c) 2025 Nous Research; its upstream license is retained in place. See [NOTICE](NOTICE).
