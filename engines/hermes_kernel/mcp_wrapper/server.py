@@ -6,7 +6,9 @@ with Tailscale or set HERMES_ENGINE_TOKEN and a reverse proxy — never bare
 0.0.0.0 (the OpenClaw exposed-default-port incident class)."""
 import asyncio
 import os
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
@@ -525,8 +527,36 @@ async def refresh_skill_trust(source_id: str) -> dict:
         return governed_skills.map_activation_failure(exc, queue_status=None)
 
 
+def apply_workspace_root() -> None:
+    """Anchor the process cwd to $TORQCLAW_WORKSPACE_ROOT (fail-soft).
+
+    The vendored Hermes file tools resolve relative paths against the process
+    cwd. Without this, a model asked to "create demo.txt in the workspace"
+    writes into the engine checkout (engines/hermes_kernel/) instead of the
+    workspace the operator can see. Engine-owned state is unaffected: task
+    store, skill stores, and the attempt ledger all resolve via
+    $TORQCLAW_DATA_DIR / ~/.torqclaw (absolute), and skip_context_files=True
+    keeps the agent from reading project context out of the new cwd.
+    Unset or unusable root -> warn and keep the current cwd (existing
+    behavior); never fail startup over it."""
+    root = os.environ.get("TORQCLAW_WORKSPACE_ROOT", "").strip()
+    if not root:
+        return
+    path = Path(root).expanduser()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        os.chdir(path)
+    except OSError as exc:
+        print(
+            f"[engine] TORQCLAW_WORKSPACE_ROOT unusable ({exc}); "
+            f"file tools stay relative to {os.getcwd()}",
+            file=sys.stderr,
+        )
+
+
 if __name__ == "__main__":
     # NEVER add uvicorn workers>1: the cancellation registry (hermes_runner.
     # RUNNING) and task SQLite assume one process. FastMCP runs single-process
     # uvicorn by default — keep it.
+    apply_workspace_root()
     mcp.run(transport="streamable-http")  # serves at /mcp
