@@ -8,6 +8,10 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Gateway tests](https://img.shields.io/badge/tests-991%2F991%20TS%20%C2%B7%20186%20Python-brightgreen)](#verification)
 
+![A write-capable tool call is blocked, the operator approves once, the run produces a receipt](docs/demo.gif)
+
+*The approval gate in action (4× speed): a cloud-routed task tries `write_file`, the engine blocks it pending approval, the operator allows it once, and the receipt lands with the written file in the workspace.*
+
 Most agent frameworks optimize for autonomy. TORQCLAW optimizes for **trust**: every agent runs behind a gateway that enforces what the operator decided, not what the model wants.
 
 ```text
@@ -81,9 +85,6 @@ Console: `http://127.0.0.1:3000` · Gateway: `127.0.0.1:18790` · Engine health:
 The install wrappers run the submodule, frozen pnpm, contracts build, `uv sync --locked`, vendored Hermes editable install, and Hermes import checks. They never create or overwrite `.env`. Everything runs on loopback, and the engine defaults to stub mode — the stack comes up with **zero API keys and zero cloud spend**. Add a provider (`HERMES_PROVIDER`, `HERMES_MODEL`, `HERMES_API_KEY`) only when you want the FRONTIER tier. See [Configuration](#configuration).
 
 Before any non-loopback deployment, replace both `TORQCLAW_GATEWAY_TOKEN=change-me` and `NEXT_PUBLIC_GATEWAY_TOKEN=change-me` with the same non-placeholder value.
-
-<!-- demo GIF placeholder: record the console approving a write-capable tool (10s, <5MB) and drop it here -->
-<!-- ![TORQCLAW approval card in action](docs/demo.gif) -->
 
 ## Program status
 
