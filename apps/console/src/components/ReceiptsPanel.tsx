@@ -219,11 +219,23 @@ export default function ReceiptsPanel({
     <div className="absolute inset-0 z-20 flex bg-[#0a0a0a]/98 text-sm text-neutral-300">
       {/* LIST */}
       <div className="w-72 shrink-0 overflow-y-auto border-r border-neutral-800 p-3">
-        <div className="mb-3 flex items-center justify-between">
+        <div className="mb-3 flex items-center justify-between gap-2">
           <h2 className="text-[10px] font-bold uppercase tracking-widest text-neutral-400">Receipts</h2>
-          <button onClick={onClose} className="text-neutral-500 hover:text-neutral-200" aria-label="Close receipts panel">
-            close
-          </button>
+          <div className="flex items-center gap-3">
+            {/* Redesign 5/7: manual re-pull + "as of" footer below, matching
+                the ApprovalHistoryPanel pattern. Label stays distinct from
+                the detail view's safe-export refresh on purpose. */}
+            <button
+              type="button"
+              onClick={() => sendCommand({ action: 'LIST_RECEIPTS', limit: 20 })}
+              className="text-[10px] text-neutral-500 hover:text-neutral-200"
+            >
+              refresh list
+            </button>
+            <button onClick={onClose} className="text-neutral-500 hover:text-neutral-200" aria-label="Close receipts panel">
+              close
+            </button>
+          </div>
         </div>
         {receiptList.length === 0 && (
           <p className="text-[11px] text-neutral-600">No receipts yet.</p>
@@ -248,6 +260,8 @@ export default function ReceiptsPanel({
             </li>
           ))}
         </ul>
+        {/* Redesign 5/7: the list is a pull surface — always show the bound. */}
+        <p className="mt-3 text-[10px] text-neutral-600">List is as of the last refresh.</p>
       </div>
 
       {/* DETAIL / REPLAY */}

@@ -104,18 +104,40 @@ export default function CostPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Redesign 5/7: manual refresh + an honest "as of" footer, matching the
+  // ApprovalHistoryPanel pattern. Strictly read-only still: the ONLY action
+  // this dispatches is GET_COST_SUMMARY (same as the mount fetch). The panel
+  // is a pull surface — figures are as fresh as the last frame received, so
+  // the operator must be able to re-pull and must always see that bound.
+  const refresh = () => {
+    sendCommand({ action: 'GET_COST_SUMMARY', recentLimit: 20 });
+  };
+
   return (
     <div className="absolute inset-0 z-20 flex flex-col bg-[#0a0a0a]/98 text-sm text-neutral-300">
       <div className="flex items-center justify-between border-b border-neutral-800 p-3">
         <h2 className="text-[10px] font-bold uppercase tracking-widest text-neutral-400">Cost Control Center</h2>
-        <button onClick={onClose} className="text-neutral-500 hover:text-neutral-200" aria-label="Close cost panel">
-          close
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={refresh}
+            className="text-neutral-500 hover:text-neutral-200"
+          >
+            refresh
+          </button>
+          <button onClick={onClose} className="text-neutral-500 hover:text-neutral-200" aria-label="Close cost panel">
+            close
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-4">
         {!summary && <p className="text-neutral-600">Loading…</p>}
         {summary && <CostSummaryView summary={summary} />}
+      </div>
+
+      <div className="border-t border-neutral-800 p-2 text-[10px] text-neutral-600">
+        <p>Figures are as of the last refresh — this is a pull surface, not a live feed.</p>
       </div>
     </div>
   );

@@ -188,4 +188,17 @@ describe('CostPanel', () => {
     fireEvent.click(screen.getByLabelText('Close cost panel'));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it('9. Redesign 5/7: manual refresh re-pulls the ledger and stays read-only; footer names the pull-surface bound', () => {
+    const sc = vi.fn(() => true);
+    render(<CostPanel events={[]} sendCommand={sc} onClose={vi.fn()} />);
+
+    expect(screen.getByText(/Figures are as of the last refresh/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('refresh'));
+    // Mount fetch + one manual refresh — BOTH the single read-only action.
+    expect(sc).toHaveBeenCalledTimes(2);
+    expect(sc).toHaveBeenLastCalledWith({ action: 'GET_COST_SUMMARY', recentLimit: 20 });
+    expect(sc.mock.calls.every(([c]) => (c as any).action === 'GET_COST_SUMMARY')).toBe(true);
+  });
 });

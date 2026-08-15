@@ -615,4 +615,16 @@ describe('ReceiptsPanel — Safe export section', () => {
     for (const a of actions) expect(READ_ONLY_ALLOWLIST.has(a)).toBe(true);
     expect(actions).not.toContain('APPROVE_TOOL');
   });
+
+  it('Redesign 5/7: "refresh list" re-pulls LIST_RECEIPTS and the footer names the pull-surface bound', () => {
+    const sc = vi.fn(() => true);
+    render(<ReceiptsPanel events={[]} sendCommand={sc} onClose={vi.fn()} />);
+
+    expect(screen.getByText('List is as of the last refresh.')).toBeInTheDocument();
+
+    sc.mockClear(); // drop the mount fetch; count only the manual re-pull
+    fireEvent.click(screen.getByText('refresh list'));
+    expect(sc).toHaveBeenCalledTimes(1);
+    expect(sc).toHaveBeenCalledWith({ action: 'LIST_RECEIPTS', limit: 20 });
+  });
 });

@@ -541,9 +541,25 @@ export default function TorqTerminal() {
     <section className="flex h-screen flex-col bg-[#0a0a0a] p-4 font-mono text-sm text-neutral-300">
       <header className="mb-4 flex items-center justify-between gap-3 border-b border-neutral-800 pb-4">
         <div className="flex items-center gap-3">
+          {/* Sync dot (redesign 5/7): green = live, amber + pulse = data
+              >30s unrefreshed (stale must be VISIBLE), red = socket down
+              (error — the only states red may mark). */}
           <span
-            className={`h-2 w-2 rounded-full ${isConnected ? 'bg-[#E24B4A]' : 'animate-pulse bg-neutral-600'}`}
+            className={`h-2 w-2 rounded-full ${
+              !isConnected
+                ? 'bg-bad'
+                : stale
+                  ? 'animate-pulse bg-torque'
+                  : 'bg-good'
+            }`}
             aria-hidden
+            title={
+              !isConnected
+                ? 'connection lost — reconnecting'
+                : stale
+                  ? 'no gateway data for 30s+'
+                  : 'live'
+            }
           />
           <h1 className="text-xs font-bold tracking-[0.3em] text-neutral-100">
             TORQCLAW <span className="text-[#E24B4A]">//</span> ORCHESTRATOR
@@ -564,32 +580,46 @@ export default function TorqTerminal() {
           />
         )}
         <div className="flex items-center gap-3">
-          {/* Session budget meter (redesign 4/7): climbs with REAL recorded
-              spend from the kernel's costSummary frames — the same frame the
-              working-card panel and PresenceCard read, so the surfaces can
-              never contradict each other. Absent frame = no meter (never a
-              fabricated $0). */}
-          {costMeta && typeof costMeta.sessionTotal === 'number' && (
-            <span
-              className="flex items-center gap-1.5 text-[10px] tabular-nums text-faint"
-              title="session spend — provider-reported spend recorded by the kernel"
+          {/* Session budget meter (redesign 4/7 + 5/7): climbs with REAL
+              recorded spend from the kernel's costSummary frames — the same
+              frame the working-card panel and PresenceCard read, so the
+              surfaces can never contradict each other. Absent frame = no
+              meter (never a fabricated $0) — and a manual refresh, matching
+              the panels' "last refresh" pattern, so the operator can pull
+              the ledger without opening a panel. */}
+          <span className="flex items-center gap-1.5 text-[10px] tabular-nums text-faint">
+            {costMeta && typeof costMeta.sessionTotal === 'number' ? (
+              <span
+                className="flex items-center gap-1.5"
+                title="session spend — provider-reported spend recorded by the kernel"
+              >
+                session ${costMeta.sessionTotal.toFixed(2)}
+                {typeof costMeta.sessionCap === 'number' && (
+                  <>
+                    <span className="h-1 w-16 overflow-hidden rounded-sm bg-panel-2">
+                      <span
+                        className={`block h-full ${costMeta.breach ? 'bg-bad' : 'bg-torque'}`}
+                        style={{
+                          width: `${Math.min(100, (costMeta.sessionTotal / costMeta.sessionCap) * 100)}%`,
+                        }}
+                      />
+                    </span>
+                    <span>/ ${costMeta.sessionCap.toFixed(2)}</span>
+                  </>
+                )}
+              </span>
+            ) : (
+              <span title="no costSummary frame has landed this session yet">spend n/a</span>
+            )}
+            <button
+              type="button"
+              onClick={() => sendCommand({ action: 'GET_COST_SUMMARY', recentLimit: 20 })}
+              title="re-fetch session spend from the kernel ledger"
+              className="rounded border border-transparent px-1 text-faint transition-colors hover:border-edge hover:text-muted"
             >
-              session ${costMeta.sessionTotal.toFixed(2)}
-              {typeof costMeta.sessionCap === 'number' && (
-                <>
-                  <span className="h-1 w-16 overflow-hidden rounded-sm bg-panel-2">
-                    <span
-                      className={`block h-full ${costMeta.breach ? 'bg-bad' : 'bg-torque'}`}
-                      style={{
-                        width: `${Math.min(100, (costMeta.sessionTotal / costMeta.sessionCap) * 100)}%`,
-                      }}
-                    />
-                  </span>
-                  <span>/ ${costMeta.sessionCap.toFixed(2)}</span>
-                </>
-              )}
-            </span>
-          )}
+              refresh
+            </button>
+          </span>
           <span className="text-[10px] uppercase tracking-widest text-neutral-500">
             {isConnected ? 'connected' : 'reconnecting — your work is safe'}
           </span>
