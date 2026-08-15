@@ -149,6 +149,19 @@ def test_frontier_toolsets_screen_artifact_intent_adds_file(monkeypatch):
     assert result == ["web", "file"]
 
 
+def test_frontier_toolsets_landing_page_intent_adds_file(monkeypatch):
+    """Regression: "building a landing page" previously matched no file-intent
+    signal ("building" inflected past build, "page" missing from nouns),
+    so the model got web-only tools and dumped the whole HTML page into chat
+    instead of writing it to the workspace."""
+    monkeypatch.delenv("HERMES_FRONTIER_TOOLSETS", raising=False)
+    result = hermes_runner._frontier_enabled_toolsets(
+        "ROUTINE_AUTOMATION",
+        "i am interested in building a landing page",
+    )
+    assert result == ["web", "file"]
+
+
 def test_frontier_toolsets_no_intent_stays_web_only(monkeypatch):
     """The expanded regex must not fire on plain research prompts."""
     monkeypatch.delenv("HERMES_FRONTIER_TOOLSETS", raising=False)

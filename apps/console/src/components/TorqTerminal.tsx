@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GatewayEvent, ClientCommand, RouterDiagnostics } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
-import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, type SafeExportFrameLike } from './friendly';
+import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, isOperatorOnlyEvent, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, type SafeExportFrameLike } from './friendly';
 import ReceiptsPanel from './ReceiptsPanel';
 import CostPanel from './CostPanel';
 import ApprovalHistoryPanel from './ApprovalHistoryPanel';
@@ -767,6 +767,12 @@ function EventRow({
   // to the inline check this replaces (see friendly.ts); it deliberately
   // excludes memory frames and the Done receipt frame, which stay visible.
   if (isPanelSystemFrame(event)) return null;
+
+  // Engine/bridge diagnostics (kernel task ids, model slugs, skill-nudge
+  // state, spend internals) are receipt/replay evidence, not chat rows —
+  // an end user must not see operator-grade log lines in the feed. Still
+  // rendered in receipts and the read-only replay view.
+  if (isOperatorOnlyEvent(event)) return null;
 
   // P2.5: a SYSTEM event carrying a receipt renders as a footer card, not a row.
   if (event.type === 'SYSTEM' && meta.receipt) {

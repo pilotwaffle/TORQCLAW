@@ -405,6 +405,31 @@ export function isPanelSystemFrame(ev: GatewayEvent): boolean {
   return !!(m.routePreview || m.receiptList || m.receiptView || m.costSummary || m.approvalList || m.safeExportView);
 }
 
+/** Operator-only SYSTEM frames: engine/bridge diagnostics an operator may
+ *  want in receipts and replay, but that must never surface as chat rows for
+ *  an end user (kernel task ids, internal model slugs, skill-nudge state,
+ *  spend-enforcement internals, duplicated tool-completion echoes).
+ *  Two recognition paths, deliberately both kept:
+ *   1. metadata.audience === 'operator' — set at every producer going
+ *      forward (bridge hermes.ts emits; engine mcp_wrapper emits). The
+ *      durable contract: a new diagnostic SYSTEM event tags itself or it
+ *      renders in chat.
+ *   2. message prefixes — covers PERSISTED history recorded before the tag
+ *      existed (reconnect backlog replays old rows verbatim), so the feed
+ *      cleans up on existing sessions too.
+ *  Deliberately NOT operator-only: "No budget set…" (an honest spend warning
+ *  the user must see), STUB MODE (explains canned answers on a keyless
+ *  install), memory frames, and the Done receipt. TOOL_CALL progress
+ *  ("Using web extract") stays visible; only the SYSTEM "Tool X completed"
+ *  echo duplicates it. */
+const OPERATOR_ONLY_MESSAGE =
+  /^(Hermes kernel accepted task |Hermes agent booted |Model: |Cloud tools enabled: |Skill nudge suppressed |Spend reporting unavailable |Spend so far: \$|Tool \S+ completed$)/;
+export function isOperatorOnlyEvent(ev: GatewayEvent): boolean {
+  if (ev.type !== 'SYSTEM') return false;
+  const m = (ev.metadata ?? {}) as Record<string, unknown>;
+  return m.audience === 'operator' || OPERATOR_ONLY_MESSAGE.test(ev.message);
+}
+
 /** TCLAW-UIFIX-1 INVARIANT (G1R-verified against every SYSTEM producer):
  *  busy-truth rides on non-SYSTEM events only. SYSTEM frames may display
  *  information (progress notes, confirmations, receipts, memory output) but

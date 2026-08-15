@@ -111,7 +111,10 @@ async def run_hermes_loop(task_id: str, payload: dict) -> None:
         available, why = hermes_available()
 
         if available and live_configured:
-            task_store.emit(task_id, "SYSTEM", f"Hermes agent booted for {task_type}")
+            task_store.emit(
+                task_id, "SYSTEM", f"Hermes agent booted for {task_type}",
+                {"audience": "operator"},
+            )
             # run_conversation is synchronous — never block the event loop.
             out = await asyncio.to_thread(run_hermes_sync, task_id, payload)
             tele = out.get("telemetry", {})
@@ -140,6 +143,7 @@ async def run_hermes_loop(task_id: str, payload: dict) -> None:
                     "Spend reporting unavailable for this provider — budget "
                     "cannot be enforced; the iteration cap "
                     "(HERMES_MAX_ITERATIONS) is the only guard.",
+                    {"audience": "operator"},
                 )
             if resilience_task:
                 _finish_internal_observation(
@@ -195,6 +199,7 @@ async def run_hermes_loop(task_id: str, payload: dict) -> None:
                 "Spend reporting unavailable for this provider — budget cannot "
                 "be enforced; the iteration cap (HERMES_MAX_ITERATIONS) is the "
                 "only guard.",
+                {"audience": "operator"},
             )
         # Configurable so e2e-budget can hold the task open across a poll.
         await asyncio.sleep(float(os.environ.get("HERMES_STUB_DELAY_S", "1")))

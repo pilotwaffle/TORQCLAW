@@ -291,8 +291,8 @@ _FRONTIER_TOOLSETS = {
 # "create a kanban board showing X on the screen" gets a file tool — otherwise
 # the model can only dump HTML into chat and truthfully report it cannot write.
 _FILE_INTENT = re.compile(
-    r"\b(write|save|create|append|edit|update|delete|read|open|build|generate|make|draw)\b"
-    r".{0,40}\b(file|notes?|\.txt|\.md|\.json|\.csv|\.html|workspace|document|board|dashboard|chart|graph|screen|diagram|report)",
+    r"\b(write|save|create|append|edit|update|delete|read|open|build|building|generate|make|draw)\b"
+    r".{0,40}\b(file|notes?|pages?|\.txt|\.md|\.json|\.csv|\.html|workspace|document|board|dashboard|chart|graph|screen|diagram|report)",
     re.IGNORECASE,
 )
 
@@ -435,7 +435,10 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
     pconf = _provider_config(task_type, provider_ref if isinstance(provider_ref, dict) else None)
     if isinstance(provider_ref, dict) and not pconf.get("api_key"):
         raise MissingCredentialsError()
-    task_store.emit(task_id, "SYSTEM", f"Model: {pconf['provider']}/{pconf['model']}")
+    task_store.emit(
+        task_id, "SYSTEM", f"Model: {pconf['provider']}/{pconf['model']}",
+        {"audience": "operator"},
+    )
 
     enabled = _frontier_enabled_toolsets(task_type, prompt, req.get("effectiveProfile"))
 
@@ -453,6 +456,7 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
     task_store.emit(
         task_id, "SYSTEM",
         f"Cloud tools enabled: {', '.join(enabled) if enabled else 'all (override)'}",
+        {"audience": "operator"},
     )
 
     # Per-tool approval gate on the cloud tier (fork-free, via the vendored
@@ -535,15 +539,20 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
             if resilience_active:
                 task_store.emit(task_id, "SYSTEM", "Tool completed", {
                     "callId": str(call_id)[:256], "toolName": str(name)[:256],
+                    "audience": "operator",
                 })
                 return
+            # Echo of the visible TOOL_CALL above; receipt/replay evidence
+            # only, never a chat row.
             task_store.emit(task_id, "SYSTEM", f"Tool {name} completed",
-                            {"call_id": call_id, "result": _clip(result)})
+                            {"call_id": call_id, "result": _clip(result),
+                             "audience": "operator"})
 
         def _status(kind, msg):
             if resilience_active:
                 task_store.emit(task_id, "SYSTEM", "Provider status", {
                     "kind": str(kind)[:64],
+                    "audience": "operator",
                 })
                 return
             task_store.emit(task_id, "SYSTEM", f"[{kind}] {_clip(msg, 300)}")
@@ -658,7 +667,8 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
                 "Skill nudge suppressed (agent._skill_nudge_interval=0); "
                 f"toolset override active: {enabled is None}",
                 {"skillNudgeIntervalAfterSuppression": _interval_after_suppression,
-                 "toolsetWildcardOverride": enabled is None},
+                 "toolsetWildcardOverride": enabled is None,
+                 "audience": "operator"},
             )
             # Register BEFORE run so cancel_task can interrupt; baseline the usage
             # delta source in case credits-micros is unavailable for this provider.
