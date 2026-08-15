@@ -50,6 +50,24 @@ describe('console presence / liveness selectors', () => {
       // Earlier task's timestamps never leak into the anchor for r1.
       expect(selectTurnStartMs(events, 'r1')).toBe(Date.parse('2026-01-01T00:00:03.000Z'));
     });
+
+    it('survives a reconnect backlog replay — the anchor never resets', () => {
+      // Pre-reconnect view: task r1, two events in, anchor at the first.
+      const backlog = [
+        ev({ type: 'TIER_SELECTED', requestId: 'r1', timestamp: '2026-01-01T00:00:05.000Z' }),
+        ev({ type: 'TOOL_CALL', requestId: 'r1', timestamp: '2026-01-01T00:00:06.000Z' }),
+      ];
+      const before = selectTurnStartMs(backlog, 'r1');
+      // Reconnect: the gateway replays from lastSeenSeq — seq is the replay
+      // cursor, so replayed frames carry their PERSISTED timestamps, then
+      // live events resume after them.
+      const after = [
+        ...backlog,
+        ev({ type: 'TOOL_CALL', requestId: 'r1', timestamp: '2026-01-01T00:00:18.000Z' }),
+      ];
+      expect(before).toBe(Date.parse('2026-01-01T00:00:05.000Z'));
+      expect(selectTurnStartMs(after, 'r1')).toBe(before);
+    });
   });
 
   describe('selectLastSyncedMs', () => {
