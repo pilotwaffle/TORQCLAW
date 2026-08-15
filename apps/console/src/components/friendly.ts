@@ -491,6 +491,42 @@ export function groupStreamIntoTasks(events: GatewayEvent[]): StreamItem[] {
   return items;
 }
 
+/** Redesign 4/7: the composer's pre-flight estimate, derived from a
+ *  PREVIEW_ROUTE response frame — the kernel's REAL sizing pass (enrichment +
+ *  router evaluation, no dispatch; preview.ts). PURE.
+ *
+ *  HONESTY: the kernel records provider-reported spend only and NEVER
+ *  estimates dollars (spend.ts: "never a fabricated/estimated cost"). So the
+ *  chip shows a dollar figure ONLY where it is true by construction —
+ *  the local tier, which is free ('$0.00 · local', the same fact the receipt
+ *  renders as 'free') — and otherwise the kernel's real sizing number
+ *  (~N tokens). A cloud dollar estimate would be fabrication; the per-task
+ *  cost appears when the receipt records it. */
+export interface PreflightEstimate {
+  route: 'local' | 'cloud';
+  label: string;
+  /** The kernel's estimated token count, when present (cloud sizing). */
+  estimatedTokens: number | null;
+}
+
+export function derivePreflightEstimate(frame: GatewayEvent | null): PreflightEstimate | null {
+  if (!frame) return null;
+  const meta = (frame.metadata ?? {}) as Record<string, any>;
+  if (meta.routePreview !== true || meta.dropped) return null;
+  const diag = meta.diagnostics as { tier?: string } | null | undefined;
+  if (!diag || typeof diag.tier !== 'string') return null;
+  if (diag.tier === 'OLLAMA_LOCAL') {
+    return { route: 'local', label: '$0.00 · local', estimatedTokens: null };
+  }
+  const est = (meta.enrichment as Record<string, any> | undefined)?.estimatedTokens;
+  const tokens = typeof est === 'number' && Number.isFinite(est) ? est : null;
+  return {
+    route: 'cloud',
+    label: tokens !== null ? `~${tokens.toLocaleString('en-US')} tokens · cloud` : 'cloud route',
+    estimatedTokens: tokens,
+  };
+}
+
 /** Plain data row a replay-only event renders — NO callbacks, NO dispatch
  *  surface of any kind. This is the type-level half of the structural
  *  boundary: even if a future edit tried to add a handler field here, the

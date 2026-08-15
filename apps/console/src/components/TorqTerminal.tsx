@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GatewayEvent, ClientCommand, RouterDiagnostics } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
-import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, groupStreamIntoTasks, type SafeExportFrameLike, type TaskGroup } from './friendly';
+import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, groupStreamIntoTasks, derivePreflightEstimate, type SafeExportFrameLike, type TaskGroup, type PreflightEstimate } from './friendly';
 import { selectTurnStartMs, selectLastSyncedMs, isStale, selectCostSummaryMeta, selectLivePhase, isPhaseStuck, STALE_AFTER_MS } from './presence';
 import { LiveDuration } from './LiveDuration';
 import { LivenessChip } from './LivenessChip';
@@ -466,6 +466,62 @@ export default function TorqTerminal() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input, controls]);
 
+  // Redesign 4/7: pre-flight estimate chip — the kernel's REAL sizing pass
+  // (PREVIEW_ROUTE: real enrichment + real router evaluation, no dispatch).
+  // Rides its OWN nonce channel, separate from the manual simulate-route
+  // panel: each reads only frames matching its own nonce, so the two surfaces
+  // never clobber each other.
+  const [estimateNonce, setEstimateNonce] = useState<string | null>(null);
+  // A changing draft invalidates the last estimate immediately — never show a
+  // number sized for text that is no longer in the box.
+  useEffect(() => { setEstimateNonce(null); }, [input]);
+  useEffect(() => {
+    const prompt = debouncedInput.trim();
+    if (!prompt) { setEstimateNonce(null); return; }
+    const nonce = crypto.randomUUID(); // fresh per settled draft
+    const sent = sendCommand({ action: 'PREVIEW_ROUTE', previewOf: nonce, ...buildJudgment(prompt, controls) });
+    if (sent) setEstimateNonce(nonce); // a dropped send never arms a lookup
+  }, [debouncedInput, controls, sendCommand]);
+  const estimateFrame = useMemo(
+    () => selectLatestRoutePreview(events, estimateNonce),
+    [events, estimateNonce],
+  );
+  const estimate = useMemo(() => derivePreflightEstimate(estimateFrame), [estimateFrame]);
+
+  // Redesign 4/7: the working card's est-cap line must read the SAME number
+  // the composer chip showed — snapshotted per request while the task is in
+  // flight (write-on-present, never cleared on absent; mirrors the route-chip
+  // snapshot discipline), never recomputed into a different figure that could
+  // exceed its own cap.
+  const [estimateByRequest, setEstimateByRequest] = useState<Record<string, PreflightEstimate>>({});
+  useEffect(() => {
+    if (activeRequestId && estimate) {
+      setEstimateByRequest((prev) => (prev[activeRequestId] ? prev : { ...prev, [activeRequestId]: estimate }));
+    }
+  }, [activeRequestId, estimate]);
+  const activeEstimate: PreflightEstimate | null = activeRequestId
+    ? (estimateByRequest[activeRequestId] ?? estimate)
+    : null;
+
+  // Redesign 4/7: session budget meter + working-card spend readout. Events
+  // are push-based, but cost totals are pull-based (GET_COST_SUMMARY) — poll
+  // every 5s WHILE A TASK IS IN FLIGHT, so the meter climbs with REAL
+  // recorded spend and the header and per-task panel read one frame source
+  // (selectCostSummaryMeta) — they can never contradict each other. Idle
+  // console, no poll: no new spend can land while idle, so an empty meter is
+  // the honest read (it also fills whenever the cost panel's own mount fetch
+  // lands a frame). Deliberately NO mount-time fetch — keeps the console's
+  // dispatch surface event-driven.
+  useEffect(() => {
+    if (!busy) return;
+    const t = setInterval(() => sendCommand({ action: 'GET_COST_SUMMARY', recentLimit: 20 }), 5000);
+    return () => clearInterval(t);
+  }, [busy, sendCommand]);
+  const costMeta = useMemo(
+    () => selectCostSummaryMeta(events) as Record<string, any> | null,
+    [events],
+  );
+
   const simulateRoute = () => {
     const prompt = input.trim();
     if (!prompt) return; // belt-and-braces with the disabled attr
@@ -508,6 +564,32 @@ export default function TorqTerminal() {
           />
         )}
         <div className="flex items-center gap-3">
+          {/* Session budget meter (redesign 4/7): climbs with REAL recorded
+              spend from the kernel's costSummary frames — the same frame the
+              working-card panel and PresenceCard read, so the surfaces can
+              never contradict each other. Absent frame = no meter (never a
+              fabricated $0). */}
+          {costMeta && typeof costMeta.sessionTotal === 'number' && (
+            <span
+              className="flex items-center gap-1.5 text-[10px] tabular-nums text-faint"
+              title="session spend — provider-reported spend recorded by the kernel"
+            >
+              session ${costMeta.sessionTotal.toFixed(2)}
+              {typeof costMeta.sessionCap === 'number' && (
+                <>
+                  <span className="h-1 w-16 overflow-hidden rounded-sm bg-panel-2">
+                    <span
+                      className={`block h-full ${costMeta.breach ? 'bg-bad' : 'bg-torque'}`}
+                      style={{
+                        width: `${Math.min(100, (costMeta.sessionTotal / costMeta.sessionCap) * 100)}%`,
+                      }}
+                    />
+                  </span>
+                  <span>/ ${costMeta.sessionCap.toFixed(2)}</span>
+                </>
+              )}
+            </span>
+          )}
           <span className="text-[10px] uppercase tracking-widest text-neutral-500">
             {isConnected ? 'connected' : 'reconnecting — your work is safe'}
           </span>
@@ -612,6 +694,7 @@ export default function TorqTerminal() {
             turnStartMs={turnStartMs}
             budgetRemaining={budgetRemaining}
           />
+          <LiveCostPanel estimate={activeEstimate} costMeta={costMeta} />
           </>
         )}
         {/* TCLAW-2C: live current-task route chip.
@@ -683,6 +766,21 @@ export default function TorqTerminal() {
             className="flex-1 bg-transparent py-1 text-neutral-100 placeholder:text-neutral-600 focus:outline-none"
             autoFocus
           />
+          {/* Pre-flight estimate chip (redesign 4/7): the kernel's real
+              sizing pass, debounced as the operator types. Dollars only
+              where true by construction (local = free); cloud shows the
+              kernel's token estimate — a cloud dollar figure would be
+              fabrication (spend.ts records provider-reported cost only).
+              Hidden while the manual simulate-route panel is open: one
+              route truth on screen at a time. */}
+          {estimate && !previewState && (
+            <span className="shrink-0 text-[10px] text-faint">
+              est:{' '}
+              <span className={estimate.route === 'local' ? 'text-good' : 'text-cloud'}>
+                {estimate.label}
+              </span>
+            </span>
+          )}
         </div>
 
         {/* TCLAW-2D-2: route preview panel. Renders per previewState — ZERO
@@ -838,6 +936,64 @@ function useNow(intervalMs: number) {
     return () => clearInterval(t);
   }, [intervalMs]);
   return now;
+}
+
+/** Redesign 4/7: the working card's live cost panel.
+ *
+ *  HONESTY (load-bearing): the gateway wire carries NO per-turn usage stream
+ *  — provider-reported cost is recorded once, at completion (receipt), and
+ *  spend.ts forbids estimated dollars. So there is no live per-task tick to
+ *  render, and this panel says exactly that instead of animating a fake
+ *  counter. What it DOES show, all from one frame source (costSummary):
+ *   - est cap: the SAME pre-flight number the composer chip showed,
+ *     snapshotted for this request — never recomputed into a different
+ *     figure that could exceed its own cap;
+ *   - session spend: real recorded spend, climbing on each 5s poll;
+ *   - a cap bar only when a real session cap exists (fill = total/cap). */
+function LiveCostPanel({
+  estimate,
+  costMeta,
+}: {
+  estimate: PreflightEstimate | null;
+  costMeta: Record<string, any> | null;
+}) {
+  const total = typeof costMeta?.sessionTotal === 'number' ? costMeta.sessionTotal : null;
+  const cap = typeof costMeta?.sessionCap === 'number' ? costMeta.sessionCap : null;
+  const breach = costMeta?.breach ?? null;
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[10px] text-neutral-500">
+      {estimate && (
+        <span>
+          est cap:{' '}
+          <span className={estimate.route === 'local' ? 'text-good' : 'text-cloud'}>
+            {estimate.label}
+          </span>
+        </span>
+      )}
+      {total !== null && (
+        <span>
+          session spend:{' '}
+          <span className="tabular-nums text-neutral-300">${total.toFixed(2)}</span>
+        </span>
+      )}
+      {total !== null && cap !== null && (
+        <span className="flex items-center gap-1.5" title="session spend vs session cap">
+          <span className="h-1 w-16 overflow-hidden rounded-sm bg-neutral-800">
+            <span
+              className={`block h-full ${breach ? 'bg-bad' : 'bg-torque'}`}
+              style={{ width: `${Math.min(100, (total / cap) * 100)}%` }}
+            />
+          </span>
+          <span className="tabular-nums">cap ${cap.toFixed(2)}</span>
+        </span>
+      )}
+      {estimate?.route === 'cloud' && (
+        <span className="text-neutral-600">
+          task cost records on completion — no mid-task usage stream
+        </span>
+      )}
+    </div>
+  );
 }
 
 /** Redesign 3/7: the answer is the visual hero of a task card — Inter for

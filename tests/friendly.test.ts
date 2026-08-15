@@ -37,6 +37,7 @@ import {
   escInline,
   fenceBlock,
   groupStreamIntoTasks,
+  derivePreflightEstimate,
   type ReceiptLike,
   type ApprovalSummaryLike,
   type SafeExportLike,
@@ -1464,6 +1465,47 @@ describe('renderSafeExportMarkdown', () => {
     expect(out).not.toMatch(/\bsecure\b/i);
     expect(out).not.toMatch(/\bguaranteed\b/i);
     expect(out).not.toMatch(/\bclean\b/i);
+  });
+});
+
+describe('derivePreflightEstimate (redesign 4/7) — the composer pre-flight chip', () => {
+  function previewFrame(meta: Record<string, unknown>): GatewayEvent {
+    return ev({ type: 'SYSTEM', message: 'Route preview', metadata: { routePreview: true, ...meta } });
+  }
+
+  it('null frame -> null', () => {
+    expect(derivePreflightEstimate(null)).toBeNull();
+  });
+
+  it('non-preview frame -> null', () => {
+    expect(derivePreflightEstimate(ev({ type: 'SYSTEM', message: 'x' }))).toBeNull();
+  });
+
+  it('dropped preview -> null (never an estimate from a coalesced inference)', () => {
+    expect(derivePreflightEstimate(previewFrame({ previewOf: 'n', dropped: 'in_flight' }))).toBeNull();
+  });
+
+  it('missing/non-string tier -> null', () => {
+    expect(derivePreflightEstimate(previewFrame({ previewOf: 'n', diagnostics: null }))).toBeNull();
+    expect(derivePreflightEstimate(previewFrame({ previewOf: 'n', diagnostics: {} }))).toBeNull();
+  });
+
+  it('local tier -> $0.00 · local (free by construction — the receipt renders the same fact as "free")', () => {
+    const est = derivePreflightEstimate(previewFrame({ previewOf: 'n', diagnostics: { tier: 'OLLAMA_LOCAL' } }));
+    expect(est).toEqual({ route: 'local', label: '$0.00 · local', estimatedTokens: null });
+  });
+
+  it('cloud tier -> the kernel REAL token estimate, never a fabricated dollar figure', () => {
+    const est = derivePreflightEstimate(
+      previewFrame({ previewOf: 'n', diagnostics: { tier: 'API_EXTERNAL' }, enrichment: { estimatedTokens: 1234 } }),
+    );
+    expect(est).toEqual({ route: 'cloud', label: '~1,234 tokens · cloud', estimatedTokens: 1234 });
+    expect(est!.label).not.toContain('$');
+  });
+
+  it('cloud tier without a token estimate -> bare route label, no invented number', () => {
+    const est = derivePreflightEstimate(previewFrame({ previewOf: 'n', diagnostics: { tier: 'API_EXTERNAL' } }));
+    expect(est).toEqual({ route: 'cloud', label: 'cloud route', estimatedTokens: null });
   });
 });
 
