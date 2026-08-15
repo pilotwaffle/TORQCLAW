@@ -1,7 +1,10 @@
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   auditSourceSnippet,
   inventoryProductionCalls,
+  resolveAuditTsconfig,
+  REPO_ROOT,
   type ResolvedCall,
 } from './helpers/profile-conformance.js';
 
@@ -56,5 +59,13 @@ describe('AC-10A TypeScript compiler-API production caller audit', () => {
     const production = inventoryProductionCalls(['executeTool']).filter((call) => call.importedName === 'executeTool');
     expect([...production.map(identity), 'executeTool:packages/new-caller.ts'])
       .not.toEqual(['executeTool:packages/inference/src/ollama.ts']);
+  });
+
+  it('anchors compiler options in-tree and never consumes a tsconfig outside the repository', () => {
+    expect(resolveAuditTsconfig(REPO_ROOT)).toBe(join(REPO_ROOT, 'tsconfig.base.json'));
+    expect(() => resolveAuditTsconfig(REPO_ROOT, join('..', 'tsconfig.json')))
+      .toThrow(/OUTSIDE the repository/);
+    expect(() => resolveAuditTsconfig(join(REPO_ROOT, 'tests')))
+      .toThrow(/in-tree tsconfig is absent/);
   });
 });

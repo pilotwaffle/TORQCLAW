@@ -171,14 +171,24 @@ function symbolName(checker: ts.TypeChecker, expression: ts.Expression): { name?
   return { name: symbol.getName(), resolved: true };
 }
 
+export function resolveAuditTsconfig(root: string, configFile = 'tsconfig.base.json'): string {
+  const resolvedConfig = resolve(join(root, configFile));
+  if (!resolvedConfig.startsWith(resolve(root) + sep)) {
+    throw new Error(`profile-conformance: tsconfig resolved OUTSIDE the repository: ${resolvedConfig}`);
+  }
+  if (!ts.sys.fileExists(resolvedConfig)) {
+    throw new Error(`profile-conformance: in-tree tsconfig is absent: ${resolvedConfig}`);
+  }
+  return resolvedConfig;
+}
+
 export function inventoryProductionCalls(watchedNames: readonly string[]): ResolvedCall[] {
   const files: string[] = [];
   for (const root of ['apps', 'packages', 'engines', 'ops', 'scripts']) {
     const absolute = join(REPO_ROOT, root);
     try { if (statSync(absolute).isDirectory()) walkProduction(absolute, files); } catch { /* optional production root */ }
   }
-  const configPath = ts.findConfigFile(REPO_ROOT, ts.sys.fileExists, 'tsconfig.json');
-  if (!configPath) throw new Error('tsconfig.json not found');
+  const configPath = resolveAuditTsconfig(REPO_ROOT);
   const parsed = ts.parseJsonConfigFileContent(ts.readConfigFile(configPath, ts.sys.readFile).config, ts.sys, REPO_ROOT);
   const program = ts.createProgram({ rootNames: files, options: parsed.options });
   program.getTypeChecker(); // force full TypeScript binding/module resolution
