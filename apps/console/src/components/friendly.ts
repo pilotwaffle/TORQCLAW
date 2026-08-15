@@ -491,6 +491,18 @@ export function groupStreamIntoTasks(events: GatewayEvent[]): StreamItem[] {
   return items;
 }
 
+/** Redesign 7/7: attachment chip family — type-coded tiles in the composer.
+ *  PURE: name + mime in, family out. Image thumbnails only for the image
+ *  family; pdf/doc never get one. */
+export type AttachmentKind = 'pdf' | 'image' | 'doc';
+
+export function attachmentKind(name: string, mime: string): AttachmentKind {
+  const lower = name.toLowerCase();
+  if (mime === 'application/pdf' || lower.endsWith('.pdf')) return 'pdf';
+  if (mime.startsWith('image/') || /\.(png|jpe?g|gif|webp|svg|bmp|avif)$/.test(lower)) return 'image';
+  return 'doc';
+}
+
 /** Redesign 6/7: severity tier for a tool approval, derived MECHANICALLY
  *  from the gate facts built by dispatch.ts (buildGateFacts) — never a
  *  client-side re-classification, never a guess. PURE.

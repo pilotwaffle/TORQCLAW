@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GatewayEvent, ClientCommand, RouterDiagnostics } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
-import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, groupStreamIntoTasks, derivePreflightEstimate, approvalTierFromGate, type SafeExportFrameLike, type TaskGroup, type PreflightEstimate } from './friendly';
+import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, groupStreamIntoTasks, derivePreflightEstimate, approvalTierFromGate, attachmentKind, type SafeExportFrameLike, type TaskGroup, type PreflightEstimate, type AttachmentKind } from './friendly';
 import { selectTurnStartMs, selectLastSyncedMs, isStale, selectCostSummaryMeta, selectLivePhase, isPhaseStuck, STALE_AFTER_MS } from './presence';
 import { LiveDuration } from './LiveDuration';
 import { LivenessChip } from './LivenessChip';
@@ -38,6 +38,15 @@ import ApprovalHistoryPanel from './ApprovalHistoryPanel';
 const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL ?? 'ws://localhost:18790/ws';
 const GATEWAY_TOKEN = process.env.NEXT_PUBLIC_GATEWAY_TOKEN ?? '';
 
+// Redesign 7/7: composer attachments are feature-flagged. KERNEL GAP: the
+// wire carries attachmentIds on SUBMIT_PROMPT, but the gateway exposes NO
+// upload command and NO storage (gatewayClient hardcodes attachmentIds: []),
+// so with the flag ON the composer collects files, warns on the cloud route,
+// and GATES submission — it never sends fake ids and never silently submits
+// without the files the operator attached. Flag OFF (default): no paperclip,
+// zero behavior change.
+const ATTACHMENTS_ENABLED = process.env.NEXT_PUBLIC_ATTACHMENTS === '1';
+
 type ExecutionMode = 'AUTO' | 'LOCAL_ONLY' | 'CLOUD_OK';
 // '' = no budget (falls to env default). 'free' = local-only, $0.
 type BudgetChoice = '' | 'free' | '0.25' | '1' | '5' | 'custom';
@@ -65,6 +74,15 @@ function loadControls(): Controls {
   } catch {
     return DEFAULT_CONTROLS;
   }
+}
+
+/** Redesign 7/7: a composer attachment awaiting a kernel upload pipeline.
+ *  `id` is a LOCAL identity only — it is never sent as an attachmentId. */
+interface PendingAttachment {
+  id: string;
+  file: File;
+  kind: AttachmentKind;
+  previewUrl: string | null;
 }
 
 /** TCLAW-2D-2: the judgment fields shared verbatim by SUBMIT_PROMPT and
@@ -119,6 +137,9 @@ export default function TorqTerminal() {
   // 'failed' if the send was dropped so the user knows to retry. Cleared when the
   // next task starts.
   const [stopState, setStopState] = useState<'idle' | 'requested' | 'failed'>('idle');
+  // Redesign 7/7: composer attachments (flag-gated; see ATTACHMENTS_ENABLED).
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [attachmentGateNote, setAttachmentGateNote] = useState(false);
 
   // TCLAW-2D-2: route preview. previewNonce = latest-SENT nonce (the ONLY
   // staleness key). previewState is the RENDER SOURCE (useState snapshot,
@@ -280,10 +301,51 @@ export default function TorqTerminal() {
   );
   useEffect(() => { setHintDismissed(false); }, [debouncedInput]);
 
+  // Redesign 7/7: attachment handlers. Files never leave the browser until
+  // the kernel ships an upload pipeline — addFiles collects, removeAttachment
+  // releases, submit GATES (never fake ids, never silent drop).
+  const addFiles = (list: FileList | null) => {
+    if (!ATTACHMENTS_ENABLED || !list || list.length === 0) return;
+    const canPreview = typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
+    const added: PendingAttachment[] = Array.from(list).map((file) => {
+      const kind = attachmentKind(file.name, file.type);
+      return {
+        id: crypto.randomUUID(),
+        file,
+        kind,
+        previewUrl: kind === 'image' && canPreview ? URL.createObjectURL(file) : null,
+      };
+    });
+    setAttachments((prev) => [...prev, ...added]);
+    setAttachmentGateNote(false);
+  };
+  const removeAttachment = (id: string) => {
+    setAttachments((prev) => {
+      const gone = prev.find((a) => a.id === id);
+      if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
+      return prev.filter((a) => a.id !== id);
+    });
+    setAttachmentGateNote(false);
+  };
+  // Revoke any live object URLs on unmount (ref keeps the latest list).
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
+  useEffect(() => () => {
+    for (const a of attachmentsRef.current) {
+      if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+    }
+  }, []);
+
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     const prompt = input.trim();
     if (!prompt) return;
+    if (ATTACHMENTS_ENABLED && attachments.length > 0) {
+      // KERNEL GAP: no upload command exists — never send fake attachmentIds,
+      // and never silently submit without the files the operator attached.
+      setAttachmentGateNote(true);
+      return;
+    }
     sendCommand(buildSubmit(prompt, controls));
     setInput('');
     setStopState('idle'); // a fresh run clears any prior stop feedback
@@ -798,7 +860,15 @@ export default function TorqTerminal() {
       )}
 
       <form onSubmit={submit} className="mt-4 border-t border-neutral-800 pt-4">
-        <div className="flex items-center gap-3">
+        <div
+          className="flex items-center gap-3"
+          onDragOver={(e) => { if (ATTACHMENTS_ENABLED) e.preventDefault(); }}
+          onDrop={(e) => {
+            if (!ATTACHMENTS_ENABLED) return;
+            e.preventDefault();
+            addFiles(e.dataTransfer?.files ?? null);
+          }}
+        >
           <span className="text-[#E24B4A]" aria-hidden>{'>'}</span>
           <input
             type="text"
@@ -809,6 +879,23 @@ export default function TorqTerminal() {
             className="flex-1 bg-transparent py-1 text-neutral-100 placeholder:text-neutral-600 focus:outline-none"
             autoFocus
           />
+          {/* Redesign 7/7: paperclip (flag-gated). The hidden picker is the
+              ONLY file entry point besides drag-and-drop on this row. */}
+          {ATTACHMENTS_ENABLED && (
+            <label
+              className="cursor-pointer text-faint transition-colors hover:text-muted"
+              title="attach files — preview only: the kernel has no upload pipeline yet"
+            >
+              <span aria-hidden>📎</span>
+              <input
+                type="file"
+                multiple
+                className="hidden"
+                aria-label="attach files"
+                onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }}
+              />
+            </label>
+          )}
           {/* Pre-flight estimate chip (redesign 4/7): the kernel's real
               sizing pass, debounced as the operator types. Dollars only
               where true by construction (local = free); cloud shows the
@@ -825,6 +912,52 @@ export default function TorqTerminal() {
             </span>
           )}
         </div>
+
+        {/* Redesign 7/7: attachment chips — type-coded tiles (PDF red, IMG
+            cyan with thumbnail, DOC amber), per-file remove. Flag-gated. */}
+        {ATTACHMENTS_ENABLED && attachments.length > 0 && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            {attachments.map((a) => (
+              <span
+                key={a.id}
+                className={`flex items-center gap-1.5 rounded border px-1.5 py-0.5 text-[10px] ${
+                  a.kind === 'pdf' ? 'border-bad/40 bg-bad/10 text-bad'
+                  : a.kind === 'image' ? 'border-cloud/40 bg-cloud/10 text-cloud'
+                  : 'border-torque/40 bg-torque/10 text-torque'
+                }`}
+              >
+                {a.previewUrl && (
+                  <img src={a.previewUrl} alt="" className="h-4 w-4 rounded-sm object-cover" />
+                )}
+                <span className="max-w-[18ch] truncate" title={a.file.name}>{a.file.name}</span>
+                <button
+                  type="button"
+                  onClick={() => removeAttachment(a.id)}
+                  aria-label={`remove ${a.file.name}`}
+                  className="text-faint transition-colors hover:text-ink"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        {/* Cloud-route privacy warning: real estimate route only — never a
+            guess. Disappears on the local route (or with no attachments). */}
+        {ATTACHMENTS_ENABLED && attachments.length > 0 && estimate?.route === 'cloud' && (
+          <p className="mt-2 text-[10px] text-torque">
+            {attachments.length} attachment{attachments.length === 1 ? '' : 's'} will be uploaded
+            with this task — route is cloud
+          </p>
+        )}
+        {/* Submit gate: the kernel exposes no upload pipeline, so attached
+            files cannot ride the task yet — say so instead of faking it. */}
+        {ATTACHMENTS_ENABLED && attachmentGateNote && attachments.length > 0 && (
+          <p className="mt-2 text-[10px] text-torque">
+            attachments can&apos;t ride this task yet — the kernel exposes no upload
+            pipeline; remove them or submit without
+          </p>
+        )}
 
         {/* TCLAW-2D-2: route preview panel. Renders per previewState — ZERO
             interactive elements (no buttons/links/onClick anywhere below):

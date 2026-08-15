@@ -39,6 +39,7 @@ import {
   groupStreamIntoTasks,
   derivePreflightEstimate,
   approvalTierFromGate,
+  attachmentKind,
   type ReceiptLike,
   type ApprovalSummaryLike,
   type SafeExportLike,
@@ -1507,6 +1508,25 @@ describe('derivePreflightEstimate (redesign 4/7) — the composer pre-flight chi
   it('cloud tier without a token estimate -> bare route label, no invented number', () => {
     const est = derivePreflightEstimate(previewFrame({ previewOf: 'n', diagnostics: { tier: 'API_EXTERNAL' } }));
     expect(est).toEqual({ route: 'cloud', label: 'cloud route', estimatedTokens: null });
+  });
+});
+
+describe('attachmentKind (redesign 7/7) — type-coded composer tiles', () => {
+  it('pdf by mime or extension', () => {
+    expect(attachmentKind('report.pdf', 'application/pdf')).toBe('pdf');
+    expect(attachmentKind('REPORT.PDF', '')).toBe('pdf');
+  });
+
+  it('image by mime or extension', () => {
+    expect(attachmentKind('photo.png', 'image/png')).toBe('image');
+    expect(attachmentKind('shot.JPEG', '')).toBe('image');
+    expect(attachmentKind('icon.svg', '')).toBe('image');
+  });
+
+  it('everything else is doc', () => {
+    expect(attachmentKind('notes.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')).toBe('doc');
+    expect(attachmentKind('data.csv', 'text/csv')).toBe('doc');
+    expect(attachmentKind('archive.zip', 'application/zip')).toBe('doc');
   });
 });
 
