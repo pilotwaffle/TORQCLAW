@@ -1,0 +1,1204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TorqClaw — Console Concept</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0A0B0D;
+  --panel:#121316;
+  --panel-2:#17191D;
+  --panel-3:#1D2026;
+  --border:#23262C;
+  --border-strong:#2E323A;
+  --text:#F4F5F6;
+  --muted:#A7ADB8;
+  --faint:#6A717C;
+  --torque:#FF9E40;
+  --torque-dim:rgba(255,158,64,.14);
+  --cloud:#22D3EE;
+  --cloud-dim:rgba(34,211,238,.12);
+  --good:#34D399;
+  --good-dim:rgba(52,211,153,.12);
+  --mem:#A78BFA;
+  --mem-dim:rgba(167,139,250,.12);
+  --bad:#F87171;
+  --bad-dim:rgba(248,113,113,.12);
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+  --sans:'Inter',-apple-system,sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{
+  background:var(--bg);color:var(--text);
+  font-family:var(--mono);font-size:13px;line-height:1.6;
+  overflow:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+/* subtle scanline texture */
+body::after{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:99;
+  background:repeating-linear-gradient(0deg,rgba(255,255,255,.012) 0 1px,transparent 1px 3px);
+}
+::selection{background:rgba(255,158,64,.25)}
+*{scrollbar-width:thin;scrollbar-color:#2E323A transparent}
+*::-webkit-scrollbar{width:6px;height:6px}
+*::-webkit-scrollbar-thumb{background:#2E323A;border-radius:3px}
+*::-webkit-scrollbar-track{background:transparent}
+
+/* ============ HEADER ============ */
+header{
+  height:52px;display:flex;align-items:center;gap:14px;
+  padding:0 14px;border-bottom:1px solid var(--border);
+  background:var(--panel);flex-shrink:0;
+}
+.brand{display:flex;align-items:center;gap:10px}
+.brand svg{display:block}
+.wordmark{font-weight:700;font-size:14px;letter-spacing:.18em}
+.wordmark em{font-style:normal;color:var(--torque)}
+.conn{
+  display:flex;align-items:center;gap:8px;
+  font-size:10px;letter-spacing:.16em;color:var(--good);font-weight:600;
+}
+.led{width:7px;height:7px;border-radius:50%;background:var(--good);
+  box-shadow:0 0 8px var(--good);animation:pulse 1.5s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ============ GLOBAL LIVENESS CHIP ============ */
+.live-chip{
+  display:none;align-items:center;gap:8px;max-width:380px;
+  background:var(--panel-2);border:1px solid rgba(255,158,64,.35);border-radius:6px;
+  padding:4px 10px;cursor:pointer;transition:all .15s ease;
+  animation:enter .2s ease both;
+}
+.live-chip.show{display:flex}
+.live-chip:hover{border-color:var(--torque);background:var(--torque-dim)}
+.live-chip .spin{
+  width:10px;height:10px;border-radius:50%;flex-shrink:0;
+  border:2px solid var(--panel-3);border-top-color:var(--torque);
+  animation:rot .8s linear infinite;
+}
+.live-chip .ltxt{
+  font-size:10.5px;color:var(--muted);letter-spacing:.04em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.live-chip .ltxt b{color:var(--torque);font-weight:600}
+.live-chip .ltime{font-size:10px;color:var(--faint);font-variant-numeric:tabular-nums;flex-shrink:0}
+.live-chip .lsrc{
+  font-size:8px;letter-spacing:.14em;color:var(--mem);text-transform:uppercase;flex-shrink:0;
+  border-left:1px solid var(--border-strong);padding-left:9px;
+}
+.live-chip.stuck{border-color:rgba(248,113,113,.45)}
+.live-chip.stuck .spin{border-top-color:var(--bad)}
+.live-chip.stuck .ltxt b{color:var(--bad)}
+
+/* ============ SYNC STATE ============ */
+.sync-dot{width:5px;height:5px;border-radius:50%;background:var(--good);flex-shrink:0}
+.sync-dot.stale{background:var(--torque);animation:pulse 1.5s ease-in-out infinite}
+.sync-line{display:flex;align-items:center;gap:6px}
+.refresh-btn{
+  background:none;border:none;color:var(--faint);cursor:pointer;
+  font-size:11px;padding:2px 4px;border-radius:4px;transition:all .15s ease;line-height:1;
+}
+.refresh-btn:hover{color:var(--torque);background:var(--torque-dim)}
+.refresh-btn.spinning svg{animation:rot .7s linear}
+.synced-at{font-size:8.5px;color:#4A505A;letter-spacing:.06em}
+.header-right{margin-left:auto;display:flex;align-items:center;gap:12px;flex-shrink:0}
+.kernel{
+  font-size:9.5px;letter-spacing:.1em;color:var(--faint);white-space:nowrap;
+  border:1px solid var(--border);padding:4px 9px;border-radius:4px;
+}
+.budget-meter{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.budget-meter .label{font-size:9px;letter-spacing:.1em;color:var(--faint);text-transform:uppercase;white-space:nowrap}
+.meter{width:110px;height:4px;background:var(--panel-3);border-radius:2px;overflow:hidden}
+.meter i{display:block;height:100%;width:34%;background:linear-gradient(90deg,var(--torque),#FFC38A);border-radius:2px}
+.budget-meter .val{font-size:11px;color:var(--muted)}
+.budget-meter .val b{color:var(--text);font-weight:600}
+
+/* ============ SHELL ============ */
+.shell{display:flex;height:calc(100vh - 52px)}
+
+/* ============ SIDEBAR ============ */
+aside{
+  width:236px;flex-shrink:0;border-right:1px solid var(--border);
+  background:var(--panel);display:flex;flex-direction:column;
+}
+.nav{padding:14px 10px 6px}
+.nav-label{font-size:9px;letter-spacing:.2em;color:var(--faint);padding:0 10px 8px;text-transform:uppercase}
+.nav-item{
+  display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;
+  color:var(--muted);cursor:pointer;font-size:12px;font-weight:500;
+  transition:background .15s ease,color .15s ease;border:1px solid transparent;
+}
+.nav-item:hover{background:var(--panel-2);color:var(--text)}
+.nav-item.active{background:var(--torque-dim);color:var(--torque);border-color:rgba(255,158,64,.25)}
+.nav-item .ico{width:15px;height:15px;flex-shrink:0;opacity:.9}
+.badge{
+  margin-left:auto;font-size:9px;font-weight:700;letter-spacing:.05em;
+  background:var(--torque);color:#0A0B0D;border-radius:99px;padding:1px 7px;
+}
+.sessions{flex:1;overflow-y:auto;padding:14px 10px}
+.session{
+  padding:8px 10px;border-radius:6px;cursor:pointer;
+  transition:background .15s ease;margin-bottom:2px;
+}
+.session:hover{background:var(--panel-2)}
+.session.current{background:var(--panel-2);box-shadow:inset 2px 0 0 var(--torque)}
+.session .t{font-size:11.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.session .m{font-size:9.5px;color:var(--faint);letter-spacing:.06em;margin-top:2px}
+.side-foot{border-top:1px solid var(--border);padding:12px 18px}
+.side-foot .row{display:flex;justify-content:space-between;font-size:10px;color:var(--faint);letter-spacing:.1em}
+.side-foot .row b{color:var(--muted)}
+
+/* ============ MAIN ============ */
+main{flex:1;display:flex;flex-direction:column;min-width:0}
+.view{display:none;flex:1;overflow-y:auto;padding:28px 34px 20px}
+.view.active{display:block}
+.stream{max-width:860px;margin:0 auto}
+
+.view-head{display:flex;align-items:baseline;gap:14px;margin-bottom:22px}
+.view-head h1{font-family:var(--mono);font-size:15px;font-weight:600;letter-spacing:.14em;text-transform:uppercase}
+.view-head .sub{font-size:10.5px;color:var(--faint);letter-spacing:.08em}
+
+/* ============ TASK CARD ============ */
+.task{
+  background:var(--panel);border:1px solid var(--border);border-radius:10px;
+  margin-bottom:18px;overflow:hidden;
+  animation:enter .28s cubic-bezier(.22,.9,.3,1) both;
+}
+@keyframes enter{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.task-head{
+  display:flex;align-items:flex-start;gap:12px;padding:15px 18px 13px;
+}
+.task-head .avatar{
+  width:26px;height:26px;border-radius:6px;flex-shrink:0;margin-top:1px;
+  background:var(--torque-dim);border:1px solid rgba(255,158,64,.3);
+  display:flex;align-items:center;justify-content:center;
+  color:var(--torque);font-size:10px;font-weight:700;letter-spacing:.05em;
+}
+.task-prompt{font-size:13.5px;font-weight:600;color:var(--text);line-height:1.5;flex:1}
+.task-time{font-size:10px;color:var(--faint);letter-spacing:.08em;flex-shrink:0;margin-top:3px}
+.route-chip{
+  display:inline-flex;align-items:center;gap:6px;flex-shrink:0;margin-top:2px;
+  font-size:9.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+  padding:3px 9px;border-radius:4px;
+}
+.route-chip.cloud{color:var(--cloud);background:var(--cloud-dim);border:1px solid rgba(34,211,238,.28)}
+.route-chip.local{color:var(--good);background:var(--good-dim);border:1px solid rgba(52,211,153,.28)}
+.route-chip .dot{width:5px;height:5px;border-radius:50%;background:currentColor}
+
+/* steps — collapsed plumbing */
+.steps{border-top:1px solid var(--border)}
+.steps-toggle{
+  width:100%;display:flex;align-items:center;gap:8px;background:none;border:none;
+  padding:8px 18px;cursor:pointer;color:var(--faint);
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;
+  transition:color .15s ease,background .15s ease;text-align:left;
+}
+.steps-toggle:hover{color:var(--muted);background:var(--panel-2)}
+.steps-toggle .chev{transition:transform .2s ease;font-size:9px}
+.steps.open .steps-toggle .chev{transform:rotate(90deg)}
+.steps-body{max-height:0;overflow:hidden;transition:max-height .32s cubic-bezier(.22,.9,.3,1)}
+.steps.open .steps-body{max-height:400px}
+.step-line{
+  display:flex;gap:12px;padding:5px 18px 5px 30px;
+  font-size:11px;color:var(--faint);letter-spacing:.02em;
+}
+.step-line .st{color:#3D424B;flex-shrink:0}
+.step-line .tag{flex-shrink:0;font-weight:600;letter-spacing:.08em}
+.step-line .tag.kernel{color:var(--torque)}
+.step-line .tag.mem{color:var(--mem)}
+.step-line .tag.sys{color:var(--faint)}
+.step-line:hover{color:var(--muted)}
+
+/* answer — the hero */
+.answer{
+  border-top:1px solid var(--border);
+  padding:18px 20px 16px;
+  background:linear-gradient(180deg,rgba(255,255,255,.014),transparent 40%);
+  position:relative;
+}
+.answer::before{
+  content:"";position:absolute;left:0;top:0;bottom:0;width:2px;
+  background:linear-gradient(180deg,var(--torque),transparent 85%);
+}
+.answer-tag{
+  font-size:9px;font-weight:700;letter-spacing:.22em;color:var(--torque);
+  text-transform:uppercase;margin-bottom:9px;display:flex;align-items:center;gap:8px;
+}
+.answer-body{
+  font-family:var(--sans);font-size:14.5px;line-height:1.72;
+  color:#E8EAED;font-weight:400;max-width:72ch;
+}
+.answer-body b{color:#fff;font-weight:600}
+.answer-body .hl{color:var(--torque);font-weight:600}
+.answer-body .num{font-family:var(--mono);font-size:13px;color:var(--cloud)}
+.answer-body ul{margin:10px 0 2px 18px}
+.answer-body li{margin-bottom:6px}
+.answer-body code{
+  font-family:var(--mono);font-size:12px;background:var(--panel-3);
+  padding:1px 6px;border-radius:4px;color:var(--muted);
+}
+
+/* working state */
+.working{border-top:1px solid var(--border);padding:14px 20px 16px}
+.work-row{display:flex;align-items:center;gap:12px;font-size:11px;color:var(--muted)}
+.work-row .spin{
+  width:12px;height:12px;border-radius:50%;flex-shrink:0;
+  border:2px solid var(--panel-3);border-top-color:var(--torque);
+  animation:rot .8s linear infinite;
+}
+@keyframes rot{to{transform:rotate(360deg)}}
+.work-row .elapsed{color:var(--faint);font-variant-numeric:tabular-nums}
+.prog{height:3px;background:var(--panel-3);border-radius:2px;margin-top:11px;overflow:hidden;position:relative}
+.prog i{
+  position:absolute;top:0;bottom:0;width:38%;border-radius:2px;
+  background:linear-gradient(90deg,transparent,var(--torque),transparent);
+  animation:shimmer 1.4s ease-in-out infinite;
+}
+@keyframes shimmer{from{left:-40%}to{left:105%}}
+
+/* receipt */
+.receipt{
+  display:flex;align-items:center;flex-wrap:wrap;gap:7px;
+  border-top:1px solid var(--border);padding:9px 18px;background:var(--panel-2);
+}
+.rchip{
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:10px;letter-spacing:.06em;color:var(--muted);
+  border:1px solid var(--border);border-radius:4px;padding:2.5px 8px;
+  background:var(--panel);font-variant-numeric:tabular-nums;
+}
+.rchip svg{opacity:.7}
+.rchip.ok{color:var(--good);border-color:rgba(52,211,153,.3)}
+.rchip.ok svg{opacity:1}
+.ghost-btn{
+  margin-left:auto;display:inline-flex;align-items:center;gap:6px;
+  font-family:var(--mono);font-size:10px;letter-spacing:.1em;color:var(--faint);
+  background:none;border:1px solid transparent;border-radius:4px;
+  padding:3px 9px;cursor:pointer;transition:all .15s ease;
+}
+.ghost-btn:hover{color:var(--torque);border-color:rgba(255,158,64,.3);background:var(--torque-dim)}
+
+/* ============ COMPOSER ============ */
+.composer{
+  border-top:1px solid var(--border);background:var(--panel);
+  padding:14px 34px 16px;flex-shrink:0;
+}
+.composer-inner{max-width:860px;margin:0 auto}
+.composer-box{
+  background:var(--panel-2);border:1px solid var(--border-strong);border-radius:10px;
+  transition:border-color .2s ease,box-shadow .2s ease;
+}
+.composer-box:focus-within{
+  border-color:rgba(255,158,64,.5);
+  box-shadow:0 0 0 3px rgba(255,158,64,.08),0 -1px 24px rgba(255,158,64,.06);
+}
+.composer-input-row{display:flex;align-items:center;gap:10px;padding:4px 8px 4px 10px}
+.clip-btn{
+  width:32px;height:32px;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  background:none;border:1px solid transparent;border-radius:7px;cursor:pointer;
+  color:var(--faint);transition:all .15s ease;
+}
+.clip-btn:hover{color:var(--torque);background:var(--torque-dim);border-color:rgba(255,158,64,.3)}
+.composer-box.dragging{
+  border-color:var(--torque);border-style:dashed;
+  box-shadow:0 0 0 3px rgba(255,158,64,.1),0 -1px 24px rgba(255,158,64,.08);
+}
+.attach-row{display:none;gap:8px;flex-wrap:wrap;padding:2px 12px 10px}
+.attach-row.has-files{display:flex}
+.attach{
+  display:inline-flex;align-items:center;gap:8px;max-width:240px;
+  background:var(--panel);border:1px solid var(--border-strong);border-radius:6px;
+  padding:5px 8px 5px 6px;animation:enter .2s ease both;
+}
+.attach .aico{
+  width:24px;height:24px;border-radius:5px;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  font-size:8px;font-weight:700;letter-spacing:.05em;
+}
+.attach .aico.pdf{background:var(--bad-dim);color:var(--bad);border:1px solid rgba(248,113,113,.3)}
+.attach .aico.img{background:var(--cloud-dim);color:var(--cloud);border:1px solid rgba(34,211,238,.3);overflow:hidden;padding:0}
+.attach .aico.img img{width:100%;height:100%;object-fit:cover;display:block}
+.attach .aico.doc{background:var(--torque-dim);color:var(--torque);border:1px solid rgba(255,158,64,.3)}
+.attach .aico.gen{background:var(--panel-3);color:var(--muted);border:1px solid var(--border)}
+.attach .ameta{min-width:0}
+.attach .aname{
+  font-size:10.5px;color:var(--text);font-weight:500;max-width:150px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.attach .asize{font-size:9px;color:var(--faint);letter-spacing:.04em}
+.attach .ax{
+  flex-shrink:0;width:16px;height:16px;display:flex;align-items:center;justify-content:center;
+  background:none;border:none;border-radius:4px;color:var(--faint);cursor:pointer;
+  font-size:11px;line-height:1;transition:all .12s ease;
+}
+.attach .ax:hover{color:var(--bad);background:var(--bad-dim)}
+.cloud-warn{
+  display:none;align-items:center;gap:7px;padding:0 16px 10px;
+  font-size:9.5px;letter-spacing:.06em;color:var(--torque);
+}
+.cloud-warn.show{display:flex}
+.cloud-warn svg{flex-shrink:0}
+/* attachments echoed inside a task card */
+.task-files{display:flex;gap:7px;flex-wrap:wrap;padding:0 18px 12px}
+.tfile{
+  display:inline-flex;align-items:center;gap:7px;
+  font-size:10px;color:var(--muted);letter-spacing:.03em;
+  border:1px solid var(--border);background:var(--panel-2);border-radius:5px;padding:3px 9px;
+}
+.tfile .fdot{width:6px;height:6px;border-radius:2px;flex-shrink:0}
+.tfile .fdot.pdf{background:var(--bad)}
+.tfile .fdot.img{background:var(--cloud)}
+.tfile .fdot.doc{background:var(--torque)}
+.tfile .fdot.gen{background:var(--faint)}
+.prompt-sig{color:var(--torque);font-weight:700;flex-shrink:0}
+#cmdline{
+  flex:1;background:none;border:none;outline:none;color:var(--text);
+  font-family:var(--mono);font-size:13px;padding:11px 0;caret-color:var(--torque);
+}
+#cmdline::placeholder{color:#4A505A}
+.send-btn{
+  background:var(--torque);color:#0A0B0D;border:none;border-radius:7px;
+  font-family:var(--mono);font-weight:700;font-size:11px;letter-spacing:.1em;
+  padding:9px 16px;cursor:pointer;transition:filter .15s ease,transform .1s ease;
+}
+.send-btn:hover{filter:brightness(1.1)}
+.send-btn:active{transform:scale(.97)}
+.composer-chips{
+  display:flex;align-items:center;gap:7px;padding:0 12px 10px;flex-wrap:wrap;
+}
+.cchip{
+  display:inline-flex;align-items:center;gap:6px;cursor:pointer;
+  font-size:9.5px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--muted);border:1px solid var(--border);border-radius:4px;
+  padding:3px 9px;background:var(--panel);transition:all .15s ease;
+}
+.cchip:hover{border-color:var(--border-strong);color:var(--text)}
+.cchip .dot{width:5px;height:5px;border-radius:50%}
+.cchip.cloud .dot{background:var(--cloud)}
+.cchip.local .dot{background:var(--good)}
+.cchip.budget-ok{color:var(--good)}
+.cchip.budget-ok .dot{background:var(--good)}
+.khint{
+  margin-left:auto;font-size:9.5px;color:#4A505A;letter-spacing:.08em;
+}
+.khint kbd{
+  border:1px solid var(--border);border-radius:3px;padding:1px 5px;
+  background:var(--panel);font-family:var(--mono);color:var(--faint);
+}
+
+/* ============ PRE-FLIGHT ESTIMATE ============ */
+.est-chip{
+  display:none;align-items:center;gap:6px;
+  font-size:9.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--torque);border:1px solid rgba(255,158,64,.3);border-radius:4px;
+  padding:3px 9px;background:var(--torque-dim);
+  font-variant-numeric:tabular-nums;animation:enter .18s ease both;
+}
+.est-chip.show{display:inline-flex}
+.est-chip.free{color:var(--good);border-color:rgba(52,211,153,.3);background:var(--good-dim)}
+.est-chip .lbl{color:var(--faint)}
+
+/* ============ LIVE COST TICKER (inside working card) ============ */
+.live-cost{
+  display:flex;align-items:center;gap:14px;margin-top:11px;
+  padding:8px 12px;background:var(--panel-2);border:1px solid var(--border);border-radius:6px;
+}
+.lc-cell{display:flex;flex-direction:column;gap:1px}
+.lc-cell .k{font-size:8px;letter-spacing:.18em;color:var(--faint);text-transform:uppercase}
+.lc-cell .v{font-size:12.5px;color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+.lc-cell .v.tok{color:var(--cloud)}
+.lc-cell .v.dol{color:var(--torque)}
+.lc-cap{margin-left:auto;display:flex;align-items:center;gap:8px}
+.lc-cap .k{font-size:8px;letter-spacing:.18em;color:var(--faint);text-transform:uppercase}
+.lc-cap .v{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+.lc-bar{width:90px;height:4px;background:var(--panel-3);border-radius:2px;overflow:hidden}
+.lc-bar i{display:block;height:100%;width:0%;background:var(--torque);border-radius:2px;transition:width .25s linear}
+
+/* ============ CHECKPOINT / UNDO ============ */
+.rchip.snap{color:var(--mem);border-color:rgba(167,139,250,.35)}
+.rchip.snap svg{opacity:1}
+.undo-btn{
+  display:inline-flex;align-items:center;gap:6px;
+  font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.1em;
+  color:var(--mem);background:none;border:1px solid rgba(167,139,250,.35);border-radius:4px;
+  padding:3px 10px;cursor:pointer;transition:all .15s ease;text-transform:uppercase;
+}
+.undo-btn:hover{background:var(--mem-dim);border-color:var(--mem)}
+.task.reverted{opacity:.55}
+.task.reverted .answer-body{opacity:.6}
+.rchip.rev{color:var(--faint);border-color:var(--border);text-decoration:line-through}
+.revert-note{
+  border-top:1px solid var(--border);padding:9px 20px;background:var(--mem-dim);
+  font-size:10.5px;color:var(--mem);letter-spacing:.06em;
+  display:flex;align-items:center;gap:8px;animation:enter .2s ease both;
+}
+
+/* ============ TIERED APPROVALS ============ */
+.appr-card.tier-read{border-left-color:var(--good)}
+.appr-card.tier-spend{border-left-color:var(--torque)}
+.appr-card.tier-destructive{border-left-color:var(--bad);border-color:rgba(248,113,113,.3)}
+.tier-tag{
+  display:inline-flex;align-items:center;gap:5px;
+  font-size:8.5px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;
+  padding:2px 8px;border-radius:3px;
+}
+.tier-tag.read{color:var(--good);background:var(--good-dim)}
+.tier-tag.spend{color:var(--torque);background:var(--torque-dim)}
+.tier-tag.destructive{color:var(--bad);background:var(--bad-dim)}
+.confirm-row{display:flex;align-items:center;gap:10px;margin-top:13px;flex-wrap:wrap}
+.confirm-row .clabel{font-size:10px;color:var(--faint);letter-spacing:.06em}
+.confirm-row .clabel code{color:var(--bad);background:var(--bad-dim);padding:1px 6px;border-radius:4px;font-size:10px}
+#confirm-input{
+  background:var(--panel-2);border:1px solid rgba(248,113,113,.4);border-radius:6px;
+  color:var(--text);font-family:var(--mono);font-size:11px;padding:7px 12px;
+  width:130px;outline:none;caret-color:var(--bad);letter-spacing:.05em;
+}
+#confirm-input:focus{border-color:var(--bad);box-shadow:0 0 0 3px rgba(248,113,113,.08)}
+#confirm-input::placeholder{color:#4A505A}
+.btn.kill{background:var(--bad);border-color:var(--bad);color:#140607;opacity:.35;cursor:not-allowed}
+.btn.kill.armed{opacity:1;cursor:pointer}
+.btn.kill.armed:hover{filter:brightness(1.1);color:#140607}
+.risk-list{margin:8px 0 0 0;list-style:none}
+.risk-list li{
+  font-size:10.5px;color:var(--faint);padding:3px 0 3px 16px;position:relative;letter-spacing:.03em;
+}
+.risk-list li::before{content:"▸";position:absolute;left:2px;color:var(--bad)}
+
+/* ============ APPROVALS ============ */
+.appr-card{
+  background:var(--panel);border:1px solid var(--border);border-left:3px solid var(--torque);
+  border-radius:8px;padding:16px 18px;margin-bottom:14px;max-width:860px;
+  animation:enter .28s cubic-bezier(.22,.9,.3,1) both;
+}
+.appr-card .top{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.pill{
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:9px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;
+  padding:3px 9px;border-radius:99px;
+}
+.pill.pending{color:var(--torque);background:var(--torque-dim)}
+.pill.pending .dot{width:5px;height:5px;border-radius:50%;background:var(--torque);animation:pulse 1.4s ease-in-out infinite}
+.pill.approved{color:var(--good);background:var(--good-dim)}
+.pill.denied{color:var(--bad);background:var(--bad-dim)}
+.appr-card .what{font-size:13px;color:var(--text);font-weight:500}
+.appr-card .why{font-size:11px;color:var(--faint);margin-top:5px;letter-spacing:.02em}
+.appr-card .why code{color:var(--muted);background:var(--panel-3);padding:1px 6px;border-radius:4px;font-size:10.5px}
+.appr-actions{display:flex;gap:8px;margin-top:13px}
+.btn{
+  font-family:var(--mono);font-size:10.5px;font-weight:700;letter-spacing:.12em;
+  padding:7px 16px;border-radius:6px;cursor:pointer;transition:all .15s ease;
+  border:1px solid var(--border-strong);background:var(--panel-2);color:var(--muted);
+}
+.btn:hover{color:var(--text);border-color:#3A3F48}
+.btn.primary{background:var(--good);border-color:var(--good);color:#06110C}
+.btn.primary:hover{filter:brightness(1.1);color:#06110C}
+.btn.danger:hover{color:var(--bad);border-color:rgba(248,113,113,.4);background:var(--bad-dim)}
+.hist-label{
+  font-size:9px;letter-spacing:.2em;color:var(--faint);text-transform:uppercase;
+  margin:26px 0 10px;max-width:860px;
+}
+.empty{
+  max-width:860px;border:1px dashed var(--border-strong);border-radius:10px;
+  padding:34px 24px;text-align:center;color:var(--faint);
+}
+.empty .eico{font-size:20px;margin-bottom:10px;opacity:.6}
+.empty .et{font-size:12px;color:var(--muted);margin-bottom:4px}
+.empty .es{font-size:10.5px;letter-spacing:.04em;max-width:44ch;margin:0 auto;line-height:1.7}
+
+/* ============ MEMORY ============ */
+.mem-grid{max-width:860px;display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.mem-card{
+  background:var(--panel);border:1px solid var(--border);border-radius:8px;
+  padding:14px 16px;transition:border-color .15s ease;
+}
+.mem-card:hover{border-color:rgba(167,139,250,.4)}
+.mem-card .mt{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+.mem-card .mt .tag{font-size:9px;font-weight:700;letter-spacing:.18em;color:var(--mem);text-transform:uppercase}
+.mem-card .mt .w{margin-left:auto;font-size:9.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+.mem-card .mb{font-family:var(--sans);font-size:12.5px;color:var(--muted);line-height:1.65}
+
+@media (max-width:900px){
+  aside{display:none}
+  .view,.composer{padding-left:18px;padding-right:18px}
+}
+</style>
+<base target="_blank">
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+      <path d="M12 3 L20 7.5 V16.5 L12 21 L4 16.5 V7.5 Z" stroke="#FF9E40" stroke-width="1.4"/>
+      <path d="M12 8 L12 13 M12 13 L8.5 15.5 M12 13 L15.5 15.5" stroke="#FF9E40" stroke-width="1.6" stroke-linecap="round"/>
+      <circle cx="12" cy="7" r="1.4" fill="#FF9E40"/>
+    </svg>
+    <span class="wordmark">TORQ<em>CLAW</em></span>
+  </div>
+  <div class="conn"><span class="led"></span>CONNECTED</div>
+  <div class="live-chip" id="live-chip" title="jump to running task · phase streamed from kernel ActionStatus, elapsed from kernel LiveDuration (epoch-anchored)">
+    <span class="spin"></span>
+    <span class="ltxt" id="live-txt"><b>working</b>&nbsp;· composing answer</span>
+    <span class="ltime" id="live-time">0:00</span>
+    <span class="lsrc" id="live-src">ActionStatus</span>
+  </div>
+  <button class="refresh-btn" id="reconnect-btn" title="simulate a 2s UI reconnect — elapsed must not reset" style="border:1px solid var(--border);border-radius:5px;padding:3px 8px;font-family:var(--mono);font-size:9px;letter-spacing:.1em">
+    ⟳ reconnect
+  </button>
+  <div class="header-right">
+    <div class="budget-meter" id="budget-meter" title="reads live from kernel session state">
+      <span class="sync-dot" id="budget-sync"></span>
+      <span class="label">Session budget</span>
+      <span class="meter"><i id="budget-fill" style="width:34%"></i></span>
+      <span class="val"><b id="budget-val">$3.42</b> / $10.00</span>
+      <span class="sync-line">
+        <button class="refresh-btn" id="budget-refresh" title="refresh from runtime">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.6-6.3M21 4v5h-5"/></svg>
+        </button>
+        <span class="synced-at" id="budget-synced">synced 0:04</span>
+      </span>
+    </div>
+    <span class="kernel" title="reported by kernel process, not config file">hermes kernel · v0.9.4</span>
+  </div>
+</header>
+
+<div class="shell">
+  <aside>
+    <div class="nav">
+      <div class="nav-label">Console</div>
+      <div class="nav-item active" data-view="tasks">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h10M4 18h13"/></svg>
+        Task Stream
+      </div>
+      <div class="nav-item" data-view="approvals">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/></svg>
+        Approvals
+        <span class="badge">3</span>
+      </div>
+      <div class="nav-item" data-view="memory">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4"/></svg>
+        Memory
+      </div>
+    </div>
+    <div class="sessions">
+      <div class="nav-label">Sessions</div>
+      <div class="session current">
+        <div class="t">cost-audit → q3-infra</div>
+        <div class="m">NOW · 4 TASKS · CLOUD</div>
+      </div>
+      <div class="session">
+        <div class="t">vendor-eval / llama-4-scout</div>
+        <div class="m">2H AGO · 11 TASKS · LOCAL</div>
+      </div>
+      <div class="session">
+        <div class="t">weekly spend recap</div>
+        <div class="m">YESTERDAY · 3 TASKS · CLOUD</div>
+      </div>
+    </div>
+    <div class="side-foot">
+      <div class="row"><span>EPISODES</span><b>1,284</b></div>
+      <div class="row" style="margin-top:4px"><span>UPTIME</span><b>6d 14h</b></div>
+    </div>
+  </aside>
+
+  <main>
+    <!-- ============ TASK STREAM ============ -->
+    <section class="view active" id="view-tasks">
+      <div class="stream" id="stream">
+        <div class="view-head">
+          <h1>Task Stream</h1>
+          <span class="sub">session: cost-audit → q3-infra · 4 tasks</span>
+        </div>
+
+        <!-- completed task 1 -->
+        <article class="task">
+          <div class="task-head">
+            <div class="avatar">YOU</div>
+            <div class="task-prompt">compare our cloud vs local inference cost for the last 30 days, flag anything weird</div>
+            <span class="route-chip cloud"><span class="dot"></span>cloud</span>
+            <span class="task-time">14:02:11</span>
+          </div>
+          <div class="steps">
+            <button class="steps-toggle"><span class="chev">▶</span>6 STEPS · hermes kernel · memory recall</button>
+            <div class="steps-body">
+              <div class="step-line"><span class="st">14:02:11</span><span class="tag kernel">KERNEL</span><span>accepted task c99889cc · route=cloud · est. $0.004</span></div>
+              <div class="step-line"><span class="st">14:02:11</span><span class="tag mem">MEMORY</span><span>recalled 3 episodes · vendor-pricing, may-audit, budget-cap</span></div>
+              <div class="step-line"><span class="st">14:02:12</span><span class="tag sys">SYS</span><span>stub mode off · live billing adapter attached</span></div>
+              <div class="step-line"><span class="st">14:02:12</span><span class="tag sys">SYS</span><span>pulling usage ledger · 30d window · 41,202 calls</span></div>
+              <div class="step-line"><span class="st">14:02:13</span><span class="tag kernel">KERNEL</span><span>tricky to size up — splitting by model class</span></div>
+              <div class="step-line"><span class="st">14:02:13</span><span class="tag kernel">KERNEL</span><span>composing answer · 263 chars context headroom</span></div>
+            </div>
+          </div>
+          <div class="answer">
+            <div class="answer-tag">Answer</div>
+            <div class="answer-body">
+              Cloud ran <b><span class="num">$212.40</span></b> vs an estimated <b><span class="num">$61.00</span></b> local — a <span class="hl">3.5× premium</span>, mostly from long-context calls on the 12th–14th.
+              <ul>
+                <li><b>Weird flag:</b> 3 retries billed at full price on May 13 (~<span class="num">$18.20</span>) — looks like a timeout loop, worth a refund ticket.</li>
+                <li>Moving batch summarization local would cut ~<span class="num">$94</span>/mo at current volume.</li>
+              </ul>
+            </div>
+          </div>
+          <div class="receipt">
+            <span class="rchip ok"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 12l6 6L20 6"/></svg>done</span>
+            <span class="rchip">$0.004</span>
+            <span class="rchip">2.1s</span>
+            <span class="rchip">41,202 calls scanned</span>
+            <span class="rchip">3 episodes used</span>
+            <button class="ghost-btn">view context used ↗</button>
+          </div>
+        </article>
+
+        <!-- completed task 2 -->
+        <article class="task">
+          <div class="task-head">
+            <div class="avatar">YOU</div>
+            <div class="task-prompt">draft the refund ticket for those May 13 retries</div>
+            <span class="route-chip local"><span class="dot"></span>local</span>
+            <span class="task-time">14:04:37</span>
+          </div>
+          <div class="steps">
+            <button class="steps-toggle"><span class="chev">▶</span>3 STEPS · hermes kernel</button>
+            <div class="steps-body">
+              <div class="step-line"><span class="st">14:04:37</span><span class="tag kernel">KERNEL</span><span>accepted task e1b207aa · route=local · est. $0.000</span></div>
+              <div class="step-line"><span class="st">14:04:37</span><span class="tag mem">MEMORY</span><span>recalled 1 episode · may-13-timeout-loop</span></div>
+              <div class="step-line"><span class="st">14:04:38</span><span class="tag kernel">KERNEL</span><span>composing answer</span></div>
+            </div>
+          </div>
+          <div class="answer">
+            <div class="answer-tag">Answer</div>
+            <div class="answer-body">
+              Draft ready — <code>ticket-2026-0513-retries.md</code>. It cites the three call IDs, the 30s timeout signature, and requests <b><span class="num">$18.20</span></b> credit. Routing it local kept this one <b>free</b>; nothing sensitive left the machine.
+            </div>
+          </div>
+          <div class="receipt">
+            <span class="rchip ok"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 12l6 6L20 6"/></svg>done</span>
+            <span class="rchip">$0.000</span>
+            <span class="rchip">1.4s</span>
+            <span class="rchip">1 episode used</span>
+            <span class="rchip snap"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3.5"/></svg>snapshot b2f1</span>
+            <button class="undo-btn" onclick="undoTask(this)">↩ undo</button>
+            <button class="ghost-btn">view context used ↗</button>
+          </div>
+        </article>
+
+        <!-- working task -->
+        <article class="task" id="working-task">
+          <div class="task-head">
+            <div class="avatar">YOU</div>
+            <div class="task-prompt">project q4 spend if we shift batch jobs local — needs the pricing sheet, approve file access</div>
+            <span class="route-chip cloud"><span class="dot"></span>cloud</span>
+            <span class="task-time">14:06:02</span>
+          </div>
+          <div class="working">
+            <div class="work-row">
+              <span class="spin"></span>
+              <span class="seed-phase">working… waiting on file-access approval</span>
+              <span class="elapsed" id="elapsed">0:04</span>
+            </div>
+            <div class="prog"><i></i></div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- ============ APPROVALS ============ -->
+    <section class="view" id="view-approvals">
+      <div class="view-head">
+        <h1>Approvals</h1>
+        <span class="sub">3 pending · kernel pauses until you decide</span>
+      </div>
+      <div class="appr-card tier-destructive" id="appr-3">
+        <div class="top">
+          <span class="pill pending"><span class="dot"></span>pending</span>
+          <span class="tier-tag destructive">destructive</span>
+          <span style="font-size:10px;color:var(--faint)">14:07:41 · task 9c2e5a1b</span>
+        </div>
+        <div class="what">Delete <b>147 cached render files</b> in <b>~/projects/landing/dist</b></div>
+        <div class="why">Kernel wants to free 2.3 GB before the rebuild. This is <b>irreversible</b> — checkpoint covers tracked files only.</div>
+        <ul class="risk-list">
+          <li>147 files will be permanently removed</li>
+          <li>dist/ is gitignored — not covered by snapshot</li>
+          <li>a rebuild will regenerate ~2.1 GB of it</li>
+        </ul>
+        <div class="confirm-row">
+          <span class="clabel">type <code>DELETE</code> to arm:</span>
+          <input class="confirm-type" data-target="appr-3" placeholder="DELETE" autocomplete="off" spellcheck="false">
+          <button class="btn kill" data-target="appr-3" disabled>Execute</button>
+          <button class="btn danger" onclick="decide('appr-3',false)">Deny</button>
+        </div>
+      </div>
+      <div class="appr-card tier-read" id="appr-1">
+        <div class="top">
+          <span class="pill pending"><span class="dot"></span>pending</span>
+          <span class="tier-tag read">read-only</span>
+          <span style="font-size:10px;color:var(--faint)">14:06:02 · task f44c19d0</span>
+        </div>
+        <div class="what">Read <b>~/finance/q3-pricing-sheet.xlsx</b></div>
+        <div class="why">Requested by cloud model to ground the Q4 projection. Scope: <code>read-only</code> · this file only · expires after task.</div>
+        <div class="appr-actions">
+          <button class="btn primary" onclick="decide('appr-1',true)">Approve</button>
+          <button class="btn danger" onclick="decide('appr-1',false)">Deny</button>
+        </div>
+      </div>
+      <div class="appr-card tier-spend" id="appr-2">
+        <div class="top">
+          <span class="pill pending"><span class="dot"></span>pending</span>
+          <span class="tier-tag spend">spend</span>
+          <span style="font-size:10px;color:var(--faint)">14:06:03 · task f44c19d0</span>
+        </div>
+        <div class="what">Spend <b>$0.40</b> over per-task cap on long-context projection</div>
+        <div class="why">Task estimate <code>$0.90</code> exceeds the <code>$0.50</code> cap you set for cloud calls.</div>
+        <div class="appr-actions">
+          <button class="btn primary" onclick="decide('appr-2',true)">Approve</button>
+          <button class="btn danger" onclick="decide('appr-2',false)">Deny</button>
+        </div>
+      </div>
+      <div class="hist-label">History</div>
+      <div class="empty" id="appr-empty">
+        <div class="eico">◌</div>
+        <div class="et">No approval history yet</div>
+        <div class="es">When the kernel asks for file access, spend-cap overrides, or external calls, your decisions will be logged here.</div>
+      </div>
+    </section>
+
+    <!-- ============ MEMORY ============ -->
+    <section class="view" id="view-memory">
+      <div class="view-head">
+        <h1>Memory</h1>
+        <span class="sub">1,284 episodes · recalled automatically when relevant</span>
+      </div>
+      <div class="mem-grid">
+        <div class="mem-card">
+          <div class="mt"><span class="tag">vendor-pricing</span><span class="w">w 0.92</span></div>
+          <div class="mb">Current per-token rates for the three cloud providers, refreshed weekly. Drives every cost comparison answer.</div>
+        </div>
+        <div class="mem-card">
+          <div class="mt"><span class="tag">may-13-timeout-loop</span><span class="w">w 0.88</span></div>
+          <div class="mb">Three full-price retries with a 30s timeout signature. Flagged for refund; ticket drafted in session cost-audit.</div>
+        </div>
+        <div class="mem-card">
+          <div class="mt"><span class="tag">budget-cap</span><span class="w">w 0.95</span></div>
+          <div class="mb">User preference: $0.50 per-task cloud cap, $10 session budget. Overrides always require explicit approval.</div>
+        </div>
+        <div class="mem-card">
+          <div class="mt"><span class="tag">batch-shift-plan</span><span class="w">w 0.71</span></div>
+          <div class="mb">Ongoing plan to move batch summarization to the local model; estimated saving $94/mo at current volume.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ COMPOSER ============ -->
+    <div class="composer">
+      <div class="composer-inner">
+        <div class="composer-box">
+          <div class="composer-input-row">
+            <button class="clip-btn" id="clip" title="attach a file — pdf, image, doc…">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+              </svg>
+            </button>
+            <input type="file" id="filepick" multiple hidden
+              accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.svg,.doc,.docx,.txt,.md,.csv,.xlsx,.pptx,.zip">
+            <span class="prompt-sig">❯</span>
+            <input id="cmdline" placeholder="ask torqclaw anything…" autocomplete="off" spellcheck="false">
+            <button class="send-btn" id="send">RUN ⏎</button>
+          </div>
+          <div class="attach-row" id="attach-row"></div>
+          <div class="cloud-warn" id="cloud-warn">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+            <span id="cloud-warn-txt">attachments will be uploaded with this task — route is cloud</span>
+          </div>
+          <div class="composer-chips">
+            <span class="cchip cloud" id="route-chip" title="click to switch route"><span class="dot"></span><span id="route-label">route: cloud</span> ▾</span>
+            <span class="cchip"><span style="color:var(--faint)">model:</span>&nbsp;hermes-3-70b</span>
+            <span class="cchip budget-ok"><span class="dot"></span>under budget</span>
+            <span class="cchip"><span style="color:var(--faint)">memory:</span>&nbsp;<span style="color:var(--mem)">on</span></span>
+            <span class="est-chip" id="est-chip"><span class="lbl">est</span>&nbsp;<span id="est-val">~$0.00</span></span>
+            <span class="khint"><kbd>⌘K</kbd> commands · <kbd>↑</kbd> history</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+/* ---- nav switching ---- */
+document.querySelectorAll('.nav-item').forEach(item=>{
+  item.addEventListener('click',()=>{
+    document.querySelectorAll('.nav-item').forEach(i=>i.classList.remove('active'));
+    document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+    item.classList.add('active');
+    document.getElementById('view-'+item.dataset.view).classList.add('active');
+  });
+});
+
+/* ---- collapsible steps ---- */
+document.addEventListener('click',e=>{
+  const t=e.target.closest('.steps-toggle');
+  if(t) t.parentElement.classList.toggle('open');
+});
+
+/* ---- approvals demo ---- */
+function decide(id,ok){
+  const card=document.getElementById(id);
+  const pill=card.querySelector('.pill');
+  pill.className='pill '+(ok?'approved':'denied');
+  pill.innerHTML=(ok?'✓ approved':'✕ denied');
+  card.style.borderLeftColor=ok?'var(--good)':'var(--bad)';
+  const acts=card.querySelector('.appr-actions');
+  if(acts) acts.remove();
+  const crow=card.querySelector('.confirm-row');
+  if(crow) crow.remove();
+  const badge=document.querySelector('.badge');
+  const pend=document.querySelectorAll('.pill.pending').length;
+  if(pend===0&&badge) badge.remove(); else if(badge) badge.textContent=pend;
+}
+
+/* type-to-confirm for destructive tier */
+document.querySelectorAll('.confirm-type').forEach(inp=>{
+  inp.addEventListener('input',()=>{
+    const btn=document.querySelector('.kill[data-target="'+inp.dataset.target+'"]');
+    const armed=inp.value.trim()==='DELETE';
+    btn.disabled=!armed;
+    btn.classList.toggle('armed',armed);
+  });
+});
+document.querySelectorAll('.btn.kill').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    if(!btn.disabled) decide(btn.dataset.target,true);
+  });
+});
+
+/* ---- checkpoint / undo ---- */
+function undoTask(btn){
+  const card=btn.closest('.task');
+  if(card.classList.contains('reverted')) return;
+  card.classList.add('reverted');
+  const snap=card.querySelector('.rchip.snap');
+  if(snap){snap.classList.add('rev');}
+  const done=card.querySelector('.rchip.ok');
+  if(done){done.classList.remove('ok');done.classList.add('rev');done.innerHTML='reverted';}
+  btn.remove();
+  const note=document.createElement('div');
+  note.className='revert-note';
+  note.innerHTML='↩ restored checkpoint <b>snap-b2f1</b> — <code style="background:var(--panel-3);padding:1px 6px;border-radius:4px">ticket-2026-0513-retries.md</code> removed, workspace back to pre-task state';
+  card.appendChild(note);
+}
+
+/* ---- elapsed ticker on seed working task + global liveness chip ----
+   Elapsed is anchored to the task's real start epoch (kernel LiveDuration pattern),
+   NOT component mount — so a UI reconnect re-anchors to wall-clock instead of lying. */
+const liveChip=document.getElementById('live-chip');
+const liveTxt=document.getElementById('live-txt');
+const liveTime=document.getElementById('live-time');
+const liveSrc=document.getElementById('live-src');
+liveChip.classList.add('show');
+function setLive(phase,stuck,src){
+  liveTxt.innerHTML=(stuck?'<b>no output for 30s+</b>&nbsp;· ':'<b>working</b>&nbsp;· ')+phase;
+  liveChip.classList.toggle('stuck',!!stuck);
+  if(liveSrc&&src) liveSrc.textContent=src;
+}
+/* seed task started 4s before page load — epoch, not a counter */
+const seedStartEpoch=Date.now()-4000;
+let secs=4;
+setLive('waiting on file-access approval',false,'ActionStatus · turn f44c19d0');
+setInterval(()=>{
+  secs=Math.round((Date.now()-seedStartEpoch)/1000); /* re-anchored every tick */
+  const mm=Math.floor(secs/60)+':'+String(secs%60).padStart(2,'0');
+  const el=document.getElementById('elapsed');
+  if(el) el.textContent=mm;
+  liveTime.textContent=mm;
+  /* honesty demo: stuck state instead of a forever-shimmer */
+  if(secs===30) setLive('file-access approval — still waiting on you',true);
+},1000);
+liveChip.addEventListener('click',()=>{
+  document.querySelector('[data-view="tasks"]').click();
+  const wt=document.getElementById('working-task');
+  if(wt) wt.scrollIntoView({behavior:'smooth',block:'center'});
+});
+
+/* ---- reconnect simulation: freeze UI 2s, then prove the epoch anchor ---- */
+function simulateReconnect(){
+  const chip=document.getElementById('live-chip');
+  chip.style.transition='opacity .2s ease';
+  chip.style.opacity='0';
+  const conn=document.querySelector('.conn');
+  const oldConn=conn.innerHTML;
+  conn.innerHTML='<span class="led" style="background:var(--torque);box-shadow:0 0 8px var(--torque)"></span><span style="color:var(--torque)">RECONNECTING…</span>';
+  setTimeout(()=>{
+    conn.innerHTML=oldConn;
+    chip.style.opacity='1';
+    /* elapsed re-anchors from seedStartEpoch on the very next tick — no reset to 0:00 */
+    const note=document.createElement('span');
+    note.className='rchip';note.style.cssText='color:var(--good);border-color:rgba(52,211,153,.3)';
+    note.textContent='clock re-anchored ✓';
+    chip.parentElement.insertBefore(note,chip.nextSibling);
+    setTimeout(()=>note.remove(),2600);
+  },2000);
+}
+document.getElementById('reconnect-btn').addEventListener('click',simulateReconnect);
+
+/* ---- runtime-true sync state on header budget ---- */
+let syncAgo=4;
+const syncDot=document.getElementById('budget-sync');
+const syncLbl=document.getElementById('budget-synced');
+setInterval(()=>{
+  syncAgo++;
+  syncLbl.textContent='synced '+Math.floor(syncAgo/60)+':'+String(syncAgo%60).padStart(2,'0');
+  syncDot.classList.toggle('stale',syncAgo>=30); // amber + pulsing = stale
+},1000);
+document.getElementById('budget-refresh').addEventListener('click',function(){
+  this.classList.add('spinning');
+  setTimeout(()=>{
+    this.classList.remove('spinning');
+    syncAgo=0;
+    syncLbl.textContent='synced just now';
+    syncDot.classList.remove('stale');
+  },700);
+});
+
+/* ---- route toggle ---- */
+let route='cloud';
+document.getElementById('route-chip').addEventListener('click',()=>{
+  route=route==='cloud'?'local':'cloud';
+  const chip=document.getElementById('route-chip');
+  chip.className='cchip '+route;
+  document.getElementById('route-label').textContent='route: '+route;
+  updateCloudWarn();
+});
+
+/* ---- attachments ---- */
+const filepick=document.getElementById('filepick');
+const attachRow=document.getElementById('attach-row');
+const composerBox=document.querySelector('.composer-box');
+let files=[]; // {name,size,kind,thumb}
+
+function kindOf(name,type){
+  const ext=(name.split('.').pop()||'').toLowerCase();
+  if(ext==='pdf') return 'pdf';
+  if(['png','jpg','jpeg','gif','webp','svg'].includes(ext)||(type||'').startsWith('image/')) return 'img';
+  if(['doc','docx','txt','md','csv','xlsx','pptx'].includes(ext)) return 'doc';
+  return 'gen';
+}
+function fmtSize(b){
+  if(b<1024) return b+' B';
+  if(b<1048576) return (b/1024).toFixed(1)+' KB';
+  return (b/1048576).toFixed(1)+' MB';
+}
+function updateCloudWarn(){
+  const w=document.getElementById('cloud-warn');
+  const on=files.length>0&&route==='cloud';
+  w.classList.toggle('show',on);
+  if(on) document.getElementById('cloud-warn-txt').textContent=
+    files.length+' attachment'+(files.length>1?'s':'')+' will be uploaded with this task — route is cloud';
+}
+function renderAttachments(){
+  attachRow.innerHTML='';
+  files.forEach((f,i)=>{
+    const el=document.createElement('span');
+    el.className='attach';
+    const label={pdf:'PDF',img:'IMG',doc:'DOC',gen:'FILE'}[f.kind];
+    el.innerHTML=`
+      <span class="aico ${f.kind}">${f.thumb?'<img src="'+f.thumb+'">':label}</span>
+      <span class="ameta">
+        <span class="aname" title=""></span>
+        <span class="asize">${fmtSize(f.size)}</span>
+      </span>
+      <button class="ax" title="remove">✕</button>`;
+    el.querySelector('.aname').textContent=f.name;
+    el.querySelector('.aname').title=f.name;
+    el.querySelector('.ameta').style.display='flex';
+    el.querySelector('.ameta').style.flexDirection='column';
+    el.querySelector('.ameta').style.lineHeight='1.3';
+    el.querySelector('.ax').addEventListener('click',()=>{
+      files.splice(i,1);renderAttachments();
+    });
+    attachRow.appendChild(el);
+  });
+  attachRow.classList.toggle('has-files',files.length>0);
+  updateCloudWarn();
+}
+function addFiles(list){
+  [...list].forEach(file=>{
+    const f={name:file.name,size:file.size,kind:kindOf(file.name,file.type),thumb:null};
+    if(f.kind==='img'){
+      const rd=new FileReader();
+      rd.onload=e=>{f.thumb=e.target.result;renderAttachments();};
+      rd.readAsDataURL(file);
+    }
+    files.push(f);
+  });
+  renderAttachments();
+}
+document.getElementById('clip').addEventListener('click',()=>filepick.click());
+filepick.addEventListener('change',()=>{addFiles(filepick.files);filepick.value='';});
+['dragenter','dragover'].forEach(ev=>composerBox.addEventListener(ev,e=>{
+  e.preventDefault();composerBox.classList.add('dragging');
+}));
+['dragleave','drop'].forEach(ev=>composerBox.addEventListener(ev,e=>{
+  e.preventDefault();composerBox.classList.remove('dragging');
+}));
+composerBox.addEventListener('drop',e=>{if(e.dataTransfer.files.length)addFiles(e.dataTransfer.files)});
+
+/* ---- composer: simulated task lifecycle ---- */
+const input=document.getElementById('cmdline');
+const stream=document.getElementById('stream');
+function now(){const d=new Date();return [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,'0')).join(':')}
+
+/* session spend tracker (mock of runtime state) */
+let sessionSpend=3.42;
+
+/* pre-flight estimate: heuristic mock of kernel sizing */
+function estimate(){
+  const q=input.value.trim();
+  const chip=document.getElementById('est-chip');
+  const val=document.getElementById('est-val');
+  if(!q){chip.classList.remove('show');return 0;}
+  let tok=Math.round(q.length*2.4+files.reduce((a,f)=>a+f.size/40,0));
+  tok=Math.max(tok,Math.round(q.length*1.8));
+  let cost;
+  if(route==='local'){cost=0;}
+  else{
+    cost=tok/1000*0.0021+files.length*0.0012;
+    cost=Math.max(cost,0.0012);
+  }
+  if(route==='local'){
+    chip.classList.add('show','free');
+    val.textContent='$0.00 · local';
+  }else{
+    chip.classList.add('show');
+    chip.classList.toggle('free',false);
+    val.textContent='~$'+cost.toFixed(3);
+  }
+  return cost;
+}
+input.addEventListener('input',estimate);
+
+function run(){
+  const q=input.value.trim();
+  if(!q) return;
+  const estCost=estimate()||(route==='cloud'?0.002:0);
+  input.value='';
+  document.getElementById('est-chip').classList.remove('show');
+  const t=now();
+  const card=document.createElement('article');
+  card.className='task';
+  card.innerHTML=`
+    <div class="task-head">
+      <div class="avatar">YOU</div>
+      <div class="task-prompt"></div>
+      <span class="route-chip ${route}"><span class="dot"></span>${route}</span>
+      <span class="task-time">${t}</span>
+    </div>
+    <div class="working">
+      <div class="work-row">
+        <span class="spin"></span>
+        <span class="wtxt">working… kernel accepted task</span>
+        <span class="elapsed">0:00</span>
+      </div>
+      <div class="prog"><i></i></div>
+      <div class="live-cost">
+        <div class="lc-cell"><span class="k">tokens</span><span class="v tok">0</span></div>
+        <div class="lc-cell"><span class="k">cost</span><span class="v dol">$0.000</span></div>
+        <div class="lc-cap">
+          <span class="k">est&nbsp;cap</span>
+          <span class="lc-bar"><i></i></span>
+          <span class="v">${route==='cloud'?'$'+estCost.toFixed(3):'free · local'}</span>
+        </div>
+      </div>
+    </div>`;
+  card.querySelector('.task-prompt').textContent=q;
+  const attached=files.slice();
+  if(attached.length){
+    const fr=document.createElement('div');
+    fr.className='task-files';
+    attached.forEach(f=>{
+      const s=document.createElement('span');
+      s.className='tfile';
+      s.innerHTML='<span class="fdot '+f.kind+'"></span>';
+      s.appendChild(document.createTextNode(f.name+' · '+fmtSize(f.size)));
+      fr.appendChild(s);
+    });
+    card.appendChild(fr);
+  }
+  files=[];renderAttachments();
+  stream.appendChild(card);
+  card.scrollIntoView({behavior:'smooth',block:'end'});
+  const phases=[];
+  if(attached.length&&route==='cloud') phases.push('working… uploading '+attached.length+' attachment'+(attached.length>1?'s':''));
+  if(attached.length) phases.push('working… parsing '+(attached.length===1?attached[0].name:attached.length+' files'));
+  phases.push('working… recalling memory (2 episodes)','working… composing answer');
+  let p=0,s=0;
+  const taskStartEpoch=Date.now(); /* kernel LiveDuration anchor — mount-independent */
+  const taskId=Math.random().toString(16).slice(2,8);
+  const tick=setInterval(()=>{
+    s=Math.round((Date.now()-taskStartEpoch)/100); /* epoch-derived, not incremented */
+    const mm=Math.floor(s/10)+':'+String(s%10*6).padStart(2,'0');
+    const e=card.querySelector('.elapsed');
+    if(e) e.textContent=mm;
+    /* global liveness chip follows this task, labeled with its kernel source */
+    const phaseEl=card.querySelector('.wtxt');
+    if(phaseEl){setLive(phaseEl.textContent.replace('working… ',''),false,'ActionStatus · turn '+taskId);liveTime.textContent=mm;}
+  },100);
+  /* live cost ticker: ramps tokens/cost toward the SAME estimate shown pre-flight */
+  const totalTicks=(phases.length+1)*9; // phases every 900ms, tick every 100ms
+  let toks=0;
+  const tokTarget=Math.max(120,Math.round(estCost*1000/0.0021*0.97)); // lands just under est cap
+  const ctick=setInterval(()=>{
+    toks+=Math.max(6,Math.round(tokTarget/totalTicks*(0.6+Math.random()*0.9)));
+    if(toks>tokTarget) toks=tokTarget;
+    const cost=route==='cloud'?toks/1000*0.0021:0;
+    const te=card.querySelector('.lc-cell .v.tok');
+    const de=card.querySelector('.lc-cell .v.dol');
+    const bar=card.querySelector('.lc-bar i');
+    if(te) te.textContent=toks.toLocaleString();
+    if(de) de.textContent='$'+cost.toFixed(4);
+    if(bar&&estCost>0) bar.style.width=Math.min(100,cost/estCost*100)+'%';
+    /* session budget meter climbs with spend — runtime-true, not static */
+    if(route==='cloud'){
+      sessionSpend+=cost*0.02;
+      document.getElementById('budget-val').textContent='$'+sessionSpend.toFixed(2);
+      document.getElementById('budget-fill').style.width=Math.min(100,sessionSpend/10*100)+'%';
+    }
+  },100);
+  const ph=setInterval(()=>{
+    p++;
+    if(p<phases.length){card.querySelector('.wtxt').textContent=phases[p];}
+    else{
+      clearInterval(ph);clearInterval(tick);clearInterval(ctick);
+      liveChip.classList.remove('show');liveChip.classList.remove('stuck');
+      card.querySelector('.working').remove();
+      const ans=document.createElement('div');
+      ans.className='answer';
+      ans.innerHTML=`<div class="answer-tag">Answer</div>
+        <div class="answer-body">This is a <b>live concept mockup</b> — in the real console, the kernel's response renders here as the visual hero, with the plumbing collapsed above and the receipt below. The point: <span class="hl">your eye lands on the answer first</span>, every time.</div>`;
+      card.appendChild(ans);
+      const snapId=Math.random().toString(16).slice(2,6);
+      const rec=document.createElement('div');
+      rec.className='receipt';
+      rec.innerHTML=`<span class="rchip ok"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 12l6 6L20 6"/></svg>done</span>
+        <span class="rchip">${route==='cloud'?'$0.003':'$0.000'}</span>
+        <span class="rchip">1.8s</span>
+        ${attached.length?`<span class="rchip">${attached.length} file${attached.length>1?'s':''} parsed</span>`:''}
+        <span class="rchip">2 episodes used</span>
+        <span class="rchip snap"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3.5"/></svg>snapshot ${snapId}</span>
+        <button class="undo-btn" onclick="undoTask(this)">↩ undo</button>
+        <button class="ghost-btn">view context used ↗</button>`;
+      card.appendChild(rec);
+      ans.scrollIntoView({behavior:'smooth',block:'end'});
+    }
+  },900);
+}
+document.getElementById('send').addEventListener('click',run);
+input.addEventListener('keydown',e=>{if(e.key==='Enter')run()});
+</script>
+</body>
+</html>
