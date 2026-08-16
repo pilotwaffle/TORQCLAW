@@ -1,0 +1,125 @@
+{
+  "schemaVersion": "torqclaw.profile-conformance-golden/v1",
+  "baseCommit": "9324cbc6e195807ff6849c6b2d646e745e66fa0d",
+  "profiles": {
+    "read_only": {
+      "profileId": "read_only",
+      "profileVersion": 1,
+      "allowedNamespaces": ["*"],
+      "allowedCapabilities": ["read"],
+      "allowedSideEffects": ["none"],
+      "allowedTiers": ["LOCAL_EDGE"],
+      "scopes": { "path": "none", "network": "none" },
+      "approvalRequirements": { "write": false, "exec": false, "send": false }
+    },
+    "workspace_write": {
+      "profileId": "workspace_write",
+      "profileVersion": 1,
+      "allowedNamespaces": ["filesystem"],
+      "allowedCapabilities": ["read", "write"],
+      "allowedSideEffects": ["none", "filesystem_write"],
+      "allowedTiers": ["LOCAL_EDGE", "FRONTIER"],
+      "scopes": { "path": "workspace", "network": "none" },
+      "approvalRequirements": { "write": true, "exec": false, "send": false }
+    },
+    "browser_research": {
+      "profileId": "browser_research",
+      "profileVersion": 1,
+      "allowedNamespaces": ["browser", "playwright", "websearch"],
+      "allowedCapabilities": ["read"],
+      "allowedSideEffects": ["none"],
+      "allowedTiers": ["LOCAL_EDGE", "FRONTIER"],
+      "scopes": { "path": "none", "network": "browser" },
+      "approvalRequirements": { "write": false, "exec": false, "send": false }
+    },
+    "terminal_power": {
+      "profileId": "terminal_power",
+      "profileVersion": 1,
+      "allowedNamespaces": ["desktop_commander", "sandbox", "shell", "terminal"],
+      "allowedCapabilities": ["read", "write", "exec"],
+      "allowedSideEffects": ["none", "process"],
+      "allowedTiers": ["LOCAL_EDGE", "FRONTIER"],
+      "scopes": { "path": "configured", "network": "configured" },
+      "approvalRequirements": { "write": true, "exec": true, "send": false }
+    }
+  },
+  "classifierFixtures": [
+    {
+      "id": "config-read",
+      "rawToolId": "read_file",
+      "condition": { "configCapability": "read" },
+      "classifierOutput": "read",
+      "scopeMode": "read",
+      "sideEffect": "none",
+      "purpose": "P1 explicit config is the only operator-controlled read path"
+    },
+    {
+      "id": "annotation-read",
+      "rawToolId": "snapshot",
+      "condition": { "annotations": { "readOnlyHint": true } },
+      "classifierOutput": "read",
+      "scopeMode": "read",
+      "sideEffect": "none",
+      "purpose": "P3 readOnlyHint is the other read path"
+    },
+    {
+      "id": "destructive-write",
+      "rawToolId": "delete_file",
+      "condition": {},
+      "classifierOutput": "write",
+      "scopeMode": "write",
+      "sideEffect": "filesystem_write",
+      "purpose": "P4 destructive token remains write-class"
+    },
+    {
+      "id": "exec-token",
+      "rawToolId": "run_command",
+      "condition": {},
+      "classifierOutput": "exec",
+      "scopeMode": "write",
+      "sideEffect": "process",
+      "purpose": "P4 execution token reaches exec"
+    },
+    {
+      "id": "send-token",
+      "rawToolId": "send_email",
+      "condition": {},
+      "classifierOutput": "send",
+      "scopeMode": "write",
+      "sideEffect": "network_send",
+      "purpose": "P4 send token reaches send"
+    },
+    {
+      "id": "unknown-fail-closed",
+      "rawToolId": "frobnicate",
+      "condition": {},
+      "classifierOutput": "write",
+      "scopeMode": "write",
+      "sideEffect": "process",
+      "purpose": "P6 unknown never means read"
+    },
+    {
+      "id": "browser-mutation",
+      "rawToolId": "click",
+      "condition": { "configCapability": "write" },
+      "classifierOutput": "write",
+      "scopeMode": "write",
+      "sideEffect": "browser_mutation",
+      "purpose": "browser provenance derives browser mutation"
+    },
+    {
+      "id": "playwright-mutation",
+      "rawToolId": "fill",
+      "condition": { "configCapability": "write" },
+      "classifierOutput": "write",
+      "scopeMode": "write",
+      "sideEffect": "browser_mutation",
+      "purpose": "playwright provenance derives browser mutation"
+    }
+  ],
+  "fixedPolicyVector": {
+    "label": "read_only-live-module-v1",
+    "canonicalPreimage": "{\"allowedOperationIds\":[\"browser__snapshot\",\"filesystem__read_file\",\"playwright__snapshot\",\"shell__inspect\",\"websearch__search\"],\"allowedTiers\":[\"LOCAL_EDGE\"],\"approvalRequirements\":{\"exec\":false,\"send\":false,\"write\":false},\"capabilityClasses\":[\"read\"],\"operationApprovals\":{\"browser__snapshot\":false,\"filesystem__read_file\":false,\"playwright__snapshot\":false,\"shell__inspect\":false,\"websearch__search\":false},\"operationCapabilities\":{\"browser__snapshot\":\"read\",\"filesystem__read_file\":\"read\",\"playwright__snapshot\":\"read\",\"shell__inspect\":\"read\",\"websearch__search\":\"read\"},\"operationSideEffects\":{\"browser__snapshot\":\"none\",\"filesystem__read_file\":\"none\",\"playwright__snapshot\":\"none\",\"shell__inspect\":\"none\",\"websearch__search\":\"none\"},\"profileId\":\"read_only\",\"profileVersion\":1,\"schemaVersion\":\"torqclaw.effective-profile/v1\",\"scopes\":{\"network\":\"none\",\"path\":\"none\"},\"sideEffectClasses\":[\"none\"],\"toolRegistryVersion\":\"torqclaw.tools/v1\"}",
+    "expectedSha256": "3ef1dd5f3fdec47f77830e64d1e2eb2da624a434824b0fb3c5645af2996e67a5"
+  }
+}
