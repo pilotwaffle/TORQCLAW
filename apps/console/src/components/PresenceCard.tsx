@@ -23,7 +23,7 @@ export default function PresenceCard({
 }) {
   const hasMeta = tier !== null || lock !== null || budgetRemaining !== null;
   return (
-    <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[10px] text-neutral-500">
+    <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[10px] text-faint">
       {turnStartMs !== null && (
         <span className="inline-flex items-center gap-1.5">
           <span className="h-1 w-1 rounded-full bg-torque" aria-hidden />
@@ -34,18 +34,18 @@ export default function PresenceCard({
         <>
           {tier && (
             <span>
-              tier: <span className="text-neutral-300">{tier}</span>
+              tier: <span className="text-muted">{tier}</span>
             </span>
           )}
           {lock && (
             <span>
-              lock: <span className="text-neutral-300">{lock}</span>
+              lock: <span className="text-muted">{lock}</span>
             </span>
           )}
           {budgetRemaining !== null && (
             <span>
               budget left:{' '}
-              <span className="text-neutral-300">
+              <span className="text-muted">
                 ${budgetRemaining.toFixed(2)}
               </span>
             </span>

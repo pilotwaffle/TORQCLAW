@@ -617,7 +617,7 @@ export default function TorqTerminal() {
       : '0%';
 
   return (
-    <section className="flex h-screen flex-col bg-bg font-mono text-sm text-neutral-300">
+    <section className="flex h-screen flex-col bg-bg font-mono text-[13px] leading-[1.6] text-muted">
       {/* PRD-UI-1 §2 header: 52px, --panel, bottom hairline. */}
       <header className="flex h-[52px] shrink-0 items-center gap-3.5 border-b border-edge bg-panel px-3.5">
         <div className="flex items-center gap-2.5">
@@ -674,7 +674,7 @@ export default function TorqTerminal() {
               className={`h-[5px] w-[5px] rounded-full ${stale ? 'animate-pulse bg-torque' : 'bg-good'}`}
               aria-hidden
             />
-            <span className="text-[9px] uppercase tracking-[0.1em] text-faint">Session budget</span>
+            <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-faint">Session budget</span>
             <span className="h-1 w-[110px] overflow-hidden rounded-sm bg-panel-3">
               <span
                 className="block h-full rounded-sm"
@@ -716,7 +716,7 @@ export default function TorqTerminal() {
       <div className="relative flex-1 overflow-hidden">
       <div ref={scrollRef} className="h-full space-y-1 overflow-y-auto px-4 pr-2 pt-4" aria-live="polite">
         {events.length === 0 && (
-          <p className="pt-8 text-center text-neutral-600">
+          <p className="pt-8 text-center text-faint/75">
             Nothing yet. Type what you need below — simple tasks run free on this
             machine, complex ones go to a cloud model automatically. Set a budget
             or keep a task local with the controls under the box.
@@ -773,7 +773,7 @@ export default function TorqTerminal() {
         })}
         {busy && (
           <>
-          <p className="flex items-center gap-3 px-2 py-1 text-neutral-500">
+          <p className="flex items-center gap-3 px-2 py-1 text-faint">
             <span className="inline-block animate-pulse">
               {stopState === 'requested' ? 'stopping…' : 'working…'}
             </span>
@@ -781,12 +781,12 @@ export default function TorqTerminal() {
             <button
               onClick={stop}
               disabled={stopState === 'requested'}
-              className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] uppercase tracking-widest text-neutral-400 transition-colors hover:border-torque/60 hover:text-torque disabled:opacity-40 disabled:hover:border-neutral-700 disabled:hover:text-neutral-400"
+              className="rounded border border-border-strong px-2 py-0.5 text-[10px] uppercase tracking-widest text-muted transition-colors hover:border-torque/60 hover:text-torque disabled:opacity-40 disabled:hover:border-border-strong disabled:hover:text-muted"
             >
               {stopState === 'requested' ? 'stopping' : 'stop'}
             </button>
             {stopState === 'failed' && (
-              <span className="text-[10px] text-amber-400">
+              <span className="text-[10px] text-torque">
                 couldn’t send stop — connection may be reconnecting; try again
               </span>
             )}
@@ -806,13 +806,13 @@ export default function TorqTerminal() {
             during the approval pause intentionally, and swaps to the re-minted task's
             route (new requestId) on APPROVE. */}
         {chipDiag && (
-          <p className="flex items-center gap-2 px-2 pb-1 text-[11px] text-neutral-600"
+          <p className="flex items-center gap-2 px-2 pb-1 text-[11px] text-faint/75"
              title={formatRouteExplanation(chipDiag)[0]?.value}>
-            <span className="text-neutral-500">↳</span>
+            <span className="text-faint">↳</span>
             {tierLabel(chipDiag.tier) && <span>{tierLabel(chipDiag.tier)!.text}</span>}
             {formatLockState(chipDiag) && (
               <>
-                <span className="text-neutral-700">·</span>
+                <span className="text-faint/50">·</span>
                 <span>{formatLockState(chipDiag)!.value}</span>
               </>
             )}
@@ -840,17 +840,17 @@ export default function TorqTerminal() {
       </div>
 
       {hint && !hintDismissed && (
-        <div className="mt-3 flex items-center gap-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">
+        <div className="mt-3 flex items-center gap-3 rounded border border-torque/40 bg-torque/10 px-3 py-2 text-[11px] text-torque">
           <span>This looks like it may contain {hint} — keep it on this machine?</span>
           <button
             onClick={() => set('privateMode', true)}
-            className="rounded border border-amber-400/50 px-2 py-0.5 text-amber-200 hover:bg-amber-400/15"
+            className="rounded border border-torque/50 px-2 py-0.5 text-torque hover:bg-torque/15"
           >
             keep private
           </button>
           <button
             onClick={() => setHintDismissed(true)}
-            className="text-amber-400/60 hover:text-amber-300"
+            className="text-torque/60 hover:text-torque"
           >
             dismiss
           </button>
@@ -874,7 +874,7 @@ export default function TorqTerminal() {
             onChange={(e) => setInput(e.target.value)}
             placeholder="What do you need done?"
             aria-label="Describe your task"
-            className="flex-1 bg-transparent py-1 text-neutral-100 placeholder:text-neutral-600 focus:outline-none"
+            className="flex-1 bg-transparent py-1 text-ink placeholder:text-faint/75 focus:outline-none"
             autoFocus
           />
           {/* Redesign 7/7: paperclip (flag-gated). The hidden picker is the
@@ -963,7 +963,7 @@ export default function TorqTerminal() {
             executed-task path. The caveat line is EXACT and appears in every
             state that shows any preview content. */}
         {previewState && (
-          <div className="mt-3 rounded border border-neutral-800 bg-neutral-900/40 px-3 py-2 text-[11px] text-neutral-500">
+          <div className="mt-3 rounded border border-edge bg-panel-2/40 px-3 py-2 text-[11px] text-faint">
             {previewState.kind === 'pending' && <p>previewing…</p>}
             {previewState.kind === 'result' && (() => {
               const diag = previewState.meta.diagnostics as RouterDiagnostics | null | undefined;
@@ -980,7 +980,7 @@ export default function TorqTerminal() {
                 : null; // never fabricate doubt for LOCAL_LLM or any other value (G1R S2)
               return (
                 <>
-                  <p className="text-neutral-300">
+                  <p className="text-muted">
                     Would route: {tier ? tier.text : 'unknown'}
                   </p>
                   {explanation.map((row, i) => (
@@ -1002,7 +1002,7 @@ export default function TorqTerminal() {
                   {typeof previewState.meta.contextSize === 'number' && (
                     <p>context size: {previewState.meta.contextSize}</p>
                   )}
-                  {fidelityNote && <p className="text-amber-400">{fidelityNote}</p>}
+                  {fidelityNote && <p className="text-torque">{fidelityNote}</p>}
                 </>
               );
             })()}
@@ -1013,20 +1013,20 @@ export default function TorqTerminal() {
             {previewState.kind === 'sendFailed' && (
               <p>couldn’t send preview — connection may be reconnecting; try again</p>
             )}
-            <p className="mt-1 text-neutral-600">
+            <p className="mt-1 text-faint/75">
               Preview only. Enrichment and route may change when you submit.
             </p>
           </div>
         )}
 
         {/* Run controls: budget, where it runs, speed, privacy. */}
-        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[10px] uppercase tracking-widest text-neutral-500">
+        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[10px] uppercase tracking-widest text-faint">
           <label className="flex items-center gap-1.5" title="Cap what a cloud task may spend">
             budget
             <select
               value={controls.budget}
               onChange={(e) => set('budget', e.target.value as BudgetChoice)}
-              className="rounded border border-neutral-700 bg-neutral-900 px-1.5 py-0.5 text-neutral-300"
+              className="rounded border border-border-strong bg-panel-2 px-1.5 py-0.5 text-muted"
             >
               <option value="">default</option>
               <option value="free">Free (local only)</option>
@@ -1043,7 +1043,7 @@ export default function TorqTerminal() {
               onChange={(e) => set('customBudget', e.target.value)}
               placeholder="USD"
               aria-label="Custom budget in USD"
-              className="w-16 rounded border border-neutral-700 bg-neutral-900 px-1.5 py-0.5 text-neutral-300"
+              className="w-16 rounded border border-border-strong bg-panel-2 px-1.5 py-0.5 text-muted"
             />
           )}
           <label className="flex items-center gap-1.5" title="Where this task may run">
@@ -1052,7 +1052,7 @@ export default function TorqTerminal() {
               value={controls.budget === 'free' ? 'LOCAL_ONLY' : controls.mode}
               disabled={controls.budget === 'free'}
               onChange={(e) => set('mode', e.target.value as ExecutionMode)}
-              className="rounded border border-neutral-700 bg-neutral-900 px-1.5 py-0.5 text-neutral-300 disabled:opacity-50"
+              className="rounded border border-border-strong bg-panel-2 px-1.5 py-0.5 text-muted disabled:opacity-50"
             >
               <option value="AUTO">Auto</option>
               <option value="LOCAL_ONLY">This machine only</option>
@@ -1071,27 +1071,27 @@ export default function TorqTerminal() {
             <input type="checkbox" checked={controls.useMemory} onChange={(e) => set('useMemory', e.target.checked)} className="accent-torque" />
             memory
           </label>
-          <span className="text-neutral-700">·</span>
-          <button type="button" onClick={() => sendCommand({ action: 'MEMORY', op: 'SHOW' })} className="text-neutral-500 hover:text-neutral-300">
+          <span className="text-faint/50">·</span>
+          <button type="button" onClick={() => sendCommand({ action: 'MEMORY', op: 'SHOW' })} className="text-faint hover:text-muted">
             show memory
           </button>
-          <button type="button" onClick={() => sendCommand({ action: 'MEMORY', op: 'FORGET_SESSION' })} className="text-neutral-500 hover:text-torque">
+          <button type="button" onClick={() => sendCommand({ action: 'MEMORY', op: 'FORGET_SESSION' })} className="text-faint hover:text-torque">
             forget session
           </button>
-          <span className="text-neutral-700">·</span>
-          <button type="button" onClick={() => setReceiptsOpen((v) => !v)} className="text-neutral-500 hover:text-neutral-300">
+          <span className="text-faint/50">·</span>
+          <button type="button" onClick={() => setReceiptsOpen((v) => !v)} className="text-faint hover:text-muted">
             {receiptsOpen ? 'hide receipts' : 'receipts'}
           </button>
-          <span className="text-neutral-700">·</span>
-          <button type="button" onClick={() => setCostOpen((v) => !v)} className="text-neutral-500 hover:text-neutral-300">
+          <span className="text-faint/50">·</span>
+          <button type="button" onClick={() => setCostOpen((v) => !v)} className="text-faint hover:text-muted">
             {costOpen ? 'hide cost' : 'cost'}
           </button>
-          <span className="text-neutral-700">·</span>
-          <button type="button" onClick={() => setApprovalsOpen((v) => !v)} className="text-neutral-500 hover:text-neutral-300">
+          <span className="text-faint/50">·</span>
+          <button type="button" onClick={() => setApprovalsOpen((v) => !v)} className="text-faint hover:text-muted">
             {approvalsOpen ? 'hide approvals' : 'approvals'}
           </button>
-          <span className="text-neutral-700">·</span>
-          <button type="button" onClick={simulateRoute} disabled={!input.trim()} className="text-neutral-500 hover:text-neutral-300 disabled:opacity-40">
+          <span className="text-faint/50">·</span>
+          <button type="button" onClick={simulateRoute} disabled={!input.trim()} className="text-faint hover:text-muted disabled:opacity-40">
             simulate route
           </button>
         </div>
@@ -1135,7 +1135,7 @@ function LiveCostPanel({
   const cap = typeof costMeta?.sessionCap === 'number' ? costMeta.sessionCap : null;
   const breach = costMeta?.breach ?? null;
   return (
-    <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[10px] text-neutral-500">
+    <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[10px] text-faint">
       {estimate && (
         <span>
           est cap:{' '}
@@ -1147,12 +1147,12 @@ function LiveCostPanel({
       {total !== null && (
         <span>
           session spend:{' '}
-          <span className="tabular-nums text-neutral-300">${total.toFixed(2)}</span>
+          <span className="tabular-nums text-muted">${total.toFixed(2)}</span>
         </span>
       )}
       {total !== null && cap !== null && (
         <span className="flex items-center gap-1.5" title="session spend vs session cap">
-          <span className="h-1 w-16 overflow-hidden rounded-sm bg-neutral-800">
+          <span className="h-1 w-16 overflow-hidden rounded-sm bg-panel-3">
             <span
               className={`block h-full ${breach ? 'bg-bad' : 'bg-torque'}`}
               style={{ width: `${Math.min(100, (total / cap) * 100)}%` }}
@@ -1162,7 +1162,7 @@ function LiveCostPanel({
         </span>
       )}
       {estimate?.route === 'cloud' && (
-        <span className="text-neutral-600">
+        <span className="text-faint/75">
           task cost records on completion — no mid-task usage stream
         </span>
       )}
@@ -1242,7 +1242,7 @@ function TaskCard({
   });
 
   return (
-    <article className="rounded border border-edge bg-panel px-3 py-2">
+    <article className="rounded-[10px] border border-edge bg-panel px-3 py-2">
       <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         {tier && (
           <span
@@ -1257,7 +1257,7 @@ function TaskCard({
           </span>
         )}
         {group.prompt && (
-          <span className="min-w-0 flex-1 font-reading text-[13px] font-semibold text-ink">
+          <span className="min-w-0 flex-1 font-chrome text-[13.5px] font-semibold text-ink">
             {group.prompt}
           </span>
         )}
@@ -1369,13 +1369,13 @@ function EventRow({
 
   return (
     <article
-      className={`group flex gap-4 rounded px-2 py-1 transition-colors hover:bg-neutral-900/60 ${
+      className={`group flex gap-4 rounded px-2 py-1 transition-colors hover:bg-panel-2/60 ${
         event.type === 'PENDING_APPROVAL' && !decision ? 'bg-torque/10' : ''
       }`}
       title={`${event.type}${meta.reason ? ` — ${meta.reason}` : ''}`}
     >
       {!hideTimestamp && (
-        <time className="shrink-0 tabular-nums text-neutral-600">
+        <time className="shrink-0 tabular-nums text-faint/75">
           {new Date(event.timestamp).toLocaleTimeString([], { hour12: false })}
         </time>
       )}
@@ -1385,7 +1385,7 @@ function EventRow({
             title={tier.hint}
             className={`mr-2 rounded border px-1.5 py-0.5 text-[10px] tracking-wide ${
               event.tier === 'OLLAMA_LOCAL'
-                ? 'border-neutral-700 bg-neutral-900 text-neutral-400'
+                ? 'border-border-strong bg-panel-2 text-muted'
                 : 'border-torque/40 bg-torque/10 text-torque'
             }`}
           >
@@ -1394,19 +1394,19 @@ function EventRow({
         )}
         <span
           className={`mr-2 text-[10px] font-bold ${
-            event.type === 'TOOL_CALL' ? 'text-amber-400'
+            event.type === 'TOOL_CALL' ? 'text-torque'
             : event.type === 'PENDING_APPROVAL' && !decision ? 'animate-pulse text-torque'
             : event.type === 'ERROR' ? 'text-bad'
-            : isUser ? 'text-neutral-300'
-            : 'text-neutral-600'
+            : isUser ? 'text-muted'
+            : 'text-faint/75'
           }`}
         >
           [{TYPE_LABELS[event.type] ?? event.type.toLowerCase()}]
         </span>
         <span className={
-          event.type === 'RESULT' ? 'font-semibold text-neutral-100'
-          : isUser ? 'text-neutral-200'
-          : 'text-neutral-400'
+          event.type === 'RESULT' ? 'font-semibold text-ink'
+          : isUser ? 'text-ink'
+          : 'text-muted'
         }>
           {friendlyMessage(event)}
         </span>
@@ -1436,7 +1436,7 @@ function EventRow({
         )}
 
         {decision && (
-          <span className="ml-3 text-[10px] text-neutral-500">
+          <span className="ml-3 text-[10px] text-faint">
             {decision === 'APPROVE' ? '✓ allowed once' : '✕ denied'}
           </span>
         )}
@@ -1447,7 +1447,7 @@ function EventRow({
             {recovery.includes('RETRY') && meta.prompt && (
               <button
                 onClick={() => onRetry(String(meta.prompt), typeof meta.suggestedBudget === 'number' ? meta.suggestedBudget : undefined)}
-                className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-torque/60 hover:text-torque"
+                className="rounded border border-border-strong px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-torque/60 hover:text-torque"
               >
                 {typeof meta.suggestedBudget === 'number' ? `retry at $${meta.suggestedBudget}` : 'retry'}
               </button>
@@ -1455,7 +1455,7 @@ function EventRow({
             {recovery.includes('RETRY_LOCAL') && meta.prompt && (
               <button
                 onClick={() => onResendLocal(String(meta.prompt))}
-                className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-torque/60 hover:text-torque"
+                className="rounded border border-border-strong px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-torque/60 hover:text-torque"
               >
                 run on this machine
               </button>
@@ -1489,13 +1489,13 @@ function EventRow({
               <button
                 onClick={() => onCopyDiagnostic(event)}
                 title="copies requestId, reason, and the last 10 event messages exactly as shown in this terminal — no redaction"
-                className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-neutral-500"
+                className="rounded border border-border-strong px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-faint"
               >
                 copy raw diagnostic (local, unredacted)
               </button>
             )}
             {typeof meta.sideEffectNote === 'string' && (
-              <span className="text-[10px] text-neutral-600">{meta.sideEffectNote}</span>
+              <span className="text-[10px] text-faint/75">{meta.sideEffectNote}</span>
             )}
           </div>
         )}
@@ -1534,13 +1534,13 @@ function SafeExportChip({
   // shared effect, and the FRAME's own shape decides which of the five
   // ready-adjacent renders below applies.
   if (frame && !frame.error && frame.exportOmitted) {
-    return <span className="text-[10px] text-neutral-600">export exceeds the frame size limit — not available</span>;
+    return <span className="text-[10px] text-faint/75">export exceeds the frame size limit — not available</span>;
   }
   if (frame && frame.error) {
-    return <span className="text-[10px] text-neutral-600">safe export failed (nothing copied)</span>;
+    return <span className="text-[10px] text-faint/75">safe export failed (nothing copied)</span>;
   }
   if (frame && !frame.error && !frame.exportOmitted && !frame.safeExport) {
-    return <span className="text-[10px] text-neutral-600">no receipt for this task</span>;
+    return <span className="text-[10px] text-faint/75">no receipt for this task</span>;
   }
   if (frame && frame.safeExport) {
     const report = frame.safeExport.redactionReport;
@@ -1554,17 +1554,17 @@ function SafeExportChip({
         <button
           onClick={() => onCopySafeExportChip(taskId)}
           title="copies the redacted export as Markdown, including its redaction report"
-          className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-neutral-500"
+          className="rounded border border-border-strong px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-faint"
         >
           {copied ? 'copied' : 'copy safe export (ready)'}
         </button>
-        <span className="text-[10px] text-neutral-600">{summary}</span>
+        <span className="text-[10px] text-faint/75">{summary}</span>
       </span>
     );
   }
   if (phase === 'pending') {
     return (
-      <button disabled className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-500 opacity-60">
+      <button disabled className="rounded border border-border-strong px-2 py-0.5 text-[10px] text-faint opacity-60">
         preparing…
       </button>
     );
@@ -1573,7 +1573,7 @@ function SafeExportChip({
     return (
       <button
         onClick={() => onGetSafeExportChip(taskId)}
-        className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-neutral-500"
+        className="rounded border border-border-strong px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-faint"
       >
         couldn&apos;t request — try again
       </button>
@@ -1583,7 +1583,7 @@ function SafeExportChip({
     return (
       <button
         onClick={() => onGetSafeExportChip(taskId)}
-        className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-neutral-500"
+        className="rounded border border-border-strong px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-faint"
       >
         no response — try again
       </button>
@@ -1592,7 +1592,7 @@ function SafeExportChip({
   return (
     <button
       onClick={() => onGetSafeExportChip(taskId)}
-      className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-neutral-500"
+      className="rounded border border-border-strong px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-faint"
     >
       copy safe export
     </button>
@@ -1644,7 +1644,7 @@ function ReceiptCard({ receipt, tools }: { receipt: any; tools: string[] }) {
         )}
       </div>
       {showCtx && ctx && (
-        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-black/40 p-2 text-[11px] text-neutral-400">
+        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-black/40 p-2 text-[11px] text-muted">
           {ctx}
         </pre>
       )}
@@ -1702,9 +1702,9 @@ function SkillApprovalCard({
   const diff = editing && original !== undefined ? lineDiff(original, text) : [];
 
   return (
-    <div className="ml-2 mt-2 max-w-3xl rounded border border-torque/40 bg-torque/5 p-3">
-      <p className="text-neutral-200">
-        Learned a new skill: <span className="font-semibold text-neutral-100">{skillName}</span> — review before it can be used.
+    <div className="ml-2 mt-2 max-w-3xl rounded-lg border border-torque/40 bg-torque/5 p-3">
+      <p className="text-ink">
+        Learned a new skill: <span className="font-semibold text-ink">{skillName}</span> — review before it can be used.
       </p>
 
       {editing && (
@@ -1714,7 +1714,7 @@ function SkillApprovalCard({
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
             spellCheck={false}
-            className="mt-2 h-48 w-full resize-y rounded bg-black/50 p-2 font-mono text-[11px] text-neutral-200 focus:outline-none"
+            className="mt-2 h-48 w-full resize-y rounded bg-black/50 p-2 font-mono text-[11px] text-ink focus:outline-none"
           />
           {diff.some((d) => d.t !== ' ') && (
             <pre className="mt-2 max-h-40 overflow-auto rounded bg-black/40 p-2 font-mono text-[11px]">
@@ -1722,9 +1722,9 @@ function SkillApprovalCard({
                 <div
                   key={k}
                   className={
-                    d.t === '+' ? 'bg-green-500/10 text-green-400'
+                    d.t === '+' ? 'bg-good/10 text-good'
                     : d.t === '-' ? 'bg-faint/15 text-faint'
-                    : 'text-neutral-500'
+                    : 'text-faint'
                   }
                 >
                   {d.t} {d.line}
@@ -1745,14 +1745,14 @@ function SkillApprovalCard({
         {!editing && (
           <button
             onClick={startEdit}
-            className="rounded border border-neutral-700 px-3 py-1 text-[11px] text-neutral-300 hover:border-neutral-500"
+            className="rounded border border-border-strong px-3 py-1 text-[11px] text-muted hover:border-faint"
           >
             {original === undefined ? 'load draft to edit' : 'Edit'}
           </button>
         )}
         <button
           onClick={() => onDecide(queueId, 'REJECT')}
-          className="rounded border border-neutral-700 px-3 py-1 text-[11px] text-neutral-400 hover:bg-neutral-800"
+          className="rounded border border-border-strong px-3 py-1 text-[11px] text-muted hover:bg-panel-3"
         >
           Deny
         </button>
@@ -1821,18 +1821,18 @@ function ToolPermissionCard({
   const shown = expanded || !isLong ? pretty : pretty.slice(0, TRUNC) + '\n…';
 
   return (
-    <div className={`ml-2 mt-2 max-w-2xl rounded border p-3 ${tierChrome}`}>
-      <p className="text-neutral-200">
-        This task wants to <span className="font-semibold text-neutral-100">{friendly}</span> to finish.
+    <div className={`ml-2 mt-2 max-w-2xl rounded-lg border p-3 ${tierChrome}`}>
+      <p className="text-ink">
+        This task wants to <span className="font-semibold text-ink">{friendly}</span> to finish.
       </p>
       <dl className="mt-2 space-y-1 text-[11px]">
         <div className="flex gap-2">
-          <dt className="w-16 shrink-0 uppercase tracking-widest text-neutral-500">tool</dt>
-          <dd className="font-mono text-neutral-300">{toolName || '(unknown)'}</dd>
+          <dt className="w-16 shrink-0 uppercase tracking-widest text-faint">tool</dt>
+          <dd className="font-mono text-muted">{toolName || '(unknown)'}</dd>
         </div>
         <div className="flex gap-2">
-          <dt className="w-16 shrink-0 uppercase tracking-widest text-neutral-500">scope</dt>
-          <dd className="text-neutral-400">One-time — applies to a single re-run</dd>
+          <dt className="w-16 shrink-0 uppercase tracking-widest text-faint">scope</dt>
+          <dd className="text-muted">One-time — applies to a single re-run</dd>
         </div>
       </dl>
       {/* TCLAW-5A-2 Card v2 gate block — additional dt/dd rows in a SECOND dl
@@ -1844,25 +1844,25 @@ function ToolPermissionCard({
         <dl className="mt-2 space-y-1 text-[11px]">
           {gateFacts.classRow && (
             <div className="flex gap-2">
-              <dt className="w-24 shrink-0 uppercase tracking-widest text-neutral-500">class</dt>
-              <dd className="text-neutral-400" title={gateFacts.classRow.title}>{gateFacts.classRow.text}</dd>
+              <dt className="w-24 shrink-0 uppercase tracking-widest text-faint">class</dt>
+              <dd className="text-muted" title={gateFacts.classRow.title}>{gateFacts.classRow.text}</dd>
             </div>
           )}
           {gateFacts.whyGated && (
             <div className="flex gap-2">
-              <dt className="w-24 shrink-0 uppercase tracking-widest text-neutral-500">why gated</dt>
-              <dd className="text-neutral-400" title={gateFacts.whyGated.title}>{gateFacts.whyGated.text}</dd>
+              <dt className="w-24 shrink-0 uppercase tracking-widest text-faint">why gated</dt>
+              <dd className="text-muted" title={gateFacts.whyGated.title}>{gateFacts.whyGated.text}</dd>
             </div>
           )}
           {gateFacts.server && (
             <div className="flex gap-2">
-              <dt className="w-24 shrink-0 uppercase tracking-widest text-neutral-500">server</dt>
-              <dd className="font-mono text-neutral-400">{gateFacts.server}</dd>
+              <dt className="w-24 shrink-0 uppercase tracking-widest text-faint">server</dt>
+              <dd className="font-mono text-muted">{gateFacts.server}</dd>
             </div>
           )}
           <div className="flex gap-2">
-            <dt className="w-24 shrink-0 uppercase tracking-widest text-neutral-500">may touch</dt>
-            <dd className="min-w-0 text-neutral-400">
+            <dt className="w-24 shrink-0 uppercase tracking-widest text-faint">may touch</dt>
+            <dd className="min-w-0 text-muted">
               {gateFacts.targets.items.length === 0 ? (
                 <span>none detected</span>
               ) : (
@@ -1876,7 +1876,7 @@ function ToolPermissionCard({
                     <button
                       type="button"
                       onClick={() => setTargetsExpanded((v) => !v)}
-                      className="ml-1 text-[10px] text-neutral-500 hover:text-neutral-300"
+                      className="ml-1 text-[10px] text-faint hover:text-muted"
                     >
                       {targetsExpanded ? 'show less' : `show all (${gateFacts.targets.items.length})`}
                     </button>
@@ -1892,21 +1892,21 @@ function ToolPermissionCard({
               )}
             </dd>
           </div>
-          <p className="text-[10px] text-neutral-600">{gateFacts.targetsCaption}</p>
+          <p className="text-[10px] text-faint/75">{gateFacts.targetsCaption}</p>
         </dl>
       )}
-      <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded bg-black/40 p-2 text-[11px] text-neutral-400">
+      <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded bg-black/40 p-2 text-[11px] text-muted">
         {shown}
       </pre>
       {isLong && (
-        <button onClick={() => setExpanded((v) => !v)} className="mt-1 text-[10px] text-neutral-500 hover:text-neutral-300">
+        <button onClick={() => setExpanded((v) => !v)} className="mt-1 text-[10px] text-faint hover:text-muted">
           {expanded ? 'show less' : `show all (${pretty.length} chars)`}
         </button>
       )}
       {/* Redesign 6/7 — spend tier: recorded budget context inline. Real
           costSummary facts only (null -> renders nothing, never a guess). */}
       {tier === 'spend' && budgetLine && (
-        <p className="mt-2 text-[10px] text-neutral-500">budget: {budgetLine}</p>
+        <p className="mt-2 text-[10px] text-faint">budget: {budgetLine}</p>
       )}
 
       {/* Redesign 6/7 — destructive tier: risk list, checkpoint truth, and
@@ -1914,7 +1914,7 @@ function ToolPermissionCard({
           reality — no invented risk scores. */}
       {tier === 'destructive' && (
         <div className="mt-2 space-y-1.5 text-[10px]">
-          <ul className="list-disc space-y-0.5 pl-4 text-neutral-400">
+          <ul className="list-disc space-y-0.5 pl-4 text-muted">
             {rawGate?.capability === 'exec' && (
               <li>runs code with this machine&apos;s privileges — effects are not bounded by the gateway</li>
             )}
@@ -1928,7 +1928,7 @@ function ToolPermissionCard({
           <p className="text-bad">
             not covered by any checkpoint — the kernel exposes no checkpoint/rollback surface
           </p>
-          <label className="block text-neutral-500">
+          <label className="block text-faint">
             type DELETE to arm approve
             <input
               value={confirmText}
@@ -1936,7 +1936,7 @@ function ToolPermissionCard({
               placeholder="DELETE"
               aria-label="type DELETE to arm approve"
               spellCheck={false}
-              className="mt-1 block w-40 rounded border border-neutral-700 bg-black/40 px-2 py-1 font-mono text-[11px] text-neutral-200 focus:outline-none"
+              className="mt-1 block w-40 rounded border border-border-strong bg-black/40 px-2 py-1 font-mono text-[11px] text-ink focus:outline-none"
             />
           </label>
         </div>
@@ -1956,7 +1956,7 @@ function ToolPermissionCard({
         >
           Allow once
         </button>
-        <button onClick={onDeny} className="rounded border border-neutral-700 px-3 py-1 text-[11px] text-neutral-400 hover:bg-neutral-800">
+        <button onClick={onDeny} className="rounded border border-border-strong px-3 py-1 text-[11px] text-muted hover:bg-panel-3">
           Deny
         </button>
       </div>

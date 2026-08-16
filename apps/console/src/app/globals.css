@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* TORQ design tokens — single source of truth for the console redesign.
+/* TORQ design tokens ï¿½ single source of truth for the console redesign.
    Red is reserved for destructive/error ONLY (token rule; the legacy
    --torq-accent red is deliberately gone). */
 :root {
@@ -24,8 +24,8 @@
   background: rgba(255, 158, 64, 0.25);
 }
 
-/* Tailwind v4 utility mapping — utilities (bg-panel, text-muted, border-edge,
-   font-chrome…) resolve to the :root tokens above, never raw hex. */
+/* Tailwind v4 utility mapping ï¿½ utilities (bg-panel, text-muted, border-edge,
+   font-chromeï¿½) resolve to the :root tokens above, never raw hex. */
 @theme inline {
   --color-bg: var(--bg);
   --color-panel: var(--panel);
@@ -43,9 +43,19 @@
   --color-bad: var(--bad);
 
   /* JetBrains Mono = UI chrome/labels/data; Inter = answer body + long
-     reading. The --font-* values are set by next/font in layout.tsx. */
+     reading. The --font-* values are set by next/font in layout.tsx.
+     --font-mono is remapped too so Tailwind's `font-mono` class resolves to
+     JetBrains instead of the default ui-monospace stack. */
   --font-chrome: var(--font-jetbrains), ui-monospace, monospace;
   --font-reading: var(--font-inter), ui-sans-serif, sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, monospace;
+
+  /* Spec pulse: 1.5s ease-in-out, dip to .35 â€” replaces Tailwind's default. */
+  --animate-pulse: pulse 1.5s ease-in-out infinite;
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
 }
 
 /* Chrome surfaces default to JetBrains Mono; long-form answer blocks opt into
@@ -54,7 +64,7 @@ body {
   font-family: var(--font-chrome);
 }
 
-/* Subtle scanline overlay — part of the look. */
+/* Subtle scanline overlay ï¿½ part of the look. */
 body::after {
   content: "";
   position: fixed;

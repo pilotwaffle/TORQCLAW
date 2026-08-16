@@ -16,7 +16,7 @@ const FRAME_INTERVAL_MS = 80;
 
 export function GlyphSpinner({
   ariaLabel = 'Working',
-  className = 'text-neutral-500',
+  className = 'text-faint',
 }: {
   ariaLabel?: string;
   className?: string;

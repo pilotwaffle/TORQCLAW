@@ -23,7 +23,7 @@ export function formatElapsed(totalSeconds: number): string {
  */
 export function LiveDuration({
   since,
-  className = 'tabular-nums text-neutral-600',
+  className = 'tabular-nums text-faint/75',
 }: {
   since: number | null;
   className?: string;
