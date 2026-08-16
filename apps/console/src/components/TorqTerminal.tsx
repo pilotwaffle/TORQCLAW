@@ -710,6 +710,7 @@ export default function TorqTerminal() {
           <LivenessChip
             phase={livePhase.text}
             stuck={phaseStuck}
+            waitingOnApproval={livePhase.waitingOnApproval}
             turnStartMs={turnStartMs}
             turnId={activeRequestId}
             onScrollToTask={() => {

@@ -22,16 +22,28 @@ import { LiveDuration } from './LiveDuration';
 export function LivenessChip({
   phase,
   stuck,
+  waitingOnApproval = false,
   turnStartMs,
   turnId,
   onScrollToTask,
 }: {
   phase: string;
   stuck: boolean;
+  /** §5 exception: a task paused on a pending approval is never stuck — the
+   *  chip says so in the normal state instead. */
+  waitingOnApproval?: boolean;
   turnStartMs: number | null;
   turnId: string;
   onScrollToTask: () => void;
 }) {
+  // §5: bold status keyword — torque while working, --bad once genuinely
+  // stuck (red is allowed here: 30s of kernel silence IS an error signal).
+  const keyword = stuck
+    ? 'no output for 30s+'
+    : waitingOnApproval
+      ? 'waiting on your approval'
+      : 'working';
+  const body = waitingOnApproval && !stuck ? null : phase;
   return (
     <button
       type="button"
@@ -41,24 +53,19 @@ export function LivenessChip({
           ? 'no kernel output for 30s+ — click to inspect the task'
           : 'click to scroll to the running task'
       }
-      className={`flex min-w-0 items-center gap-2 rounded border px-2 py-1 text-[11px] transition-colors ${
-        stuck
-          ? 'border-torque/60 bg-torque/10 text-torque'
-          : 'border-edge text-muted hover:border-torque/40'
+      className={`flex min-w-0 max-w-[380px] items-center gap-2 rounded-md border bg-panel-2 px-2.5 py-1 transition-colors ${
+        stuck ? 'border-bad/45' : 'border-torque/35 hover:border-torque hover:bg-torque/[.14]'
       }`}
     >
-      {stuck ? (
-        <span aria-hidden className="text-torque">
-          ▲
-        </span>
-      ) : (
-        <GlyphSpinner ariaLabel="task running" className="text-torque" />
-      )}
-      <span className="max-w-[42ch] truncate">
-        {stuck ? `no output for 30s+ · ${phase}` : phase}
+      <GlyphSpinner ariaLabel="task running" className={stuck ? 'text-bad' : 'text-torque'} />
+      <span className="min-w-0 truncate text-[10.5px] tracking-[0.04em] text-muted">
+        <b className={`font-semibold ${stuck ? 'text-bad' : 'text-torque'}`}>{keyword}</b>
+        {body ? ` · ${body}` : ''}
       </span>
-      <LiveDuration since={turnStartMs} className="tabular-nums text-faint" />
-      <span className="whitespace-nowrap text-faint">turn {turnId.slice(0, 8)}</span>
+      <LiveDuration since={turnStartMs} className="shrink-0 text-[10px] tabular-nums text-faint" />
+      <span className="shrink-0 whitespace-nowrap border-l border-border-strong pl-2 text-[8px] uppercase tracking-[0.14em] text-mem">
+        turn {turnId.slice(0, 8)}
+      </span>
     </button>
   );
 }
