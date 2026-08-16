@@ -259,10 +259,13 @@ describe('TorqTerminal route preview composer (TCLAW-2D-2)', () => {
     unmountA();
     cleanup();
 
-    // (b) mid-task: last non-preview event is TOOL_CALL -> busy.
+    // (b) mid-task: last non-preview event is TOOL_CALL -> busy. PRD-UI-1 §4e:
+    // once TIER_SELECTED mints the task card, the working state lives INSIDE
+    // that card (phase text appended: "working… <phase>"), not in the
+    // stream-level pre-card block — so match the prefix, not the bare word.
     stream.events = [tierSelected('A', diagA), toolCall('A'), previewResultFrame('n1')];
     const { unmount: unmountB } = render(<TorqTerminal />);
-    expect(screen.getByText('working…')).toBeInTheDocument();
+    expect(screen.getByText(/^working…/)).toBeInTheDocument();
     unmountB();
     cleanup();
 

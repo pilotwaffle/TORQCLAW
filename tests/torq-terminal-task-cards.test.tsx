@@ -79,28 +79,41 @@ describe('TorqTerminal — task cards (redesign 3/7)', () => {
     stream.events = [userPrompt('r1', 'summarize this'), tierSelected('r1', 'OLLAMA_LOCAL'), toolCall('r1')];
     const { container } = render(<TorqTerminal />);
 
-    // Prompt is the header line, weight 600.
-    const prompt = screen.getByText('summarize this');
-    expect(prompt.className).toContain('font-semibold');
+    // Prompt is the header line, weight 600. getAllByText: the sidebar
+    // session-title line (§3) ALSO echoes the first USER_PROMPT verbatim, so
+    // assert the CARD's own prompt span by its font-semibold class among all
+    // matches — the sidebar copy is plain text-ink (no weight class).
+    const prompts = screen.getAllByText('summarize this');
+    const cardPrompt = prompts.find((el) => el.className.includes('font-semibold'));
+    expect(cardPrompt).toBeDefined();
 
     // Route chip: local renders green per tokens (never red — red is reserved).
-    // getAllByText: the standalone 2C route chip ALSO spells the tier text, so
-    // assert the CARD's chip by class among all matches.
-    const chips = screen.getAllByText('on this machine');
-    expect(chips.some((el) => el.className.includes('text-good'))).toBe(true);
+    // Card head chip text is the short 'local' label (§4b); the longer
+    // 'on this machine' copy now lives only on the loose 2C route-explainer
+    // line below the stream, which carries no color class of its own.
+    const chip = screen.getByText('local');
+    expect(chip.className).toContain('text-good');
 
-    // ONE <time> for the whole task — rows inside the card hide theirs.
-    expect(container.querySelectorAll('time')).toHaveLength(1);
+    // ONE VISIBLE <time> for the whole task: the card header's own <time> is
+    // the only one outside the collapsed-plumbing wrapper. The plumbing rows
+    // (§4c) are always mounted with hideTimestamp=false — collapse is done
+    // via a max-height CSS clip (for the 320ms expand transition), not
+    // conditional unmount — so their <time> elements exist in the DOM but
+    // are visually clipped inside the max-h-0 wrapper. Assert the header's
+    // time is the only one OUTSIDE that clipped wrapper.
+    const allTimes = Array.from(container.querySelectorAll('time'));
+    const visibleTimes = allTimes.filter((t) => !t.closest('.max-h-0'));
+    expect(visibleTimes).toHaveLength(1);
+    expect(allTimes.length).toBeGreaterThan(1); // sanity: plumbing rows really do carry hidden clocks
   });
 
   it('cloud route chip renders cyan, never red', () => {
     stream.events = [userPrompt('r1', 'deep research'), tierSelected('r1', 'API_EXTERNAL'), toolCall('r1')];
     render(<TorqTerminal />);
-    // getAllByText: the standalone 2C route chip also spells the tier text.
-    const chips = screen.getAllByText('cloud model');
-    const cardChip = chips.find((el) => el.className.includes('text-cloud'));
-    expect(cardChip).toBeDefined();
-    expect(cardChip!.className).not.toContain('#E24B4A');
+    // Card head chip text is the short 'cloud' label (§4b).
+    const cardChip = screen.getByText('cloud');
+    expect(cardChip.className).toContain('text-cloud');
+    expect(cardChip.className).not.toContain('#E24B4A');
   });
 
   it('plumbing collapses to "N STEPS", default collapsed; expanding reveals the rows', () => {
@@ -108,11 +121,26 @@ describe('TorqTerminal — task cards (redesign 3/7)', () => {
     render(<TorqTerminal />);
 
     // Two plumbing events (TIER_SELECTED + TOOL_CALL), collapsed by default.
-    const toggle = screen.getByText(/2 steps ▸/);
-    expect(screen.queryByText('Using read file (filesystem)')).not.toBeInTheDocument();
+    // The toggle row is "▶ 2 steps · hermes kernel" (spec §4c); the chevron
+    // is a single glyph that ROTATES via a CSS class on open rather than
+    // swapping to a different character — pin the row by its stable text.
+    //
+    // Mechanism change from the pre-redesign component: the plumbing body is
+    // now ALWAYS mounted (never conditionally rendered) and collapse is done
+    // via a max-height CSS clip so the 320ms expand transition (§4c) has
+    // something to animate — so the row's text is present in the DOM even
+    // while collapsed. The real collapse signal is the wrapper's max-height
+    // class and the toggle's aria-expanded flag; assert those instead of
+    // DOM presence/absence of the row text.
+    const toggle = screen.getByText(/2 steps · hermes kernel/);
+    const toggleButton = toggle.closest('button')!;
+    const body = screen.getByText('Using read file (filesystem)').closest('.overflow-hidden')!;
+    expect(toggleButton).toHaveAttribute('aria-expanded', 'false');
+    expect(body.className).toContain('max-h-0');
 
     fireEvent.click(toggle);
-    expect(screen.getByText(/2 steps ▾/)).toBeInTheDocument();
+    expect(toggleButton).toHaveAttribute('aria-expanded', 'true');
+    expect(body.className).toContain('max-h-[400px]');
     expect(screen.getByText('Using read file (filesystem)')).toBeInTheDocument();
   });
 
@@ -120,18 +148,25 @@ describe('TorqTerminal — task cards (redesign 3/7)', () => {
     stream.events = [userPrompt('r1', 'question'), tierSelected('r1', 'OLLAMA_LOCAL'), result('r1', 'the final answer')];
     render(<TorqTerminal />);
 
-    expect(screen.getByText('ANSWER')).toBeInTheDocument();
+    // Eyebrow's DOM text is title-case "Answer" — CSS applies the ALL-CAPS
+    // display (uppercase + letter-spacing per §4d), the text node itself is
+    // never mutated to literal caps.
+    expect(screen.getByText('Answer')).toBeInTheDocument();
     expect(screen.getByText('the final answer')).toBeInTheDocument();
   });
 
-  it('receipt renders as a chip row: Done + cost + latency', () => {
+  it('receipt renders as a chip row: done + cost + latency', () => {
     stream.events = [
       userPrompt('r1', 'question'), tierSelected('r1', 'API_EXTERNAL'),
       toolCall('r1'), result('r1', 'answer'), doneReceipt('r1'),
     ];
     render(<TorqTerminal />);
 
-    expect(screen.getByText('Done')).toBeInTheDocument();
+    // §4f: the good chip pairs an SVG checkmark glyph with lowercase text
+    // "done" — the DOM text node is 'done', never 'Done' (no CSS transform
+    // applied to this chip; the spec's "✓ done" glyph is the SVG check icon
+    // preceding the text, not a literal ✓ character).
+    expect(screen.getByText('done')).toBeInTheDocument();
     expect(screen.getByText('$0.01')).toBeInTheDocument();
     expect(screen.getByText('0.5s')).toBeInTheDocument();
   });
@@ -148,7 +183,8 @@ describe('TorqTerminal — task cards (redesign 3/7)', () => {
     render(<TorqTerminal />);
 
     // Steps collapsed by default, yet the approval card's buttons are live.
-    expect(screen.getByText(/2 steps ▸/)).toBeInTheDocument();
+    const toggle = screen.getByText(/2 steps · hermes kernel/);
+    expect(toggle.closest('button')).toHaveAttribute('aria-expanded', 'false');
     expect(screen.getByText('Allow once')).toBeInTheDocument();
     expect(screen.getByText('Deny')).toBeInTheDocument();
   });

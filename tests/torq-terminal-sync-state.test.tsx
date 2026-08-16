@@ -86,12 +86,21 @@ describe('TorqTerminal — connection element (PRD §2)', () => {
   });
 
   it('disconnected -> the badge replaces CONNECTED (error state, no green lie)', () => {
+    // PRD-UI-1 §2: socket-down and data-stale are two distinct, honest states.
+    // The shipped component (matches docs/ui-concept.html:935) reads
+    // isConnected first: a dead socket renders torque "RECONNECTING…" (still
+    // an actionable force-reconnect button); the muted "stale ·
+    // reconnecting…" pill is reserved for a live socket whose event stream
+    // has gone quiet >30s. Both replace CONNECTED and both stay actionable —
+    // this test pins the disconnected branch specifically.
     stream.isConnected = false;
     stream.events = [ev({ type: 'RESULT', requestId: 'r1' })];
     render(<TorqTerminal />);
 
     expect(screen.queryByText('CONNECTED')).not.toBeInTheDocument();
-    expect(screen.getByText(/stale · reconnecting/)).toBeInTheDocument();
+    const badge = screen.getByText('RECONNECTING…').closest('button')!;
+    fireEvent.click(badge);
+    expect(stream.reconnect).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -64,8 +64,12 @@ function approval(gate: unknown, extra: Record<string, unknown> = {}): GatewayEv
     message: 'Tool filesystem__write_file requires approval', metadata,
   });
 }
+// The permission card always renders "This task wants to <verb> to finish."
+// regardless of tier — unlike the action button, whose label flips to
+// 'Execute' on the destructive tier — so it is the stable anchor back up to
+// the card's own div (rounded-lg, not the bare 'rounded' token).
 function cardOf(): HTMLElement {
-  return screen.getByText('Allow once').closest('div.rounded') as HTMLElement;
+  return screen.getByText(/This task wants to/).closest('div.rounded-lg') as HTMLElement;
 }
 
 describe('TorqTerminal — tiered approvals (redesign 6/7)', () => {
@@ -114,15 +118,17 @@ describe('TorqTerminal — tiered approvals (redesign 6/7)', () => {
     expect(screen.getByText(/runs code with this machine/)).toBeInTheDocument();
     expect(screen.getByText(/not covered by any checkpoint/)).toBeInTheDocument();
 
-    // Disarmed until the operator types DELETE.
-    const allow = screen.getByText('Allow once') as HTMLButtonElement;
+    // Disarmed until the operator types DELETE. Destructive tier labels the
+    // action button 'Execute' (not 'Allow once' — that label is reserved for
+    // the read/spend/unknown tiers).
+    const allow = screen.getByText('Execute') as HTMLButtonElement;
     expect(allow.disabled).toBe(true);
     fireEvent.click(allow);
     expect(stream.sendCommand).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByLabelText('type DELETE to arm approve'), { target: { value: 'DELETE' } });
-    expect((screen.getByText('Allow once') as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.click(screen.getByText('Allow once'));
+    expect((screen.getByText('Execute') as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByText('Execute'));
     expect(stream.sendCommand).toHaveBeenCalledWith({
       action: 'APPROVE_TOOL', approvalId: 'appr-1', decision: 'APPROVE',
     });
@@ -140,7 +146,8 @@ describe('TorqTerminal — tiered approvals (redesign 6/7)', () => {
     const { unmount } = render(<TorqTerminal />);
     expect(cardOf().className).toContain('border-bad');
     expect(screen.getByText(/could not classify/)).toBeInTheDocument();
-    expect((screen.getByText('Allow once') as HTMLButtonElement).disabled).toBe(true);
+    // Fail-closed -> destructive tier -> the button is labeled 'Execute', not 'Allow once'.
+    expect((screen.getByText('Execute') as HTMLButtonElement).disabled).toBe(true);
     unmount();
     cleanup();
 

@@ -80,8 +80,12 @@ describe('TorqTerminal — attachments flag ON', () => {
     const pdf = new File(['%PDF-1.4 fake'], 'report.pdf', { type: 'application/pdf' });
     fireEvent.change(picker, { target: { files: [pdf] } });
 
-    const chip = screen.getByText('report.pdf').closest('span[class*="border"]')!;
-    expect(chip.className).toContain('text-bad'); // pdf = red tile
+    // The 24x24 type tile is a SIBLING of the filename span, not an ancestor —
+    // .closest() can't reach it. Scope to the chip container, then find the
+    // tile by its distinguishing layout class (grid place-items-center).
+    const chipContainer = screen.getByText('report.pdf').closest('span[class*="border-border-strong"]')!;
+    const tile = chipContainer.querySelector('span[class*="place-items-center"]')!;
+    expect(tile.className).toContain('text-bad'); // pdf = red tile
 
     fireEvent.click(screen.getByLabelText('remove report.pdf'));
     expect(screen.queryByText('report.pdf')).not.toBeInTheDocument();
@@ -93,8 +97,9 @@ describe('TorqTerminal — attachments flag ON', () => {
 
     const doc = new File(['x'], 'notes.docx', { type: 'application/octet-stream' });
     fireEvent.change(screen.getByLabelText('attach files'), { target: { files: [doc] } });
-    const chip = screen.getByText('notes.docx').closest('span[class*="border"]')!;
-    expect(chip.className).toContain('text-torque');
+    const chipContainer = screen.getByText('notes.docx').closest('span[class*="border-border-strong"]')!;
+    const tile = chipContainer.querySelector('span[class*="place-items-center"]')!;
+    expect(tile.className).toContain('text-torque');
   });
 
   it('submit GATES while files are attached — never fake ids, never silent drop', async () => {

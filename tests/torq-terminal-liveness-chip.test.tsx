@@ -139,13 +139,16 @@ describe('TorqTerminal — global liveness chip', () => {
     vi.setSystemTime(BASE + STALE_AFTER_MS + 5_000); // 35s quiet
     render(<TorqTerminal />);
 
-    // The warning renders inside the chip span; the button ancestor carries it
-    // in its aggregate text too — assert the EXACT span text among matches.
-    const matches = screen.getAllByText(/no output for 30s\+/);
-    expect(matches.length).toBeGreaterThanOrEqual(1);
-    expect(
-      matches.some((el) => el.textContent === 'no output for 30s+ · Using read file (filesystem)'),
-    ).toBe(true);
+    // The chip renders the bold keyword in its own <b>, followed by a
+    // trailing text node with the phase (` · <phase>`) inside the same
+    // <span> — RTL's default text matcher returns only the innermost node
+    // whose OWN text matches, i.e. the <b>, so assert the bold keyword there
+    // and confirm the phase text is concatenated onto it via the parent span.
+    const keyword = screen.getByText('no output for 30s+');
+    expect(keyword.tagName).toBe('B');
+    expect(keyword.parentElement?.textContent).toBe(
+      'no output for 30s+ · Using read file (filesystem)',
+    );
   });
 
   it('clicking the chip scrolls the stream to the running task', () => {

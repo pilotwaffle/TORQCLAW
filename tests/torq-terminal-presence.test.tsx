@@ -96,12 +96,22 @@ describe('TorqTerminal — staleness affordance + presence card', () => {
       expect(screen.getByText(/synced \d+:\d\d/)).toBeInTheDocument();
     });
 
-    it('disconnected -> the stale badge replaces CONNECTED', () => {
+    it('disconnected -> CONNECTED is replaced by the RECONNECTING… badge', () => {
+      // PRD-UI-1 §2 splits this into two distinct copy strings: socket-down
+      // reads "RECONNECTING…" (torque); connected-but-stale reads
+      // "stale · reconnecting…" (a separate branch — see the sibling "stale
+      // while a task should be producing events" test above, which covers
+      // that case). Both stay actionable (force-reconnect button).
       stream.isConnected = false;
       stream.events = [ev({ type: 'RESULT', requestId: 'r1', timestamp: '2026-01-01T00:00:00.000Z' })];
       render(<TorqTerminal />);
       expect(screen.queryByText('CONNECTED')).not.toBeInTheDocument();
-      expect(screen.getByText(/stale · reconnecting/)).toBeInTheDocument();
+      expect(screen.queryByText(/stale · reconnecting/)).not.toBeInTheDocument();
+      const badge = screen.getByText('RECONNECTING…').closest('button');
+      expect(badge).not.toBeNull(); // an action, not decoration — same contract as the stale badge
+
+      fireEvent.click(badge!);
+      expect(stream.reconnect).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -114,11 +124,26 @@ describe('TorqTerminal — staleness affordance + presence card', () => {
       ];
       render(<TorqTerminal />);
 
-      // PresenceCard renders a `tier:` / `lock:` prefix; the separate route
-      // chip never does — so these are unique to the presence card.
-      expect(screen.getByText(/tier:/)).toBeInTheDocument();
-      expect(screen.getByText(/lock:/)).toBeInTheDocument();
-      expect(screen.getByText('$4.75')).toBeInTheDocument(); // budget remaining
+      // PRD-UI-1 §4e retired PresenceCard from the busy-task render path: the
+      // working state (spinner/phase/elapsed/stop) now lives INSIDE the
+      // running TaskCard once TIER_SELECTED mints it (see TorqTerminal.tsx's
+      // "stream-level block now covers only the pre-card window" — commit
+      // 3749e8c), and TIER_SELECTED is exactly what sets activeRequestId, so
+      // PresenceCard's tier/lock/budget props (fed only from that pre-card
+      // block) can never render with real data for any task that has routed.
+      // The surviving reader of the SAME chipDiag facts is the "↳ tier · lock"
+      // line (TorqTerminal.tsx ~985) — same tierLabel()/formatLockState()
+      // source, just without the "tier:"/"lock:" prefix labels. Assert that.
+      // budgetRemaining (sessionRemaining) has no reachable renderer left in
+      // TorqTerminal now that PresenceCard is unreachable — the header meter
+      // reads sessionTotal/sessionCap, not sessionRemaining — so that fact is
+      // no longer surfaced anywhere in the live UI; not asserted here.
+      // Anchor on the ↳ glyph (unique to this line) since "on this machine" /
+      // "Fixed for this task" can also appear inside the collapsed TIER_SELECTED
+      // plumbing row for the same task.
+      const routeLine = screen.getByText('↳').closest('p')!;
+      expect(routeLine).toHaveTextContent('on this machine'); // tierLabel(OLLAMA_LOCAL).text
+      expect(routeLine).toHaveTextContent('Fixed for this task'); // formatLockState: overridable === false
     });
 
     it('no presence card when idle (no task to be present about)', () => {
