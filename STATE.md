@@ -2,7 +2,48 @@
 
 Single-file program state, updated only after meaningful progress with tests + independent verifier passing. Detailed history lives in `docs/prd-reviews/*` and the per-project memory index.
 
-_Last updated: 2026-08-09 (GS-COORD merged and pushed; GS-ACCEPT is next)._
+_Last updated: 2026-08-15 (PRD-1 Profile Conformance Suite: SHIPPED — merged `069f556b`, hotfix `e60587c`, transform anchor `09ca3f0`, all pushed to origin/master, CI green; evidence bulk cleaned on operator instruction, documentary record retained)._
+
+## SHIPPED: PRD-1 Profile Conformance Suite — full handoff executed, merged, pushed, CI green
+
+**Landed on operator authorization 2026-08-15, three commits on origin/master:**
+`069f556b` (merge of the G2A-approved 8-file C4 delta onto the operator's line, zero
+overlap, audited SHAs preserved) · `e60587c` (C4-DEF-2 part 1: AC-10A helper anchored
+to in-tree `tsconfig.base.json` + containment guard + regression test — fixed the CI
+red the defect itself predicted) · `09ca3f0` (C4-DEF-2 part 2: `tests/tsconfig.json`
+transform anchor, independent-Opus-reviewed spec + 7 conditions, dual-regime proof —
+host suite baseline-conformant, CI green). **C4-DEF-2 fully closed.** Follow-up spec +
+review record live in `docs/prd-reviews/PRD-1-FOLLOWUPS-SPEC*.md`. Dormant by trigger:
+verifier-v4 (next base-arm verify), F1 residue check (next auditor revision).
+
+**Status: G2A APPROVE, zero conditions, 2026-08-15** (audit
+`E:\tmp\torqclaw-prd1-phasec-exec-20260815Z\final\G2A-AUDIT-20260815.md`, sha256
+`02136706…`; G2A role filled on claude-opus-5 — Opus 4.8 not invocable this session, stated
+in the audit). All 16 items of `docs/prd-reviews/PRD-1-CLAUDE-HANDOFF-2026-08-14.md` closed
+with on-disk evidence; independent verifier passed the packet READY_FOR_G2A (74 checks, 0
+material defects) before the audit.
+
+- **Candidate delta:** exactly 8 added files at commit `7261617…` (branchless, worktree-
+  protected). **Not committed to any branch, not merged, not pushed** — operator-reserved.
+- **Sealed-container record:** offline provisioning proven; better-sqlite3 rebuilt
+  byte-identical to the accepted artifact in both arms; argon2 KDF native end-to-end; the
+  **eight PRD-1 mutations 8/8 relevant RED** in-container (three-run record: fail-closed
+  discovery STOP → a-2 mount falsified → 8/8 under ruled in-tree mount). Canonical
+  conformance proven on retained 2026-08-14 host runs per **LIMITATION FINDING PC-1**, which
+  travels with the record permanently.
+- **Verifier:** K1 `verify-run` PASS with zero relief (2/100/102 files, 2/1895/1897 tests,
+  36/36 inventory). verifier-v3 `verify-base` mode proven defective (never load-bearing);
+  **verifier-v4 filed**.
+- **Defects surfaced by the sealed lane (filed, not fixed in-run):** C4-DEF-1 (`it.each`
+  titles) and C4-DEF-2 widened (out-of-tree tsconfig ascent — helper `findConfigFile` AND
+  vite/tsconfck transform layer; hygiene finding PC-2 + addendum carried).
+- **Operator decisions pending:** R-3 retroactive acknowledgment; F1 auditor-residue
+  obligation; KBN-1 PYTHONHASHSEED mandate; C4-DEF-1/2 + verifier-v4 fix authorization;
+  held-container `b22ce32d…` disposition (Docker Desktop engine restarts start its
+  `/bin/true` — benign, receipted); merge/push/cleanup of the Phase C worktrees, containers,
+  and volumes (all retained, create-only).
+- Evidence root: `E:\tmp\torqclaw-prd1-phasec-exec-20260815Z\` — reading entry point
+  `final\PHASE-C-EVIDENCE-PACKET-20260815.md`.
 
 ## SHIPPED: GS-COORD — coordinated governed skill activation
 

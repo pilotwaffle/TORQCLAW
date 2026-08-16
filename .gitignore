@@ -26,6 +26,8 @@ graphify-vendor/
 
 # scratch and local run artifacts
 scratchpad/
+# local demo/launcher scratch + isolated demo data dir (alt-gateway.mjs, alt-data/)
+.torq/
 packages/gateway/.playwright-mcp/
 tests/resilience/p0-report-correction*.json
 torq-live-current.png
