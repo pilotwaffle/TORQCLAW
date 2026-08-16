@@ -1484,6 +1484,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "croniter" },
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "fire" },
     { name = "httpx", extra = ["socks"] },
@@ -1519,6 +1520,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "croniter", specifier = "==6.0.0" },
+    { name = "cryptography", specifier = ">=44,<50" },
     { name = "fastapi", specifier = ">=0.104.0,<1" },
     { name = "fire", specifier = "==0.7.1" },
     { name = "httpx", extras = ["socks"], specifier = "==0.28.1" },

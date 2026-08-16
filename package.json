@@ -20,6 +20,7 @@
     "stats": "node ops/stats.mjs",
     "contracts:check": "pnpm --filter @torqclaw/contracts check",
     "reachability": "node ops/reachability.mjs",
+    "auth:phase2a:offline": "node scripts/auth-phase2a-offline.mjs",
     "bench": "node --env-file-if-exists=.env ops/bench.mjs",
     "bench:quick": "node --env-file-if-exists=.env ops/bench.mjs --quick --no-score",
     "test": "vitest run",
@@ -39,5 +40,11 @@
     "typescript": "^5.5.0",
     "vitest": "^2",
     "ws": "^8"
+  },
+  "pnpm": {
+    "overrides": {
+      "postcss": "^8.5.18",
+      "sharp": "^0.35.0"
+    }
   }
 }

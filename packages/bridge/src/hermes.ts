@@ -121,7 +121,9 @@ export async function executeHermesTask(
   );
   const taskId: string = submit.task_id;
   engineTaskByRequest.set(req.id, taskId);
-  emit('SYSTEM', `Hermes kernel accepted task ${taskId}`);
+  // audience:'operator' — kernel task ids are diagnostics; the console feed
+  // hides these rows (receipts/replay keep them).
+  emit('SYSTEM', `Hermes kernel accepted task ${taskId}`, { audience: 'operator' });
 
   // maxCost is the only user-set budget here; precedence resolution lives in
   // dispatch (constraint → env default → unlimited).
@@ -156,7 +158,7 @@ export async function executeHermesTask(
     const { heartbeat: spendMsg, breachMessage } = evaluateSpend(
       status.telemetry?.costUsd, budget, heartbeat, Date.now(),
     );
-    if (spendMsg) emit('SYSTEM', spendMsg);
+    if (spendMsg) emit('SYSTEM', spendMsg, { audience: 'operator' });
     if (breachMessage) {
       await client.callTool({
         name: 'cancel_task',

@@ -1,8 +1,18 @@
 # TORQCLAW
 
-**TORQCLAW TrustOS** is a governed local/cloud AI agent control plane: a TypeScript gateway, router, MCP bridge, and console UI wrapped around a forked Hermes Python execution engine.
+**A governed control plane for AI agents: local when private, cloud when needed, approval before action, receipts after every run.**
 
-It is built around one product thesis:
+[![CI](https://github.com/pilotwaffle/TORQCLAW/actions/workflows/ci.yml/badge.svg)](https://github.com/pilotwaffle/TORQCLAW/actions/workflows/ci.yml)
+[![Node](https://img.shields.io/badge/node-%E2%89%A520.9-339933?logo=node.js)](https://nodejs.org)
+[![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Gateway tests](https://img.shields.io/badge/tests-1860%20passed%20TS%20%C2%B7%20477%20Python-brightgreen)](#verification)
+
+![A write-capable tool call is blocked, the operator approves once, the run produces a receipt](docs/demo.gif)
+
+*The approval gate in action (4× speed): a cloud-routed task tries `write_file`, the engine blocks it pending approval, the operator allows it once, and the receipt lands with the written file in the workspace.*
+
+Most agent frameworks optimize for autonomy. TORQCLAW optimizes for **trust**: every agent runs behind a gateway that enforces what the operator decided, not what the model wants.
 
 ```text
 Local when private.
@@ -13,6 +23,69 @@ Receipts after every run.
 Learning that is measurable, governed, and reversible.
 ```
 
+**TORQCLAW TrustOS** is a TypeScript gateway, router, MCP bridge, and console UI wrapped around a forked Hermes Python execution engine.
+
+## Why TORQCLAW
+
+- **Approval before write.** A write-capable tool never runs without operator approval — on both the local and cloud tiers. [How approvals work](#tool-approvals)
+- **Budget before spend.** Cloud tasks carry an explicit budget; a breach cancels execution. Provider-reported spend is the enforcement source of truth. [Cost control](#what-is-implemented)
+- **Receipts after every run.** Terminal tasks produce queryable receipts from real telemetry — absent facts are distinguished from known facts, never invented. [Receipts and replay](#what-is-implemented)
+- **Privacy beats routing confidence.** Private and local-only tasks stay local, and the lock is visible in the route explanation — not silently overridden. [Design invariants](#design-invariants)
+
+## Architecture
+
+```text
+ [ Console / HTTP channel / future channel adapters ]
+                  │
+                  ▼
+ ┌─────────────────────────────────────────────┐
+ │ TypeScript Control Plane                    │
+ │ Fastify gateway :18790 · sessions · authz   │
+ │ enrich → route → dispatch → receipts        │
+ └───────────────┬─────────────────────────────┘
+                 │
+        ┌────────┴────────┐
+        ▼                 ▼
+ ┌──────────────┐   ┌──────────────────────────┐
+ │ LOCAL_EDGE   │   │ FRONTIER / Hermes Engine │
+ │ Ollama /v1   │   │ Python · MCP wrapper     │
+ │ tool loop    │   │ streamable-http          │
+ └──────┬───────┘   └──────────┬───────────────┘
+        │                      │
+        └──────────┬───────────┘
+                   ▼
+ ┌─────────────────────────────────────────────┐
+ │ Universal MCP Bridge                        │
+ │ namespaced tools · capability policy        │
+ │ path scope · approval-gated writes          │
+ └─────────────────────────────────────────────┘
+```
+
+## Quickstart
+
+Requires [Node.js ≥ 20.9](https://nodejs.org), [pnpm](https://pnpm.io), [uv](https://docs.astral.sh/uv/), and Git.
+
+```bash
+git clone https://github.com/pilotwaffle/TORQCLAW.git
+cd TORQCLAW
+ops/install-torqclaw.cmd       # Windows
+# or: sh ops/install-torqclaw.sh
+copy .env.example .env         # Windows; use cp on POSIX
+```
+
+Then start the stack:
+
+```bash
+pnpm doctor                    # preflight check
+pnpm start                     # or ops/start-torqclaw.cmd / sh ops/start-torqclaw.sh
+```
+
+Console: `http://127.0.0.1:3000` · Gateway: `127.0.0.1:18790` · Engine health: `127.0.0.1:8000/health`
+
+The install wrappers run the submodule, frozen pnpm, contracts build, `uv sync --locked`, vendored Hermes editable install, and Hermes import checks. They never create or overwrite `.env`. Everything runs on loopback, and the engine defaults to stub mode — the stack comes up with **zero API keys and zero cloud spend**. Add a provider (`HERMES_PROVIDER`, `HERMES_MODEL`, `HERMES_API_KEY`) only when you want the FRONTIER tier. See [Configuration](#configuration).
+
+Before any non-loopback deployment, replace both `TORQCLAW_GATEWAY_TOKEN=change-me` and `NEXT_PUBLIC_GATEWAY_TOKEN=change-me` with the same non-placeholder value.
+
 ## Program status
 
 | Area | Status |
@@ -21,7 +94,7 @@ Learning that is measurable, governed, and reversible.
 | Phase 1 — Visible Trust MVP | **Complete** |
 | Phase 2 — Governed Learning MVP | **Not started** |
 | Resilient extensibility (PRD-TCLAW-RESILIENT-EXTENSIBILITY-001) | **Partially landed** — see [Resilient extensibility](#resilient-extensibility-partially-landed) |
-| Current master | `e3ae332` (PR #37), CI green |
+| Current master | `faefb62`, CI green |
 | Verified gate on `e3ae332` | `991/991` TypeScript tests across 43 files · `186` passed / `1` skipped Python engine tests · typecheck `12/12` · contracts drift OK (8 schemas, 2 dirs) · build `7/7` |
 
 Gate figures above were reproduced from a clean checkout of `e3ae332`, not copied from a pre-merge worktree.
@@ -192,18 +265,26 @@ operation — governed mode IS the soak, monitored in use, with flag-off as
 the immediate rollback. The flag itself still defaults off in code: a fresh
 deployment must still opt in explicitly.
 
-Skills reach the queue by operator paste and digest-bound review. **Remote skill
-distribution is not implemented**: no downloader, no HTTPS bounds, no pinned
-upgrades, no revocation refresh. `skill.json` accepts optional Ed25519 signature
-metadata and the store validates its *shape only* — it performs no cryptographic
-verification, and signatures are not required.
+Skills reach the queue by operator paste and digest-bound review, OR — behind
+`TORQCLAW_REMOTE_SKILL_SOURCES` (default off) — by a signed remote fetch
+(`install_remote_skill`). The kernel (`engines/hermes_kernel/mcp_wrapper/
+skill_trust.py`) fetches over bounded HTTPS (no redirects, connect/read
+timeouts, `limit+1` streaming), independently computes the package digest
+from the fetched bytes, and verifies an Ed25519 signature over that digest
+against an origin-scoped, operator-configured trust root with signed
+revocation bundles — colocated with the install authority, so the process
+that installs is the process that verifies. On the local (non-remote) path,
+`skill.json` still accepts optional Ed25519 signature metadata for shape
+validation only; no cryptographic verification runs there and signatures
+are not required.
 
-Ed25519 origin trust bundles live in `packages/gateway/src/skillTrust.ts`. That
-module is **dormant by declaration** — 662 lines with no consumer until remote
-sources exist, recorded in `ops/reachability.mjs` and enforced by
-`pnpm reachability`, which fails CI on any substantial module that is neither
-reachable nor explicitly declared. Nothing in TORQCLAW verifies a skill
-signature today.
+The former `packages/gateway/src/skillTrust.ts` (Ed25519 origin trust
+bundles, 661 lines, zero production importers) was **deleted** rather than
+wired: two implementations of canonical JSON is a signature-forgery seam
+waiting for a divergence, so its *model* — not its lines — was ported into
+the Python trust engine above. `ops/reachability.mjs`'s `DORMANT` map and
+`pnpm reachability` record the retirement; `tests/reachability.test.ts`
+pins that the file never reappears.
 
 Two further caveats recorded with the checkpoint: Phase-1 failover evidence
 rests on a deterministic loopback/fake-provider fixture rather than a live
@@ -214,36 +295,7 @@ canonicalizer without RFC 8785 interoperability vectors.
 
 Graphify project profile files are present on `master` through governed Graphify PRs and are accepted current repository state. Graphify relocation or cleanup remains a separate operator-lane item and is not part of TrustOS Phase 1.
 
-## Architecture
-
-```text
- [ Console / HTTP channel / future channel adapters ]
-                  │
-                  ▼
- ┌─────────────────────────────────────────────┐
- │ TypeScript Control Plane                    │
- │ Fastify gateway :18790 · sessions · authz   │
- │ enrich → route → dispatch → receipts        │
- └───────────────┬─────────────────────────────┘
-                 │
-        ┌────────┴────────┐
-        ▼                 ▼
- ┌──────────────┐   ┌──────────────────────────┐
- │ LOCAL_EDGE   │   │ FRONTIER / Hermes Engine │
- │ Ollama /v1   │   │ Python · MCP wrapper     │
- │ tool loop    │   │ streamable-http          │
- └──────┬───────┘   └──────────┬───────────────┘
-        │                      │
-        └──────────┬───────────┘
-                   ▼
- ┌─────────────────────────────────────────────┐
- │ Universal MCP Bridge                        │
- │ namespaced tools · capability policy        │
- │ path scope · approval-gated writes          │
- └─────────────────────────────────────────────┘
-```
-
-## Layout
+## Repository layout
 
 | Path | What |
 |---|---|
@@ -258,35 +310,6 @@ Graphify project profile files are present on `master` through governed Graphify
 | `ops/` | Portable install/start wrappers, doctor, readiness, e2e and live-acceptance harnesses |
 | `docs/TRUSTOS-BUILD-LEDGER.md` | Implementation ledger and phase closeout record |
 | `docs/PRD-TCLAW-RESILIENT-EXTENSIBILITY-001.md` | Failover / profiles / verified-skills program spec |
-
-## Quickstart
-
-```bash
-git clone https://github.com/pilotwaffle/TORQCLAW.git
-cd TORQCLAW
-ops/install-torqclaw.cmd       # Windows
-# or: sh ops/install-torqclaw.sh
-copy .env.example .env         # Windows; use cp on POSIX
-```
-
-The install wrappers run the submodule, frozen pnpm, contracts build, `uv sync --locked`, vendored Hermes editable install, and Hermes import checks. They never create or overwrite `.env`.
-
-Before production start, replace both `TORQCLAW_GATEWAY_TOKEN=change-me` and `NEXT_PUBLIC_GATEWAY_TOKEN=change-me` with the same non-placeholder value.
-
-Before starting, run `node --env-file=.env ops/doctor.mjs --preflight --production` (or `pnpm doctor`). Start the portable production path with `ops/start-torqclaw.cmd`, `sh ops/start-torqclaw.sh`, or `pnpm start`. The wrappers can be launched from any current directory and keep the stack on loopback.
-
-Console: `http://127.0.0.1:3000`  
-Gateway: `127.0.0.1:18790`  
-Engine health: `127.0.0.1:8000/health`
-
-For a real provider acceptance run, configure non-placeholder matching gateway tokens plus `HERMES_MODEL`, `HERMES_PROVIDER`, and `HERMES_API_KEY`, start the stack, then run:
-
-```bash
-node --env-file=.env ops/doctor.mjs --runtime --production
-pnpm acceptance:live
-```
-
-Live acceptance is deliberately not part of public CI and never succeeds by skipping, stubbing, or accepting a pending/error result. Public CI uses a synthetic-token, stub-mode production-launch e2e instead.
 
 ## Configuration
 
@@ -404,6 +427,15 @@ timeout as a real regression.
 Historical Phase-1 closeout gate, for reference only — `805/805` TypeScript and
 `75/75` Python tests at commit `f5fbee7`.
 
+For a real provider acceptance run, configure non-placeholder matching gateway tokens plus `HERMES_MODEL`, `HERMES_PROVIDER`, and `HERMES_API_KEY`, start the stack, then run:
+
+```bash
+node --env-file=.env ops/doctor.mjs --runtime --production
+pnpm acceptance:live
+```
+
+Live acceptance is deliberately not part of public CI and never succeeds by skipping, stubbing, or accepting a pending/error result. Public CI uses a synthetic-token, stub-mode production-launch e2e instead.
+
 ## Design invariants
 
 1. **No hidden authority.** Client requests cannot inject grants, scopes, approvals, or internal authorization.
@@ -437,3 +469,7 @@ Not started:
 Filed non-blocking residuals:
 
 - `TCLAW-GRAPHIFY-CLEANUP` — Graphify cleanup/relocation operator lane.
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE). The vendored Hermes engine (`engines/hermes_kernel/vendor/hermes-agent`) is MIT, Copyright (c) 2025 Nous Research; its upstream license is retained in place. See [NOTICE](NOTICE).

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GatewayEvent, ClientCommand, RouterDiagnostics } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
-import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, groupStreamIntoTasks, derivePreflightEstimate, approvalTierFromGate, attachmentKind, type SafeExportFrameLike, type TaskGroup, type PreflightEstimate, type AttachmentKind } from './friendly';
+import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, isOperatorOnlyEvent, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, groupStreamIntoTasks, derivePreflightEstimate, approvalTierFromGate, attachmentKind, type SafeExportFrameLike, type TaskGroup, type PreflightEstimate, type AttachmentKind } from './friendly';
 import { selectTurnStartMs, selectLastSyncedMs, isStale, selectCostSummaryMeta, selectLivePhase, isPhaseStuck, STALE_AFTER_MS } from './presence';
 import { LiveDuration, formatElapsed } from './LiveDuration';
 import { LivenessChip } from './LivenessChip';
@@ -1718,6 +1718,12 @@ function EventRow({
   // excludes memory frames and the Done receipt frame, which stay visible.
   if (isPanelSystemFrame(event)) return null;
 
+  // Engine/bridge diagnostics (kernel task ids, model slugs, skill-nudge
+  // state, spend internals) are receipt/replay evidence, not chat rows —
+  // an end user must not see operator-grade log lines in the feed. Still
+  // rendered in receipts and the read-only replay view.
+  if (isOperatorOnlyEvent(event)) return null;
+
   // P2.5: a SYSTEM event carrying a receipt renders as a footer card, not a row.
   if (event.type === 'SYSTEM' && meta.receipt) {
     const tools = event.requestId ? (toolsByRequest[event.requestId] ?? []) : [];
@@ -1784,6 +1790,10 @@ function EventRow({
             fetchedDraft={draftsByQueue[queueId]}
             onGetDraft={() => onGetDraft(queueId)}
             onDecide={onDecideSkill}
+            sourceOrigin={typeof meta.sourceOrigin === 'string' ? meta.sourceOrigin : undefined}
+            keyId={typeof meta.keyId === 'string' ? meta.keyId : undefined}
+            digest={typeof meta.digest === 'string' ? meta.digest : undefined}
+            verificationStatus={typeof meta.verificationStatus === 'string' ? meta.verificationStatus : undefined}
           />
         )}
 
@@ -1791,7 +1801,9 @@ function EventRow({
         {isToolApproval && approvalId && !decision && canRenderAction(event, false) && (
           <ToolPermissionCard
             toolName={String(meta.toolName ?? meta.tool_name ?? '')}
-            args={meta.args}
+            argSummaries={meta.argSummaries}
+            argsTruncated={meta.argsTruncated === true}
+            redactionNote={typeof meta.redactionNote === 'string' ? meta.redactionNote : undefined}
             gate={meta.gate}
             budgetLine={budgetLine}
             onAllow={() => onDecideTool(approvalId, 'APPROVE')}
@@ -2037,9 +2049,21 @@ function ReceiptCard({ receipt, tools }: { receipt: any; tools: string[] }) {
  *  (invariant 6). Allow once -> APPROVE_TOOL re-runs the task with the grant. */
 /** P4 skill approval: allow as-is, deny, or edit-and-approve. The editor is a
  *  plain textarea (no Monaco) with Tab->2-spaces so Python indentation is
- *  editable; an inline line-diff shows the operator's changes vs the draft. */
+ *  editable; an inline line-diff shows the operator's changes vs the draft.
+ *
+ *  Phase 4 (§7.1(b), R-10b): a REMOTE (signed) skill's PENDING_APPROVAL
+ *  metadata additionally carries {sourceOrigin, keyId, digest,
+ *  verificationStatus}. Rendered as plain facts next to name/draft --
+ *  adopting the P2 tool card's "ONLY facts the system knows" discipline
+ *  (L1048-1050 above), never an invented risk assessment. The Edit
+ *  affordance is disabled for these rows: the kernel refuses
+ *  edited_markdown on a remote row with SKILL_REMOTE_EDIT_REFUSED
+ *  (§6.2, O-17) because the signature covers exact bytes, so the UI should
+ *  not offer what the kernel will refuse. Local rows (no trust facts) are
+ *  completely unaffected -- byte-identical to pre-Phase-4 rendering. */
 function SkillApprovalCard({
   queueId, skillName, draft, fetchedDraft, onGetDraft, onDecide,
+  sourceOrigin, keyId, digest, verificationStatus,
 }: {
   queueId: string;
   skillName: string;
@@ -2047,10 +2071,18 @@ function SkillApprovalCard({
   fetchedDraft?: string;   // fetched via GET_SKILL_DRAFT (large)
   onGetDraft: () => void;
   onDecide: (queueId: string, decision: 'APPROVE' | 'REJECT', editedMarkdown?: string) => void;
+  sourceOrigin?: string;
+  keyId?: string;
+  digest?: string;
+  verificationStatus?: string;
 }) {
   const original = draft ?? fetchedDraft;
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState('');
+  // A remote (signed) row is identified by the presence of ANY trust fact --
+  // sourceOrigin is the primary signal, matching how get_draft/PENDING_
+  // APPROVAL only ever emit these keys together for remote rows.
+  const isRemote = sourceOrigin !== undefined;
 
   const startEdit = () => {
     if (original === undefined) { onGetDraft(); return; } // fetch then user clicks again
@@ -2087,6 +2119,16 @@ function SkillApprovalCard({
         Learned a new skill: <span className="font-semibold text-ink">{skillName}</span> — review before it can be used.
       </p>
 
+      {isRemote && (
+        <dl className="mt-2 grid grid-cols-[max-content_1fr] gap-x-2 gap-y-0.5 rounded bg-black/30 p-2 text-[11px] text-neutral-400">
+          <dt className="text-neutral-500">source</dt>
+          <dd className="truncate text-neutral-300">{sourceOrigin}</dd>
+          {keyId !== undefined && (<><dt className="text-neutral-500">key</dt><dd className="truncate text-neutral-300">{keyId}</dd></>)}
+          {digest !== undefined && (<><dt className="text-neutral-500">digest</dt><dd className="truncate font-mono text-neutral-300">{digest}</dd></>)}
+          {verificationStatus !== undefined && (<><dt className="text-neutral-500">verification</dt><dd className="text-neutral-300">{verificationStatus}</dd></>)}
+        </dl>
+      )}
+
       {editing && (
         <>
           <textarea
@@ -2122,7 +2164,11 @@ function SkillApprovalCard({
         >
           {editing ? 'Approve with edits' : 'Allow'}
         </button>
-        {!editing && (
+        {/* Phase 4 (§6.2/§7.2, O-17): the kernel refuses edited_markdown on a
+            remote (signed) row -- the signature covers exact bytes, so an
+            edit would sever it. The UI should not offer what the kernel
+            will refuse; local rows (isRemote===false) are unaffected. */}
+        {!editing && !isRemote && (
           <button
             onClick={startEdit}
             className="rounded border border-border-strong px-3 py-1 text-[11px] text-muted hover:border-faint"
@@ -2141,11 +2187,26 @@ function SkillApprovalCard({
   );
 }
 
+/** One bounded/redacted argument summary, exactly as the gateway emits it. */
+interface ArgSummary {
+  key: string;
+  type: string;
+  value?: string;
+  size?: number;
+  withheld?: boolean;
+}
+
 function ToolPermissionCard({
-  toolName, args, gate, onAllow, onDeny, budgetLine = null,
+  toolName, argSummaries, argsTruncated, redactionNote, gate, onAllow, onDeny, budgetLine = null,
 }: {
   toolName: string;
-  args: unknown;
+  /** C2-6 / property 8: raw proposed args are NEVER sent to a client any
+   *  more. The gateway emits bounded, redacted per-key summaries, so this
+   *  card can no longer display secret material the redactor removed —
+   *  and cannot be made to by a client-side change. */
+  argSummaries?: unknown;
+  argsTruncated?: boolean;
+  redactionNote?: string;
   gate?: unknown;
   onAllow: () => void;
   onDeny: () => void;
@@ -2193,13 +2254,17 @@ function ToolPermissionCard({
     : toolName
   ).replace(/_/g, ' ');
 
-  const pretty = useMemo(() => {
-    try { return JSON.stringify(args ?? {}, null, 2); }
-    catch { return String(args); }
-  }, [args]);
-  const TRUNC = 500;
-  const isLong = pretty.length > TRUNC;
-  const shown = expanded || !isLong ? pretty : pretty.slice(0, TRUNC) + '\n…';
+  // Render only what the gateway chose to send. A summary with no `value`
+  // was withheld by server-side policy; the card says so plainly rather
+  // than rendering an empty line the operator would misread as "no
+  // argument".
+  const summaries: ArgSummary[] = useMemo(
+    () => (Array.isArray(argSummaries) ? (argSummaries as ArgSummary[]) : []),
+    [argSummaries],
+  );
+  const SHOW = 6;
+  const isLong = summaries.length > SHOW;
+  const shownSummaries = expanded || !isLong ? summaries : summaries.slice(0, SHOW);
 
   return (
     <div className={`ml-2 mt-2 max-w-2xl rounded-lg border p-3 ${tierChrome}`}>
@@ -2289,13 +2354,36 @@ function ToolPermissionCard({
           <p className="text-[10px] text-faint/75">{gateFacts.targetsCaption}</p>
         </dl>
       )}
-      <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded bg-black/40 p-2 text-[11px] text-muted">
-        {shown}
-      </pre>
+      {/* C2-6 / property 8 (master): bounded, redacted per-key summaries —
+          raw args never reach the client. Token classes per PRD-UI-1 §0. */}
+      {summaries.length > 0 && (
+        <dl className="mt-2 space-y-1 rounded bg-black/40 p-2 text-[11px]">
+          {shownSummaries.map((s) => (
+            <div key={s.key} className="flex gap-2">
+              <dt className="w-28 shrink-0 break-all font-mono text-faint">{s.key}</dt>
+              <dd className="min-w-0 break-all font-mono text-muted">
+                {s.value !== undefined
+                  ? s.value
+                  : <span className="text-faint/75">
+                      {`<${s.type}${s.size !== undefined ? `, ${s.size}` : ''} — withheld>`}
+                    </span>}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      )}
       {isLong && (
         <button onClick={() => setExpanded((v) => !v)} className="mt-1 text-[10px] text-faint hover:text-muted">
-          {expanded ? 'show less' : `show all (${pretty.length} chars)`}
+          {expanded ? 'show less' : `show all (${summaries.length} arguments)`}
         </button>
+      )}
+      {argsTruncated && (
+        <p className="mt-1 text-[10px] text-faint/75">
+          Some arguments were omitted from this summary.
+        </p>
+      )}
+      {redactionNote && (
+        <p className="mt-1 text-[10px] text-faint/75">{redactionNote}</p>
       )}
       {/* Redesign 6/7 — spend tier: recorded budget context inline. Real
           costSummary facts only (null -> renders nothing, never a guess). */}

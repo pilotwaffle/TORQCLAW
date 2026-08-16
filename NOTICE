@@ -1,0 +1,11 @@
+TORQCLAW
+Copyright 2026 Torq Business Solutions
+
+This product includes software developed as part of TORQCLAW
+(https://github.com/pilotwaffle/TORQCLAW).
+
+This product includes vendored software from hermes-agent
+(https://github.com/NousResearch/hermes-agent),
+Copyright (c) 2025 Nous Research, licensed under the MIT License.
+The upstream LICENSE file is retained at
+engines/hermes_kernel/vendor/hermes-agent/LICENSE.

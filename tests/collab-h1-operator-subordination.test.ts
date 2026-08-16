@@ -30,6 +30,7 @@ import {
 } from '../packages/gateway/src/surfaceSecurity.js';
 
 const APPROVE_TOOL = { action: 'APPROVE_TOOL', approvalId: 'a1', decision: 'APPROVE' } as unknown as ClientCommand;
+const APPROVE_SKILL = { action: 'APPROVE_SKILL', queueId: 'q1', decision: 'APPROVE' } as unknown as ClientCommand;
 const SUBMIT_PROMPT = { action: 'SUBMIT_PROMPT', prompt: 'hi' } as unknown as ClientCommand;
 
 function stateDb(): Database.Database {
@@ -252,13 +253,90 @@ describe('H-1 — operator authority is INTERSECTED with the presenting surface'
     db.close();
   });
 
-  it('other operator commands are not gated by C1 (exactly one authority token exists)', () => {
+  it('other operator commands are not gated by C1/P4-8 (exactly one authority token exists)', () => {
     const db = stateDb();
     activate(db, 'op', 'operator');
     // No approve grant, yet ordinary operator commands still work -- C1
-    // introduces `approve` only; inventing gates for unspecified commands
-    // would be scope drift with real lockout risk.
+    // introduces `approve` only (now shared by APPROVE_TOOL and, as of P4-8,
+    // APPROVE_SKILL); inventing gates for unspecified commands would be
+    // scope drift with real lockout risk.
     expect(authorize('operator', SUBMIT_PROMPT, ctxFor(db, 'op'))).toEqual({ ok: true });
+    db.close();
+  });
+});
+
+describe('P4-8 — APPROVE_SKILL joins the same approve-authority gate (R-10a)', () => {
+  // Specified against current master independently (§1.4): inherits nothing
+  // from any other lane. Mirrors APPROVE_TOOL's own H-1 coverage above --
+  // both commands share exactly the SAME authority token ('approve'), so a
+  // surface holding the grant may decide either kind of approval, and a
+  // surface without it is denied for both, identically.
+
+  it('an operator surface WITH a live approve grant may APPROVE_SKILL', () => {
+    const db = stateDb();
+    activate(db, 'op', 'operator');
+    grantAuthority(db, 'op', 'approve', randomUUID());
+    expect(authorize('operator', APPROVE_SKILL, ctxFor(db, 'op'))).toEqual({ ok: true });
+    db.close();
+  });
+
+  it('an operator surface WITHOUT the grant is DENIED for APPROVE_SKILL', () => {
+    const db = stateDb();
+    activate(db, 'op', 'operator');
+    const decision = authorize('operator', APPROVE_SKILL, ctxFor(db, 'op'));
+    expect(decision.ok).toBe(false);
+    expect((decision as { reason: string }).reason).toMatch(/authority/i);
+    db.close();
+  });
+
+  it('CT-2 at decision time: an agent-role surface is denied APPROVE_SKILL even with a grant row', () => {
+    const db = stateDb();
+    activate(db, 'op', 'operator');
+    grantAuthority(db, 'op', 'approve', randomUUID());
+    const decision = authorize('operator', APPROVE_SKILL, ctxFor(db, 'op', 'agent'));
+    expect(decision.ok).toBe(false);
+    expect((decision as { reason: string }).reason).toMatch(/operator-role/i);
+    db.close();
+  });
+
+  it('revocation is observed by the very next APPROVE_SKILL command (no caching)', () => {
+    const db = stateDb();
+    activate(db, 'op', 'operator');
+    grantAuthority(db, 'op', 'approve', randomUUID());
+    const ctx = ctxFor(db, 'op');
+    expect(authorize('operator', APPROVE_SKILL, ctx).ok).toBe(true);
+
+    revokeAuthority(db, 'op', 'approve');
+    expect(authorize('operator', APPROVE_SKILL, ctx).ok).toBe(false);
+    db.close();
+  });
+
+  it('flag-off / legacy connections keep APPROVE_SKILL blanket-allowed byte-identically', () => {
+    expect(authorize('operator', APPROVE_SKILL, legacyCtx)).toEqual({ ok: true });
+  });
+
+  it('channel role is denied APPROVE_SKILL exactly like APPROVE_TOOL (untouched authz.ts:153)', () => {
+    expect(authorize('channel', APPROVE_SKILL, legacyCtx))
+      .toEqual({ ok: false, reason: 'action not permitted for this role' });
+    const db = stateDb();
+    activate(db, 'op', 'operator');
+    grantAuthority(db, 'op', 'approve', randomUUID());
+    expect(authorize('channel', APPROVE_SKILL, ctxFor(db, 'op')))
+      .toEqual({ ok: false, reason: 'action not permitted for this role' });
+    db.close();
+  });
+
+  it('a single grant authorizes BOTH APPROVE_TOOL and APPROVE_SKILL -- one shared token', () => {
+    const db = stateDb();
+    activate(db, 'op', 'operator');
+    grantAuthority(db, 'op', 'approve', randomUUID());
+    const ctx = ctxFor(db, 'op');
+    expect(authorize('operator', APPROVE_TOOL, ctx).ok).toBe(true);
+    expect(authorize('operator', APPROVE_SKILL, ctx).ok).toBe(true);
+
+    revokeAuthority(db, 'op', 'approve');
+    expect(authorize('operator', APPROVE_TOOL, ctx).ok).toBe(false);
+    expect(authorize('operator', APPROVE_SKILL, ctx).ok).toBe(false);
     db.close();
   });
 });

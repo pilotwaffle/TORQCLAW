@@ -203,7 +203,18 @@ function authorizeOperator(cmd: ClientCommand, ctx: AuthzContext): AuthzDecision
   // No surface layer => legacy behaviour, unchanged (SI-4).
   if (!surface) return ALLOW;
 
-  if (cmd.action === 'APPROVE_TOOL') {
+  // Phase 4 (R-10a, PRD-TCLAW-REMOTE-SKILL-SOURCES-005 §2/§7.1): APPROVE_SKILL
+  // joins the approve-authority gate. Specified against current master
+  // independently -- it inherits nothing from any other lane. The deeper,
+  // writer-level re-check for a remote (signed) skill lives with the kernel
+  // decision seam (skill_queue.decide -- approval-token digest binding plus
+  // activation-time trust evaluation via _enforce_activation_policy), so this
+  // gate is a surface gate, never the enforcement of record. Lockout surface
+  // is identical to APPROVE_TOOL's: an operator surface without a live
+  // `approve` grant loses skill approval ONLY when ctx.surface is present
+  // (collab flag on + C1 surface); flag-off/legacy connections keep today's
+  // blanket allow byte-identically (the `if (!surface) return ALLOW;` above).
+  if (cmd.action === 'APPROVE_TOOL' || cmd.action === 'APPROVE_SKILL') {
     // CT-2 decision-time enforcement: operator ROLE is required, and role
     // is the predicate -- never surface kind (§3.14).
     //

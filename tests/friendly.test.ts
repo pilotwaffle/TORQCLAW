@@ -27,6 +27,7 @@ import {
   selectLatestRoutePreview,
   isPanelSystemFrame,
   isBusyNeutralEvent,
+  isOperatorOnlyEvent,
   selectLatestApprovalList,
   formatApprovalStatus,
   formatGateFacts,
@@ -1642,5 +1643,40 @@ describe('groupStreamIntoTasks (redesign 3/7) — per-task card grouping', () =>
     expect(t1.group.visible).toHaveLength(1);
     expect(t2.group.plumbing).toHaveLength(1);
     expect(t2.group.visible).toHaveLength(0);
+  });
+});
+
+describe('isOperatorOnlyEvent — engine/bridge diagnostics never render as chat rows', () => {
+  // Recognition path 1: metadata tag (producers set audience:'operator').
+  it('true for an audience-tagged SYSTEM frame regardless of message', () => {
+    expect(isOperatorOnlyEvent(ev({ type: 'SYSTEM', message: 'anything internal', metadata: { audience: 'operator' } }))).toBe(true);
+  });
+
+  // Recognition path 2: message prefixes — persisted history recorded before
+  // the tag existed replays verbatim on reconnect and must still be hidden.
+  it.each([
+    'Hermes kernel accepted task 67651798-03b9-4927-9cb7-de685d1dfccf',
+    'Hermes agent booted for ROUTINE_AUTOMATION',
+    'Model: deepseek/deepseek-chat',
+    'Cloud tools enabled: web',
+    'Skill nudge suppressed (agent._skill_nudge_interval=0); toolset override active: False',
+    'Spend reporting unavailable for this provider — budget cannot be enforced; the iteration cap (HERMES_MAX_ITERATIONS) is the only guard.',
+    'Spend so far: $0.00',
+    'Tool web_extract completed',
+  ])('true for persisted diagnostic message: %s', (message) => {
+    expect(isOperatorOnlyEvent(ev({ type: 'SYSTEM', message }))).toBe(true);
+  });
+
+  it('false for user-meaningful SYSTEM frames — budget warning, stub mode, memory, Done receipt', () => {
+    expect(isOperatorOnlyEvent(ev({ type: 'SYSTEM', message: 'No budget set — this cloud task runs without a spend cap.' }))).toBe(false);
+    expect(isOperatorOnlyEvent(ev({ type: 'SYSTEM', message: 'STUB MODE (HERMES_MODEL unset) for ROUTINE_AUTOMATION' }))).toBe(false);
+    expect(isOperatorOnlyEvent(ev({ type: 'SYSTEM', message: 'Memory: 2 episode(s) this session', metadata: { memory: 'SHOW', episodes: [] } }))).toBe(false);
+    expect(isOperatorOnlyEvent(ev({ type: 'SYSTEM', message: 'Done', metadata: { receipt: { taskId: 't1' } } }))).toBe(false);
+  });
+
+  it('false for non-SYSTEM types even with the tag or matching text — hiding is SYSTEM-only', () => {
+    expect(isOperatorOnlyEvent(ev({ type: 'TOOL_CALL', message: 'Executing web_extract' }))).toBe(false);
+    expect(isOperatorOnlyEvent(ev({ type: 'RESULT', message: 'answer text' }))).toBe(false);
+    expect(isOperatorOnlyEvent(ev({ type: 'TOOL_CALL', message: 'x', metadata: { audience: 'operator' } } as Partial<GatewayEvent>))).toBe(false);
   });
 });

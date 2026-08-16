@@ -27,6 +27,12 @@ function runGate(): { code: number; out: string } {
   }
 }
 
+function assertCollabDormancyPolicy(out: string): void {
+  expect(out).not.toContain('INCUBATING');
+  const dormantCollab = [...out.matchAll(/^\s+- (packages\/collab\/src\/[^\s]+)/gm)].map((match) => match[1]);
+  expect(dormantCollab).toEqual(['packages/collab/src/authIdentityMigration.ts']);
+}
+
 describe('reachability gate', () => {
   it('passes on the current tree', () => {
     const { code, out } = runGate();
@@ -80,11 +86,17 @@ describe('reachability gate', () => {
     }
   });
 
-  it('reports the known-dormant modules with their declared reasons', () => {
-    // Dormancy must stay visible. If someone silently drops an entry from
-    // DORMANT to make the gate green, that is the defect returning.
+  it('no longer lists skillTrust.ts as dormant (P4-2 deleted it)', () => {
+    // packages/gateway/src/skillTrust.ts was DECLARED dormant (Ed25519
+    // skill signing, zero production importers) until P4-2 deleted it
+    // outright: PRD-TCLAW-REMOTE-SKILL-SOURCES-005 R-1 ports its MODEL,
+    // never its lines, into engines/hermes_kernel/mcp_wrapper/skill_trust.py
+    // instead. Inverted from the prior "stays visible while dormant"
+    // expectation (the same inversion pattern used below at L90-98 for the
+    // wired skill pipeline): reintroducing the file OR the DORMANT entry is
+    // the DP-8 deletion probe -- it must turn this test red.
     const { out } = runGate();
-    expect(out).toContain('skillTrust.ts');
+    expect(out).not.toContain('skillTrust.ts');
   });
 
   it('no longer lists the skill pipeline as dormant (Phase 1 wired it)', () => {
@@ -97,7 +109,7 @@ describe('reachability gate', () => {
     expect(out).not.toContain('verified_skill_store.py');
   });
 
-  it('no longer lists packages/collab as dormant (C0.1 gave it a real entry point)', () => {
+  it('keeps packages/collab live integration while allowing only the reviewed offline line dormant', () => {
     // packages/collab was DORMANT ("INCUBATING — SELECTIVE INTEGRATION
     // REQUIRED", operator ruling 2026-08-08) until slice C0.1: server.ts now
     // transitively imports it via collabIdentity.ts's
@@ -108,8 +120,14 @@ describe('reachability gate', () => {
     // connect-path wiring this slice added regressed (e.g. collabIdentity.ts
     // stopped being imported by server.ts, or reverted to a stub).
     const { out } = runGate();
-    expect(out).not.toContain('packages/collab');
-    expect(out).not.toContain('INCUBATING');
+    assertCollabDormancyPolicy(out);
     expect(out).toContain('PASS');
+  });
+
+  it('turns broad or second collab dormancy mutations red', () => {
+    const exact = '  - packages/collab/src/authIdentityMigration.ts\n';
+    assertCollabDormancyPolicy(exact);
+    expect(() => assertCollabDormancyPolicy(`${exact}  - packages/collab/src/index.ts\n`)).toThrow();
+    expect(() => assertCollabDormancyPolicy(`${exact}INCUBATING — SELECTIVE INTEGRATION REQUIRED\n`)).toThrow();
   });
 });

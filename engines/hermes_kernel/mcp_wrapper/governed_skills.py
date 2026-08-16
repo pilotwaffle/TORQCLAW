@@ -177,8 +177,40 @@ def _store() -> VerifiedSkillStore:
     with _MUTATION_LOCK:
         with _STORE_SINGLETON_LOCK:
             if _STORE is None:
-                _STORE = VerifiedSkillStore(_data_dir() / "verified_skills")
+                _STORE = VerifiedSkillStore(
+                    _data_dir() / "verified_skills",
+                    trust_evaluator=_build_trust_evaluator(),
+                )
             return _STORE
+
+
+def _build_trust_evaluator():
+    """Construct the Phase-4 trust engine, or return None (O-5).
+
+    Constructed ONLY when the remote flag is on AND skill_sources.json parses.
+    Flag off (or config absent/invalid) => None: the store's policy seam then
+    fails closed only if a remote-sourced manifest actually reaches it with the
+    flag on (``trust-engine-unavailable``); the purely-local/flag-off path never
+    touches the trust arm, so flag-off behavior stays byte-identical (RS-7).
+
+    Bound once at first store construction (the singleton is cached), matching
+    every other per-process handle. An operator who edits config or flips the
+    flag after first construction re-resolves via ``_reset_for_test`` semantics
+    or a process restart -- the same lifecycle the store handle already has.
+    """
+    from . import skill_sources
+    from .skill_trust import TrustEngine
+
+    if not skill_sources.remote_flag_on():
+        return None
+    try:
+        config = skill_sources.load_config()
+    except Exception:  # noqa: BLE001 - absent/invalid config => no evaluator
+        return None
+    return TrustEngine(
+        skill_sources.trust_dir(),
+        skill_sources.authorities_map(config),
+    )
 
 
 def _store_locked() -> VerifiedSkillStore:
@@ -560,6 +592,211 @@ def install_approved_skill(skill_id: str, markdown: str) -> dict[str, Any]:
         }
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
+
+
+def discard_remote_stage(stage_id: str | None) -> None:
+    """P4-5 (§6.2, O-17): REJECT of a remote row removes ``staging/<stageId>``
+    -- the fetched bytes are no longer needed. Best-effort: a REJECT must
+    always succeed from the operator's point of view even if the stage was
+    already cleaned up (crashed process reconcile, a prior REJECT retry,
+    etc.), so this never raises. The ``skill_trust/artifacts/`` record is
+    left alone -- it is durable evidence, not authority (§14.5), and nothing
+    about REJECT invalidates it.
+    """
+    if not stage_id:
+        return
+    try:
+        store = _store()
+        store._remove_stage_if_owned({"stageId": stage_id})
+    except Exception:  # noqa: BLE001 - best-effort cleanup, never blocks REJECT
+        pass
+
+
+def install_remote_staged(
+    *, skill_id: str, skill_markdown: str, remote_meta: dict[str, Any]
+) -> dict[str, Any]:
+    """Install a REMOTE, already-verified-and-staged skill through the
+    governed lifecycle (§6.2 APPROVE routing).
+
+    Unlike :func:`install_approved_skill` (which builds a fresh local
+    package from ``markdown``), this resolves the artifact ``install_remote_
+    skill`` already fetched, verified, and staged -- identified by
+    ``remote_meta["stageId"]`` -- and re-verifies trust NOW, at decide time
+    (RS-2): a decide() that happens days after the original fetch cannot
+    ride the fetch-time verdict. ``skill_markdown`` is accepted only so the
+    caller's queue-row markdown can be threaded through unused code paths
+    identically to the local function's signature; the actual installed
+    bytes are always the staged artifact's, never re-derived from markdown.
+
+    ``remote_meta`` is the parsed ``remote_json`` row:
+    ``{sourceId, origin, keyId, digest, stageId, verifiedAt}`` (§5.7).
+
+    Steps (§6.2):
+      1. resolve the staged artifact by stageId; missing/invalid stage is a
+         typed, non-retryable refusal telling the operator to re-run
+         install_remote_skill.
+      2. recompute the staged digest and require equality with
+         remote_meta["digest"] (§5.4 TOCTOU tripwire, AC-2/AC-3).
+      3. re-verify trust NOW against current trust state (RS-2) -- bundle
+         freshness, key trust/revocation, skill revocation, digest-pin,
+         signature from the persisted artifact record.
+      4. run the SAME stage/approve/coordinator pipeline as the local path,
+         with activate() given remote_meta so R-6/F-1 apply.
+      5. the R-6 signer fields land via activate()'s remote_meta threading;
+         no separate write.
+    """
+    sid = _validate_id(skill_id)
+    digest = remote_meta["digest"]
+    stage_id = remote_meta["stageId"]
+    origin = remote_meta["origin"]
+    key_id = remote_meta["keyId"]
+
+    store = _store()
+
+    # Step 1: resolve the staged artifact. A missing/invalid stage (cleaned
+    # by an operator, or a crashed process' reconcile) is a typed,
+    # non-retryable refusal -- distinct from the generic trust taxonomy so
+    # the operator message names the actual remedy.
+    try:
+        artifact = store._resolve_artifact({"stageId": stage_id})
+    except SkillStoreError as exc:
+        from .skill_trust import SkillTrustError
+
+        raise SkillTrustError(
+            "artifact-record-missing",
+            f"staged remote package {stage_id!r} is no longer available; "
+            "re-run install_remote_skill",
+        ) from exc
+
+    # Step 2: TOCTOU tripwire (§5.4, AC-2/AC-3) -- the staged bytes must
+    # still hash to exactly the digest verified at fetch time.
+    if artifact["digest"] != digest:
+        from .verified_skill_store import SkillIntegrityError
+
+        raise SkillIntegrityError(
+            f"staged remote package digest mismatch for {sid!r}: expected "
+            f"{digest}, staged bytes hash to {artifact['digest']}"
+        )
+
+    if _already_active_and_published(sid, digest):
+        return {
+            "ok": True,
+            "skillId": sid,
+            "digest": digest,
+            "publishedPath": str(skill_publisher.published_skills_dir() / sid),
+            "reconciledFromPriorSuccess": True,
+        }
+
+    # Step 3: re-verify trust NOW, against current trust state (RS-2). The
+    # evaluator is the same one _enforce_activation_policy will use again
+    # inside activate() -- re-running it here, before approve()/the
+    # coordinator, gives an early typed refusal (e.g. SKILL_TRUST_STALE)
+    # without spending an approval token or entering the coordinator only to
+    # fail there. This is NOT a substitute for the seam-level re-check
+    # inside activate() (§6.3) -- both run; RS-2 requires the seam check
+    # specifically, this is an early-exit convenience on top of it.
+    evaluator = getattr(store, "_trust_evaluator", None)
+    if evaluator is None:
+        from .skill_trust import SkillTrustError
+
+        raise SkillTrustError("trust-engine-unavailable")
+    evaluator.evaluate_installed(
+        skill_id=sid,
+        digest=digest,
+        required_capabilities=list(artifact["manifest"].get("requiredCapabilities", [])),
+    )
+
+    remote_context = {"origin": origin, "keyId": key_id}
+
+    # F-1/R-9: remote transactions require audit headroom BEFORE the
+    # coordinator transaction begins, checked here (outside store._lock,
+    # before approve()) and re-checked again under the lock inside
+    # activate() itself (§2 R-9's "before ... checked outside the lock, and
+    # re-checked under it").
+    store.check_remote_audit_headroom()
+
+    approval = store.approve(artifact, confirm_permission_delta=True)
+
+    retain_root = skill_publisher.published_skills_retained_root() / stage_id
+
+    publish_holder: dict[str, Any] = {}
+
+    def _publish() -> dict[str, Any]:
+        result = skill_publisher.publish_skill(
+            artifact["path"],
+            digest=digest,
+            source=artifact["manifest"]["source"],
+            retain_replaced_into=retain_root,
+        )
+        publish_holder["result"] = result
+        return result
+
+    commit_holder: dict[str, Any] = {}
+
+    def _restore(publish_result: dict[str, Any]) -> None:
+        # Mirrors install_approved_skill's _restore exactly, with remote_meta
+        # threaded through revert_activation so the F-1 remote-scoped
+        # overflow arm can apply if capacity is somehow hit here too.
+        if "previous" in commit_holder:
+            locked_store = _store_locked()
+            locked_store.revert_activation(
+                sid, digest, approval["token"], commit_holder["previous"],
+                remote_meta=remote_context,
+            )
+
+        try:
+            skill_publisher.restore_retained_projection(
+                skill_id=sid, retained_path=publish_result.get("retainedPath")
+            )
+        except Exception as exc:
+            if "previous" in commit_holder:
+                raise GovernanceRevertedProjectionUnprovenError(
+                    f"skill {sid!r}: governed-active state was reverted "
+                    f"to digest {commit_holder['previous'].get('digest') if commit_holder['previous'] else None!r}, "
+                    "but restoring the prior published projection then "
+                    "failed; TORQCLAW cannot prove what is currently "
+                    "published on disk for this skill id"
+                ) from exc
+            raise
+
+        shutil.rmtree(retain_root, ignore_errors=True)
+
+    def _commit() -> dict[str, Any]:
+        locked_store = _store_locked()
+        previous = locked_store._load_state()["active"].get(sid)
+        result = locked_store.activate(artifact, approval, remote_meta=remote_context)
+        commit_holder["previous"] = previous
+        return result
+
+    def _verify(commit_result: dict[str, Any]) -> None:
+        locked_store = _store_locked()
+        active = locked_store.get_active(sid)
+        if active is None or active.get("digest") != digest:
+            raise GovernedSkillError(
+                f"post-commit verification failed: {sid} is not "
+                f"governed-active at digest {digest}"
+            )
+        if not skill_publisher.is_published(sid):
+            raise GovernedSkillError(
+                f"post-commit verification failed: {sid} is governed-"
+                "active but not published"
+            )
+
+    ActivationCoordinator(
+        publish=_publish, restore=_restore, commit=_commit, verify=_verify
+    ).run()
+
+    published_result = publish_holder["result"]
+    skill_publisher.discard_retained_projection(published_result.get("retainedPath"))
+    shutil.rmtree(retain_root, ignore_errors=True)
+    store._remove_stage_if_owned(artifact)
+
+    return {
+        "ok": True,
+        "skillId": sid,
+        "digest": digest,
+        "publishedPath": published_result["path"],
+    }
 
 
 def rollback_governed_skill(skill_id: str, digest: str) -> dict[str, Any]:
@@ -1073,11 +1310,33 @@ def map_activation_failure(exc: Exception, *, queue_status: str | None) -> dict[
     - anything else: retryable ``SKILL_ACTIVATION_FAILED`` -- the
       coordinator's restore path guarantees nothing partial is left
       published or governed-active, so a retry starts from a clean slate.
+
+    Phase 4 (O-13, normative): a ``SkillTrustError`` arm is checked FIRST,
+    BEFORE every arm above -- the subclass-ordering pitfall ``skill_rollback.
+    py:64-73`` documents (a subclass swallowed by an earlier parent arm
+    mislabels the one failure that needs operator inspection). Every reason
+    in the frozen §5.8 registry maps to its own code; retryable ONLY for
+    ``stale`` (with ``retryAfter: "refresh_skill_trust"``, O-12); every other
+    reason -- specially mapped or not -- is non-retryable. An out-of-registry
+    reason maps to non-retryable ``SKILL_TRUST_REFUSED`` rather than falling
+    through to the generic retryable ``SKILL_ACTIVATION_FAILED`` (never
+    silently treated as a transient failure).
     """
     from .runtime_quiescence import (
         SkillActivationRestoredButCacheUnprovenError,
         SkillRuntimeBusyError,
     )
+    from .skill_trust import SkillTrustError
+
+    if isinstance(exc, SkillTrustError):
+        code, retryable = _TRUST_REASON_CODES.get(exc.reason, ("SKILL_TRUST_REFUSED", False))
+        result = {"ok": False, "code": code, "retryable": retryable}
+        if queue_status is not None:
+            result["status"] = queue_status
+        result["error"] = str(exc)
+        if retryable:
+            result["retryAfter"] = "refresh_skill_trust"
+        return result
 
     if isinstance(exc, SkillRuntimeBusyError):
         from .hermes_runner import RUNNING
@@ -1110,3 +1369,34 @@ def map_activation_failure(exc: Exception, *, queue_status: str | None) -> dict[
         result["status"] = queue_status
     result["error"] = str(exc)
     return result
+
+
+#: §5.8 frozen registry -> (operator code, retryable). Reasons not listed
+#: here (including any future/unknown reason) map to the fallback
+#: ``("SKILL_TRUST_REFUSED", False)`` in ``map_activation_failure`` above --
+#: never to the generic retryable arm (O-13 exhaustiveness).
+_TRUST_REASON_CODES: dict[str, tuple[str, bool]] = {
+    "stale": ("SKILL_TRUST_STALE", True),
+    "revoked-key": ("SKILL_TRUST_REVOKED_KEY", False),
+    "revoked-skill": ("SKILL_TRUST_REVOKED_SKILL", False),
+    "clock-rollback": ("SKILL_TRUST_CLOCK_ROLLBACK", False),
+    "clock-unavailable": ("SKILL_TRUST_CLOCK_ROLLBACK", False),
+    "capability-unsupported": ("SKILL_TRUST_CAPABILITY_UNSUPPORTED", False),
+    "signature-invalid": ("SKILL_TRUST_REFUSED", False),
+    "digest-mismatch": ("SKILL_TRUST_REFUSED", False),
+    "digest-not-current": ("SKILL_TRUST_REFUSED", False),
+    "trust-engine-unavailable": ("SKILL_TRUST_REFUSED", False),
+    "invalid-schema": ("SKILL_TRUST_REFUSED", False),
+    "payload-too-large": ("SKILL_TRUST_REFUSED", False),
+    "origin-mismatch": ("SKILL_TRUST_REFUSED", False),
+    "unknown-authority-key": ("SKILL_TRUST_REFUSED", False),
+    "unknown-origin": ("SKILL_TRUST_REFUSED", False),
+    "untrusted-key": ("SKILL_TRUST_REFUSED", False),
+    "invalid-key": ("SKILL_TRUST_REFUSED", False),
+    "invalid-freshness": ("SKILL_TRUST_REFUSED", False),
+    "future-issued": ("SKILL_TRUST_REFUSED", False),
+    "trust-not-yet-valid": ("SKILL_TRUST_REFUSED", False),
+    "sequence-not-monotonic": ("SKILL_TRUST_REFUSED", False),
+    "issued-at-not-monotonic": ("SKILL_TRUST_REFUSED", False),
+    "artifact-record-missing": ("SKILL_TRUST_REFUSED", False),
+}

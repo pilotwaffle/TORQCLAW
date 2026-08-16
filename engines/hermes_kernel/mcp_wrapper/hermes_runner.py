@@ -278,17 +278,21 @@ _FRONTIER_TOOLSETS = {
     "SUMMARIZATION": ["web"],
     "DATA_EXTRACTION": ["web"],
     "ROUTINE_AUTOMATION": ["web"],
-    "COMPLEX_CODING": ["web", "files", "terminal", "code_execution"],
+    "COMPLEX_CODING": ["web", "file", "terminal", "code_execution"],
 }
 
 
 # Intent signals that a task needs to touch the filesystem even when the
 # classifier labeled it research/summarize/extract. Without this, "write a file"
 # lands in a web-only toolset and can NEVER succeed (it has no write_file). The
-# `files` toolset IS approval-gated (P6 pre_tool_call hook), so granting it stays
+# `file` toolset IS approval-gated (P6 pre_tool_call hook), so granting it stays
 # safe — a write still requires the human's Allow once.
+# Screen-artifact nouns (board/dashboard/chart/.html/screen...) are included so
+# "create a kanban board showing X on the screen" gets a file tool — otherwise
+# the model can only dump HTML into chat and truthfully report it cannot write.
 _FILE_INTENT = re.compile(
-    r"\b(write|save|create|append|edit|update|delete|read|open)\b.{0,40}\b(file|notes?|\.txt|\.md|\.json|\.csv|workspace|document)",
+    r"\b(write|save|create|append|edit|update|delete|read|open|build|building|generate|make|draw)\b"
+    r".{0,40}\b(file|notes?|pages?|\.txt|\.md|\.json|\.csv|\.html|workspace|document|board|dashboard|chart|graph|screen|diagram|report)",
     re.IGNORECASE,
 )
 
@@ -317,13 +321,15 @@ def _frontier_enabled_toolsets(
         # web is the safe read-only floor; workspace_write adds file writes on
         # top. (Previously files-only, which left routine tasks unable to search
         # the web once the effective profile actually reached the engine.)
-        "workspace_write": ["web", "files"],
-        "terminal_power": ["web", "files", "terminal", "code_execution"],
+        # Merge note 2026-08-16: toolset name is 'file' (singular) per master's
+        # 83d28cc — the vendored registry name; the WIP's web+file intent kept.
+        "workspace_write": ["web", "file"],
+        "terminal_power": ["web", "file", "terminal", "code_execution"],
     }
     base = list(profile_toolsets.get(profile_id, _FRONTIER_TOOLSETS.get(task_type, ["web"])))
     # File-intent override: add the (gated) files toolset so the task can act.
-    if profile_id not in {"read_only", "browser_research"} and _FILE_INTENT.search(prompt or "") and "files" not in base:
-        base.append("files")
+    if profile_id not in {"read_only", "browser_research"} and _FILE_INTENT.search(prompt or "") and "file" not in base:
+        base.append("file")
     return base
 
 
@@ -434,7 +440,10 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
     pconf = _provider_config(task_type, provider_ref if isinstance(provider_ref, dict) else None)
     if isinstance(provider_ref, dict) and not pconf.get("api_key"):
         raise MissingCredentialsError()
-    task_store.emit(task_id, "SYSTEM", f"Model: {pconf['provider']}/{pconf['model']}")
+    task_store.emit(
+        task_id, "SYSTEM", f"Model: {pconf['provider']}/{pconf['model']}",
+        {"audience": "operator"},
+    )
 
     # effectiveProfile is a TOP-LEVEL GatewayRequest field (set by the gateway's
     # enrich step), NOT part of the inner `payload` block. Read it from
@@ -458,6 +467,7 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
     task_store.emit(
         task_id, "SYSTEM",
         f"Cloud tools enabled: {', '.join(enabled) if enabled else 'all (override)'}",
+        {"audience": "operator"},
     )
 
     # Per-tool approval gate on the cloud tier (fork-free, via the vendored
@@ -540,15 +550,20 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
             if resilience_active:
                 task_store.emit(task_id, "SYSTEM", "Tool completed", {
                     "callId": str(call_id)[:256], "toolName": str(name)[:256],
+                    "audience": "operator",
                 })
                 return
+            # Echo of the visible TOOL_CALL above; receipt/replay evidence
+            # only, never a chat row.
             task_store.emit(task_id, "SYSTEM", f"Tool {name} completed",
-                            {"call_id": call_id, "result": _clip(result)})
+                            {"call_id": call_id, "result": _clip(result),
+                             "audience": "operator"})
 
         def _status(kind, msg):
             if resilience_active:
                 task_store.emit(task_id, "SYSTEM", "Provider status", {
                     "kind": str(kind)[:64],
+                    "audience": "operator",
                 })
                 return
             task_store.emit(task_id, "SYSTEM", f"[{kind}] {_clip(msg, 300)}")
@@ -663,7 +678,8 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
                 "Skill nudge suppressed (agent._skill_nudge_interval=0); "
                 f"toolset override active: {enabled is None}",
                 {"skillNudgeIntervalAfterSuppression": _interval_after_suppression,
-                 "toolsetWildcardOverride": enabled is None},
+                 "toolsetWildcardOverride": enabled is None,
+                 "audience": "operator"},
             )
             # Register BEFORE run so cancel_task can interrupt; baseline the usage
             # delta source in case credits-micros is unavailable for this provider.

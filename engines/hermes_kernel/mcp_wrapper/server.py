@@ -6,7 +6,9 @@ with Tailscale or set HERMES_ENGINE_TOKEN and a reverse proxy — never bare
 0.0.0.0 (the OpenClaw exposed-default-port incident class)."""
 import asyncio
 import os
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
@@ -17,6 +19,7 @@ from starlette.responses import JSONResponse
 from . import skill_queue, skill_rollback, task_store
 from .contracts import validate_gateway_request
 from . import failover_runtime
+from . import governed_skills, skill_sources
 
 @asynccontextmanager
 async def _resilience_lifespan(_server):
@@ -108,7 +111,10 @@ async def run_hermes_loop(task_id: str, payload: dict) -> None:
         available, why = hermes_available()
 
         if available and live_configured:
-            task_store.emit(task_id, "SYSTEM", f"Hermes agent booted for {task_type}")
+            task_store.emit(
+                task_id, "SYSTEM", f"Hermes agent booted for {task_type}",
+                {"audience": "operator"},
+            )
             # run_conversation is synchronous — never block the event loop.
             out = await asyncio.to_thread(run_hermes_sync, task_id, payload)
             tele = out.get("telemetry", {})
@@ -137,6 +143,7 @@ async def run_hermes_loop(task_id: str, payload: dict) -> None:
                     "Spend reporting unavailable for this provider — budget "
                     "cannot be enforced; the iteration cap "
                     "(HERMES_MAX_ITERATIONS) is the only guard.",
+                    {"audience": "operator"},
                 )
             if resilience_task:
                 _finish_internal_observation(
@@ -192,6 +199,7 @@ async def run_hermes_loop(task_id: str, payload: dict) -> None:
                 "Spend reporting unavailable for this provider — budget cannot "
                 "be enforced; the iteration cap (HERMES_MAX_ITERATIONS) is the "
                 "only guard.",
+                {"audience": "operator"},
             )
         # Configurable so e2e-budget can hold the task open across a poll.
         await asyncio.sleep(float(os.environ.get("HERMES_STUB_DELAY_S", "1")))
@@ -459,8 +467,101 @@ async def list_skill_versions(skill_id: str) -> dict:
     return skill_rollback.list_versions(skill_id)
 
 
+@mcp.tool()
+async def install_remote_skill(source_id: str, skill_id: str,
+                               source_task_id: str | None = None) -> dict:
+    """P4-5 (§6.1): fetch, verify, and stage a signed remote skill, then
+    queue it `pending` for operator review -- the SAME queue/decide surface
+    as draft_and_queue_skill, never a bypass. Refuses (never partially
+    stages or queues) when TORQCLAW_REMOTE_SKILL_SOURCES is off, the source
+    is unknown, the config is invalid, or ANY step of trust verification
+    fails (bad signature, wrong digest, revoked key/skill, stale bundle,
+    unsupported capability) -- see PRD-TCLAW-REMOTE-SKILL-SOURCES-005 §5.8
+    for the full typed-reason registry. This is the AC-1 seam: a
+    bad-signature package is refused HERE with an operator-visible reason,
+    proven at this tool call, not by calling the trust engine directly.
+    NOTE (O-19): this tool is operator-invoked; the kernel MCP surface does
+    not distinguish callers on this codebase, matching rollback_skill /
+    disable_skill's existing reachability boundary."""
+    from . import remote_skills
+
+    try:
+        return remote_skills.install_remote_skill(source_id, skill_id, source_task_id)
+    except remote_skills.SkillRemoteSourcesDisabled:
+        return {"ok": False, "code": "SKILL_REMOTE_SOURCES_DISABLED", "retryable": False,
+                "error": "remote skill sources are disabled"}
+    except skill_sources.SkillRemoteSourceUnknown as exc:
+        return {"ok": False, "code": "SKILL_REMOTE_SOURCE_UNKNOWN", "retryable": False,
+                "error": f"unknown source: {exc}"}
+    except skill_sources.SkillRemoteConfigError as exc:
+        return {"ok": False, "code": "SKILL_REMOTE_CONFIG_INVALID", "retryable": False,
+                "error": str(exc)}
+    except skill_sources.SkillRemoteFetchError as exc:
+        return {"ok": False, "code": "SKILL_REMOTE_FETCH_FAILED", "retryable": True,
+                "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - trust/store errors mapped uniformly
+        return governed_skills.map_activation_failure(exc, queue_status=None)
+
+
+@mcp.tool()
+async def refresh_skill_trust(source_id: str) -> dict:
+    """P4-5 (§6.5): fetch and accept the origin's current signed trust
+    bundle on demand. The retry remedy for SKILL_TRUST_STALE and the
+    recovery vehicle for clock-rollback quarantine. Reporting only (O-2):
+    if the newly accepted bundle revokes the key or digest of an installed,
+    ACTIVE skill, the result's `revocationsAffectingInstalled` names it --
+    this call never auto-disables or mutates governed state; the operator
+    must run disable_skill (or rollback_skill) themselves."""
+    from . import remote_skills
+
+    try:
+        return remote_skills.refresh_skill_trust(source_id)
+    except remote_skills.SkillRemoteSourcesDisabled:
+        return {"ok": False, "code": "SKILL_REMOTE_SOURCES_DISABLED", "retryable": False,
+                "error": "remote skill sources are disabled"}
+    except skill_sources.SkillRemoteSourceUnknown as exc:
+        return {"ok": False, "code": "SKILL_REMOTE_SOURCE_UNKNOWN", "retryable": False,
+                "error": f"unknown source: {exc}"}
+    except skill_sources.SkillRemoteConfigError as exc:
+        return {"ok": False, "code": "SKILL_REMOTE_CONFIG_INVALID", "retryable": False,
+                "error": str(exc)}
+    except skill_sources.SkillRemoteFetchError as exc:
+        return {"ok": False, "code": "SKILL_REMOTE_FETCH_FAILED", "retryable": True,
+                "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - trust/store errors mapped uniformly
+        return governed_skills.map_activation_failure(exc, queue_status=None)
+
+
+def apply_workspace_root() -> None:
+    """Anchor the process cwd to $TORQCLAW_WORKSPACE_ROOT (fail-soft).
+
+    The vendored Hermes file tools resolve relative paths against the process
+    cwd. Without this, a model asked to "create demo.txt in the workspace"
+    writes into the engine checkout (engines/hermes_kernel/) instead of the
+    workspace the operator can see. Engine-owned state is unaffected: task
+    store, skill stores, and the attempt ledger all resolve via
+    $TORQCLAW_DATA_DIR / ~/.torqclaw (absolute), and skip_context_files=True
+    keeps the agent from reading project context out of the new cwd.
+    Unset or unusable root -> warn and keep the current cwd (existing
+    behavior); never fail startup over it."""
+    root = os.environ.get("TORQCLAW_WORKSPACE_ROOT", "").strip()
+    if not root:
+        return
+    path = Path(root).expanduser()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        os.chdir(path)
+    except OSError as exc:
+        print(
+            f"[engine] TORQCLAW_WORKSPACE_ROOT unusable ({exc}); "
+            f"file tools stay relative to {os.getcwd()}",
+            file=sys.stderr,
+        )
+
+
 if __name__ == "__main__":
     # NEVER add uvicorn workers>1: the cancellation registry (hermes_runner.
     # RUNNING) and task SQLite assume one process. FastMCP runs single-process
     # uvicorn by default — keep it.
+    apply_workspace_root()
     mcp.run(transport="streamable-http")  # serves at /mcp

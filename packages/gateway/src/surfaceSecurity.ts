@@ -108,7 +108,44 @@ CREATE TABLE IF NOT EXISTS gateway_task_origins (
     created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_gateway_task_origins_session ON gateway_task_origins(session_id);
+
+-- C1 §2.13, wired in the C2 lane (C1 SCOPE §7 owed item).
+--
+-- A surface can be delegated MULTIPLE task profiles, so this is a ledger
+-- keyed by delegation_id with a partial unique index over the live
+-- (surface, profile) pair -- not one row per surface. A delegation row is
+-- IMMUTABLE: any change to the effective profile, capability, registry, or
+-- path-enforcement material revokes it and inserts a new row with a greater
+-- profile_delegation_revision. It is never updated in place, which is what
+-- lets a binding/grant reference an exact delegation_id and have that
+-- reference mean something stable.
+CREATE TABLE IF NOT EXISTS gateway_profile_delegations (
+    delegation_id                 TEXT PRIMARY KEY,
+    surface_id                    TEXT NOT NULL,
+    profile_id                    TEXT NOT NULL,
+    profile_delegation_revision   INTEGER NOT NULL CHECK (profile_delegation_revision > 0),
+    profile_schema_version        TEXT NOT NULL,
+    profile_version               INTEGER NOT NULL,
+    tool_registry_version         TEXT NOT NULL,
+    effective_profile_policy_hash TEXT NOT NULL,
+    registry_enforcement_hash     TEXT NOT NULL,
+    granted_at                    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    revoked_at                    DATETIME,
+    FOREIGN KEY (surface_id) REFERENCES gateway_surface_security(surface_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_profile_delegations_one_live
+    ON gateway_profile_delegations(surface_id, profile_id) WHERE revoked_at IS NULL;
   `);
+
+  // Post-first-ship columns on gateway_task_origins (§2.13). These MUST be
+  // guarded ALTERs, not edits to the CREATE above: C1 already shipped, so a
+  // live state.db will never re-run that CREATE and would never see them
+  // (the IF-NOT-EXISTS trap, §6.2). Nullable because C1-era origin rows
+  // predate profile delegation and must stay valid.
+  addStateColumnIfMissing(db, 'gateway_task_origins', 'delegation_id', 'TEXT');
+  addStateColumnIfMissing(db, 'gateway_task_origins', 'profile_delegation_revision', 'INTEGER');
+  addStateColumnIfMissing(db, 'gateway_task_origins', 'effective_profile_policy_hash', 'TEXT');
+  addStateColumnIfMissing(db, 'gateway_task_origins', 'registry_enforcement_hash', 'TEXT');
 }
 
 /** PRAGMA-guarded ALTER for post-first-ship columns (§6.2). */
@@ -445,6 +482,132 @@ export interface TaskOriginParams {
   credentialExpiresAt?: string | null;
   authEpoch: number;
   capabilityRevision: number;
+  /** §2.13 profile-delegation evidence. Null on C1-era rows (see schema). */
+  delegationId?: string | null;
+  profileDelegationRevision?: number | null;
+  effectiveProfilePolicyHash?: string | null;
+  registryEnforcementHash?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Profile delegation ledger (§2.13)
+// ---------------------------------------------------------------------------
+
+export interface ProfileDelegation {
+  delegationId: string;
+  surfaceId: string;
+  profileId: string;
+  profileDelegationRevision: number;
+  profileSchemaVersion: string;
+  profileVersion: number;
+  toolRegistryVersion: string;
+  effectiveProfilePolicyHash: string;
+  registryEnforcementHash: string;
+}
+
+/**
+ * Insert an immutable delegation row (grant-last, §1.4).
+ *
+ * Re-delegating the same (surface, profile) revokes the prior live row and
+ * inserts a NEW one at a greater revision, inside one transaction. Rows are
+ * never mutated in place -- a binding or grant that points at a
+ * `delegation_id` must be able to trust that what it points at never
+ * changed underneath it.
+ */
+export function grantProfileDelegation(
+  db: Database.Database,
+  params: ProfileDelegation,
+  now: Date = new Date(),
+): void {
+  if (!Number.isSafeInteger(params.profileDelegationRevision) || params.profileDelegationRevision <= 0) {
+    throw new AuthorityError('INVALID_DELEGATION_REVISION', 'profile_delegation_revision must be a positive integer');
+  }
+  const tx = db.transaction(() => {
+    const live = liveSurfaceSecurity(db, params.surfaceId);
+    if (!live) {
+      throw new AuthorityError('NO_LIVE_PROJECTION', `surface has no live security projection: ${params.surfaceId}`);
+    }
+    db.prepare(
+      `UPDATE gateway_profile_delegations SET revoked_at=?
+        WHERE surface_id=? AND profile_id=? AND revoked_at IS NULL`,
+    ).run(now.toISOString(), params.surfaceId, params.profileId);
+    db.prepare(
+      `INSERT INTO gateway_profile_delegations
+         (delegation_id, surface_id, profile_id, profile_delegation_revision,
+          profile_schema_version, profile_version, tool_registry_version,
+          effective_profile_policy_hash, registry_enforcement_hash, granted_at, revoked_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,NULL)`,
+    ).run(
+      params.delegationId, params.surfaceId, params.profileId, params.profileDelegationRevision,
+      params.profileSchemaVersion, params.profileVersion, params.toolRegistryVersion,
+      params.effectiveProfilePolicyHash, params.registryEnforcementHash, now.toISOString(),
+    );
+  });
+  tx();
+}
+
+/** Revoke the live delegation for a (surface, profile). Never deletes. */
+export function revokeProfileDelegation(
+  db: Database.Database,
+  surfaceId: string,
+  profileId: string,
+  now: Date = new Date(),
+): number {
+  const info = db
+    .prepare(`UPDATE gateway_profile_delegations SET revoked_at=?
+               WHERE surface_id=? AND profile_id=? AND revoked_at IS NULL`)
+    .run(now.toISOString(), surfaceId, profileId);
+  return Number(info.changes);
+}
+
+/**
+ * The LIVE delegation for a (surface, profile), or null. Fail-closed: a
+ * revoked, absent, or unreadable delegation denies, exactly like a missing
+ * capability projection.
+ */
+export function liveProfileDelegation(
+  db: Database.Database,
+  surfaceId: string,
+  profileId: string,
+): ProfileDelegation | null {
+  try {
+    const row = db
+      .prepare(
+        `SELECT delegation_id AS delegationId, surface_id AS surfaceId, profile_id AS profileId,
+                profile_delegation_revision AS profileDelegationRevision,
+                profile_schema_version AS profileSchemaVersion, profile_version AS profileVersion,
+                tool_registry_version AS toolRegistryVersion,
+                effective_profile_policy_hash AS effectiveProfilePolicyHash,
+                registry_enforcement_hash AS registryEnforcementHash
+           FROM gateway_profile_delegations
+          WHERE surface_id=? AND profile_id=? AND revoked_at IS NULL`,
+      )
+      .get(surfaceId, profileId) as ProfileDelegation | undefined;
+    return row ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Look a delegation up by its immutable id, live or revoked. */
+export function delegationById(db: Database.Database, delegationId: string): (ProfileDelegation & { revokedAt: string | null }) | null {
+  try {
+    const row = db
+      .prepare(
+        `SELECT delegation_id AS delegationId, surface_id AS surfaceId, profile_id AS profileId,
+                profile_delegation_revision AS profileDelegationRevision,
+                profile_schema_version AS profileSchemaVersion, profile_version AS profileVersion,
+                tool_registry_version AS toolRegistryVersion,
+                effective_profile_policy_hash AS effectiveProfilePolicyHash,
+                registry_enforcement_hash AS registryEnforcementHash,
+                revoked_at AS revokedAt
+           FROM gateway_profile_delegations WHERE delegation_id=?`,
+      )
+      .get(delegationId) as (ProfileDelegation & { revokedAt: string | null }) | undefined;
+    return row ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -465,12 +628,16 @@ export function captureTaskOrigin(db: Database.Database, params: TaskOriginParam
     db.prepare(
       `INSERT INTO gateway_task_origins
          (request_id, session_id, connection_id, principal_id, surface_id, surface_kind,
-          credential_id, credential_expires_at, auth_epoch, capability_revision)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+          credential_id, credential_expires_at, auth_epoch, capability_revision,
+          delegation_id, profile_delegation_revision,
+          effective_profile_policy_hash, registry_enforcement_hash)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       params.requestId, params.sessionId, params.connectionId, params.principalId,
       params.surfaceId, params.surfaceKind, params.credentialId,
       params.credentialExpiresAt ?? null, params.authEpoch, params.capabilityRevision,
+      params.delegationId ?? null, params.profileDelegationRevision ?? null,
+      params.effectiveProfilePolicyHash ?? null, params.registryEnforcementHash ?? null,
     );
   } catch (err) {
     if (String(err).includes('UNIQUE')) {
@@ -486,7 +653,11 @@ export function taskOrigin(db: Database.Database, requestId: string): TaskOrigin
       `SELECT request_id AS requestId, session_id AS sessionId, connection_id AS connectionId,
               principal_id AS principalId, surface_id AS surfaceId, surface_kind AS surfaceKind,
               credential_id AS credentialId, credential_expires_at AS credentialExpiresAt,
-              auth_epoch AS authEpoch, capability_revision AS capabilityRevision
+              auth_epoch AS authEpoch, capability_revision AS capabilityRevision,
+              delegation_id AS delegationId,
+              profile_delegation_revision AS profileDelegationRevision,
+              effective_profile_policy_hash AS effectiveProfilePolicyHash,
+              registry_enforcement_hash AS registryEnforcementHash
          FROM gateway_task_origins WHERE request_id = ?`,
     )
     .get(requestId) as TaskOriginParams | undefined;
