@@ -52,7 +52,13 @@ export function useGatewayStream(url: string, token: string) {
         sessionStorage.setItem(SESSION_KEY, (ev.metadata as any).sessionId);
       }
       if (ev.seq != null) sessionStorage.setItem(CURSOR_KEY, String(ev.seq));
-      setEvents((prev) => [...prev.slice(-(MAX_EVENTS - 1)), ev]);
+      setEvents((prev) => {
+        // The gateway can re-emit an event on session resume/replay; a
+        // duplicate id would collide as a React key downstream and double-
+        // render the row. Skip ids already present in the ring.
+        if (prev.some((p) => p.id === ev.id)) return prev;
+        return [...prev.slice(-(MAX_EVENTS - 1)), ev];
+      });
     };
 
     ws.onclose = () => {

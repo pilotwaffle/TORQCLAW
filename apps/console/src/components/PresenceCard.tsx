@@ -26,7 +26,7 @@ export default function PresenceCard({
     <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[10px] text-neutral-500">
       {turnStartMs !== null && (
         <span className="inline-flex items-center gap-1.5">
-          <span className="h-1 w-1 rounded-full bg-[#E24B4A]" aria-hidden />
+          <span className="h-1 w-1 rounded-full bg-torque" aria-hidden />
           <LiveDuration since={turnStartMs} />
         </span>
       )}
@@ -55,3 +55,4 @@ export default function PresenceCard({
     </div>
   );
 }
+

@@ -159,8 +159,9 @@ describe('TorqTerminal — tiered approvals (redesign 6/7)', () => {
     render(<TorqTerminal />);
 
     const card = cardOf();
+    // Unknown (registry never consulted) keeps the neutral brand chrome —
+    // never the semantic tier colors.
     expect(card.className).not.toContain('border-good');
-    expect(card.className).not.toContain('border-torque');
     expect(card.className).not.toContain('border-bad');
     expect(screen.queryByLabelText('type DELETE to arm approve')).not.toBeInTheDocument();
     const allow = screen.getByText('Allow once') as HTMLButtonElement;

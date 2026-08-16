@@ -114,7 +114,7 @@ export default function CostPanel({
   };
 
   return (
-    <div className="absolute inset-0 z-20 flex flex-col bg-[#0a0a0a]/98 text-sm text-neutral-300">
+    <div className="absolute inset-0 z-20 flex flex-col bg-bg/98 text-sm text-neutral-300">
       <div className="flex items-center justify-between border-b border-neutral-800 p-3">
         <h2 className="text-[10px] font-bold uppercase tracking-widest text-neutral-400">Cost Control Center</h2>
         <div className="flex items-center gap-3">
@@ -175,7 +175,7 @@ function CostSummaryView({ summary }: { summary: CostSummary }) {
       </Section>
 
       <Section title="Cap state">
-        <p className={breach ? 'text-[#E24B4A]' : 'text-neutral-300'}>{formatCapState(breach)}</p>
+        <p className={breach ? 'text-bad' : 'text-neutral-300'}>{formatCapState(breach)}</p>
         {breach && (
           <p className="mt-1 text-[10px] text-neutral-500">
             Raise the cap by setting {breach.envVar} — operator action outside this app.
@@ -270,3 +270,4 @@ function Row({ label, value, title }: { label: string; value: string; title?: st
     </div>
   );
 }
+

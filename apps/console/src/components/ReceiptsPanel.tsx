@@ -216,7 +216,7 @@ export default function ReceiptsPanel({
   };
 
   return (
-    <div className="absolute inset-0 z-20 flex bg-[#0a0a0a]/98 text-sm text-neutral-300">
+    <div className="absolute inset-0 z-20 flex bg-bg/98 text-sm text-neutral-300">
       {/* LIST */}
       <div className="w-72 shrink-0 overflow-y-auto border-r border-neutral-800 p-3">
         <div className="mb-3 flex items-center justify-between gap-2">
@@ -247,7 +247,7 @@ export default function ReceiptsPanel({
                 onClick={() => selectRow(r.taskId)}
                 className={`w-full rounded border px-2 py-1 text-left text-[11px] transition-colors ${
                   selectedTaskId === r.taskId
-                    ? 'border-[#E24B4A]/50 bg-[#E24B4A]/10 text-neutral-100'
+                    ? 'border-torque/50 bg-torque/10 text-neutral-100'
                     : 'border-neutral-800 text-neutral-400 hover:border-neutral-600'
                 }`}
               >
@@ -280,13 +280,13 @@ export default function ReceiptsPanel({
             <div className="mb-3 flex gap-4 border-b border-neutral-800 text-[11px] uppercase tracking-widest">
               <button
                 onClick={() => setTab('detail')}
-                className={tab === 'detail' ? 'border-b-2 border-[#E24B4A] pb-2 text-neutral-100' : 'pb-2 text-neutral-500'}
+                className={tab === 'detail' ? 'border-b-2 border-torque pb-2 text-neutral-100' : 'pb-2 text-neutral-500'}
               >
                 Detail
               </button>
               <button
                 onClick={() => setTab('replay')}
-                className={tab === 'replay' ? 'border-b-2 border-[#E24B4A] pb-2 text-neutral-100' : 'pb-2 text-neutral-500'}
+                className={tab === 'replay' ? 'border-b-2 border-torque pb-2 text-neutral-100' : 'pb-2 text-neutral-500'}
               >
                 Replay
               </button>
@@ -374,7 +374,7 @@ function ReceiptDetail({
           {state.blockedOn && <span className="ml-2 text-[10px] text-amber-400">paused for {state.blockedOn}</span>}
         </p>
         {field('error', receipt.error) && (
-          <p className="mt-1 text-[#E24B4A]">{receipt.error}</p>
+          <p className="mt-1 text-bad">{receipt.error}</p>
         )}
       </Section>
 
@@ -545,7 +545,7 @@ function SafeExportSection({
           {/* export_failed frame (error present) — NO raw fallback, no receipt
               fields, no copy affordance anywhere in this section. */}
           {frame.error && (
-            <p className="text-[#E24B4A]">
+            <p className="text-bad">
               safe export failed on the gateway — nothing to copy. This panel never falls back to raw data.{' '}
               <button type="button" onClick={onGetSafeExport} className="underline hover:text-neutral-300">
                 try again
@@ -753,3 +753,4 @@ function Rows({ rows }: { rows: Array<{ label: string; value: string }> }) {
     </dl>
   );
 }
+

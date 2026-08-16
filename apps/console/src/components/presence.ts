@@ -1,5 +1,5 @@
 import type { GatewayEvent } from '@torqclaw/contracts';
-import { friendlyMessage } from './friendly.js';
+import { friendlyMessage } from './friendly';
 
 /**
  * Presence / liveness helpers for the terminal. Everything here is PURE (no

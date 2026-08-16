@@ -611,7 +611,7 @@ export default function TorqTerminal() {
   };
 
   return (
-    <section className="flex h-screen flex-col bg-[#0a0a0a] p-4 font-mono text-sm text-neutral-300">
+    <section className="flex h-screen flex-col bg-bg p-4 font-mono text-sm text-neutral-300">
       <header className="mb-4 flex items-center justify-between gap-3 border-b border-neutral-800 pb-4">
         <div className="flex items-center gap-3">
           {/* Sync dot (redesign 5/7): green = live, amber + pulse = data
@@ -635,7 +635,7 @@ export default function TorqTerminal() {
             }
           />
           <h1 className="text-xs font-bold tracking-[0.3em] text-neutral-100">
-            TORQCLAW <span className="text-[#E24B4A]">//</span> ORCHESTRATOR
+            TORQCLAW <span className="text-torque">//</span> ORCHESTRATOR
           </h1>
         </div>
         {/* Global liveness chip (redesign 2/7): visible on EVERY view while a
@@ -707,7 +707,7 @@ export default function TorqTerminal() {
           {showStaleWarning && (
             <button
               onClick={reconnect}
-              className="rounded border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400 transition-colors hover:border-[#E24B4A]/60 hover:text-[#E24B4A]"
+              className="rounded border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400 transition-colors hover:border-torque/60 hover:text-torque"
             >
               reconnect
             </button>
@@ -783,7 +783,7 @@ export default function TorqTerminal() {
             <button
               onClick={stop}
               disabled={stopState === 'requested'}
-              className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] uppercase tracking-widest text-neutral-400 transition-colors hover:border-[#E24B4A]/60 hover:text-[#E24B4A] disabled:opacity-40 disabled:hover:border-neutral-700 disabled:hover:text-neutral-400"
+              className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] uppercase tracking-widest text-neutral-400 transition-colors hover:border-torque/60 hover:text-torque disabled:opacity-40 disabled:hover:border-neutral-700 disabled:hover:text-neutral-400"
             >
               {stopState === 'requested' ? 'stopping' : 'stop'}
             </button>
@@ -869,7 +869,7 @@ export default function TorqTerminal() {
             addFiles(e.dataTransfer?.files ?? null);
           }}
         >
-          <span className="text-[#E24B4A]" aria-hidden>{'>'}</span>
+          <span className="text-torque" aria-hidden>{'>'}</span>
           <input
             type="text"
             value={input}
@@ -1062,22 +1062,22 @@ export default function TorqTerminal() {
             </select>
           </label>
           <label className="flex cursor-pointer items-center gap-1.5" title="Prefer a fast answer">
-            <input type="checkbox" checked={controls.fast} onChange={(e) => set('fast', e.target.checked)} className="accent-[#E24B4A]" />
+            <input type="checkbox" checked={controls.fast} onChange={(e) => set('fast', e.target.checked)} className="accent-torque" />
             fast
           </label>
           <label className="flex cursor-pointer items-center gap-1.5" title="Private tasks never leave this machine — no cloud APIs, no exceptions">
-            <input type="checkbox" checked={controls.privateMode} onChange={(e) => set('privateMode', e.target.checked)} className="accent-[#E24B4A]" />
+            <input type="checkbox" checked={controls.privateMode} onChange={(e) => set('privateMode', e.target.checked)} className="accent-torque" />
             private
           </label>
           <label className="flex cursor-pointer items-center gap-1.5" title="Use past-task memory as context for this task">
-            <input type="checkbox" checked={controls.useMemory} onChange={(e) => set('useMemory', e.target.checked)} className="accent-[#E24B4A]" />
+            <input type="checkbox" checked={controls.useMemory} onChange={(e) => set('useMemory', e.target.checked)} className="accent-torque" />
             memory
           </label>
           <span className="text-neutral-700">·</span>
           <button type="button" onClick={() => sendCommand({ action: 'MEMORY', op: 'SHOW' })} className="text-neutral-500 hover:text-neutral-300">
             show memory
           </button>
-          <button type="button" onClick={() => sendCommand({ action: 'MEMORY', op: 'FORGET_SESSION' })} className="text-neutral-500 hover:text-[#E24B4A]">
+          <button type="button" onClick={() => sendCommand({ action: 'MEMORY', op: 'FORGET_SESSION' })} className="text-neutral-500 hover:text-torque">
             forget session
           </button>
           <span className="text-neutral-700">·</span>
@@ -1372,7 +1372,7 @@ function EventRow({
   return (
     <article
       className={`group flex gap-4 rounded px-2 py-1 transition-colors hover:bg-neutral-900/60 ${
-        event.type === 'PENDING_APPROVAL' && !decision ? 'bg-[#E24B4A]/5' : ''
+        event.type === 'PENDING_APPROVAL' && !decision ? 'bg-torque/10' : ''
       }`}
       title={`${event.type}${meta.reason ? ` — ${meta.reason}` : ''}`}
     >
@@ -1388,7 +1388,7 @@ function EventRow({
             className={`mr-2 rounded border px-1.5 py-0.5 text-[10px] tracking-wide ${
               event.tier === 'OLLAMA_LOCAL'
                 ? 'border-neutral-700 bg-neutral-900 text-neutral-400'
-                : 'border-[#E24B4A]/40 bg-[#E24B4A]/10 text-[#E24B4A]'
+                : 'border-torque/40 bg-torque/10 text-torque'
             }`}
           >
             {tier.text}
@@ -1397,8 +1397,8 @@ function EventRow({
         <span
           className={`mr-2 text-[10px] font-bold ${
             event.type === 'TOOL_CALL' ? 'text-amber-400'
-            : event.type === 'PENDING_APPROVAL' && !decision ? 'animate-pulse text-[#E24B4A]'
-            : event.type === 'ERROR' ? 'text-[#E24B4A]'
+            : event.type === 'PENDING_APPROVAL' && !decision ? 'animate-pulse text-torque'
+            : event.type === 'ERROR' ? 'text-bad'
             : isUser ? 'text-neutral-300'
             : 'text-neutral-600'
           }`}
@@ -1449,7 +1449,7 @@ function EventRow({
             {recovery.includes('RETRY') && meta.prompt && (
               <button
                 onClick={() => onRetry(String(meta.prompt), typeof meta.suggestedBudget === 'number' ? meta.suggestedBudget : undefined)}
-                className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-[#E24B4A]/60 hover:text-[#E24B4A]"
+                className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-torque/60 hover:text-torque"
               >
                 {typeof meta.suggestedBudget === 'number' ? `retry at $${meta.suggestedBudget}` : 'retry'}
               </button>
@@ -1457,7 +1457,7 @@ function EventRow({
             {recovery.includes('RETRY_LOCAL') && meta.prompt && (
               <button
                 onClick={() => onResendLocal(String(meta.prompt))}
-                className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-[#E24B4A]/60 hover:text-[#E24B4A]"
+                className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-torque/60 hover:text-torque"
               >
                 run on this machine
               </button>
@@ -1465,7 +1465,7 @@ function EventRow({
             {recovery.includes('RETRY_CLOUD') && meta.prompt && (
               <button
                 onClick={() => onResendCloud(String(meta.prompt))}
-                className="rounded border border-[#E24B4A]/50 px-2 py-0.5 text-[10px] text-[#E24B4A] transition-colors hover:bg-[#E24B4A]/15"
+                className="rounded border border-torque/50 px-2 py-0.5 text-[10px] text-torque transition-colors hover:bg-torque/10"
               >
                 run on cloud (faster)
               </button>
@@ -1704,7 +1704,7 @@ function SkillApprovalCard({
   const diff = editing && original !== undefined ? lineDiff(original, text) : [];
 
   return (
-    <div className="ml-2 mt-2 max-w-3xl rounded border border-[#E24B4A]/40 bg-[#E24B4A]/5 p-3">
+    <div className="ml-2 mt-2 max-w-3xl rounded border border-torque/40 bg-torque/5 p-3">
       <p className="text-neutral-200">
         Learned a new skill: <span className="font-semibold text-neutral-100">{skillName}</span> — review before it can be used.
       </p>
@@ -1725,7 +1725,7 @@ function SkillApprovalCard({
                   key={k}
                   className={
                     d.t === '+' ? 'bg-green-500/10 text-green-400'
-                    : d.t === '-' ? 'bg-[#E24B4A]/15 text-[#E24B4A]'
+                    : d.t === '-' ? 'bg-faint/15 text-faint'
                     : 'text-neutral-500'
                   }
                 >
@@ -1740,7 +1740,7 @@ function SkillApprovalCard({
       <div className="mt-3 flex flex-wrap gap-2">
         <button
           onClick={() => onDecide(queueId, 'APPROVE', editing ? text : undefined)}
-          className="rounded border border-[#E24B4A]/50 px-3 py-1 text-[11px] text-[#E24B4A] hover:bg-[#E24B4A]/15"
+          className="rounded border border-torque/50 px-3 py-1 text-[11px] text-torque hover:bg-torque/10"
         >
           {editing ? 'Approve with edits' : 'Allow'}
         </button>
@@ -1801,7 +1801,7 @@ function ToolPermissionCard({
     tier === 'read' ? 'border-good/40 bg-good/5'
     : tier === 'spend' ? 'border-torque/40 bg-torque/5'
     : tier === 'destructive' ? 'border-bad/40 bg-bad/5'
-    : 'border-[#E24B4A]/40 bg-[#E24B4A]/5';
+    : 'border-torque/40 bg-torque/5';
   const armed = confirmText === 'DELETE';
   const rawGate = gate !== undefined && gate !== null && typeof gate === 'object'
     ? (gate as Record<string, unknown>)
@@ -1953,7 +1953,7 @@ function ToolPermissionCard({
             tier === 'read' ? 'border-good/50 text-good hover:bg-good/10'
             : tier === 'spend' ? 'border-torque/50 text-torque hover:bg-torque/10'
             : tier === 'destructive' ? 'border-bad/50 text-bad hover:bg-bad/10'
-            : 'border-[#E24B4A]/50 text-[#E24B4A] hover:bg-[#E24B4A]/15'
+            : 'border-torque/50 text-torque hover:bg-torque/10'
           }`}
         >
           Allow once
@@ -1965,3 +1965,4 @@ function ToolPermissionCard({
     </div>
   );
 }
+

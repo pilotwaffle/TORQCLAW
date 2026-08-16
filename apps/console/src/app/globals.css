@@ -1,13 +1,15 @@
 @import "tailwindcss";
 
-/* TORQ design tokens â€” single source of truth for the console redesign.
+/* TORQ design tokens — single source of truth for the console redesign.
    Red is reserved for destructive/error ONLY (token rule; the legacy
    --torq-accent red is deliberately gone). */
 :root {
   --bg: #0a0b0d;
   --panel: #121316;
   --panel-2: #17191d;
+  --panel-3: #1d2026;
   --border: #23262c;
+  --border-strong: #2e323a;
   --text: #f4f5f6;
   --muted: #a7adb8;
   --faint: #6a717c;
@@ -18,13 +20,19 @@
   --bad: #f87171;
 }
 
-/* Tailwind v4 utility mapping â€” utilities (bg-panel, text-muted, border-edge,
-   font-chromeâ€¦) resolve to the :root tokens above, never to raw hex. */
+::selection {
+  background: rgba(255, 158, 64, 0.25);
+}
+
+/* Tailwind v4 utility mapping — utilities (bg-panel, text-muted, border-edge,
+   font-chrome…) resolve to the :root tokens above, never raw hex. */
 @theme inline {
   --color-bg: var(--bg);
   --color-panel: var(--panel);
   --color-panel-2: var(--panel-2);
+  --color-panel-3: var(--panel-3);
   --color-edge: var(--border);
+  --color-border-strong: var(--border-strong);
   --color-ink: var(--text);
   --color-muted: var(--muted);
   --color-faint: var(--faint);
@@ -46,8 +54,7 @@ body {
   font-family: var(--font-chrome);
 }
 
-/* Subtle 3px scanline overlay â€” part of the look. Pure texture: never
-   intercepts input (pointer-events: none), sits above every panel. */
+/* Subtle scanline overlay — part of the look. */
 body::after {
   content: "";
   position: fixed;
@@ -55,10 +62,8 @@ body::after {
   z-index: 50;
   pointer-events: none;
   background: repeating-linear-gradient(
-    to bottom,
-    rgba(0, 0, 0, 0) 0px,
-    rgba(0, 0, 0, 0) 2px,
-    rgba(0, 0, 0, 0.12) 2px,
-    rgba(0, 0, 0, 0.12) 3px
+    0deg,
+    rgba(255, 255, 255, 0.012) 0 1px,
+    transparent 1px 3px
   );
 }

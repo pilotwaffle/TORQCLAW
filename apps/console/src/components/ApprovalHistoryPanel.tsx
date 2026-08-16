@@ -132,7 +132,7 @@ export default function ApprovalHistoryPanel({
   const isRefreshing = phase === 'pending' && approvals !== null;
 
   return (
-    <div className="absolute inset-0 z-20 flex flex-col bg-[#0a0a0a]/98 text-sm text-neutral-300">
+    <div className="absolute inset-0 z-20 flex flex-col bg-bg/98 text-sm text-neutral-300">
       <div className="flex items-center justify-between border-b border-neutral-800 p-3">
         <h2 className="text-[10px] font-bold uppercase tracking-widest text-neutral-400">Approval History</h2>
         <div className="flex items-center gap-3">
@@ -217,7 +217,7 @@ export default function ApprovalHistoryPanel({
 function ApprovalHistoryRow({ row }: { row: ApprovalHistoryRowData }) {
   const toneClass =
     row.status.tone === 'pending' ? 'text-amber-400'
-    : row.status.tone === 'denied' ? 'text-[#E24B4A]'
+    : row.status.tone === 'denied' ? 'text-neutral-500'
     : row.status.tone === 'approved' ? 'text-neutral-300'
     : 'text-neutral-500';
 
@@ -239,3 +239,4 @@ function ApprovalHistoryRow({ row }: { row: ApprovalHistoryRowData }) {
     </li>
   );
 }
+
