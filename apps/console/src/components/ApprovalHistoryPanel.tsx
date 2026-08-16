@@ -176,7 +176,15 @@ export default function ApprovalHistoryPanel({
               <p className="mb-2 text-torque">Refresh didn&apos;t return — showing the last list received.</p>
             )}
             {rows.length === 0 ? (
-              <p className="text-faint/75">No tool approval requests in this session yet.</p>
+              /* §7 empty state: dashed box, icon, title, one-line explainer. */
+              <div className="rounded-[10px] border border-dashed border-border-strong px-6 py-8 text-center">
+                <p className="text-[20px] opacity-60" aria-hidden>◌</p>
+                <p className="mt-2 text-[12px] text-muted">No approval history yet</p>
+                <p className="mx-auto mt-1 max-w-[44ch] text-[10.5px] leading-[1.7] tracking-[0.04em] text-faint">
+                  When the kernel asks for file access, spend-cap overrides, or external
+                  calls, your decisions will be logged here.
+                </p>
+              </div>
             ) : (
               <ul className="space-y-1">
                 {rows.map((row) => (

@@ -1740,17 +1740,24 @@ function EventRow({
             {tier.text}
           </span>
         )}
-        <span
-          className={`mr-2 text-[10px] font-bold ${
-            event.type === 'TOOL_CALL' ? 'text-torque'
-            : event.type === 'PENDING_APPROVAL' && !decision ? 'animate-pulse text-torque'
-            : event.type === 'ERROR' ? 'text-bad'
-            : isUser ? 'text-muted'
-            : 'text-faint/75'
-          }`}
-        >
-          [{TYPE_LABELS[event.type] ?? event.type.toLowerCase()}]
-        </span>
+        {event.type === 'PENDING_APPROVAL' && !decision ? (
+          /* §7 pending pill: torque pill with a pulsing 5px dot. */
+          <span className="mr-2 inline-flex items-center gap-1.5 rounded-full bg-torque/[.14] px-[9px] py-[2px] text-[9px] font-bold uppercase tracking-[0.16em] text-torque">
+            <span className="h-[5px] w-[5px] animate-pulse rounded-full bg-torque" aria-hidden />
+            pending
+          </span>
+        ) : (
+          <span
+            className={`mr-2 text-[10px] font-bold ${
+              event.type === 'TOOL_CALL' ? 'text-torque'
+              : event.type === 'ERROR' ? 'text-bad'
+              : isUser ? 'text-muted'
+              : 'text-faint/75'
+            }`}
+          >
+            [{TYPE_LABELS[event.type] ?? event.type.toLowerCase()}]
+          </span>
+        )}
         <span className={
           event.type === 'RESULT' ? 'font-semibold text-ink'
           : isUser ? 'text-ink'
@@ -1784,8 +1791,13 @@ function EventRow({
         )}
 
         {decision && (
-          <span className="ml-3 text-[10px] text-faint">
-            {decision === 'APPROVE' ? '✓ allowed once' : '✕ denied'}
+          /* §7: the decision flip carries its outcome color. */
+          <span
+            className={`ml-3 inline-flex items-center rounded-full px-2 py-[2px] text-[9px] font-bold uppercase tracking-[0.16em] ${
+              decision === 'APPROVE' ? 'bg-good/[.12] text-good' : 'bg-bad/[.12] text-bad'
+            }`}
+          >
+            {decision === 'APPROVE' ? '✓ approved' : '✕ denied'}
           </span>
         )}
 
@@ -2154,10 +2166,11 @@ function ToolPermissionCard({
   // unknown = gate absent/null/malformed — the registry was never consulted,
   // so the card keeps its exact pre-redesign look (honesty forks 1+2).
   const tier = approvalTierFromGate(gate);
+  // §7: 3px tier-colored LEFT EDGE is the primary tier signal.
   const tierChrome =
-    tier === 'read' ? 'border-good/40 bg-good/5'
-    : tier === 'spend' ? 'border-torque/40 bg-torque/5'
-    : tier === 'destructive' ? 'border-bad/40 bg-bad/5'
+    tier === 'read' ? 'border-good/40 border-l-[3px] border-l-good bg-good/5'
+    : tier === 'spend' ? 'border-torque/40 border-l-[3px] border-l-torque bg-torque/5'
+    : tier === 'destructive' ? 'border-bad/40 border-l-[3px] border-l-bad bg-bad/5'
     : 'border-torque/40 bg-torque/5';
   const armed = confirmText === 'DELETE';
   const rawGate = gate !== undefined && gate !== null && typeof gate === 'object'
@@ -2181,6 +2194,19 @@ function ToolPermissionCard({
 
   return (
     <div className={`ml-2 mt-2 max-w-2xl rounded-lg border p-3 ${tierChrome}`}>
+      {/* §7 tier tag pill — rendered only when the gate actually classified
+          the action (tier 'unknown' = gate absent/malformed, no pill). */}
+      {tier !== 'unknown' && (
+        <span
+          className={`mb-2 inline-flex items-center rounded-[3px] px-2 py-[2px] text-[8.5px] font-bold uppercase tracking-[0.18em] ${
+            tier === 'read' ? 'bg-good/[.12] text-good'
+            : tier === 'spend' ? 'bg-torque/[.14] text-torque'
+            : 'bg-bad/[.12] text-bad'
+          }`}
+        >
+          {tier === 'read' ? 'read-only' : tier}
+        </span>
+      )}
       <p className="text-ink">
         This task wants to <span className="font-semibold text-ink">{friendly}</span> to finish.
       </p>
@@ -2273,15 +2299,15 @@ function ToolPermissionCard({
           reality — no invented risk scores. */}
       {tier === 'destructive' && (
         <div className="mt-2 space-y-1.5 text-[10px]">
-          <ul className="list-disc space-y-0.5 pl-4 text-muted">
+          <ul className="space-y-0.5 text-[10.5px] tracking-[0.03em] text-faint">
             {rawGate?.capability === 'exec' && (
-              <li>runs code with this machine&apos;s privileges — effects are not bounded by the gateway</li>
+              <li><span className="mr-1.5 text-bad" aria-hidden>▸</span>runs code with this machine&apos;s privileges — effects are not bounded by the gateway</li>
             )}
             {rawGate?.capability === 'send' && (
-              <li>sends data off this machine — outbound transfers cannot be recalled</li>
+              <li><span className="mr-1.5 text-bad" aria-hidden>▸</span>sends data off this machine — outbound transfers cannot be recalled</li>
             )}
             {rawGate?.capability === undefined && (
-              <li>the kernel could not classify this action — treat it as irreversible</li>
+              <li><span className="mr-1.5 text-bad" aria-hidden>▸</span>the kernel could not classify this action — treat it as irreversible</li>
             )}
           </ul>
           <p className="text-bad">
@@ -2295,7 +2321,7 @@ function ToolPermissionCard({
               placeholder="DELETE"
               aria-label="type DELETE to arm approve"
               spellCheck={false}
-              className="mt-1 block w-40 rounded border border-border-strong bg-black/40 px-2 py-1 font-mono text-[11px] text-ink focus:outline-none"
+              className="mt-1 block w-[130px] rounded-md border border-bad/40 bg-panel-2 px-3 py-[7px] font-mono text-[11px] tracking-[0.05em] text-ink caret-bad focus:border-bad focus:shadow-[0_0_0_3px_rgba(248,113,113,0.08)] focus:outline-none"
             />
           </label>
         </div>
@@ -2306,14 +2332,17 @@ function ToolPermissionCard({
           onClick={onAllow}
           disabled={tier === 'destructive' && !armed}
           title={tier === 'destructive' && !armed ? 'type DELETE to arm' : undefined}
-          className={`rounded border px-3 py-1 text-[11px] disabled:opacity-40 ${
+          className={`rounded-md border px-3 py-1 text-[11px] disabled:opacity-[.35] ${
             tier === 'read' ? 'border-good/50 text-good hover:bg-good/10'
             : tier === 'spend' ? 'border-torque/50 text-torque hover:bg-torque/10'
-            : tier === 'destructive' ? 'border-bad/50 text-bad hover:bg-bad/10'
+            : tier === 'destructive'
+              ? armed
+                ? 'border-bad bg-bad font-bold text-bg hover:brightness-110'
+                : 'border-bad/50 text-bad'
             : 'border-torque/50 text-torque hover:bg-torque/10'
           }`}
         >
-          Allow once
+          {tier === 'destructive' ? 'Execute' : 'Allow once'}
         </button>
         <button onClick={onDeny} className="rounded border border-border-strong px-3 py-1 text-[11px] text-muted hover:bg-panel-3">
           Deny
