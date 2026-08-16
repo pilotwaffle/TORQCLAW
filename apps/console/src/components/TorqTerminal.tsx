@@ -676,9 +676,21 @@ export default function TorqTerminal() {
             reconnect) so the dead-WS affordance survives the restyle. */}
         {isConnected && !stale ? (
           <span className="flex items-center gap-2 text-[10px] font-semibold tracking-[0.16em] text-good">
-            <span className="h-[7px] w-[7px] animate-pulse rounded-full bg-good" aria-hidden />
+            <span className="h-[7px] w-[7px] animate-pulse rounded-full bg-good shadow-[0_0_8px_var(--good)]" aria-hidden />
             CONNECTED
           </span>
+        ) : !isConnected ? (
+          /* §2: socket down — dot + text go torque, RECONNECTING…; stays a
+             button so the force-reconnect affordance survives. */
+          <button
+            type="button"
+            onClick={reconnect}
+            title="force reconnect"
+            className="flex items-center gap-2 text-[10px] font-semibold tracking-[0.16em] text-torque"
+          >
+            <span className="h-[7px] w-[7px] animate-pulse rounded-full bg-torque shadow-[0_0_8px_var(--torque)]" aria-hidden />
+            RECONNECTING…
+          </button>
         ) : (
           <button
             type="button"
