@@ -1,4 +1,5 @@
-import { join } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   auditSourceSnippet,
@@ -65,7 +66,27 @@ describe('AC-10A TypeScript compiler-API production caller audit', () => {
     expect(resolveAuditTsconfig(REPO_ROOT)).toBe(join(REPO_ROOT, 'tsconfig.base.json'));
     expect(() => resolveAuditTsconfig(REPO_ROOT, join('..', 'tsconfig.json')))
       .toThrow(/OUTSIDE the repository/);
-    expect(() => resolveAuditTsconfig(join(REPO_ROOT, 'tests')))
+    expect(() => resolveAuditTsconfig(join(REPO_ROOT, 'tests'), 'tsconfig.base.json'))
       .toThrow(/in-tree tsconfig is absent/);
+  });
+
+  it('anchors the vite/tsconfck transform layer inside the repository for the test tree', () => {
+    const anchorPath = join(REPO_ROOT, 'tests', 'tsconfig.json');
+    const anchor = JSON.parse(readFileSync(anchorPath, 'utf8')) as Record<string, unknown>;
+    expect(anchor.extends).toBe('../tsconfig.base.json');
+    expect(resolveAuditTsconfig(REPO_ROOT, join('tests', anchor.extends as string)))
+      .toBe(join(REPO_ROOT, 'tsconfig.base.json'));
+    expect(anchor).not.toHaveProperty('references');
+
+    const shadows: string[] = [];
+    const scan = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const absolute = join(dir, entry.name);
+        if (entry.isDirectory()) scan(absolute);
+        else if (/^tsconfig.*\.json$/.test(entry.name)) shadows.push(relative(REPO_ROOT, absolute));
+      }
+    };
+    scan(join(REPO_ROOT, 'tests'));
+    expect(shadows).toEqual([join('tests', 'tsconfig.json')]);
   });
 });
