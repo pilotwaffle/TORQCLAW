@@ -118,6 +118,17 @@ function buildSubmit(prompt: string, c: Controls): Extract<ClientCommand, { acti
   return { action: 'SUBMIT_PROMPT', ...buildJudgment(prompt, c), attachmentIds: [] };
 }
 
+/** §6 attachment chip size line. */
+function formatFileSize(b: number): string {
+  if (b < 1024) return `${b} B`;
+  if (b < 1048576) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / 1048576).toFixed(1)} MB`;
+}
+
+/** §6 composer chip chrome (cchip): 9.5px 600 uppercase over panel. */
+const CCHIP =
+  'inline-flex items-center gap-1.5 rounded border border-edge bg-panel px-2 py-[3px] text-[9.5px] font-semibold uppercase tracking-[0.12em] text-muted transition-colors';
+
 /** PRD-UI-1 §3 sidebar nav-item chrome: active = torque text over 14% torque
  *  fill with a 25% torque border; inactive = muted with panel-2 hover. */
 function navItemClass(active: boolean): string {
@@ -154,6 +165,39 @@ export default function TorqTerminal() {
   // Redesign 7/7: composer attachments (flag-gated; see ATTACHMENTS_ENABLED).
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [attachmentGateNote, setAttachmentGateNote] = useState(false);
+  // §6: drag-over visual state for the composer box (flag-gated drop target).
+  const [dragging, setDragging] = useState(false);
+  // §6: REAL ↑/↓ prompt history over prompts submitted this mount — the kbd
+  // hint only advertises a shortcut that actually works.
+  const [promptHistory, setPromptHistory] = useState<string[]>([]);
+  const historyIdx = useRef<number | null>(null);
+  const onComposerKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'ArrowUp') {
+      if (promptHistory.length === 0) return;
+      e.preventDefault();
+      const next = historyIdx.current === null ? promptHistory.length - 1 : Math.max(0, historyIdx.current - 1);
+      historyIdx.current = next;
+      setInput(promptHistory[next]!);
+    } else if (e.key === 'ArrowDown') {
+      if (historyIdx.current === null) return;
+      e.preventDefault();
+      const next = historyIdx.current + 1;
+      if (next >= promptHistory.length) {
+        historyIdx.current = null;
+        setInput('');
+      } else {
+        historyIdx.current = next;
+        setInput(promptHistory[next]!);
+      }
+    }
+  };
+  // §6: route chip cycles the SAME executionMode control the selects drove.
+  const cycleMode = () => {
+    setControls((c) => ({
+      ...c,
+      mode: c.mode === 'AUTO' ? 'LOCAL_ONLY' : c.mode === 'LOCAL_ONLY' ? 'CLOUD_OK' : 'AUTO',
+    }));
+  };
 
   // TCLAW-2D-2: route preview. previewNonce = latest-SENT nonce (the ONLY
   // staleness key). previewState is the RENDER SOURCE (useState snapshot,
@@ -387,6 +431,8 @@ export default function TorqTerminal() {
       return;
     }
     sendCommand(buildSubmit(prompt, controls));
+    setPromptHistory((h) => [...h, prompt]); // §6 ↑ history ring
+    historyIdx.current = null;
     setInput('');
     setStopState('idle'); // a fresh run clears any prior stop feedback
   };
@@ -652,6 +698,8 @@ export default function TorqTerminal() {
 
   const sessionTotal = costMeta && typeof costMeta.sessionTotal === 'number' ? costMeta.sessionTotal : null;
   const sessionCap = costMeta && typeof costMeta.sessionCap === 'number' ? costMeta.sessionCap : null;
+  // §6 route chip: the same effective mode the submit path computes.
+  const effectiveMode: ExecutionMode = controls.budget === 'free' ? 'LOCAL_ONLY' : controls.mode;
   const budgetPct =
     sessionTotal !== null && sessionCap !== null && sessionCap > 0
       ? `${Math.min(100, (sessionTotal / sessionCap) * 100)}%`
@@ -979,105 +1027,180 @@ export default function TorqTerminal() {
         </div>
       )}
 
-      <form onSubmit={submit} className="border-t border-edge bg-panel px-4 pb-4 pt-3">
+      <form onSubmit={submit} className="border-t border-edge bg-panel px-4 pb-4 pt-3.5">
+        <div className="mx-auto max-w-[860px]">
+        {/* §6 composer box: panel-2 body, strong hairline, 10px radius, torque
+            focus glow; drag-over flips to a dashed torque border. */}
         <div
-          className="flex items-center gap-3"
-          onDragOver={(e) => { if (ATTACHMENTS_ENABLED) e.preventDefault(); }}
+          className={`rounded-[10px] border bg-panel-2 transition-[border-color,box-shadow] duration-200 focus-within:border-torque/50 focus-within:shadow-[0_0_0_3px_rgba(255,158,64,0.08),0_-1px_24px_rgba(255,158,64,0.06)] ${
+            dragging ? 'border-dashed border-torque shadow-[0_0_0_3px_rgba(255,158,64,0.1)]' : 'border-border-strong'
+          }`}
+          onDragOver={(e) => { if (ATTACHMENTS_ENABLED) { e.preventDefault(); setDragging(true); } }}
+          onDragEnter={(e) => { if (ATTACHMENTS_ENABLED) { e.preventDefault(); setDragging(true); } }}
+          onDragLeave={(e) => { if (ATTACHMENTS_ENABLED) { e.preventDefault(); setDragging(false); } }}
           onDrop={(e) => {
             if (!ATTACHMENTS_ENABLED) return;
             e.preventDefault();
+            setDragging(false);
             addFiles(e.dataTransfer?.files ?? null);
           }}
         >
-          <span className="text-torque" aria-hidden>{'>'}</span>
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="What do you need done?"
-            aria-label="Describe your task"
-            className="flex-1 bg-transparent py-1 text-ink placeholder:text-faint/75 focus:outline-none"
-            autoFocus
-          />
-          {/* Redesign 7/7: paperclip (flag-gated). The hidden picker is the
-              ONLY file entry point besides drag-and-drop on this row. */}
-          {ATTACHMENTS_ENABLED && (
-            <label
-              className="cursor-pointer text-faint transition-colors hover:text-muted"
-              title="attach files — preview only: the kernel has no upload pipeline yet"
+          <div className="flex items-center gap-2.5 py-1 pl-2.5 pr-2">
+            {/* §6 paperclip: 16px SVG (flag-gated), hover torque tile. */}
+            {ATTACHMENTS_ENABLED && (
+              <label
+                className="grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-[7px] border border-transparent text-faint transition-colors hover:border-torque/30 hover:bg-torque/[.14] hover:text-torque"
+                title="attach files — preview only: the kernel has no upload pipeline yet"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                </svg>
+                <input
+                  type="file"
+                  multiple
+                  className="hidden"
+                  aria-label="attach files"
+                  onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }}
+                />
+              </label>
+            )}
+            <span className="shrink-0 font-bold text-torque" aria-hidden>❯</span>
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={onComposerKeyDown}
+              placeholder="What do you need done?"
+              aria-label="Describe your task"
+              className="min-w-0 flex-1 bg-transparent py-[11px] text-[13px] text-ink caret-torque placeholder:text-[#4A505A] focus:outline-none"
+              autoFocus
+            />
+            <button
+              type="submit"
+              disabled={!input.trim()}
+              className="shrink-0 rounded-[7px] bg-torque px-4 py-[9px] text-[11px] font-bold tracking-[0.1em] text-[#0A0B0D] transition-[filter,transform] hover:brightness-110 active:scale-[0.97] disabled:opacity-40"
             >
-              <span aria-hidden>📎</span>
-              <input
-                type="file"
-                multiple
-                className="hidden"
-                aria-label="attach files"
-                onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }}
-              />
-            </label>
+              RUN ⏎
+            </button>
+          </div>
+
+          {/* §6 attachment chips: 24x24 type tile (PDF bad / IMG cloud with a
+              real thumbnail / DOC torque), name + size column, ✕ hover bad. */}
+          {ATTACHMENTS_ENABLED && attachments.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 px-3 pb-2.5">
+              {attachments.map((a) => (
+                <span
+                  key={a.id}
+                  className="flex max-w-[240px] animate-task-enter items-center gap-2 rounded-md border border-border-strong bg-panel py-[5px] pl-1.5 pr-2"
+                >
+                  <span
+                    className={`grid h-6 w-6 shrink-0 place-items-center overflow-hidden rounded-[5px] border text-[8px] font-bold tracking-[0.05em] ${
+                      a.kind === 'pdf' ? 'border-bad/30 bg-bad/10 text-bad'
+                      : a.kind === 'image' ? 'border-cloud/30 bg-cloud/10 text-cloud'
+                      : 'border-torque/30 bg-torque/10 text-torque'
+                    }`}
+                    aria-hidden
+                  >
+                    {a.previewUrl ? (
+                      <img src={a.previewUrl} alt="" className="h-full w-full object-cover" />
+                    ) : a.kind === 'pdf' ? 'PDF' : a.kind === 'image' ? 'IMG' : 'DOC'}
+                  </span>
+                  <span className="flex min-w-0 flex-col leading-[1.3]">
+                    <span className="max-w-[150px] truncate text-[10.5px] font-medium text-ink" title={a.file.name}>
+                      {a.file.name}
+                    </span>
+                    <span className="text-[9px] tracking-[0.04em] text-faint">{formatFileSize(a.file.size)}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(a.id)}
+                    aria-label={`remove ${a.file.name}`}
+                    className="grid h-4 w-4 shrink-0 place-items-center rounded text-faint transition-colors hover:bg-bad/10 hover:text-bad"
+                  >
+                    ✕
+                  </button>
+                </span>
+              ))}
+            </div>
           )}
-          {/* Pre-flight estimate chip (redesign 4/7): the kernel's real
-              sizing pass, debounced as the operator types. Dollars only
-              where true by construction (local = free); cloud shows the
-              kernel's token estimate — a cloud dollar figure would be
-              fabrication (spend.ts records provider-reported cost only).
-              Hidden while the manual simulate-route panel is open: one
-              route truth on screen at a time. */}
-          {estimate && !previewState && (
-            <span className="shrink-0 text-[10px] text-faint">
-              est:{' '}
-              <span className={estimate.route === 'local' ? 'text-good' : 'text-cloud'}>
-                {estimate.label}
+          {/* Cloud-route privacy warning: real estimate route only — never a
+              guess. Disappears on the local route (or with no attachments). */}
+          {ATTACHMENTS_ENABLED && attachments.length > 0 && estimate?.route === 'cloud' && (
+            <p className="flex items-center gap-[7px] px-4 pb-2.5 text-[9.5px] tracking-[0.06em] text-torque">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0" aria-hidden>
+                <path d="M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+              </svg>
+              {attachments.length} attachment{attachments.length === 1 ? '' : 's'} will be uploaded
+              with this task — route is cloud
+            </p>
+          )}
+          {/* Submit gate: the kernel exposes no upload pipeline, so attached
+              files cannot ride the task yet — say so instead of faking it. */}
+          {ATTACHMENTS_ENABLED && attachmentGateNote && attachments.length > 0 && (
+            <p className="px-4 pb-2.5 text-[10px] text-torque">
+              attachments can&apos;t ride this task yet — the kernel exposes no upload
+              pipeline; remove them or submit without
+            </p>
+          )}
+
+          {/* §6 chips row: route / memory / budget-state cchips, est chip +
+              a REAL ↑-history hint on the right. Model chip omitted — no
+              model name rides the WS wire (named gap, checklist row 10). */}
+          <div className="flex flex-wrap items-center gap-[7px] px-3 pb-2.5">
+            <button
+              type="button"
+              onClick={cycleMode}
+              disabled={controls.budget === 'free'}
+              title="where this task may run — click to cycle auto → local → cloud"
+              className={`${CCHIP} hover:border-border-strong hover:text-ink disabled:opacity-60`}
+            >
+              <span
+                className={`h-[5px] w-[5px] rounded-full ${
+                  effectiveMode === 'LOCAL_ONLY' ? 'bg-good' : effectiveMode === 'CLOUD_OK' ? 'bg-cloud' : 'bg-faint'
+                }`}
+                aria-hidden
+              />
+              route: {controls.budget === 'free' ? 'local (free)' : effectiveMode === 'LOCAL_ONLY' ? 'local' : effectiveMode === 'CLOUD_OK' ? 'cloud' : 'auto'} ▾
+            </button>
+            <button
+              type="button"
+              onClick={() => set('useMemory', !controls.useMemory)}
+              title="use past-task memory as context for this task"
+              className={`${CCHIP} hover:border-border-strong`}
+            >
+              <span className="normal-case text-faint">memory:</span>
+              <span className={controls.useMemory ? 'text-mem' : 'text-faint'}>{controls.useMemory ? 'on' : 'off'}</span>
+            </button>
+            {sessionTotal !== null && sessionCap !== null && (
+              <span className={`${CCHIP} ${sessionTotal < sessionCap ? 'text-good' : 'text-torque'}`}>
+                <span
+                  className={`h-[5px] w-[5px] rounded-full ${sessionTotal < sessionCap ? 'bg-good' : 'bg-torque'}`}
+                  aria-hidden
+                />
+                {sessionTotal < sessionCap ? 'under budget' : 'over budget'}
+              </span>
+            )}
+            <span className="ml-auto flex items-center gap-[7px]">
+              {/* Pre-flight estimate (redesign 4/7 honesty core unchanged):
+                  the kernel's real sizing pass; dollars only where true by
+                  construction (local = free), token figures for cloud. */}
+              {estimate && !previewState && (
+                <span
+                  className={`inline-flex animate-task-enter items-center gap-1.5 rounded border px-2 py-[3px] text-[9.5px] font-semibold uppercase tracking-[0.1em] tabular-nums ${
+                    estimate.route === 'local'
+                      ? 'border-good/30 bg-good/[.12] text-good'
+                      : 'border-torque/30 bg-torque/[.14] text-torque'
+                  }`}
+                >
+                  <span className="text-faint">est</span> {estimate.label}
+                </span>
+              )}
+              <span className="text-[9.5px] tracking-[0.08em] text-[#4A505A]">
+                <kbd className="rounded-[3px] border border-edge bg-panel px-1.5 py-px font-chrome text-faint">↑</kbd> history
               </span>
             </span>
-          )}
-        </div>
-
-        {/* Redesign 7/7: attachment chips — type-coded tiles (PDF red, IMG
-            cyan with thumbnail, DOC amber), per-file remove. Flag-gated. */}
-        {ATTACHMENTS_ENABLED && attachments.length > 0 && (
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            {attachments.map((a) => (
-              <span
-                key={a.id}
-                className={`flex items-center gap-1.5 rounded border px-1.5 py-0.5 text-[10px] ${
-                  a.kind === 'pdf' ? 'border-bad/40 bg-bad/10 text-bad'
-                  : a.kind === 'image' ? 'border-cloud/40 bg-cloud/10 text-cloud'
-                  : 'border-torque/40 bg-torque/10 text-torque'
-                }`}
-              >
-                {a.previewUrl && (
-                  <img src={a.previewUrl} alt="" className="h-4 w-4 rounded-sm object-cover" />
-                )}
-                <span className="max-w-[18ch] truncate" title={a.file.name}>{a.file.name}</span>
-                <button
-                  type="button"
-                  onClick={() => removeAttachment(a.id)}
-                  aria-label={`remove ${a.file.name}`}
-                  className="text-faint transition-colors hover:text-ink"
-                >
-                  ×
-                </button>
-              </span>
-            ))}
           </div>
-        )}
-        {/* Cloud-route privacy warning: real estimate route only — never a
-            guess. Disappears on the local route (or with no attachments). */}
-        {ATTACHMENTS_ENABLED && attachments.length > 0 && estimate?.route === 'cloud' && (
-          <p className="mt-2 text-[10px] text-torque">
-            {attachments.length} attachment{attachments.length === 1 ? '' : 's'} will be uploaded
-            with this task — route is cloud
-          </p>
-        )}
-        {/* Submit gate: the kernel exposes no upload pipeline, so attached
-            files cannot ride the task yet — say so instead of faking it. */}
-        {ATTACHMENTS_ENABLED && attachmentGateNote && attachments.length > 0 && (
-          <p className="mt-2 text-[10px] text-torque">
-            attachments can&apos;t ride this task yet — the kernel exposes no upload
-            pipeline; remove them or submit without
-          </p>
-        )}
+        </div>
 
         {/* TCLAW-2D-2: route preview panel. Renders per previewState — ZERO
             interactive elements (no buttons/links/onClick anywhere below):
@@ -1168,19 +1291,8 @@ export default function TorqTerminal() {
               className="w-16 rounded border border-border-strong bg-panel-2 px-1.5 py-0.5 text-muted"
             />
           )}
-          <label className="flex items-center gap-1.5" title="Where this task may run">
-            mode
-            <select
-              value={controls.budget === 'free' ? 'LOCAL_ONLY' : controls.mode}
-              disabled={controls.budget === 'free'}
-              onChange={(e) => set('mode', e.target.value as ExecutionMode)}
-              className="rounded border border-border-strong bg-panel-2 px-1.5 py-0.5 text-muted disabled:opacity-50"
-            >
-              <option value="AUTO">Auto</option>
-              <option value="LOCAL_ONLY">This machine only</option>
-              <option value="CLOUD_OK">Cloud allowed</option>
-            </select>
-          </label>
+          {/* §6: mode select + memory checkbox replaced by the in-box route
+              and memory chips — one control surface each. */}
           <label className="flex cursor-pointer items-center gap-1.5" title="Prefer a fast answer">
             <input type="checkbox" checked={controls.fast} onChange={(e) => set('fast', e.target.checked)} className="accent-torque" />
             fast
@@ -1188,10 +1300,6 @@ export default function TorqTerminal() {
           <label className="flex cursor-pointer items-center gap-1.5" title="Private tasks never leave this machine — no cloud APIs, no exceptions">
             <input type="checkbox" checked={controls.privateMode} onChange={(e) => set('privateMode', e.target.checked)} className="accent-torque" />
             private
-          </label>
-          <label className="flex cursor-pointer items-center gap-1.5" title="Use past-task memory as context for this task">
-            <input type="checkbox" checked={controls.useMemory} onChange={(e) => set('useMemory', e.target.checked)} className="accent-torque" />
-            memory
           </label>
           <span className="text-faint/50">·</span>
           <button type="button" onClick={() => sendCommand({ action: 'MEMORY', op: 'SHOW' })} className="text-faint hover:text-muted">
@@ -1216,6 +1324,7 @@ export default function TorqTerminal() {
           <button type="button" onClick={simulateRoute} disabled={!input.trim()} className="text-faint hover:text-muted disabled:opacity-40">
             simulate route
           </button>
+        </div>
         </div>
       </form>
     </section>
