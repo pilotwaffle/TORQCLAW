@@ -117,6 +117,16 @@ function buildSubmit(prompt: string, c: Controls): Extract<ClientCommand, { acti
   return { action: 'SUBMIT_PROMPT', ...buildJudgment(prompt, c), attachmentIds: [] };
 }
 
+/** PRD-UI-1 §3 sidebar nav-item chrome: active = torque text over 14% torque
+ *  fill with a 25% torque border; inactive = muted with panel-2 hover. */
+function navItemClass(active: boolean): string {
+  return `mb-0.5 flex w-full items-center gap-2.5 rounded-md border px-2.5 py-2 text-left text-[12px] font-medium transition-colors ${
+    active
+      ? 'border-torque/25 bg-torque/[.14] text-torque'
+      : 'border-transparent text-muted hover:bg-panel-2 hover:text-ink'
+  }`;
+}
+
 export default function TorqTerminal() {
   const { events, isConnected, sendCommand, reconnect } = useGatewayStream(GATEWAY_URL, GATEWAY_TOKEN);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -133,6 +143,9 @@ export default function TorqTerminal() {
   // same pattern. No mutual-exclusion with receipts/cost (G1R SC-3): all
   // three may be open simultaneously, no coordination logic between them.
   const [approvalsOpen, setApprovalsOpen] = useState(false);
+  // PRD-UI-1 §1/§3: sidebar view switching. 'memory' arrives with the §8
+  // view — a nav item without a view behind it would be a dead control.
+  const [view, setView] = useState<'tasks' | 'approvals'>('tasks');
   // Stop-button UX: 'requested' once a cancel is sent (button shows "stopping…"),
   // 'failed' if the send was dropped so the user knows to retry. Cleared when the
   // next task starts.
@@ -286,6 +299,33 @@ export default function TorqTerminal() {
   // selector (friendly.ts) — events with a requestId join their task's card;
   // session-level frames stay loose and render exactly as before.
   const streamItems = useMemo(() => groupStreamIntoTasks(events), [events]);
+
+  // PRD-UI-1 §3: live Approvals badge — counts exactly what the inline cards
+  // still consider decidable (PENDING_APPROVAL whose approval/queue id has no
+  // local decision). Same predicate as the card render, so badge and cards
+  // can never disagree.
+  const pendingApprovalCount = useMemo(() => {
+    let n = 0;
+    for (const ev of events) {
+      if (ev.type !== 'PENDING_APPROVAL') continue;
+      const meta = (ev.metadata ?? {}) as Record<string, any>;
+      const cardId = meta.approvalId ?? meta.approval_id ?? meta.queueId ?? meta.queue_id;
+      if (cardId && !decided[cardId]) n++;
+    }
+    return n;
+  }, [events, decided]);
+
+  // §3: the one session the console truly has — title from the first prompt,
+  // meta from the real task-card count. A browsable past-session list needs a
+  // backend session listing that doesn't exist on the wire; omitted, not faked.
+  const sessionInfo = useMemo(() => {
+    let title: string | null = null;
+    for (const ev of events) {
+      if (ev.type === 'USER_PROMPT') { title = ev.message; break; }
+    }
+    const taskCount = streamItems.reduce((n, it) => n + (it.kind === 'loose' ? 0 : 1), 0);
+    return { title, taskCount };
+  }, [events, streamItems]);
 
   // Privacy SUGGESTION (suggest-only — never sets the flag, never blocks).
   // Debounced 500ms so the regex pass never runs on the keystroke hot path,
@@ -659,9 +699,11 @@ export default function TorqTerminal() {
             stuck={phaseStuck}
             turnStartMs={turnStartMs}
             turnId={activeRequestId}
-            onScrollToTask={() =>
-              scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-            }
+            onScrollToTask={() => {
+              // §5: the chip jumps to the Task Stream from ANY view.
+              setView('tasks');
+              scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+            }}
           />
         )}
         <div className="ml-auto flex items-center gap-3">
@@ -713,8 +755,57 @@ export default function TorqTerminal() {
         </div>
       </header>
 
-      <div className="relative flex-1 overflow-hidden">
-      <div ref={scrollRef} className="h-full space-y-1 overflow-y-auto px-4 pr-2 pt-4" aria-live="polite">
+      {/* PRD-UI-1 §1 shell row: 236px sidebar (hidden <900px) + main view. */}
+      <div className="flex min-h-0 flex-1">
+        <aside className="hidden w-[236px] shrink-0 flex-col border-r border-edge bg-panel min-[900px]:flex">
+          <nav className="px-2.5 pb-1.5 pt-3.5">
+            <p className="px-2.5 pb-2 text-[9px] font-bold uppercase tracking-[0.2em] text-faint">Console</p>
+            <button type="button" onClick={() => setView('tasks')} className={navItemClass(view === 'tasks')}>
+              <svg className="h-[15px] w-[15px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                <path d="M4 6h16M4 12h10M4 18h13" />
+              </svg>
+              Task Stream
+            </button>
+            <button type="button" onClick={() => setView('approvals')} className={navItemClass(view === 'approvals')}>
+              <svg className="h-[15px] w-[15px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                <path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z" />
+              </svg>
+              Approvals
+              {pendingApprovalCount > 0 && (
+                <span className="ml-auto rounded-full bg-torque px-[7px] text-[9px] font-bold leading-[1.6] text-[#0A0B0D]">
+                  {pendingApprovalCount}
+                </span>
+              )}
+            </button>
+            {/* §8 Memory nav ships WITH the Memory view — no dead nav items (row 10). */}
+          </nav>
+          <div className="min-h-0 flex-1 overflow-y-auto px-2.5 pt-2">
+            <p className="px-2.5 pb-2 text-[9px] font-bold uppercase tracking-[0.2em] text-faint">Sessions</p>
+            <div className="rounded-md bg-panel-2 px-2.5 py-2 shadow-[inset_2px_0_0_var(--torque)]">
+              <p className="truncate text-[11.5px] text-ink">{sessionInfo.title ?? 'this session'}</p>
+              <p className="mt-0.5 text-[9.5px] uppercase tracking-[0.06em] text-faint">
+                now · {sessionInfo.taskCount} {sessionInfo.taskCount === 1 ? 'task' : 'tasks'}
+              </p>
+            </div>
+            {/* KERNEL GAP (§3): past sessions + EPISODES/UPTIME footer need
+                backend listings that aren't on the wire — omitted, not faked. */}
+          </div>
+        </aside>
+        <div className="relative min-w-0 flex-1 overflow-hidden">
+        {view === 'approvals' && (
+          <ApprovalHistoryPanel
+            events={events}
+            sendCommand={sendCommand}
+            onClose={() => setView('tasks')}
+            decidedCount={Object.keys(decided).length}
+          />
+        )}
+      <div
+        ref={scrollRef}
+        className={`h-full overflow-y-auto px-4 pr-2 pt-7 ${view === 'tasks' ? '' : 'hidden'}`}
+        aria-live="polite"
+      >
+      <div className="mx-auto max-w-[860px] space-y-1">
         {events.length === 0 && (
           <p className="pt-8 text-center text-faint/75">
             Nothing yet. Type what you need below — simple tasks run free on this
@@ -819,6 +910,7 @@ export default function TorqTerminal() {
           </p>
         )}
       </div>
+      </div>
       {receiptsOpen && (
         <ReceiptsPanel
           events={events}
@@ -829,7 +921,7 @@ export default function TorqTerminal() {
       {costOpen && (
         <CostPanel events={events} sendCommand={sendCommand} onClose={() => setCostOpen(false)} />
       )}
-      {approvalsOpen && (
+      {approvalsOpen && view !== 'approvals' && (
         <ApprovalHistoryPanel
           events={events}
           sendCommand={sendCommand}
@@ -837,6 +929,7 @@ export default function TorqTerminal() {
           decidedCount={Object.keys(decided).length}
         />
       )}
+        </div>
       </div>
 
       {hint && !hintDismissed && (
@@ -857,7 +950,7 @@ export default function TorqTerminal() {
         </div>
       )}
 
-      <form onSubmit={submit} className="border-t border-edge px-4 pb-4 pt-3">
+      <form onSubmit={submit} className="border-t border-edge bg-panel px-4 pb-4 pt-3">
         <div
           className="flex items-center gap-3"
           onDragOver={(e) => { if (ATTACHMENTS_ENABLED) e.preventDefault(); }}
