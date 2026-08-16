@@ -183,8 +183,9 @@ describe('TorqTerminal — working-card cost panel + header meter (redesign 4/7)
       metadata: { costSummary: true, sessionTotal: 0.03, sessionCap: 1, sessionRemaining: 0.97 },
     })];
     rerender(<TorqTerminal />);
-    expect(screen.getByText(/session \$0\.03/)).toBeInTheDocument();
-    expect(screen.getByText(/\$1\.00/)).toBeInTheDocument();
+    // PRD §2 meter markup: bold total + muted "/ $cap" sibling.
+    expect(screen.getByText('$0.03')).toBeInTheDocument();
+    expect(screen.getByText('/ $1.00')).toBeInTheDocument();
   });
 
   it('polls GET_COST_SUMMARY every 5s while a task is in flight (and never while idle)', () => {

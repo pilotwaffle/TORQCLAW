@@ -65,8 +65,8 @@ function toolCall(requestId: string): GatewayEvent {
 const diagA = { score: 10, reason: 'a', tier: 'OLLAMA_LOCAL', ruleId: 'LOCAL_INTENT', overridable: false };
 
 describe('TorqTerminal — staleness affordance + presence card', () => {
-  describe('staleness affordance (review: actionable dead-WS, not pure display)', () => {
-    it('stale while a task should be producing events -> reconnect button calls stream.reconnect', () => {
+  describe('staleness affordance (PRD §2: badge replaces CONNECTED, stays actionable)', () => {
+    it('stale while a task should be producing events -> the stale badge calls stream.reconnect', () => {
       vi.useFakeTimers();
       stream.events = [tierSelected('r1', diagA), toolCall('r1')];
       // 60s (> STALE_AFTER_MS) after the newest event, still "connected".
@@ -74,16 +74,16 @@ describe('TorqTerminal — staleness affordance + presence card', () => {
 
       render(<TorqTerminal />);
 
-      const btn = screen.getByText('reconnect');
-      expect(btn.tagName).toBe('BUTTON'); // an action, not decoration
+      const badge = screen.getByText(/stale · reconnecting/).closest('button');
+      expect(badge).not.toBeNull(); // an action, not decoration
 
       act(() => {
-        fireEvent.click(btn);
+        fireEvent.click(badge!);
       });
       expect(stream.reconnect).toHaveBeenCalledTimes(1);
     });
 
-    it('idle + connected + fresh is NOT stale -> no reconnect button, shows synced readout', () => {
+    it('idle + connected + fresh -> CONNECTED, no badge, M:SS synced readout', () => {
       vi.useFakeTimers();
       const fresh = Date.UTC(2026, 0, 1, 0, 0, 2); // a RECENT event relative to now
       stream.events = [ev({ type: 'RESULT', requestId: 'r1', timestamp: new Date(fresh).toISOString() })];
@@ -91,18 +91,17 @@ describe('TorqTerminal — staleness affordance + presence card', () => {
 
       render(<TorqTerminal />);
 
-      expect(screen.queryByText('reconnect')).not.toBeInTheDocument();
-      // Still shows a "synced Xs ago" readout rather than nothing.
-      expect(screen.getByText(/synced \d+s ago/)).toBeInTheDocument();
-      expect(screen.queryByText('stale')).not.toBeInTheDocument();
+      expect(screen.getByText('CONNECTED')).toBeInTheDocument();
+      expect(screen.queryByText(/stale · reconnecting/)).not.toBeInTheDocument();
+      expect(screen.getByText(/synced \d+:\d\d/)).toBeInTheDocument();
     });
 
-    it('disconnected renders the reconnect text and keeps the reconnect action', () => {
+    it('disconnected -> the stale badge replaces CONNECTED', () => {
       stream.isConnected = false;
       stream.events = [ev({ type: 'RESULT', requestId: 'r1', timestamp: '2026-01-01T00:00:00.000Z' })];
       render(<TorqTerminal />);
-      expect(screen.getByText(/reconnecting — your work is safe/)).toBeInTheDocument();
-      expect(screen.getByText('reconnect')).toBeInTheDocument();
+      expect(screen.queryByText('CONNECTED')).not.toBeInTheDocument();
+      expect(screen.getByText(/stale · reconnecting/)).toBeInTheDocument();
     });
   });
 

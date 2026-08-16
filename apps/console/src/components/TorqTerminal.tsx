@@ -5,7 +5,7 @@ import type { GatewayEvent, ClientCommand, RouterDiagnostics } from '@torqclaw/c
 import { useGatewayStream } from './useGatewayStream';
 import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, groupStreamIntoTasks, derivePreflightEstimate, approvalTierFromGate, attachmentKind, type SafeExportFrameLike, type TaskGroup, type PreflightEstimate, type AttachmentKind } from './friendly';
 import { selectTurnStartMs, selectLastSyncedMs, isStale, selectCostSummaryMeta, selectLivePhase, isPhaseStuck, STALE_AFTER_MS } from './presence';
-import { LiveDuration } from './LiveDuration';
+import { LiveDuration, formatElapsed } from './LiveDuration';
 import { LivenessChip } from './LivenessChip';
 import PresenceCard from './PresenceCard';
 import ReceiptsPanel from './ReceiptsPanel';
@@ -257,7 +257,6 @@ export default function TorqTerminal() {
   const lastSyncedMs = useMemo(() => selectLastSyncedMs(events), [events]);
   const nowMs = useNow(5000);
   const stale = isStale(lastSyncedMs, nowMs, STALE_AFTER_MS);
-  const showStaleWarning = stale && (busy || !isConnected);
   // Chip stuck-state: the active task's own stream quiet for 30s+. Never fires
   // while the task waits on the operator (see isPhaseStuck).
   const phaseStuck = isPhaseStuck(livePhase, nowMs);
@@ -610,37 +609,50 @@ export default function TorqTerminal() {
     );
   };
 
+  const sessionTotal = costMeta && typeof costMeta.sessionTotal === 'number' ? costMeta.sessionTotal : null;
+  const sessionCap = costMeta && typeof costMeta.sessionCap === 'number' ? costMeta.sessionCap : null;
+  const budgetPct =
+    sessionTotal !== null && sessionCap !== null && sessionCap > 0
+      ? `${Math.min(100, (sessionTotal / sessionCap) * 100)}%`
+      : '0%';
+
   return (
-    <section className="flex h-screen flex-col bg-bg p-4 font-mono text-sm text-neutral-300">
-      <header className="mb-4 flex items-center justify-between gap-3 border-b border-neutral-800 pb-4">
-        <div className="flex items-center gap-3">
-          {/* Sync dot (redesign 5/7): green = live, amber + pulse = data
-              >30s unrefreshed (stale must be VISIBLE), red = socket down
-              (error — the only states red may mark). */}
-          <span
-            className={`h-2 w-2 rounded-full ${
-              !isConnected
-                ? 'bg-bad'
-                : stale
-                  ? 'animate-pulse bg-torque'
-                  : 'bg-good'
-            }`}
-            aria-hidden
-            title={
-              !isConnected
-                ? 'connection lost — reconnecting'
-                : stale
-                  ? 'no gateway data for 30s+'
-                  : 'live'
-            }
-          />
-          <h1 className="text-xs font-bold tracking-[0.3em] text-neutral-100">
-            TORQCLAW <span className="text-torque">//</span> ORCHESTRATOR
-          </h1>
+    <section className="flex h-screen flex-col bg-bg font-mono text-sm text-neutral-300">
+      {/* PRD-UI-1 §2 header: 52px, --panel, bottom hairline. */}
+      <header className="flex h-[52px] shrink-0 items-center gap-3.5 border-b border-edge bg-panel px-3.5">
+        <div className="flex items-center gap-2.5">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden>
+            <path d="M12 3 L20 7.5 V16.5 L12 21 L4 16.5 V7.5 Z" stroke="#FF9E40" strokeWidth="1.4" />
+            <path d="M12 8 L12 13 M12 13 L8.5 15.5 M12 13 L15.5 15.5" stroke="#FF9E40" strokeWidth="1.6" strokeLinecap="round" />
+            <circle cx="12" cy="7" r="1.4" fill="#FF9E40" />
+          </svg>
+          <span className="text-[14px] font-bold tracking-[0.18em] text-ink">
+            TORQ<span className="text-torque">CLAW</span>
+          </span>
         </div>
-        {/* Global liveness chip (redesign 2/7): visible on EVERY view while a
-            task is in flight — header stays clear of the panel overlays. Reads
-            the SAME turnStartMs anchor as the in-stream presence block. */}
+        {/* PRD §2: fresh + connected -> CONNECTED (good, pulsing dot). Stale
+            >30s OR disconnected -> the 'stale · reconnecting…' badge REPLACES
+            the element entirely. The badge stays actionable (click forces a
+            reconnect) so the dead-WS affordance survives the restyle. */}
+        {isConnected && !stale ? (
+          <span className="flex items-center gap-2 text-[10px] font-semibold tracking-[0.16em] text-good">
+            <span className="h-[7px] w-[7px] animate-pulse rounded-full bg-good" aria-hidden />
+            CONNECTED
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={reconnect}
+            title="force reconnect"
+            className="flex items-center gap-2 rounded border border-torque/40 bg-torque/10 px-2 py-0.5 text-[10px] font-semibold tracking-[0.16em] text-torque"
+          >
+            <span className="h-[7px] w-[7px] animate-pulse rounded-full bg-torque" aria-hidden />
+            stale · reconnecting…
+          </button>
+        )}
+        {/* Global liveness chip (redesign 2/7, polish in PRD §5): visible on
+            EVERY view while a task is in flight. Reads the SAME turnStartMs
+            anchor as the in-stream presence block. */}
         {livePhase && activeRequestId && (
           <LivenessChip
             phase={livePhase.text}
@@ -652,71 +664,57 @@ export default function TorqTerminal() {
             }
           />
         )}
-        <div className="flex items-center gap-3">
-          {/* Session budget meter (redesign 4/7 + 5/7): climbs with REAL
-              recorded spend from the kernel's costSummary frames — the same
-              frame the working-card panel and PresenceCard read, so the
-              surfaces can never contradict each other. Absent frame = no
-              meter (never a fabricated $0) — and a manual refresh, matching
-              the panels' "last refresh" pattern, so the operator can pull
-              the ledger without opening a panel. */}
-          <span className="flex items-center gap-1.5 text-[10px] tabular-nums text-faint">
-            {costMeta && typeof costMeta.sessionTotal === 'number' ? (
+        <div className="ml-auto flex items-center gap-3">
+          {/* PRD §2 session budget meter: sync dot (amber pulse when stale),
+              SESSION BUDGET micro-label, 110x4 gradient meter, $X.XX / $Y.YY,
+              refresh, synced M:SS. Climbs with REAL costSummary frames only;
+              absent frame renders '—', never a fabricated $0. */}
+          <span className="flex items-center gap-2 whitespace-nowrap text-[10px] tabular-nums">
+            <span
+              className={`h-[5px] w-[5px] rounded-full ${stale ? 'animate-pulse bg-torque' : 'bg-good'}`}
+              aria-hidden
+            />
+            <span className="text-[9px] uppercase tracking-[0.1em] text-faint">Session budget</span>
+            <span className="h-1 w-[110px] overflow-hidden rounded-sm bg-panel-3">
               <span
-                className="flex items-center gap-1.5"
-                title="session spend — provider-reported spend recorded by the kernel"
-              >
-                session ${costMeta.sessionTotal.toFixed(2)}
-                {typeof costMeta.sessionCap === 'number' && (
-                  <>
-                    <span className="h-1 w-16 overflow-hidden rounded-sm bg-panel-2">
-                      <span
-                        className={`block h-full ${costMeta.breach ? 'bg-bad' : 'bg-torque'}`}
-                        style={{
-                          width: `${Math.min(100, (costMeta.sessionTotal / costMeta.sessionCap) * 100)}%`,
-                        }}
-                      />
-                    </span>
-                    <span>/ ${costMeta.sessionCap.toFixed(2)}</span>
-                  </>
-                )}
-              </span>
-            ) : (
-              <span title="no costSummary frame has landed this session yet">spend n/a</span>
-            )}
+                className="block h-full rounded-sm"
+                style={{ width: budgetPct, background: 'linear-gradient(90deg, var(--torque), #FFC38A)' }}
+              />
+            </span>
+            <span className="text-[11px] text-muted">
+              {sessionTotal !== null ? (
+                <>
+                  <b className="font-semibold text-ink">${sessionTotal.toFixed(2)}</b>
+                  {sessionCap !== null ? ` / $${sessionCap.toFixed(2)}` : ''}
+                </>
+              ) : (
+                '—'
+              )}
+            </span>
             <button
               type="button"
               onClick={() => sendCommand({ action: 'GET_COST_SUMMARY', recentLimit: 20 })}
-              title="re-fetch session spend from the kernel ledger"
-              className="rounded border border-transparent px-1 text-faint transition-colors hover:border-edge hover:text-muted"
+              title="refresh from runtime"
+              className="rounded p-0.5 text-faint transition-colors hover:bg-torque/10 hover:text-torque"
             >
-              refresh
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                <path d="M21 12a9 9 0 1 1-2.6-6.3M21 4v5h-5" />
+              </svg>
             </button>
-          </span>
-          <span className="text-[10px] uppercase tracking-widest text-neutral-500">
-            {isConnected ? 'connected' : 'reconnecting — your work is safe'}
-          </span>
-          {lastSyncedMs !== null && (
-            <span
-              className="text-[10px] tabular-nums text-neutral-600"
-              title={new Date(lastSyncedMs).toISOString()}
-            >
-              {stale ? 'stale' : `synced ${Math.max(0, Math.round((nowMs - lastSyncedMs) / 1000))}s ago`}
+            <span className="text-[8.5px] tracking-[0.06em] text-[#4A505A]">
+              {lastSyncedMs !== null
+                ? `synced ${formatElapsed(Math.max(0, Math.round((nowMs - lastSyncedMs) / 1000)))}`
+                : 'synced —'}
             </span>
-          )}
-          {showStaleWarning && (
-            <button
-              onClick={reconnect}
-              className="rounded border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400 transition-colors hover:border-torque/60 hover:text-torque"
-            >
-              reconnect
-            </button>
-          )}
+          </span>
+          {/* KERNEL GAP (PRD §2): the 'hermes kernel · vX' tag is OMITTED — no
+              kernel version rides the WS wire, and reading a config file would
+              be a lie. Add when the handshake carries it. */}
         </div>
       </header>
 
       <div className="relative flex-1 overflow-hidden">
-      <div ref={scrollRef} className="h-full space-y-1 overflow-y-auto pr-2" aria-live="polite">
+      <div ref={scrollRef} className="h-full space-y-1 overflow-y-auto px-4 pr-2 pt-4" aria-live="polite">
         {events.length === 0 && (
           <p className="pt-8 text-center text-neutral-600">
             Nothing yet. Type what you need below — simple tasks run free on this
@@ -859,7 +857,7 @@ export default function TorqTerminal() {
         </div>
       )}
 
-      <form onSubmit={submit} className="mt-4 border-t border-neutral-800 pt-4">
+      <form onSubmit={submit} className="border-t border-edge px-4 pb-4 pt-3">
         <div
           className="flex items-center gap-3"
           onDragOver={(e) => { if (ATTACHMENTS_ENABLED) e.preventDefault(); }}
