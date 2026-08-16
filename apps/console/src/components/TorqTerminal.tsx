@@ -7,6 +7,7 @@ import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRend
 import { selectTurnStartMs, selectLastSyncedMs, isStale, selectCostSummaryMeta, selectLivePhase, isPhaseStuck, STALE_AFTER_MS } from './presence';
 import { LiveDuration, formatElapsed } from './LiveDuration';
 import { LivenessChip } from './LivenessChip';
+import { GlyphSpinner } from './GlyphSpinner';
 import PresenceCard from './PresenceCard';
 import ReceiptsPanel from './ReceiptsPanel';
 import CostPanel from './CostPanel';
@@ -855,6 +856,18 @@ export default function TorqTerminal() {
             <TaskCard
               key={item.group.requestId}
               group={item.group}
+              working={
+                busy && item.group.requestId === activeRequestId
+                  ? {
+                      phaseText: livePhase?.text ?? null,
+                      turnStartMs,
+                      stopState,
+                      onStop: stop,
+                      estimate: activeEstimate,
+                      costMeta,
+                    }
+                  : null
+              }
               decided={decided}
               toolsByRequest={toolsByRequest}
               draftsByQueue={draftsByQueue}
@@ -874,7 +887,10 @@ export default function TorqTerminal() {
             />
           );
         })}
-        {busy && (
+        {/* §4e: the working state lives INSIDE the running task's card once
+            the card exists; this stream-level block covers only the window
+            before TIER_SELECTED mints the card. */}
+        {busy && !(activeRequestId !== null && streamItems.some((it) => it.kind !== 'loose' && it.group.requestId === activeRequestId)) && (
           <>
           <p className="flex items-center gap-3 px-2 py-1 text-faint">
             <span className="inline-block animate-pulse">
@@ -1240,34 +1256,41 @@ function LiveCostPanel({
   const cap = typeof costMeta?.sessionCap === 'number' ? costMeta.sessionCap : null;
   const breach = costMeta?.breach ?? null;
   return (
-    <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[10px] text-faint">
+    /* §4e live panel: panel-2 box with micro-label cells. TOKENS column is
+       deliberately absent — no mid-task usage rides the wire (honesty rule). */
+    <div className="mt-[11px] flex flex-wrap items-center gap-x-5 gap-y-1 rounded-md border border-edge bg-panel-2 px-3 py-2">
       {estimate && (
-        <span>
-          est cap:{' '}
-          <span className={estimate.route === 'local' ? 'text-good' : 'text-cloud'}>
+        <span className="flex flex-col gap-px">
+          <span className="text-[8px] font-bold uppercase tracking-[0.18em] text-faint">est cap</span>
+          <span
+            className={`text-[12.5px] font-semibold tabular-nums ${
+              estimate.route === 'local' ? 'text-good' : 'text-cloud'
+            }`}
+          >
             {estimate.label}
           </span>
         </span>
       )}
       {total !== null && (
-        <span>
-          session spend:{' '}
-          <span className="tabular-nums text-muted">${total.toFixed(2)}</span>
+        <span className="flex flex-col gap-px">
+          <span className="text-[8px] font-bold uppercase tracking-[0.18em] text-faint">session spend</span>
+          <span className="text-[12.5px] font-semibold tabular-nums text-torque">${total.toFixed(2)}</span>
         </span>
       )}
       {total !== null && cap !== null && (
-        <span className="flex items-center gap-1.5" title="session spend vs session cap">
-          <span className="h-1 w-16 overflow-hidden rounded-sm bg-panel-3">
+        <span className="flex items-center gap-2" title="session spend vs session cap">
+          <span className="text-[8px] font-bold uppercase tracking-[0.18em] text-faint">cap</span>
+          <span className="h-1 w-[90px] overflow-hidden rounded-sm bg-panel-3">
             <span
-              className={`block h-full ${breach ? 'bg-bad' : 'bg-torque'}`}
+              className={`block h-full rounded-sm transition-[width] ${breach ? 'bg-bad' : 'bg-torque'}`}
               style={{ width: `${Math.min(100, (total / cap) * 100)}%` }}
             />
           </span>
-          <span className="tabular-nums">cap ${cap.toFixed(2)}</span>
+          <span className="text-[11px] tabular-nums text-muted">${cap.toFixed(2)}</span>
         </span>
       )}
       {estimate?.route === 'cloud' && (
-        <span className="text-faint/75">
+        <span className="ml-auto text-[10px] text-faint/75">
           task cost records on completion — no mid-task usage stream
         </span>
       )}
@@ -1281,13 +1304,45 @@ function LiveCostPanel({
  *  presentation is elevated. */
 function AnswerHero({ event }: { event: GatewayEvent }) {
   return (
-    <div className="mt-2 border-l-2 border-torque pl-4">
-      <p className="font-chrome text-[9px] tracking-[0.22em] text-faint">ANSWER</p>
-      <div className="mt-1 max-w-[72ch] font-reading text-[14.5px] leading-[1.72] text-ink">
-        {friendlyMessage(event)}
+    <div className="relative border-t border-edge px-5 pb-4 pt-[18px]">
+      {/* §4d: 2px left edge, torque fading to transparent at 85%. */}
+      <span
+        className="absolute bottom-0 left-0 top-0 w-[2px]"
+        style={{ background: 'linear-gradient(180deg, var(--torque), transparent 85%)' }}
+        aria-hidden
+      />
+      <p className="font-chrome text-[9px] font-bold uppercase tracking-[0.22em] text-torque">Answer</p>
+      <div className="mt-2 max-w-[72ch] font-reading text-[14.5px] leading-[1.72] text-[#E8EAED]">
+        {renderAnswerInline(friendlyMessage(event))}
       </div>
     </div>
   );
+}
+
+/** §4d presentation-only inline treatments over the SAME answer string the
+ *  raw row always rendered: money tokens in JetBrains --cloud, `backtick`
+ *  spans as panel-3 code chips. Pure re-presentation — nothing is added,
+ *  removed, or reordered. */
+function renderAnswerInline(text: string): React.ReactNode {
+  const parts = text.split(/(`[^`\n]+`|\$\d[\d,]*(?:\.\d+)?)/g);
+  if (parts.length === 1) return text;
+  return parts.map((p, i) => {
+    if (/^`[^`\n]+`$/.test(p)) {
+      return (
+        <code key={i} className="rounded bg-panel-3 px-1.5 py-px font-chrome text-[12px] text-muted">
+          {p.slice(1, -1)}
+        </code>
+      );
+    }
+    if (/^\$\d/.test(p)) {
+      return (
+        <span key={i} className="font-chrome text-[13px] text-cloud">
+          {p}
+        </span>
+      );
+    }
+    return p;
+  });
 }
 
 /** Redesign 3/7: one task = one card. Header carries the user prompt (600
@@ -1297,13 +1352,25 @@ function AnswerHero({ event }: { event: GatewayEvent }) {
  *  errors, the answer, and the receipt stay visible — action surfaces are
  *  never hidden inside a collapse. Every row keeps its exact pre-redesign
  *  behavior and dispatch surface; only the grouping/presentation changed. */
+/** §4e: live working context for the card whose task is in flight — all
+ *  values are the same real anchors/frames the stream-level block used. */
+interface CardWorking {
+  phaseText: string | null;
+  turnStartMs: number | null;
+  stopState: 'idle' | 'requested' | 'failed';
+  onStop: () => void;
+  estimate: PreflightEstimate | null;
+  costMeta: Record<string, any> | null;
+}
+
 function TaskCard({
-  group, decided, toolsByRequest, draftsByQueue, onDecideSkill, onGetDraft,
+  group, working = null, decided, toolsByRequest, draftsByQueue, onDecideSkill, onGetDraft,
   onDecideTool, onResendLocal, onResendCloud, onRetry, onCopyDiagnostic,
   safeExportViewByTaskId, safeExportChipPhase, safeExportChipCopied,
   onGetSafeExportChip, onCopySafeExportChip, budgetLine,
 }: {
   group: TaskGroup;
+  working?: CardWorking | null;
   decided: Record<string, 'APPROVE' | 'REJECT'>;
   toolsByRequest: Record<string, string[]>;
   draftsByQueue: Record<string, string>;
@@ -1346,29 +1413,40 @@ function TaskCard({
     budgetLine,
   });
 
+  // §4c: honest summary segments derived from the real plumbing rows.
+  const hasMemoryStep = group.plumbing.some((ev) => /memor|recall/i.test(ev.message));
+
   return (
-    <article className="rounded-[10px] border border-edge bg-panel px-3 py-2">
-      <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+    <article className="mb-[18px] animate-task-enter overflow-hidden rounded-[10px] border border-edge bg-panel">
+      {/* §4b card head: avatar tile · prompt · route chip · ONE timestamp. */}
+      <header className="flex flex-wrap items-start gap-x-3 gap-y-1 px-[18px] pb-[13px] pt-[15px]">
+        <div
+          className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-md border border-torque/30 bg-torque/[.14] text-[10px] font-bold tracking-[0.05em] text-torque"
+          aria-hidden
+        >
+          YOU
+        </div>
+        {group.prompt && (
+          <span className="min-w-0 flex-1 font-chrome text-[13.5px] font-semibold leading-[1.5] text-ink">
+            {group.prompt}
+          </span>
+        )}
         {tier && (
           <span
             title={tier.hint}
-            className={`rounded border px-1.5 py-0.5 text-[10px] tracking-wide ${
+            className={`mt-0.5 inline-flex shrink-0 items-center gap-1.5 rounded border px-[9px] py-[3px] text-[9.5px] font-bold uppercase tracking-[0.14em] ${
               isCloud
-                ? 'border-cloud/40 bg-cloud/10 text-cloud'
-                : 'border-good/40 bg-good/10 text-good'
+                ? 'border-cloud/[.28] bg-cloud/[.12] text-cloud'
+                : 'border-good/[.28] bg-good/[.12] text-good'
             }`}
           >
-            {tier.text}
-          </span>
-        )}
-        {group.prompt && (
-          <span className="min-w-0 flex-1 font-chrome text-[13.5px] font-semibold text-ink">
-            {group.prompt}
+            <span className="h-[5px] w-[5px] rounded-full bg-current" aria-hidden />
+            {isCloud ? 'cloud' : 'local'}
           </span>
         )}
         {group.startMs !== null && (
           <time
-            className="shrink-0 text-[10px] tabular-nums text-faint"
+            className="mt-1 shrink-0 text-[10px] tabular-nums tracking-[0.08em] text-faint"
             title={new Date(group.startMs).toISOString()}
           >
             {new Date(group.startMs).toLocaleTimeString([], { hour12: false })}
@@ -1376,26 +1454,41 @@ function TaskCard({
         )}
       </header>
 
+      {/* §4c collapsed plumbing: one full-width row, chevron rotates, body
+          expands 320ms; per-line timestamps visible ONLY inside here. */}
       {group.plumbing.length > 0 && (
-        <button
-          type="button"
-          onClick={() => setStepsOpen((v) => !v)}
-          aria-expanded={stepsOpen}
-          className="mt-1.5 text-[10px] uppercase tracking-widest text-faint transition-colors hover:text-muted"
-        >
-          {group.plumbing.length} {group.plumbing.length === 1 ? 'step' : 'steps'} {stepsOpen ? '▾' : '▸'}
-        </button>
-      )}
-      {stepsOpen && (
-        <div className="mt-1 space-y-1">
-          {group.plumbing.map((ev) => (
-            <EventRow key={ev.id} {...rowProps(ev)} />
-          ))}
+        <div className="border-t border-edge">
+          <button
+            type="button"
+            onClick={() => setStepsOpen((v) => !v)}
+            aria-expanded={stepsOpen}
+            className="flex w-full items-center gap-2 px-[18px] py-2 text-left text-[10.5px] uppercase tracking-[0.1em] text-faint transition-colors hover:bg-panel-2 hover:text-muted"
+          >
+            <span
+              className={`text-[9px] transition-transform duration-200 ${stepsOpen ? 'rotate-90' : ''}`}
+              aria-hidden
+            >
+              ▶
+            </span>
+            {group.plumbing.length} {group.plumbing.length === 1 ? 'step' : 'steps'} · hermes kernel
+            {hasMemoryStep ? ' · memory recall' : ''}
+          </button>
+          <div
+            className={`overflow-hidden transition-[max-height] duration-300 ease-out ${
+              stepsOpen ? 'max-h-[400px] overflow-y-auto' : 'max-h-0'
+            }`}
+          >
+            <div className="pb-2 pl-[30px] pr-[18px] text-[11px]">
+              {group.plumbing.map((ev) => (
+                <EventRow key={ev.id} {...rowProps(ev)} hideTimestamp={false} />
+              ))}
+            </div>
+          </div>
         </div>
       )}
 
       {group.visible.length > 0 && (
-        <div className="mt-1 space-y-1">
+        <div className="space-y-1">
           {group.visible.map((ev) => {
             const meta = (ev.metadata ?? {}) as Record<string, any>;
             if (ev.type === 'SYSTEM' && meta.receipt) {
@@ -1408,8 +1501,48 @@ function TaskCard({
               );
             }
             if (ev.type === 'RESULT') return <AnswerHero key={ev.id} event={ev} />;
-            return <EventRow key={ev.id} {...rowProps(ev)} />;
+            return (
+              <div key={ev.id} className="px-[18px]">
+                <EventRow {...rowProps(ev)} />
+              </div>
+            );
           })}
+        </div>
+      )}
+
+      {/* §4e working state: phase row + shimmer + honest live panel, inside
+          THIS card while its task runs. */}
+      {working && (
+        <div className="border-t border-edge px-5 pb-4 pt-3.5">
+          <div className="flex items-center gap-3 text-[11px] text-muted">
+            <GlyphSpinner className="text-torque" />
+            <span>
+              {working.stopState === 'requested'
+                ? 'stopping…'
+                : `working…${working.phaseText ? ` ${working.phaseText}` : ''}`}
+            </span>
+            <LiveDuration since={working.turnStartMs} className="text-[10px] tabular-nums text-faint" />
+            <button
+              onClick={working.onStop}
+              disabled={working.stopState === 'requested'}
+              className="rounded-md border border-border-strong px-2 py-0.5 text-[10px] uppercase tracking-widest text-muted transition-colors hover:border-torque/60 hover:text-torque disabled:opacity-40"
+            >
+              {working.stopState === 'requested' ? 'stopping' : 'stop'}
+            </button>
+            {working.stopState === 'failed' && (
+              <span className="text-[10px] text-torque">
+                couldn’t send stop — connection may be reconnecting; try again
+              </span>
+            )}
+          </div>
+          <div className="relative mt-[11px] h-[3px] overflow-hidden rounded-sm bg-panel-3">
+            <span
+              className="absolute bottom-0 top-0 w-[38%] animate-shimmer rounded-sm"
+              style={{ background: 'linear-gradient(90deg, transparent, var(--torque), transparent)' }}
+              aria-hidden
+            />
+          </div>
+          <LiveCostPanel estimate={working.estimate} costMeta={working.costMeta} />
         </div>
       )}
     </article>
@@ -1731,20 +1864,31 @@ function ReceiptCard({ receipt, tools }: { receipt: any; tools: string[] }) {
   const ctx: string | undefined = typeof receipt.assembledContext === 'string' ? receipt.assembledContext : undefined;
 
   return (
-    <div className="mt-2">
-      <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
-        <span className="rounded border border-edge bg-panel-2 px-1.5 py-0.5 font-semibold text-muted">Done</span>
+    /* §4f: full-width receipt strip — panel-2 over a top hairline. */
+    <div className="border-t border-edge bg-panel-2 px-[18px] py-[9px]">
+      <div className="flex flex-wrap items-center gap-[7px] text-[10px]">
+        <span className="inline-flex items-center gap-1.5 rounded border border-good/30 bg-panel px-2 py-[2.5px] font-semibold tracking-[0.06em] text-good">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden>
+            <path d="M4 12l6 6L20 6" />
+          </svg>
+          done
+        </span>
         {parts.map((p, i) => (
-          <span key={i} className="rounded border border-edge bg-panel-2 px-1.5 py-0.5 tabular-nums text-faint">
+          <span
+            key={i}
+            className="rounded border border-edge bg-panel px-2 py-[2.5px] tabular-nums tracking-[0.06em] text-muted"
+          >
             {p}
           </span>
         ))}
+        {/* KERNEL GAP (§4f): snapshot chip + UNDO render only if the kernel
+            exposes checkpoint/rollback — it exposes neither; omitted. */}
         {ctx && (
           <button
             onClick={() => setShowCtx((v) => !v)}
-            className="rounded border border-transparent px-1.5 py-0.5 text-faint transition-colors hover:border-edge hover:text-muted"
+            className="ml-auto rounded border border-transparent px-2 py-[2.5px] tracking-[0.1em] text-faint transition-colors hover:border-torque/30 hover:bg-torque/[.14] hover:text-torque"
           >
-            {showCtx ? 'hide context' : 'view context used'}
+            {showCtx ? 'hide context' : 'view context used ↗'}
           </button>
         )}
       </div>
