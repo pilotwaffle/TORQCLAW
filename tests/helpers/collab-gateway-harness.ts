@@ -372,6 +372,15 @@ export async function launchGateway(env: Record<string, string>, useTestPreload 
   const port = await reservePort();
   const childEnv: NodeJS.ProcessEnv = { ...process.env, ...env, TORQCLAW_PORT: String(port), TORQCLAW_HOST: '127.0.0.1' };
   delete childEnv.NODE_OPTIONS;
+  // Hermetic: this harness boots the gateway to test IDENTITY/connect semantics,
+  // not failover. An ambient TORQCLAW_PROVIDER_FAILOVER_ENABLED=true would
+  // otherwise route every booted gateway through the failover path and couple
+  // these tests to failover behaviour. Default it OFF unless a caller
+  // explicitly opts in via `env` (mirrors how spend-caps / skill-queue tests
+  // pin their own flags rather than inheriting the operator env).
+  if (!('TORQCLAW_PROVIDER_FAILOVER_ENABLED' in env)) {
+    delete childEnv.TORQCLAW_PROVIDER_FAILOVER_ENABLED;
+  }
   if (useTestPreload) {
     childEnv.NODE_ENV = 'test';
     childEnv.NODE_OPTIONS = '--import=' + pathToFileURL(PRELOAD).href;

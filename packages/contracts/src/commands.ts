@@ -137,13 +137,18 @@ export type ClientCommand = z.infer<typeof ClientCommandSchema>;
  *  principalId/surfaceId — identity is always server-derived from the
  *  verified credential, never trusted from the wire (H-1). */
 export const ConnectFrameSchema = z.object({
-  role: z.enum(['operator', 'channel', 'node']),
-  token: z.string(),
+  // Compatibility assertions only. The gateway derives authority from the
+  // authenticated credential and rejects either field when it disagrees.
+  role: z.enum(['operator', 'channel', 'node']).optional(),
+  expectedRole: z.enum(['operator', 'channel', 'node']).optional(),
+  // Deprecated legacy transport. Production rejects this path regardless of
+  // value; it remains optional for the bounded development migration window.
+  token: z.string().optional(),
   sessionId: z.uuid().optional(),
   clientInfo: z.object({ name: z.string(), version: z.string() }),
-  auth: z.object({
-    kind: z.literal('surface'),
-    credential: z.string(),
-  }).optional(),
+  auth: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('surface'), credential: z.string() }),
+    z.object({ kind: z.literal('channel_service'), credential: z.string() }),
+  ]).optional(),
 });
 export type ConnectFrame = z.infer<typeof ConnectFrameSchema>;

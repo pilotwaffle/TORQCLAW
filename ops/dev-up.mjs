@@ -21,6 +21,7 @@ const ENGINE_PYTHON = fileURLToPath(new URL(
 ));
 const NEXT_CLI = fileURLToPath(new URL('../apps/console/node_modules/next/dist/bin/next', import.meta.url));
 const production = process.argv.includes('--production');
+if (production) process.env.TORQCLAW_RUNTIME_MODE = 'production';
 const envFilePresent = process.env.TORQCLAW_ENV_FILE_PRESENT === '1' ||
   (await import('node:fs')).existsSync(fileURLToPath(new URL('../.env', import.meta.url)));
 

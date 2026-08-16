@@ -57,6 +57,7 @@ import {
   type BootstrapDb,
 } from '@torqclaw/collab';
 import type { PrincipalBinding } from './principalBridge.js';
+import type { AuthenticatedCaller } from './connectionAuth.js';
 import { DATA_DIR, db as stateDb } from './storage.js';
 import {
   validatePresentingSurface,
@@ -141,11 +142,41 @@ function getCollabDb(): BootstrapDb {
  *  {secretHmac, state} by design -- credentials.ts:120-123) -- widening
  *  that shared type would ripple into every CredentialLookup consumer for a
  *  need that is specific to this one connect-path derivation. */
-function principalIdForCredential(db: BootstrapDb, credentialId: string): string | null {
+type PrincipalAuthority = {
+  principalId: string;
+  principalKind: 'operator' | 'agent';
+  principalStatus: string;
+};
+
+function principalAuthorityForCredential(
+  db: BootstrapDb,
+  credentialId: string,
+): PrincipalAuthority | null {
   const row = db
-    .prepare('SELECT principal_id FROM principal_credentials WHERE id = ?')
-    .get(credentialId) as { principal_id: string } | undefined;
-  return row ? row.principal_id : null;
+    .prepare(
+      `SELECT pc.principal_id AS principalId,
+              p.kind AS principalKind,
+              p.status AS principalStatus
+         FROM principal_credentials pc
+         JOIN principals p ON p.id = pc.principal_id
+        WHERE pc.id = ?`,
+    )
+    .get(credentialId) as PrincipalAuthority | undefined;
+  return row ?? null;
+}
+
+function principalAuthorityForPrincipal(
+  db: BootstrapDb,
+  principalId: string,
+): PrincipalAuthority | null {
+  const row = db
+    .prepare(
+      `SELECT id AS principalId, kind AS principalKind, status AS principalStatus
+         FROM principals
+        WHERE id = ?`,
+    )
+    .get(principalId) as PrincipalAuthority | undefined;
+  return row ?? null;
 }
 
 /**
@@ -159,6 +190,12 @@ function principalIdForCredential(db: BootstrapDb, credentialId: string): string
  * function itself never throws and never reveals which sub-check failed).
  */
 export function verifySurfaceCredential(credential: string): PrincipalBinding | null {
+  return verifyLegacySurfaceAuthority(credential)?.binding ?? null;
+}
+
+function verifyLegacySurfaceAuthority(
+  credential: string,
+): { binding: PrincipalBinding; principalKind: 'operator' | 'agent' } | null {
   try {
     const pepper = getSecretStore().get(PRINCIPAL_PEPPER_SECRET_NAME);
     if (!pepper) return null;
@@ -168,11 +205,14 @@ export function verifySurfaceCredential(credential: string): PrincipalBinding | 
     const result = verifyCredential(credential, pepper, lookup);
     if (!result.ok) return null;
 
-    const principalId = principalIdForCredential(db, result.credentialId);
-    if (!principalId) return null;
+    const authority = principalAuthorityForCredential(db, result.credentialId);
+    if (!authority || authority.principalStatus !== 'active') return null;
 
     // surfaceId=credentialId stand-in -- see module doc comment.
-    return { principalId, surfaceId: result.credentialId };
+    return {
+      binding: { principalId: authority.principalId, surfaceId: result.credentialId },
+      principalKind: authority.principalKind,
+    };
   } catch {
     // No exception may ever escape to the connect seam -- same posture as
     // verifyCredential itself (credentials.ts:237-240).
@@ -209,7 +249,7 @@ export function verifySurfaceCredential(credential: string): PrincipalBinding | 
  */
 export function resolveConnectIdentity(
   credential: string,
-): { binding: PrincipalBinding; auth: ConnectionAuthContext | null } | null {
+): { caller: AuthenticatedCaller; auth: ConnectionAuthContext | null } | null {
   try {
     const pepper = getSecretStore().get(PRINCIPAL_PEPPER_SECRET_NAME);
     if (!pepper) return null;
@@ -221,11 +261,26 @@ export function resolveConnectIdentity(
       { collabDb, stateDb, principalPepper: pepper },
       credential,
     );
-    if (ctx !== null) return { binding: bindingFor(ctx), auth: ctx };
+    if (ctx !== null) {
+      const authority = principalAuthorityForPrincipal(collabDb as unknown as BootstrapDb, ctx.principalId);
+      if (!authority || authority.principalStatus !== 'active') return null;
+      const operator = authority.principalKind === 'operator' && ctx.surfaceRole === 'operator';
+      const role = operator ? 'operator' : 'node';
+      const authClass = operator
+        ? 'operator_surface'
+        : ctx.surfaceRole === 'automation'
+          ? 'automation_surface'
+          : 'agent_surface';
+      return { caller: { binding: bindingFor(ctx), role, authClass }, auth: ctx };
+    }
 
     // C0.1 legacy fallback (see above).
-    const legacy = verifySurfaceCredential(credential);
-    if (legacy !== null) return { binding: legacy, auth: null };
+    const legacy = verifyLegacySurfaceAuthority(credential);
+    if (legacy !== null) {
+      const role = legacy.principalKind === 'operator' ? 'operator' : 'node';
+      const authClass = legacy.principalKind === 'operator' ? 'operator_surface' : 'agent_surface';
+      return { caller: { binding: legacy.binding, role, authClass }, auth: null };
+    }
 
     return null;
   } catch {

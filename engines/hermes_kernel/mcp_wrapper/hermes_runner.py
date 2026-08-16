@@ -314,7 +314,10 @@ def _frontier_enabled_toolsets(
         # heuristics or file-intent detection would otherwise add tools.
         "read_only": ["web"],
         "browser_research": ["web"],
-        "workspace_write": ["files"],
+        # web is the safe read-only floor; workspace_write adds file writes on
+        # top. (Previously files-only, which left routine tasks unable to search
+        # the web once the effective profile actually reached the engine.)
+        "workspace_write": ["web", "files"],
         "terminal_power": ["web", "files", "terminal", "code_execution"],
     }
     base = list(profile_toolsets.get(profile_id, _FRONTIER_TOOLSETS.get(task_type, ["web"])))
@@ -433,7 +436,13 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
         raise MissingCredentialsError()
     task_store.emit(task_id, "SYSTEM", f"Model: {pconf['provider']}/{pconf['model']}")
 
-    enabled = _frontier_enabled_toolsets(task_type, prompt, req.get("effectiveProfile"))
+    # effectiveProfile is a TOP-LEVEL GatewayRequest field (set by the gateway's
+    # enrich step), NOT part of the inner `payload` block. Read it from
+    # `payload` (the complete GatewayRequest), not `req` (the inner payload) —
+    # reading it from `req` is always None, which silently degrades the toolset
+    # to the task-type default (web-only) even when the gateway resolved a
+    # write-capable profile. That is exactly the "create a file ran web-only" bug.
+    enabled = _frontier_enabled_toolsets(task_type, prompt, payload.get("effectiveProfile"))
 
     # P2-0 L1 — secondary control: reject "skills" from an explicit allowlist
     # before ever constructing the agent. This is belt-and-suspenders only:

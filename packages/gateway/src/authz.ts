@@ -54,30 +54,16 @@ const DENY_AUTHORITY: AuthzDecision = {
 
 const DENY_NOT_PERMITTED: AuthzDecision = { ok: false, reason: 'action not permitted for this role' };
 const DENY_NOT_OWNED: AuthzDecision = { ok: false, reason: 'task not owned by this session' };
-const DENY_ROLE_MISMATCH: AuthzDecision = { ok: false, reason: 'session role mismatch' };
 const ALLOW: AuthzDecision = { ok: true };
 
 /**
- * Resume-role guard: a RESUME whose ConnectFrame role disagrees with the role
- * persisted on the session is a role-escalation attempt (e.g. a channel client
- * replaying an operator sessionId, or vice versa) and MUST be rejected — the
- * caller closes the socket (4003) and never mints a fresh session as fallback.
+ * Resume-role enforcement now belongs to sessions.resolve(): it compares the
+ * persisted server-derived role with the newly authenticated caller role and
+ * refuses a mismatch without minting a replacement session.
  *
- * Fresh sessions (resumed === false) always pass: the frame role IS the role
- * just persisted, so there is nothing to disagree with.
- *
- * Pure function — server.ts calls this verbatim on the connect path, so the
- * unit tests exercise the actual production guard, not a parallel copy.
+ * Client frame.role/expectedRole fields are assertions checked separately;
+ * neither field participates in persisted authority.
  */
-export function checkResumeRole(
-  resumed: boolean,
-  storedRole: string,
-  frameRole: string,
-): AuthzDecision {
-  if (resumed && storedRole !== frameRole) return DENY_ROLE_MISMATCH;
-  return ALLOW;
-}
-
 /**
  * Allow-list authorization, default DENY for anything not explicitly granted
  * to a non-operator role. Pure function, no I/O — ctx.lookupTaskSession is the

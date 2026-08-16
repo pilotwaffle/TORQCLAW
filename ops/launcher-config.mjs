@@ -35,18 +35,26 @@ function requireLoopbackHost(value, label, fallback) {
 }
 
 function requireProductionTokens(env) {
-  const server = String(env.TORQCLAW_GATEWAY_TOKEN ?? '').trim();
-  const browser = String(env.NEXT_PUBLIC_GATEWAY_TOKEN ?? '').trim();
-  const valid = (token) => token && !PLACEHOLDER_TOKENS.has(token.toLowerCase());
-  if (!valid(server) || !valid(browser)) {
-    throw new Error('production gateway tokens must be nonempty and non-placeholder');
+  const legacy = String(env.TORQCLAW_GATEWAY_TOKEN ?? '').trim();
+  if (legacy) {
+    throw new Error('TORQCLAW_GATEWAY_TOKEN is deprecated and forbidden in production');
   }
-  if (server !== browser) {
-    throw new Error('production gateway tokens must match');
+  const channel = String(env.TORQCLAW_CHANNEL_SERVICE_TOKEN ?? '').trim();
+  if (channel && PLACEHOLDER_TOKENS.has(channel.toLowerCase())) {
+    throw new Error('production channel service token must not be a placeholder');
+  }
+}
+
+function requireEnabledChannelCredential(env) {
+  if (env.TORQCLAW_HTTP_CHANNEL !== '1') return;
+  const channel = String(env.TORQCLAW_CHANNEL_SERVICE_TOKEN ?? '').trim();
+  if (!channel || PLACEHOLDER_TOKENS.has(channel.toLowerCase())) {
+    throw new Error('enabled HTTP channel requires a non-placeholder TORQCLAW_CHANNEL_SERVICE_TOKEN');
   }
 }
 
 export function buildLauncherConfig(env = process.env, { production = false } = {}) {
+  requireEnabledChannelCredential(env);
   const engineHost = requireLoopbackHost(env.HERMES_BIND_HOST, 'HERMES_BIND_HOST', '127.0.0.1');
   const gatewayHost = requireLoopbackHost(env.TORQCLAW_HOST, 'TORQCLAW_HOST', '127.0.0.1');
   const consolePort = parsePositiveInteger(

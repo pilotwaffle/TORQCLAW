@@ -48,6 +48,78 @@ let registry: RegisteredTool[] = [];
 
 const DEFAULT_WRITE_PATTERNS = [/write/i, /delete/i, /push/i, /create/i, /update/i, /send/i, /exec/i];
 
+// Deferred hermes connection (B-1 fix). When the engine is unreachable at boot
+// we keep retrying in the background with capped exponential backoff (reset on
+// success) and notify registered waiters the first time it connects, so boot
+// work that needs the engine (failover recovery) runs as soon as the engine is
+// up instead of waiting for a gateway restart. Pattern: hermes-agent's
+// reconnect watcher re-running recovery on connect + buzz's capped backoff.
+type HermesReadyCallback = () => void | Promise<void>;
+const hermesReadyCallbacks: HermesReadyCallback[] = [];
+let hermesReconnectConfig: ServerConfig | null = null;
+let hermesReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let hermesReconnectAttempt = 0;
+const HERMES_RECONNECT_INITIAL_MS = 1_000;
+const HERMES_RECONNECT_CAP_MS = 30_000;
+// Bounded effort: after this many failed attempts we stop retrying and surface
+// it loudly rather than retrying invisibly forever (hermes MAX_ATTEMPTS idea).
+const HERMES_RECONNECT_MAX_ATTEMPTS = 24;
+
+/** Register work to run once the hermes engine is (or becomes) connected. If
+ *  the engine is already connected the callback fires immediately. Used by the
+ *  gateway to defer failover recovery until the engine is reachable. */
+export function onHermesReady(cb: HermesReadyCallback): void {
+  if (clients.has('hermes')) {
+    void Promise.resolve().then(() => cb()).catch((error) => {
+      console.warn(`[bridge] hermes-ready callback failed: ${(error as Error)?.message ?? error}`);
+    });
+    return;
+  }
+  hermesReadyCallbacks.push(cb);
+}
+
+async function fireHermesReady(): Promise<void> {
+  const cbs = hermesReadyCallbacks.splice(0);
+  for (const cb of cbs) {
+    try {
+      await cb();
+    } catch (error) {
+      console.warn(`[bridge] hermes-ready callback failed: ${(error as Error)?.message ?? error}`);
+    }
+  }
+}
+
+function scheduleHermesReconnect(): void {
+  if (hermesReconnectTimer !== null || hermesReconnectConfig === null) return;
+  if (clients.has('hermes')) return;
+  if (hermesReconnectAttempt >= HERMES_RECONNECT_MAX_ATTEMPTS) {
+    console.error(`[bridge] hermes engine unreachable after ${HERMES_RECONNECT_MAX_ATTEMPTS} reconnect attempts — FRONTIER stays degraded until gateway restart`);
+    return;
+  }
+  const delay = Math.min(HERMES_RECONNECT_INITIAL_MS * 2 ** hermesReconnectAttempt, HERMES_RECONNECT_CAP_MS);
+  hermesReconnectAttempt += 1;
+  hermesReconnectTimer = setTimeout(() => {
+    hermesReconnectTimer = null;
+    void attemptHermesReconnect();
+  }, delay);
+  // Never keep the event loop alive just to retry the engine.
+  hermesReconnectTimer.unref?.();
+}
+
+async function attemptHermesReconnect(): Promise<void> {
+  const cfg = hermesReconnectConfig;
+  if (cfg === null || clients.has('hermes')) return;
+  try {
+    await connectServer(cfg);
+    hermesReconnectAttempt = 0; // reset backoff on success (buzz run_subscriber)
+    console.log('[bridge] hermes engine connected (deferred reconnect)');
+    await fireHermesReady();
+  } catch (error) {
+    console.warn(`[bridge] hermes reconnect attempt ${hermesReconnectAttempt} failed (${(error as Error)?.message ?? error})`);
+    scheduleHermesReconnect();
+  }
+}
+
 export async function connectServer(cfg: ServerConfig): Promise<void> {
   const client = new Client(
     { name: 'torqclaw-gateway', version: '0.1.0' },
@@ -62,7 +134,13 @@ export async function connectServer(cfg: ServerConfig): Promise<void> {
         })
       : new StdioClientTransport({ command: cfg.transport.command, args: cfg.transport.args });
 
-  await client.connect(transport);
+  try {
+    await client.connect(transport);
+  } catch (error) {
+    // A failed (re)connect must not leak the half-open transport.
+    try { await transport.close(); } catch { /* best-effort cleanup */ }
+    throw error;
+  }
   clients.set(cfg.id, client);
 
   const { tools } = await client.listTools();
@@ -71,6 +149,9 @@ export async function connectServer(cfg: ServerConfig): Promise<void> {
   // large server (80+ tools) can't overflow the local context window.
   const allow = cfg.tools ? new Set(cfg.tools) : null;
   const selected = allow ? tools.filter((t) => allow.has(t.name)) : tools;
+  // Idempotent re-registration: drop any prior entries for this server so a
+  // reconnect never duplicates its tools in the registry.
+  registry = registry.filter((entry) => entry.sourceServerId !== cfg.id);
   for (const t of selected) {
     const cap = classifyCapability(t.name, (t as any).annotations, cfg.capabilities?.[t.name]);
     registry.push({
@@ -154,14 +235,18 @@ export async function executeTool(
 export async function connectBridge(): Promise<void> {
   const hermesUrl = process.env.HERMES_ENGINE_URL || 'http://127.0.0.1:8000/mcp';
   const hermesToken = process.env.HERMES_ENGINE_TOKEN;
+  const hermesConfig: ServerConfig = {
+    id: 'hermes',
+    transport: { type: 'streamable-http', url: hermesUrl, token: hermesToken },
+    approvalPatterns: [], // engine meta-tools are control-plane, not user tools
+  };
+  // Remembered so the background reconnect can retry the same endpoint (B-1).
+  hermesReconnectConfig = hermesConfig;
   try {
-    await connectServer({
-      id: 'hermes',
-      transport: { type: 'streamable-http', url: hermesUrl, token: hermesToken },
-      approvalPatterns: [], // engine meta-tools are control-plane, not user tools
-    });
+    await connectServer(hermesConfig);
   } catch (err: any) {
-    console.warn(`[bridge] hermes engine unreachable (${err.message}) — FRONTIER tier degraded`);
+    console.warn(`[bridge] hermes engine unreachable (${err.message}) — retrying in background; FRONTIER degraded until it connects`);
+    scheduleHermesReconnect();
   }
   // User-managed roster: ~/.torqclaw/servers.json (validated, per-server fault isolation)
   const { loadServerConfigs } = await import('./serverConfig.js');

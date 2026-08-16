@@ -8,6 +8,12 @@ import { fileURLToPath } from 'node:url';
 const contractsDist = fileURLToPath(
   new URL('./packages/contracts/dist/index.js', import.meta.url),
 );
+const contractsSource = fileURLToPath(
+  new URL('./packages/contracts/src/index.ts', import.meta.url),
+);
+const contractsEntry = process.env.TORQCLAW_PROFILE_CONFORMANCE_SOURCE_CONTRACTS === '1'
+  ? contractsSource
+  : contractsDist;
 
 // C0.1: collabIdentity.ts (packages/gateway/src) imports verifyCredential
 // etc. from '@torqclaw/collab', which resolves to packages/collab/dist/.
@@ -33,7 +39,7 @@ const consoleReactDom = fileURLToPath(new URL('./apps/console/node_modules/react
 export default defineConfig({
   resolve: {
     alias: {
-      '@torqclaw/contracts': contractsDist,
+      '@torqclaw/contracts': contractsEntry,
       '@torqclaw/collab': collabDist,
       react: consoleReact,
       'react-dom': consoleReactDom,

@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { db } from './storage.js';
-import { assertResumeAllowed, type PrincipalBinding } from './principalBridge.js';
+import { assertResumeAllowed, PrincipalBindingError, type PrincipalBinding } from './principalBridge.js';
 import type { ConnectFrame, GatewayEvent } from '@torqclaw/contracts';
+import type { AuthenticatedCaller } from './connectionAuth.js';
 
 const PER_EVENT_CHAR_CAP = 1_200;   // one giant RESULT must not eat the window
 const TOTAL_CONTEXT_CHAR_BUDGET = 8_000; // ~2k tokens of assembled history
@@ -21,6 +22,10 @@ function toFtsQuery(prompt: string): string | null {
 }
 
 export const sessions = {
+  has(sessionId: string): boolean {
+    return db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId) !== undefined;
+  },
+
   /** Resume if the client presented a known sessionId; create otherwise.
    *  Sessions are durable identity — sockets are ephemeral plumbing.
    *
@@ -36,9 +41,9 @@ export const sessions = {
    *  with principal_id/surface_id both NULL, exactly as before. */
   resolve(
     frame: ConnectFrame,
-    callerBinding: PrincipalBinding | null = null,
+    caller: AuthenticatedCaller,
   ): { sessionId: string; resumed: boolean; role: string } {
-    const caller = callerBinding;
+    const callerBinding: PrincipalBinding | null = caller.binding;
 
     if (frame.sessionId) {
       const row = db.prepare(
@@ -49,11 +54,23 @@ export const sessions = {
       if (row) {
         // SEC-1: previously ANY caller holding a session id resumed it. A
         // session bound to a principal now only resumes for that principal.
-        // Sessions predating the bridge have no owner and stay resumable.
+        // Sessions predating the bridge have no owner. Only the bounded
+        // development legacy credential may resume them; a new server-owned
+        // surface/channel must never claim old state by session-id possession.
         const owner = row.principal_id
           ? { principalId: row.principal_id, surfaceId: row.surface_id ?? '' }
           : null;
-        assertResumeAllowed(owner, caller);
+        if (owner == null && caller.authClass !== 'legacy_gateway') {
+          throw new PrincipalBindingError('legacy ownerless session cannot be resumed by this caller');
+        }
+        assertResumeAllowed(owner, callerBinding);
+
+        // Both sides are server-owned: the stored authority established at
+        // creation and the authority derived from the currently presented
+        // credential. A mismatch is never repaired by minting a new session.
+        if (row.role !== caller.role) {
+          throw new PrincipalBindingError('derived role does not match stored session role');
+        }
 
         db.prepare('UPDATE sessions SET last_active_at = CURRENT_TIMESTAMP WHERE id = ?')
           .run(frame.sessionId);
@@ -64,10 +81,10 @@ export const sessions = {
     db.prepare(
       'INSERT INTO sessions (id, role, client_name, principal_id, surface_id) VALUES (?, ?, ?, ?, ?)',
     ).run(
-      sessionId, frame.role, frame.clientInfo.name,
-      caller?.principalId ?? null, caller?.surfaceId ?? null,
+      sessionId, caller.role, frame.clientInfo.name,
+      callerBinding?.principalId ?? null, callerBinding?.surfaceId ?? null,
     );
-    return { sessionId, resumed: false, role: frame.role };
+    return { sessionId, resumed: false, role: caller.role };
   },
 
   /** Replay by monotonic seq cursor — never by timestamp. */

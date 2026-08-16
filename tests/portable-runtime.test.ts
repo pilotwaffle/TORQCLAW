@@ -22,8 +22,7 @@ const {
 const { stopProcessTree } = await import('../ops/process-tree.mjs');
 
 const productionEnv = {
-  TORQCLAW_GATEWAY_TOKEN: 'synthetic-matching-token',
-  NEXT_PUBLIC_GATEWAY_TOKEN: 'synthetic-matching-token',
+  TORQCLAW_CHANNEL_SERVICE_TOKEN: 'synthetic-channel-token',
   NEXT_PUBLIC_GATEWAY_URL: 'ws://127.0.0.1:18790/ws',
   TORQCLAW_HOST: '127.0.0.1',
   HERMES_BIND_HOST: '127.0.0.1',
@@ -71,14 +70,17 @@ describe('G1R launcher configuration', () => {
     expect(() => buildLauncherConfig({ NEXT_PUBLIC_GATEWAY_URL: 'ws://127.0.0.1:3001/ws' })).toThrow('exactly');
   });
 
-  it('rejects duplicate ports and production token failures without echoing values', () => {
+  it('rejects duplicate ports, legacy production auth, and placeholder channel credentials', () => {
     expect(() => buildLauncherConfig({ TORQCLAW_PORT: '8000' })).toThrow('pairwise distinct');
-    expect(() => buildLauncherConfig({ ...productionEnv, NEXT_PUBLIC_GATEWAY_TOKEN: 'change-me' }, { production: true }))
-      .toThrow('non-placeholder');
-    expect(() => buildLauncherConfig({ ...productionEnv, NEXT_PUBLIC_GATEWAY_TOKEN: 'other-token' }, { production: true }))
-      .toThrow('must match');
+    expect(() => buildLauncherConfig({ ...productionEnv, TORQCLAW_CHANNEL_SERVICE_TOKEN: 'change-me' }, { production: true }))
+      .toThrow('placeholder');
     expect(() => buildLauncherConfig({ ...productionEnv, TORQCLAW_GATEWAY_TOKEN: 'credential-value' }, { production: true }))
-      .toThrow('must match');
+      .toThrow(/deprecated.*production/i);
+    expect(() => buildLauncherConfig({ TORQCLAW_HTTP_CHANNEL: '1' }))
+      .toThrow(/requires.*TORQCLAW_CHANNEL_SERVICE_TOKEN/i);
+    expect(() => buildLauncherConfig({
+      TORQCLAW_HTTP_CHANNEL: '1', TORQCLAW_CHANNEL_SERVICE_TOKEN: 'change-me',
+    })).toThrow(/requires.*TORQCLAW_CHANNEL_SERVICE_TOKEN/i);
   });
 });
 

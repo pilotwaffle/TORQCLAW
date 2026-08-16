@@ -17,7 +17,7 @@ import { submitToGateway, resolveGatewayToken } from './gatewayClient.js';
  *
  * Auth: if CHANNEL_HTTP_TOKEN is set, callers must send it as a Bearer token.
  * This is the channel's OWN front-door auth — separate from the gateway token
- * the adapter uses to talk to the gateway (TORQCLAW_GATEWAY_TOKEN).
+ * the adapter uses to talk to the gateway (TORQCLAW_CHANNEL_SERVICE_TOKEN).
  */
 
 const PORT = Number(process.env.CHANNEL_HTTP_PORT || 18792);

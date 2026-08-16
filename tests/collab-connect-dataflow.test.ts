@@ -38,13 +38,13 @@ describe('C0.1 connect data flow', () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'torq-c01-dataflow-'));
     const pepper = Buffer.alloc(32, 0x22);
     const seeded = seedBoundDatabase(dataDir, pepper);
-    gateway = await launchGateway({ TORQCLAW_DATA_DIR: dataDir, TORQCLAW_COLLAB_DB_PATH: seeded.collabDbPath, TORQCLAW_COLLAB_ENABLED: '1', TORQCLAW_COLLAB_TEST_PEPPER: pepper.toString('base64'), TORQCLAW_GATEWAY_TOKEN: 'unused-in-this-test' });
+    gateway = await launchGateway({ TORQCLAW_DATA_DIR: dataDir, TORQCLAW_COLLAB_DB_PATH: seeded.collabDbPath, TORQCLAW_COLLAB_ENABLED: '1', TORQCLAW_COLLAB_TEST_PEPPER: pepper.toString('base64'), TORQCLAW_GATEWAY_TOKEN: 'unused-in-this-test', TORQCLAW_CHANNEL_SERVICE_TOKEN: 'channel-service-test' });
     await gateway.ready;
     const created = await connectAndCollect(gateway.url, { role: 'operator', token: 'irrelevant', clientInfo: { name: 'dataflow-A', version: '0.1.0' }, auth: { kind: 'surface', credential: seeded.issuedA.token } });
     expect(lastFrame(created).type).toBe('CONNECTED');
     const sessionId = lastFrame(created).metadata.sessionId;
     await closeWire(created);
-    const cross = await connectAndCollect(gateway.url, { role: 'operator', token: 'irrelevant', sessionId, clientInfo: { name: 'dataflow-B', version: '0.1.0' }, auth: { kind: 'surface', credential: seeded.issuedB.token } });
+    const cross = await connectAndCollect(gateway.url, { expectedRole: 'node', token: 'irrelevant', sessionId, clientInfo: { name: 'dataflow-B', version: '0.1.0' }, auth: { kind: 'surface', credential: seeded.issuedB.token } });
     expect(cross.rawMessages).toEqual(['{"type":"ERROR","code":"AUTH_FAILED"}']);
     expect(cross.close).toEqual({ code: 4001, reason: 'auth failed' });
     expect(cross.frames.some((frame) => frame.type === 'CONNECTED')).toBe(false);
@@ -52,5 +52,39 @@ describe('C0.1 connect data flow', () => {
     const recovered = await connectAndCollect(gateway.url, { role: 'operator', token: 'irrelevant', sessionId, clientInfo: { name: 'dataflow-A-again', version: '0.1.0' }, auth: { kind: 'surface', credential: seeded.issuedA.token } });
     expect(lastFrame(recovered)).toMatchObject({ type: 'CONNECTED', metadata: { resumed: true, sessionId } });
     await closeWire(recovered);
+
+    // An agent credential derives node authority. Asking for operator is an
+    // assertion mismatch and must create no session.
+    const state = new Database(join(dataDir, 'state.db'));
+    const sessionCount = () => (state.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number }).n;
+    const beforeAgentEscalation = sessionCount();
+    const agentEscalation = await connectAndCollect(gateway.url, {
+      role: 'operator', sessionId: randomUUID(),
+      clientInfo: { name: 'agent-escalation', version: '0.1.0' },
+      auth: { kind: 'surface', credential: seeded.issuedB.token },
+    });
+    expect(agentEscalation.rawMessages).toEqual(['{"type":"ERROR","code":"ROLE_MISMATCH"}']);
+    expect(agentEscalation.close).toEqual({ code: 4003, reason: 'role mismatch' });
+    expect(agentEscalation.frames.some((frame) => frame.type === 'CONNECTED')).toBe(false);
+    expect(sessionCount()).toBe(beforeAgentEscalation);
+
+    const agentLegitimate = await connectAndCollect(gateway.url, { expectedRole: 'node', clientInfo: { name: 'agent-node', version: '0.1.0' }, auth: { kind: 'surface', credential: seeded.issuedB.token } });
+    expect(lastFrame(agentLegitimate)).toMatchObject({ type: 'CONNECTED', metadata: { resumed: false } });
+    await closeWire(agentLegitimate);
+
+    const beforeChannelEscalation = sessionCount();
+    const channelEscalation = await connectAndCollect(gateway.url, {
+      role: 'operator', sessionId: randomUUID(),
+      clientInfo: { name: 'channel-escalation', version: '0.1.0' },
+      auth: { kind: 'channel_service', credential: 'channel-service-test' },
+    });
+    expect(channelEscalation.rawMessages).toEqual(['{"type":"ERROR","code":"ROLE_MISMATCH"}']);
+    expect(channelEscalation.frames.some((frame) => frame.type === 'CONNECTED')).toBe(false);
+    expect(sessionCount()).toBe(beforeChannelEscalation);
+
+    const channelLegitimate = await connectAndCollect(gateway.url, { expectedRole: 'channel', clientInfo: { name: 'channel-legitimate', version: '0.1.0' }, auth: { kind: 'channel_service', credential: 'channel-service-test' } });
+    expect(lastFrame(channelLegitimate)).toMatchObject({ type: 'CONNECTED', metadata: { resumed: false } });
+    await closeWire(channelLegitimate);
+    state.close();
   }, 45000);
 });

@@ -9,21 +9,20 @@ export function isTerminal(ev: { type?: string }): boolean {
   return typeof ev.type === 'string' && TERMINAL_TYPES.has(ev.type);
 }
 
-/** Resolve the upstream gateway token the adapter presents to the gateway.
+/** Resolve the dedicated channel-service credential presented to the gateway.
  *  Unset means unset — an empty string, never a hardcoded literal like 'dev'.
- *  An empty token is accepted only when the gateway itself runs tokenless
- *  (loopback dev mode); once the gateway has a real token, an unconfigured
- *  adapter fails auth cleanly rather than sending a guessable default. Pure and
+ *  The gateway rejects an empty credential; managed launch also rejects it
+ *  whenever the HTTP channel is enabled. Pure and
  *  exported so the invariant is unit-testable without importing the Fastify
  *  server (which binds a port at import). (TCLAW-0F) */
 export function resolveGatewayToken(env: NodeJS.ProcessEnv = process.env): string {
-  return env.TORQCLAW_GATEWAY_TOKEN || '';
+  return env.TORQCLAW_CHANNEL_SERVICE_TOKEN || '';
 }
 
 export interface SubmitOptions {
   /** ws://host:port/ws of the gateway. */
   url: string;
-  /** Gateway auth token (TORQCLAW_GATEWAY_TOKEN; empty string in loopback dev,
+  /** Channel credential (TORQCLAW_CHANNEL_SERVICE_TOKEN; empty when unset,
    *  never a hardcoded literal). */
   token: string;
   /** Resume an existing TorqClaw session; omit to start a fresh one. A channel
@@ -93,8 +92,8 @@ export function submitToGateway(
 
     ws.on('open', () => {
       ws.send(JSON.stringify({
-        role: 'channel',
-        token: opts.token,
+        expectedRole: 'channel',
+        auth: { kind: 'channel_service', credential: opts.token },
         sessionId: opts.sessionId, // undefined = create
         clientInfo: { name: opts.clientName ?? 'channel-http', version: '0.1.0' },
       }));

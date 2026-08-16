@@ -6,7 +6,7 @@ import {
   GatewayRequestSchema,
   type GatewayRequest,
 } from '@torqclaw/contracts';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { sessions } from './sessions.js';
 import { enrichCommand } from './enrich.js';
 import { dispatch, mintGrantedRequest, emitToolDenied } from './dispatch.js';
@@ -18,7 +18,7 @@ import { describeSkillDecision } from './skillDecision.js';
 import { assertResolvedProfile, constrainTier } from './profileResolver.js';
 import { setCancelCheck } from '@torqclaw/inference';
 import { cancellations } from './cancellations.js';
-import { authorize, checkResumeRole, type Role } from './authz.js';
+import { authorize, type Role } from './authz.js';
 import { db } from './storage.js';
 import { handleListReceipts, handleGetReceipt } from './receipts.js';
 import { handleGetCostSummary } from './spend.js';
@@ -27,6 +27,12 @@ import { handleGetSafeExport } from './export.js';
 import { collabEnabled, PrincipalBindingError } from './principalBridge.js';
 import { resolveConnectIdentity, type ConnectionAuthContext } from './collabIdentity.js';
 import { ensureSurfaceSecuritySchema, captureTaskOrigin, holdsAuthority, liveSurfaceSecurity } from './surfaceSecurity.js';
+import {
+  assertProductionLegacyTokenDisabled,
+  assertedRoleMatches,
+  authenticateConnection,
+  isProductionRuntime,
+} from './connectionAuth.js';
 
 // C1 (§6.2): additive, idempotent state.db migration. Safe to run with the
 // flag OFF -- the tables are created but never read or written, which is
@@ -90,17 +96,11 @@ setCancelCheck((requestId) => cancellations.isCancelled(requestId));
 const PORT = Number(process.env.TORQCLAW_PORT || 18790);
 const HOST = process.env.TORQCLAW_HOST || '127.0.0.1';
 const GATEWAY_TOKEN = process.env.TORQCLAW_GATEWAY_TOKEN || '';
+const CHANNEL_SERVICE_TOKEN = process.env.TORQCLAW_CHANNEL_SERVICE_TOKEN || '';
+const PRODUCTION = isProductionRuntime();
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
-function verifyToken(token: string): boolean {
-  if (!GATEWAY_TOKEN) {
-    console.warn('[gateway] TORQCLAW_GATEWAY_TOKEN unset — accepting all loopback clients (dev only)');
-    return true;
-  }
-  // Constant-time compare: plain === leaks match length/position via timing.
-  const received = Buffer.from(token);
-  const expected = Buffer.from(GATEWAY_TOKEN);
-  return received.length === expected.length && timingSafeEqual(received, expected);
-}
+assertProductionLegacyTokenDisabled();
 
 const app = Fastify({ logger: true });
 await app.register(websocket);
@@ -150,22 +150,32 @@ app.get('/ws', { websocket: true }, (socket) => {
       // happens inside sessions.resolve() below, in that order and
       // unchanged. A valid C1 surface also yields a connection-scoped
       // ConnectionAuthContext used for immutable per-task origin capture.
-      let callerBinding: import('./principalBridge.js').PrincipalBinding | null = null;
-      let ok: boolean;
-      if (collabEnabled() && conn.data.auth?.kind === 'surface') {
-        const identity = resolveConnectIdentity(conn.data.auth.credential);
-        callerBinding = identity?.binding ?? null;
-        connectionAuth = identity?.auth ?? null;
-        ok = identity !== null;
-      } else {
-        ok = verifyToken(conn.data.token);
-      }
-      if (!ok) {
+      const caller = authenticateConnection(conn.data, {
+        legacyGatewayToken: GATEWAY_TOKEN,
+        channelServiceToken: CHANNEL_SERVICE_TOKEN,
+        production: PRODUCTION,
+        allowTokenlessLegacy: !PRODUCTION && LOOPBACK_HOSTS.has(HOST),
+        resolveSurface: (credential) => {
+          if (!collabEnabled()) return null;
+          const identity = resolveConnectIdentity(credential);
+          connectionAuth = identity?.auth ?? null;
+          return identity?.caller ?? null;
+        },
+      });
+      if (!caller) {
         // Indistinguishable from a bad root token at the client-visible
         // level (M-1): same code, same close. Which verifier failed is
         // never surfaced here.
         sendErr('AUTH_FAILED');
         return socket.close(4001, 'auth failed');
+      }
+      const knownResume = Boolean(conn.data.sessionId && sessions.has(conn.data.sessionId));
+      // Fresh and unknown-id frames can be checked before resolve, preventing
+      // mismatch attempts from inserting an orphan session. Known resumes run
+      // ownership first below so ROLE_MISMATCH cannot become an identity oracle.
+      if (!knownResume && !assertedRoleMatches(conn.data, caller.role)) {
+        sendErr('ROLE_MISMATCH');
+        return socket.close(4003, 'role mismatch');
       }
       // sessions.resolve() throws PrincipalBindingError (via
       // assertResumeAllowed) on a cross-principal resume attempt -- this is
@@ -178,7 +188,7 @@ app.get('/ws', { websocket: true }, (socket) => {
       // failed (M-1).
       let resolved: ReturnType<typeof sessions.resolve>;
       try {
-        resolved = sessions.resolve(conn.data, callerBinding);
+        resolved = sessions.resolve(conn.data, caller);
       } catch (err) {
         if (err instanceof PrincipalBindingError) {
           sendErr('AUTH_FAILED');
@@ -187,13 +197,7 @@ app.get('/ws', { websocket: true }, (socket) => {
         throw err;
       }
 
-      // A RESUME (sessionId matched an existing row) whose frame.role disagrees
-      // with the stored role is rejected outright — never mint a fresh session
-      // as a fallback, since that would let a client re-cast its own role.
-      // The guard itself lives in authz.ts (checkResumeRole) so the unit tests
-      // cover the actual production path.
-      const roleCheck = checkResumeRole(resolved.resumed, resolved.role, conn.data.role);
-      if (!roleCheck.ok) {
+      if (knownResume && !assertedRoleMatches(conn.data, caller.role)) {
         sendErr('ROLE_MISMATCH', { sessionId: resolved.sessionId });
         return socket.close(4003, 'role mismatch');
       }
@@ -451,11 +455,55 @@ app.get('/ws', { websocket: true }, (socket) => {
 await connectBridge(); // discover + namespace MCP servers before traffic
 if (process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED?.toLowerCase() === 'true') {
   const { ensureResilienceProjection, reconcileGatewayProjection } = await import('./storage.js');
-  const { pageOutbox } = await import('@torqclaw/bridge');
+  const { pageOutbox, isHermesAvailable, onHermesReady } = await import('@torqclaw/bridge');
   ensureResilienceProjection();
-  await reconcileGatewayProjection(async (afterCursor, limit) => pageOutbox(afterCursor, limit));
-  const { recoverFailoverTasks } = await import('./failover.js');
-  await recoverFailoverTasks();
+  // Boot must not hard-crash because the engine's outbox is unreachable
+  // (engine down or still starting). Both reconcileGatewayProjection and
+  // recoverFailoverTasks call pageOutbox -> the ENGINE's resilience_page_outbox
+  // over MCP; with no engine there is no outbox to read and the call rejects
+  // with 'invalid outbox page', which used to take the whole gateway down at
+  // boot. (ensureResilienceProjection above is local-DDL only and stays
+  // unconditional.)
+  //
+  // HONEST LIMITATION (security audit B-1): skipping here does NOT weaken the
+  // per-task fail-closed guarantee -- every FRONTIER admission lazily
+  // reconciles via ensureInitialResilienceProjection and fails closed if it
+  // cannot, and spend caps read the local spend_ledger, never this projection.
+  // recoverFailoverTasks has no per-task equivalent, so if the engine is down
+  // at boot we DEFER it via onHermesReady: the bridge retries the hermes
+  // connection in the background and runs the recovery as soon as the engine
+  // connects (hermes-agent reconnect-watcher pattern). A boot with the engine
+  // down therefore no longer strands in-flight tasks until the next restart.
+  if (isHermesAvailable()) {
+    try {
+      await reconcileGatewayProjection(async (afterCursor, limit) => pageOutbox(afterCursor, limit));
+      const { recoverFailoverTasks } = await import('./failover.js');
+      await recoverFailoverTasks();
+    } catch (error) {
+      // Engine IS up yet reconciliation/recovery failed — a real integrity
+      // error (outbox gap, cursor regression, ...). Loud on purpose: the
+      // projection may be corrupt and monitoring must see it. Per-task
+      // fail-closed still holds for subsequent FRONTIER dispatches.
+      console.error('[torqclaw] failover boot reconciliation/recovery FAILED: ' + ((error as Error)?.message ?? String(error)));
+    }
+  } else {
+    // Engine down at boot: don't log-and-forget. When the bridge's background
+    // reconnect lands, run the recovery we skipped. Recovery is idempotent
+    // (only acts on still-pending candidates); a failure here is a REAL
+    // integrity error (the engine IS up by then), so it is logged loudly
+    // rather than silently retried.
+    console.warn('[torqclaw] failover boot recovery deferred: hermes engine unavailable — will run when the engine connects');
+    onHermesReady(async () => {
+      try {
+        await reconcileGatewayProjection(async (afterCursor, limit) => pageOutbox(afterCursor, limit));
+        const { recoverFailoverTasks } = await import('./failover.js');
+        const summary = await recoverFailoverTasks();
+        console.log(`[torqclaw] deferred failover recovery completed (engine connected after boot): ${summary.candidates} candidate(s)`);
+      } catch (error) {
+        console.error('[torqclaw] deferred failover recovery FAILED: ' + ((error as Error)?.message ?? String(error)));
+      }
+    });
+  }
 }
 await app.listen({ port: PORT, host: HOST });
 console.log(`[torqclaw] gateway listening on ws://${HOST}:${PORT}/ws`);
