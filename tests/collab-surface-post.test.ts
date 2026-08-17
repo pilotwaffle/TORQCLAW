@@ -16,19 +16,32 @@
  * T-9 falsifiability (§8): the probes for this matrix were executed as
  * source mutations, not as tests living in this file.
  *
- * G2A NB-2: this header previously claimed the RED excerpts were "recorded
- * in this file's own describe block at the bottom" -- they were not, and no
- * such block exists. A pointer to evidence that isn't there is worse than no
- * pointer, because it reads as discharged. The RED output for each probe is
- * recorded where it was actually observed:
- *   - builder-side probes (contract-boundary rejection, residue enumeration,
- *     throw-class totality, no-new-oracle): commit c404a24's message.
- *   - G2A's five independent re-runs, all reproduced RED and restored
- *     byte-identical: docs/prd-reviews/G2A-OPUS48-COLLAB-PRESENCE-UI-005-S3.md
- *   - the C-1 fallback probe and the D-1 ack-correlation probe: recorded in
- *     the commit that introduced each guard.
- * Per §8, a probe reported without its RED output is not a discharged probe
- * -- so the evidence lives at those paths, not in a comment claiming it does.
+ * G2A NB-2 / NB-RA-3: this header has now been wrong TWICE about where the
+ * RED evidence lives, so it states the truth including the gap.
+ *
+ * v1 claimed the excerpts were "recorded in this file's own describe block at
+ * the bottom" -- no such block exists. v2 (the NB-2 fix) redirected them to
+ * commit c404a24's message; G2A checked and that message contains only the
+ * C-1 probe's RED, not the four builder-side T-9 probes. Both versions read as
+ * discharged while pointing at nothing.
+ *
+ * WHERE THE RED OUTPUT ACTUALLY IS:
+ *   - C-1 fallback probe ("expected 'operator' to be 'agent'") -- commit
+ *     c404a24's message. VERIFIED PRESENT.
+ *   - D-1 ack-correlation probe -- commit cc95499's message. VERIFIED PRESENT.
+ *   - G2A's own independent re-runs (five on the first pass, two on the
+ *     re-audit), all reproduced RED and restored byte-identical --
+ *     docs/prd-reviews/G2A-OPUS48-COLLAB-PRESENCE-UI-005-S3.md and
+ *     ...-S3-REAUDIT.md. VERIFIED PRESENT.
+ *   - The four BUILDER-SIDE T-9 probes for the matrix below
+ *     (contract-boundary rejection, residue enumeration, throw-class
+ *     totality, no-new-oracle): the builder reported their RED in its task
+ *     output, which was NEVER COMMITTED. That evidence is LOST.
+ *
+ * Per §8 a probe reported without its RED output is not a discharged probe,
+ * so those four are NOT discharged by this repo's own standard. They were
+ * independently re-run by G2A (see the verdicts above), and that -- not the
+ * builder's uncommitted report -- is what stands behind this matrix.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
@@ -129,6 +142,36 @@ describe('S3 handler — handlePostChannelMessage (T-1, T-2, T-4, CO-1)', () => 
     const timeline = await store.getChannelTimeline(operatorCaller, { channelId: channel.channelId, afterCursor: '0', limit: 100 });
     const posted = timeline.events.filter((e) => e.kind === 'message_posted');
     expect(posted.length).toBe(1);
+
+    // ---- G2A RC-1: the ack MUST carry the idempotencyKey it acks ----
+    //
+    // The entire D-1 fix hinges on this one field, and it was pinned by
+    // NOTHING: G2A deleted `idempotencyKey` from collabSurface.ts's ack
+    // metadata and all 82 tests stayed GREEN. Without it the console cannot
+    // attribute an ack to a specific send, which is exactly how one send's
+    // ack came to clear a rejected sibling (D-1, a silent drop forbidden by
+    // §13 S3 / A8).
+    //
+    // A regression here fails SAFE -- the console ignores an unattributable
+    // ack, so the send times out honestly rather than falsely confirming --
+    // which is why G2A rated it a condition, not a blocker. It is still a
+    // silent break of the confirm path, so it gets a real assertion.
+    const ackFrame = publishedFrames
+      .map((f) => f.event.metadata as Record<string, unknown> | undefined)
+      .filter((m): m is Record<string, unknown> => m?.collabMessagePosted === true)
+      .at(-1);
+    expect(ackFrame, 'a successful post must publish a collabMessagePosted ack').toBeDefined();
+    expect(
+      ackFrame!.idempotencyKey,
+      'G2A RC-1 REGRESSION: the post ack no longer carries idempotencyKey. The '
+      + 'console correlates acks to sends by this field alone -- without it an ack '
+      + 'is unattributable and the confirm path silently stops working (and, before '
+      + 'the D-1 fix, cleared the WRONG send).',
+    ).toBe(key);
+    // Ack shape the console actually reads (selectLatestPostAck): all four.
+    expect(ackFrame!.channelId).toBe(channel.channelId);
+    expect(typeof ackFrame!.eventId).toBe('string');
+    expect(typeof ackFrame!.cursor).toBe('string');
   });
 
   // ---- T-2: byte-identical COLLAB_NOT_FOUND on the WRITE path ----
