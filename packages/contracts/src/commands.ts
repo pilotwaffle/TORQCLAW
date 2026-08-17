@@ -141,9 +141,14 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     // membership server-side on every call (assertChannelVisible), and a
     // hidden or nonexistent channel returns the SAME byte-identical
     // COLLAB_NOT_FOUND payload either way.
+    // G2A D-1 fix: the grammar below mirrors the substrate's own
+    // parseCursor (packages/collab/src/store.ts) exactly -- an unsigned
+    // base-10 integer with no leading zeroes -- so a malformed cursor is
+    // refused at the wire boundary (SCHEMA_VIOLATION) instead of reaching
+    // the handler and throwing past it.
     action: z.literal('GET_CHANNEL_TIMELINE'),
     channelId: z.string().min(1),
-    cursor: z.string().min(1).default('0'),
+    cursor: z.string().regex(/^(0|[1-9][0-9]*)$/).default('0'),
     limit: z.number().int().min(1).max(100).default(20),
   }),
 ]);

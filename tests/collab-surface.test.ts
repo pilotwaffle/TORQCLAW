@@ -22,7 +22,7 @@ import { InMemorySecretStore } from '../packages/collab/src/secrets.js';
 import { DeterministicClock, DeterministicUuids } from '../packages/collab/src/harness.js';
 import { CollaborationStore, type CallerContext } from '../packages/collab/src/store.js';
 import { authorize, type AuthzContext } from '../packages/gateway/src/authz.js';
-import type { ClientCommand } from '@torqclaw/contracts';
+import { ClientCommandSchema, type ClientCommand } from '@torqclaw/contracts';
 
 function makeFixture(fixtureId: string) {
   const sqlite = new Database(':memory:');
@@ -160,6 +160,40 @@ describe('S1 handlers — handleListChannels / handleGetChannelTimeline (T-1, T-
     expect(hiddenViaHandler?.code).toBe('COLLAB_NOT_FOUND');
   });
 
+  // ---- G2A D-1: malformed cursor must not throw out of the handler ----
+  it.each(['abc', '007', '-1', '1'.repeat(25)])(
+    'D-1: GET_CHANNEL_TIMELINE with malformed cursor %j returns a structured error and does not throw',
+    async (badCursor) => {
+      const { store, operatorCaller } = fixture;
+      const channel = await store.createChannel(operatorCaller, { name: 'D1 Channel' }, `idem-d1-${badCursor}`);
+
+      // The failure mode under test IS that the returned promise resolves
+      // (with a structured error), never rejects -- assert both directions:
+      // resolves (not throws) AND the resolved value is the expected shape.
+      await expect(
+        handleGetChannelTimeline(SESS_ID, operatorCaller.principalId, channel.channelId, badCursor, 20),
+      ).resolves.toEqual({ code: 'COLLAB_INVALID_REQUEST', detail: expect.any(String) });
+    },
+  );
+
+  it('D-1: T-2 byte-identity still holds when the cursor is malformed AND the channel is hidden vs absent (membership-oracle probe)', async () => {
+    const { store, operatorCaller } = fixture;
+    const outsider = await makeAgent(store, operatorCaller, 'D1 Outsider', 'idem-d1-outsider');
+    const channel = await store.createChannel(operatorCaller, { name: 'D1 Hidden' }, 'idem-d1-hidden-ch');
+    // outsider is never added as a member -> channel is hidden to them.
+
+    // store.ts orders assertChannelVisible BEFORE parseCursor (G2A-verified),
+    // so a non-member with a malformed cursor must still get COLLAB_NOT_FOUND
+    // -- not COLLAB_INVALID_REQUEST -- for both the hidden and the absent
+    // channel, and the two payloads must stay byte-identical.
+    const hidden = await handleGetChannelTimeline(SESS_ID, outsider.principalId, channel.channelId, 'abc', 20);
+    const absent = await handleGetChannelTimeline(SESS_ID, outsider.principalId, 'this-channel-id-does-not-exist', 'abc', 20);
+
+    expect(JSON.stringify(hidden)).toBe(JSON.stringify(absent));
+    expect(hidden?.code).toBe('COLLAB_NOT_FOUND');
+    expect(absent?.code).toBe('COLLAB_NOT_FOUND');
+  });
+
   // ---- T-5: dense channel_seq contiguity across page boundaries ----
   it('T-5: timeline cursor paging is dense-contiguous across page boundaries against a live store', async () => {
     const { store, operatorCaller } = fixture;
@@ -206,6 +240,42 @@ describe('S1 handlers — handleListChannels / handleGetChannelTimeline (T-1, T-
     expect(frame.event.metadata).toMatchObject({ collabChannels: true });
     const meta = frame.event.metadata as { channels: Array<{ channelId: string; name: string }> };
     expect(meta.channels.map((c) => c.channelId)).toContain(channel.channelId);
+  });
+
+  // ---- G2A D-1: handleListChannels must be total too ----
+  it('D-1: handleListChannels does not throw when the store call fails', async () => {
+    const { operatorCaller } = fixture;
+    const throwingStore = {
+      listChannels: async () => {
+        throw new Error('simulated store failure');
+      },
+    } as unknown as CollaborationStore;
+    setCollabSurfaceStoreForTest(throwingStore);
+
+    await expect(
+      handleListChannels(SESS_ID, operatorCaller.principalId, 20),
+    ).resolves.toEqual({ code: 'COLLAB_UNAVAILABLE' });
+
+    // Restore the real fixture store for any subsequent test in this block.
+    setCollabSurfaceStoreForTest(fixture.store);
+  });
+
+  it('D-1: handleListChannels maps a CollabError(INVALID_REQUEST) from the store to COLLAB_INVALID_REQUEST without throwing', async () => {
+    const { operatorCaller } = fixture;
+    const throwingStore = {
+      listChannels: async () => {
+        const err: any = new Error('limit must be between 1 and 100');
+        err.code = 'INVALID_REQUEST';
+        throw err;
+      },
+    } as unknown as CollaborationStore;
+    setCollabSurfaceStoreForTest(throwingStore);
+
+    await expect(
+      handleListChannels(SESS_ID, operatorCaller.principalId, 20),
+    ).resolves.toEqual({ code: 'COLLAB_INVALID_REQUEST', detail: expect.any(String) });
+
+    setCollabSurfaceStoreForTest(fixture.store);
   });
 });
 
@@ -337,5 +407,25 @@ describe('Flag matrix (T-8): TORQCLAW_COLLAB_ENABLED=1, SURFACE_COMMANDS off', (
     // server.ts dispatch switch itself, unit-untestable without a live
     // socket harness, which is out of scope for S1's test obligations).
     expect(collabSurfaceCommandsEnabled()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G2A D-1 (defence in depth, layer 1 of 2): the wire contract itself rejects
+// a malformed cursor -- proving the defense exists at the Zod boundary, not
+// only inside the handler's widened catch.
+// ---------------------------------------------------------------------------
+describe('ClientCommandSchema — GET_CHANNEL_TIMELINE cursor grammar (D-1)', () => {
+  const base = { action: 'GET_CHANNEL_TIMELINE' as const, channelId: 'c1', limit: 20 };
+
+  it.each(['abc', '007'])('rejects malformed cursor %j at the wire boundary', (badCursor) => {
+    const result = ClientCommandSchema.safeParse({ ...base, cursor: badCursor });
+    expect(result.success).toBe(false);
+  });
+
+  it.each(['0', '42'])('still parses well-formed cursor %j', (goodCursor) => {
+    const result = ClientCommandSchema.safeParse({ ...base, cursor: goodCursor });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.cursor).toBe(goodCursor);
   });
 });

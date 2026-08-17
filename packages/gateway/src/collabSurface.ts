@@ -25,6 +25,15 @@
  * Read-only: SELECT via CollaborationStore's read-lock path, publishOnly
  * SYSTEM response frames (the LIST_APPROVALS pattern) -- zero writes,
  * nothing here can reach a mutation.
+ *
+ * G2A D-1: both handlers are TOTAL -- no store throw may escape either one.
+ * There is no enclosing try/catch around the dispatch switch in server.ts's
+ * async socket.on('message') handler, so an uncaught throw here would become
+ * an unhandled rejection and (Node 22 default) terminate the gateway
+ * process. Every throw is mapped to a returned CollabSurfaceError; the
+ * COLLAB_NOT_FOUND arm is preserved byte-identically (T-2) and unexpected
+ * failures are mapped to the generic COLLAB_UNAVAILABLE without leaking
+ * internal detail.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -88,7 +97,10 @@ function getStore(): CollaborationStore | null {
   return defaultStore;
 }
 
-export type CollabSurfaceError = { code: 'COLLAB_IDENTITY_REQUIRED' | 'COLLAB_NOT_FOUND' | 'COLLAB_UNAVAILABLE'; detail?: unknown };
+export type CollabSurfaceError = {
+  code: 'COLLAB_IDENTITY_REQUIRED' | 'COLLAB_NOT_FOUND' | 'COLLAB_UNAVAILABLE' | 'COLLAB_INVALID_REQUEST';
+  detail?: unknown;
+};
 
 /** Refusal shared by both handlers when the connection has no resolved
  *  collab principal (§2a: refuse, never substitute or synthesize). */
@@ -117,16 +129,32 @@ export async function handleListChannels(
   if (principalId === null) return COLLAB_IDENTITY_REQUIRED;
   const store = getStore();
   if (!store) return { code: 'COLLAB_UNAVAILABLE' };
-  const result = await store.listChannels(callerFor(principalId), {
-    afterChannelId: null,
-    limit,
-    includeArchived: false,
-  });
-  publishOnly(sessionId, {
-    message: 'Channels listed',
-    metadata: { collabChannels: true, channels: result.channels },
-  });
-  return null;
+  try {
+    const result = await store.listChannels(callerFor(principalId), {
+      afterChannelId: null,
+      limit,
+      includeArchived: false,
+    });
+    publishOnly(sessionId, {
+      message: 'Channels listed',
+      metadata: { collabChannels: true, channels: result.channels },
+    });
+    return null;
+  } catch (err: any) {
+    // G2A D-1: this handler must be total -- there is no enclosing
+    // try/catch around the dispatch switch in server.ts's async
+    // socket.on('message') handler, so an escaping throw here becomes an
+    // unhandled rejection that terminates the gateway process (Node 22
+    // default). Same house pattern as CANCEL_TASK (server.ts) and the
+    // widened catch below in handleGetChannelTimeline.
+    if (err?.code === 'INVALID_REQUEST') {
+      return { code: 'COLLAB_INVALID_REQUEST', detail: err.message };
+    }
+    // Unexpected/unclassified failure: never leak internal detail -- a
+    // hidden channel must not become distinguishable through an error
+    // message, so this arm stays generic regardless of what store threw.
+    return { code: 'COLLAB_UNAVAILABLE' };
+  }
 }
 
 /**
@@ -164,8 +192,26 @@ export async function handleGetChannelTimeline(
     return null;
   } catch (err: any) {
     if (err?.code === 'COLLAB_NOT_FOUND') {
+      // T-2 byte-identity: this arm is UNCHANGED from before the D-1 fix --
+      // same code, same detail source, same shape -- so the hidden-channel
+      // vs nonexistent-channel payloads stay byte-identical.
       return { code: 'COLLAB_NOT_FOUND', detail: err.message };
     }
-    throw err;
+    // G2A D-1: widen instead of re-throwing. store.parseCursor throws
+    // CollabError('INVALID_REQUEST', ...) for a malformed or out-of-range
+    // cursor; CURSOR_OUT_OF_RANGE (thrown by other store methods on the
+    // same cursor family) is handled by the same generic arm below. There
+    // is no enclosing try/catch around the dispatch switch in server.ts's
+    // async socket.on('message') handler -- an escaping throw here becomes
+    // an unhandled rejection that terminates the gateway process (Node 22
+    // default), exactly the CANCEL_TASK house pattern this mirrors.
+    if (err?.code === 'INVALID_REQUEST') {
+      return { code: 'COLLAB_INVALID_REQUEST', detail: err.message };
+    }
+    // Unexpected/unclassified failure: never leak internal detail here --
+    // keeping this arm generic prevents any future thrown code from
+    // becoming a distinguishing signal on the hidden-vs-absent channel
+    // paths above.
+    return { code: 'COLLAB_UNAVAILABLE' };
   }
 }
