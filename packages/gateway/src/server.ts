@@ -475,9 +475,26 @@ app.get('/ws', { websocket: true }, (socket) => {
           // Mint a NEW task: original constraints verbatim + grant + notice.
           const reqB = mintGrantedRequest(decided.requestJson, decided.toolName);
           GatewayRequestSchema.parse(reqB); // assert our re-mint obeys contracts
+          const diag = router.evaluateRequest(reqB);
+          // N-1 (2026-08-17): the SAME refusal the C2 branch performs above.
+          // It was present only there, so with TORQCLAW_COLLAB_ENABLED off --
+          // its default -- this legacy path dispatched a FRONTIER run under a
+          // name-only grant that nothing downstream could fence. FRONTIER's
+          // Hermes hook grants by tool NAME and never inspects args, so the
+          // exact-action invariant (§1.4) cannot be satisfied here. Refuse
+          // BEFORE dispatch: `dispatch` carries an independent fence
+          // (frontierGrantFenced), and this is the defence-in-depth half so a
+          // future caller reaching dispatch by another route still cannot
+          // execute a name-only FRONTIER grant.
+          if (diag.tier === ComputeTier.FRONTIER) {
+            makeEmitter(sid, null, null)('SYSTEM',
+              'Approval refused: FRONTIER has no args-aware structured grant protocol, '
+              + 'so this approval cannot be fenced and is refused (fail-closed).',
+              { approvalId: cmd.data.approvalId, refusedCode: 'frontier-structured-grant-unavailable' });
+            break;
+          }
           const reqEmit = makeEmitter(reqB.sessionId, reqB.id, null);
           reqEmit('ROUTING', `Re-running with permission for ${decided.toolName}`, reqB.enrichment);
-          const diag = router.evaluateRequest(reqB);
           makeEmitter(reqB.sessionId, reqB.id, diag.tier)('TIER_SELECTED', diag.reason, diag);
           dispatch(reqB, diag);
         } else {
