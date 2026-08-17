@@ -188,7 +188,7 @@ describe('ChannelsPanel', () => {
     expect(screen.queryByText(/last message/i)).not.toBeInTheDocument();
   });
 
-  it('timeline paging: selecting a channel dispatches GET_CHANNEL_TIMELINE with cursor "0"; Load older uses the returned cursor; hasMore=false hides it', () => {
+  it('timeline paging: selecting a channel dispatches GET_CHANNEL_TIMELINE with cursor "0"; Load more uses the returned cursor; hasMore=false hides it', () => {
     const sc = vi.fn(() => true);
     const frame = channelListFrame([channelRow()]);
     const { rerender } = renderPanel([frame], sc);
@@ -204,13 +204,16 @@ describe('ChannelsPanel', () => {
       }
     }
 
-    // hasMore:false -> no "Load older" control.
+    // hasMore:false -> no "Load more" control.
+    // NOTE (B-2 remediation): the control was relabelled from "Load older"
+    // to "Load more" — the wire pages forward only (channel_seq ascending),
+    // so the old label described a direction the wire cannot page in.
     const timelineDone = timelineFrame('chan-1', [timelineEvent()], '1', false);
     rerender(<ChannelsPanel events={[frame, timelineDone]} sendCommand={sc} onClose={vi.fn()} />);
-    expect(screen.queryByText('Load older')).not.toBeInTheDocument();
+    expect(screen.queryByText('Load more')).not.toBeInTheDocument();
   });
 
-  it('timeline paging: hasMore=true shows Load older, which dispatches GET_CHANNEL_TIMELINE with the returned cursor', () => {
+  it('timeline paging: hasMore=true shows Load more, which dispatches GET_CHANNEL_TIMELINE with the returned cursor', () => {
     const sc = vi.fn(() => true);
     const frame = channelListFrame([channelRow()]);
     const timelineMore = timelineFrame('chan-1', [timelineEvent()], '7', true);
@@ -219,8 +222,9 @@ describe('ChannelsPanel', () => {
     fireEvent.click(screen.getByText('general'));
     rerender(<ChannelsPanel events={[frame, timelineMore]} sendCommand={sc} onClose={vi.fn()} />);
 
-    const loadOlder = screen.getByText('Load older');
-    fireEvent.click(loadOlder);
+    // NOTE (B-2 remediation): relabelled from "Load older" to "Load more".
+    const loadMore = screen.getByText('Load more');
+    fireEvent.click(loadMore);
     expect(sc).toHaveBeenLastCalledWith({ action: 'GET_CHANNEL_TIMELINE', channelId: 'chan-1', cursor: '7', limit: 50 });
   });
 
@@ -262,6 +266,155 @@ describe('ChannelsPanel', () => {
 
     expect(screen.getByText('hello world')).toBeInTheDocument();
     expect(screen.getByText('principa')).toBeInTheDocument(); // 'principal-abcdef1234'.slice(0,8)
+  });
+
+  it('B-1: non-message event kinds render with their kind label, not the message font, and "(no text)" appears nowhere in the DOM', () => {
+    const sc = vi.fn(() => true);
+    const frame = channelListFrame([channelRow()]);
+    const timeline = timelineFrame(
+      'chan-1',
+      [
+        timelineEvent({
+          id: 'ev-created',
+          cursor: '1',
+          kind: 'channel_created',
+          payload: { channelId: 'chan-1', name: 'general' },
+        }),
+        timelineEvent({
+          id: 'ev-member',
+          cursor: '2',
+          kind: 'member_added',
+          payload: { channelId: 'chan-1', principalId: 'principal-newbie1', membershipEpoch: 1 },
+        }),
+        timelineEvent({
+          id: 'ev-msg',
+          cursor: '3',
+          kind: 'message_posted',
+          payload: { channelId: 'chan-1', text: 'real message' },
+        }),
+      ],
+      '3',
+      false
+    );
+    const { rerender, container } = renderPanel([frame], sc);
+    fireEvent.click(screen.getByText('general'));
+    rerender(<ChannelsPanel events={[frame, timeline]} sendCommand={sc} onClose={vi.fn()} />);
+
+    // "(no text)" must appear nowhere in the DOM.
+    expect(container.textContent).not.toContain('(no text)');
+
+    // Kind labels are rendered for the two system events.
+    expect(screen.getByText(/channel created/i)).toBeInTheDocument();
+    expect(screen.getByText(/member added/i)).toBeInTheDocument();
+
+    // The real message still renders normally.
+    expect(screen.getByText('real message')).toBeInTheDocument();
+
+    // System-event rows are NOT in the message-body font (font-reading);
+    // they use font-mono instead.
+    const createdLabel = screen.getByText(/channel created/i);
+    const createdRow = createdLabel.closest('li')!;
+    const createdBody = createdRow.querySelector('p.font-reading');
+    expect(createdBody).toBeNull();
+    expect(createdRow.querySelector('p.font-mono')).not.toBeNull();
+
+    const memberLabel = screen.getByText(/member added/i);
+    const memberRow = memberLabel.closest('li')!;
+    expect(memberRow.querySelector('p.font-reading')).toBeNull();
+    expect(memberRow.querySelector('p.font-mono')).not.toBeNull();
+
+    // The real message row DOES use font-reading.
+    const msgRow = screen.getByText('real message').closest('li')!;
+    expect(msgRow.querySelector('p.font-reading')).not.toBeNull();
+  });
+
+  it('B-1: an unknown/future event kind degrades honestly — kind label rendered, never "(no text)", never crashes', () => {
+    const sc = vi.fn(() => true);
+    const frame = channelListFrame([channelRow()]);
+    const timeline = timelineFrame(
+      'chan-1',
+      [
+        timelineEvent({
+          id: 'ev-unknown',
+          cursor: '1',
+          kind: 'some_future_kind',
+          payload: { channelId: 'chan-1', somethingNew: true },
+        }),
+      ],
+      '1',
+      false
+    );
+    const { rerender, container } = renderPanel([frame], sc);
+    expect(() => {
+      fireEvent.click(screen.getByText('general'));
+      rerender(<ChannelsPanel events={[frame, timeline]} sendCommand={sc} onClose={vi.fn()} />);
+    }).not.toThrow();
+
+    expect(container.textContent).not.toContain('(no text)');
+    expect(screen.getByText('some_future_kind')).toBeInTheDocument();
+  });
+
+  it('B-2: paging accumulates — after "Load more" both page 1 and page 2 content are visible, in ascending channel_seq order', () => {
+    const sc = vi.fn(() => true);
+    const frame = channelListFrame([channelRow()]);
+    const page1 = timelineFrame(
+      'chan-1',
+      [timelineEvent({ id: 'ev-p1', cursor: '1', payload: { channelId: 'chan-1', text: 'page one msg' } })],
+      '1',
+      true
+    );
+    const { rerender } = renderPanel([frame], sc);
+    fireEvent.click(screen.getByText('general'));
+    rerender(<ChannelsPanel events={[frame, page1]} sendCommand={sc} onClose={vi.fn()} />);
+
+    expect(screen.getByText('page one msg')).toBeInTheDocument();
+    const loadMore = screen.getByText('Load more');
+    expect(screen.queryByText('Load older')).not.toBeInTheDocument(); // relabelled, not just aliased
+
+    fireEvent.click(loadMore);
+    expect(sc).toHaveBeenLastCalledWith({ action: 'GET_CHANNEL_TIMELINE', channelId: 'chan-1', cursor: '1', limit: 50 });
+
+    const page2 = timelineFrame(
+      'chan-1',
+      [timelineEvent({ id: 'ev-p2', cursor: '2', payload: { channelId: 'chan-1', text: 'page two msg' } })],
+      '2',
+      false
+    );
+    rerender(<ChannelsPanel events={[frame, page1, page2]} sendCommand={sc} onClose={vi.fn()} />);
+
+    // BOTH pages' content must still be visible.
+    expect(screen.getByText('page one msg')).toBeInTheDocument();
+    expect(screen.getByText('page two msg')).toBeInTheDocument();
+
+    // Ascending channel_seq (cursor) order in the DOM.
+    const items = screen.getAllByRole('listitem').filter((li) => li.textContent?.includes('page'));
+    const texts = items.map((li) => li.textContent);
+    const p1Index = texts.findIndex((t) => t?.includes('page one msg'));
+    const p2Index = texts.findIndex((t) => t?.includes('page two msg'));
+    expect(p1Index).toBeGreaterThanOrEqual(0);
+    expect(p2Index).toBeGreaterThan(p1Index);
+  });
+
+  it('B-2: every cursor dispatched via GET_CHANNEL_TIMELINE matches the wire grammar ^(0|[1-9][0-9]*)$', () => {
+    const sc = vi.fn(() => true);
+    const frame = channelListFrame([channelRow()]);
+    const page1 = timelineFrame(
+      'chan-1',
+      [timelineEvent({ id: 'ev-p1', cursor: '1', payload: { channelId: 'chan-1', text: 'page one msg' } })],
+      '1',
+      true
+    );
+    const { rerender } = renderPanel([frame], sc);
+    fireEvent.click(screen.getByText('general'));
+    rerender(<ChannelsPanel events={[frame, page1]} sendCommand={sc} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByText('Load more'));
+
+    const timelineCalls = sc.mock.calls.filter((c) => (c[0] as any).action === 'GET_CHANNEL_TIMELINE');
+    expect(timelineCalls.length).toBeGreaterThan(0);
+    for (const call of timelineCalls) {
+      const cursor = (call[0] as any).cursor;
+      expect(CURSOR_GRAMMAR.test(cursor)).toBe(true);
+    }
   });
 
   it('close calls onClose', () => {

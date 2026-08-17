@@ -12,7 +12,8 @@
 //
 // SAFETY: this panel is STRICTLY READ-ONLY. The only sendCommand actions
 // reachable from anywhere in this file are LIST_CHANNELS (mount, manual
-// refresh) and GET_CHANNEL_TIMELINE (channel select, "load older"). There is
+// refresh) and GET_CHANNEL_TIMELINE (channel select, "Load more" — the wire
+// pages forward only, see B-2 fix note at the button below). There is
 // no composer, no posting affordance (not even a disabled one — S3), no
 // roster/presence (S5). ChannelRow and TimelineEventRow are MODULE-SCOPE
 // components whose props are plain data (zero function-typed fields) —
@@ -136,9 +137,50 @@ function authorLabel(actorPrincipalId: string): string {
 
 /** Message body text — payload.text per the substrate contract
  *  (postChannelMessage / message_posted). Any other/absent shape renders an
- *  honest placeholder rather than inventing text. */
+ *  honest placeholder rather than inventing text. Callers MUST gate on
+ *  `event.kind === 'message_posted'` before calling this — see B-1 fix
+ *  below: a future kind that happens to carry a string `text` field must
+ *  NOT be silently rendered as a chat message. */
 function messageText(payload: Record<string, unknown>): string {
   return typeof payload?.text === 'string' ? payload.text : '(no text)';
+}
+
+/** System-event kind labels — cosmetic only, never data. The wire's six
+ *  known kinds (packages/collab/src/migration.ts:117-118):
+ *  channel_created, member_added, member_removed, message_posted,
+ *  channel_archived, channel_unarchived. Only message_posted renders as a
+ *  chat message; the rest render as a distinct system-event row using ONLY
+ *  fields verified present on that kind's payload (packages/collab/src/
+ *  store.ts: channel_created {channelId,name} :992-993; member_added/
+ *  member_removed {channelId,principalId,membershipEpoch} :1100-1101/:1221;
+ *  channel_archived/channel_unarchived {channelId,channelEpoch} :1323-1324/
+ *  :1406-1407). An unknown/future kind degrades honestly: kind label only,
+ *  never "(no text)", never a crash. */
+const SYSTEM_EVENT_LABELS: Record<string, string> = {
+  channel_created: 'channel created',
+  member_added: 'member added',
+  member_removed: 'member removed',
+  channel_archived: 'channel archived',
+  channel_unarchived: 'channel unarchived',
+};
+
+/** Renders ONLY fields verified present on that specific kind's payload —
+ *  never a synthesized sentence containing data the payload doesn't carry.
+ *  Falls back to nothing extra for kinds without a payload-derived detail
+ *  (channel_archived/channel_unarchived carry only channelEpoch, which is
+ *  bookkeeping, not user-facing detail; the kind label alone is honest). */
+function systemEventDetail(kind: string, payload: Record<string, unknown>): string | null {
+  if (kind === 'channel_created' && typeof payload?.name === 'string') {
+    return payload.name;
+  }
+  if (
+    (kind === 'member_added' || kind === 'member_removed') &&
+    typeof payload?.principalId === 'string' &&
+    payload.principalId.length > 0
+  ) {
+    return payload.principalId.slice(0, 8);
+  }
+  return null;
 }
 
 export default function ChannelsPanel({
@@ -199,13 +241,35 @@ export default function ChannelsPanel({
     return map;
   }, [events, selectedChannelId]);
 
+  // B-2 FIX: the wire pages FORWARD (older -> newer): store.ts:1813 is
+  // `WHERE channel_seq > ? ORDER BY channel_seq ASC`, and nextCursor
+  // (store.ts:1849) is the LAST (newest) event of the page. A newly arrived
+  // frame is therefore a page of events NEWER than what's already held, and
+  // must be MERGED (deduped by event.id, kept ascending by channel_seq),
+  // never used to replace the whole snapshot — replacing drops every prior
+  // page the operator was reading.
   const [timelineSnapshots, setTimelineSnapshots] = useState<Record<string, TimelineSnapshot | null>>({});
   useEffect(() => {
     if (!selectedChannelId) return;
     const found = timelineByChannelId[selectedChannelId];
-    if (found) {
-      setTimelineSnapshots((prev) => ({ ...prev, [selectedChannelId]: found }));
-    }
+    if (!found) return;
+    setTimelineSnapshots((prev) => {
+      const existing = prev[selectedChannelId];
+      if (!existing) {
+        // First frame for this channel selection: nothing to merge with.
+        return { ...prev, [selectedChannelId]: found };
+      }
+      const byId = new Map<string, TimelineEventEntry>();
+      for (const e of existing.events) byId.set(e.id, e);
+      for (const e of found.events) byId.set(e.id, e);
+      const merged = Array.from(byId.values()).sort(
+        (a, b) => Number(a.cursor) - Number(b.cursor)
+      );
+      return {
+        ...prev,
+        [selectedChannelId]: { events: merged, cursor: found.cursor, hasMore: found.hasMore },
+      };
+    });
   }, [selectedChannelId, timelineByChannelId]);
 
   const [timelinePhase, setTimelinePhase] = useState<Phase>('idle');
@@ -241,6 +305,10 @@ export default function ChannelsPanel({
 
   const selectChannel = (channelId: string) => {
     setSelectedChannelId(channelId);
+    // Fresh load from cursor '0' — clear any prior accumulated snapshot for
+    // this channel so the merge logic above starts clean instead of folding
+    // a from-scratch page onto stale history from an earlier selection.
+    setTimelineSnapshots((prev) => ({ ...prev, [channelId]: null }));
     if (timelineTimer.current) { clearTimeout(timelineTimer.current); timelineTimer.current = null; }
     setTimelinePhase('pending');
     requestTimeline(channelId, '0');
@@ -369,9 +437,16 @@ export default function ChannelsPanel({
                     ))}
                   </ul>
                 )}
-                {/* "Load older" is an EXPLICIT control (§11 row 13 / §13 S2):
+                {/* "Load more" is an EXPLICIT control (§11 row 13 / §13 S2):
                     the 64 KiB frame cut means a short page does NOT imply the
-                    end of history — hasMore is the only honest signal. */}
+                    end of history — hasMore is the only honest signal.
+                    B-2 FIX: the wire pages FORWARD only (channel_seq
+                    ascending, store.ts:1813) — there is no backward-paging
+                    capability. The control fetches events NEWER than what's
+                    held and the results ACCUMULATE (see the merge effect
+                    above), so it is labelled "Load more" rather than
+                    "Load older" — the previous label described a direction
+                    the wire cannot page in. */}
                 {selectedSnapshot.hasMore && (
                   <button
                     type="button"
@@ -379,7 +454,7 @@ export default function ChannelsPanel({
                     disabled={isTimelineRefreshing}
                     className="mt-3 rounded border border-border-strong px-2 py-0.5 text-[11px] text-muted transition-colors hover:border-faint disabled:opacity-50"
                   >
-                    {isTimelineRefreshing ? 'loading…' : 'Load older'}
+                    {isTimelineRefreshing ? 'loading…' : 'Load more'}
                   </button>
                 )}
               </>
@@ -444,15 +519,34 @@ function ChannelRow({
  * sendCommand, no callback of any kind in scope. Message bodies use Inter
  * (font-reading) per §13 S2/§4 S2; all other chrome stays mono (the
  * surrounding file's default font).
+ *
+ * B-1 FIX: getChannelTimeline returns EVERY event kind, not just messages
+ * (packages/collab/src/migration.ts:117-118 defines six). Only
+ * `message_posted` renders as a chat message. The other five kinds — and
+ * any future/unknown kind — render as a visually distinct system-event row
+ * in mono chrome (never font-reading, never through messageText), labelled
+ * with the kind, using only fields verified present on that kind's payload
+ * (see systemEventDetail). This is what stops a membership/channel-lifecycle
+ * event from rendering as a content-free "(no text)" chat bubble.
  */
 function TimelineEventRow({ event }: { event: TimelineEventEntry }) {
+  const isMessage = event.kind === 'message_posted';
   return (
     <li className="rounded border border-edge px-2 py-1.5 text-[12px]">
       <div className="flex flex-wrap items-center justify-between gap-x-2 text-[10px] text-faint">
         <span className="font-mono" title={event.actorPrincipalId}>{authorLabel(event.actorPrincipalId)}</span>
         <span>{formatOccurredAt(event.occurredAt)}</span>
       </div>
-      <p className="mt-0.5 font-reading text-[13px] leading-[1.6] text-ink">{messageText(event.payload)}</p>
+      {isMessage ? (
+        <p className="mt-0.5 font-reading text-[13px] leading-[1.6] text-ink">{messageText(event.payload)}</p>
+      ) : (
+        <p className="mt-0.5 font-mono text-[11px] leading-[1.6] text-faint">
+          <span className="uppercase tracking-wide">{SYSTEM_EVENT_LABELS[event.kind] ?? event.kind}</span>
+          {systemEventDetail(event.kind, event.payload) !== null && (
+            <span> — {systemEventDetail(event.kind, event.payload)}</span>
+          )}
+        </p>
+      )}
     </li>
   );
 }
