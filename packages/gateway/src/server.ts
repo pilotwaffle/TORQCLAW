@@ -39,6 +39,7 @@ import { sweepExpiredApprovals, sweepExpiredGrants } from './approvalWriter.js';
 import { rebuildDeliveryProjection } from './approvalDelivery.js';
 import { revokeInertGrants, admitToolCall } from './grantAdmission.js';
 import { decideApprovalC2 } from './c2Broker.js';
+import { collabSurfaceCommandsEnabled, handleListChannels, handleGetChannelTimeline } from './collabSurface.js';
 
 /**
  * Re-minted requests built inside the C2 decision transaction, handed to
@@ -593,6 +594,40 @@ app.get('/ws', { websocket: true }, (socket) => {
         // parallel copy. This is the ONLY path that emits redacted material —
         // redaction runs in the gateway, never the client.
         handleGetSafeExport(sid, cmd.data.taskId);
+        break;
+      }
+      case 'LIST_CHANNELS': {
+        // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S1: narrowing flag, independent
+        // of authz's seat-level allow -- turning this OFF must remove the
+        // command entirely (absent-deny) without touching authz.ts or the
+        // C0/C1 identity hardening it protects (§9). Same terminal ERROR
+        // shape as any other absent/denied action on this socket.
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        // §2a: the subject is the CONNECTION's resolved collab principal --
+        // never the gateway seat/role, never a client-supplied id. No
+        // resolved principal => the handler itself returns the terminal
+        // COLLAB_IDENTITY_REQUIRED refusal (refuse, never substitute or
+        // synthesize).
+        const listErr = await handleListChannels(sid, connectionAuth?.principalId ?? null, cmd.data.limit);
+        if (listErr) sendErr(listErr.code, listErr.detail);
+        break;
+      }
+      case 'GET_CHANNEL_TIMELINE': {
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        const timelineErr = await handleGetChannelTimeline(
+          sid,
+          connectionAuth?.principalId ?? null,
+          cmd.data.channelId,
+          cmd.data.cursor,
+          cmd.data.limit,
+        );
+        if (timelineErr) sendErr(timelineErr.code, timelineErr.detail);
         break;
       }
     }

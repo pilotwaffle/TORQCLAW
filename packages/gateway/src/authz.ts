@@ -145,6 +145,16 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     case 'LIST_APPROVALS':
     case 'GET_SAFE_EXPORT':
       return DENY_NOT_PERMITTED;
+    // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S1: the gateway SEAT lattice and the
+    // substrate PRINCIPAL lattice are never conflated (§2a). A channel seat
+    // is a transport identity (channel-http), not a collab surface
+    // credential holder, and gets no read entitlement to the collab wire
+    // surface regardless of what a bare `default:` below would otherwise
+    // resolve to -- explicit named deny so the decision is legible and
+    // pinned by a test (house pattern, matching every other arm here).
+    case 'LIST_CHANNELS':
+    case 'GET_CHANNEL_TIMELINE':
+      return DENY_NOT_PERMITTED;
     default:
       // Default deny for any future/unmapped action on a non-operator role.
       return DENY_NOT_PERMITTED;

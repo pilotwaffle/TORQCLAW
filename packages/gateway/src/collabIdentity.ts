@@ -89,6 +89,17 @@ function getSecretStore(): SecretStore {
 }
 
 /**
+ * S1: exported so collabSurface.ts can fetch the same principal pepper this
+ * module already uses to construct its production CollaborationStore --
+ * without duplicating the SecretStore selection/override logic. Returns
+ * null exactly when connect-path verification would also fail closed (no
+ * pepper provisioned), which callers must treat as a hard read refusal.
+ */
+export function getPrincipalPepper(): Buffer | undefined {
+  return getSecretStore().get(PRINCIPAL_PEPPER_SECRET_NAME);
+}
+
+/**
  * Bring a freshly opened `collab.db` up to the current schema.
  *
  * WHY THIS IS HERE (G2A round 1, defect 2). `state.db` self-migrates at
@@ -124,7 +135,14 @@ function migrateCollabDb(db: BootstrapDb): void {
   }
 }
 
-function getCollabDb(): BootstrapDb {
+/**
+ * S1 (PRD-TCLAW-COLLAB-PRESENCE-UI-005): exported so the read-surface module
+ * (collabSurface.ts) can share this exact migrated collab.db handle rather
+ * than opening a second connection to the same file. Test overrides
+ * (setCollabDbForTest) apply here identically -- there is only ever one
+ * handle for this module's lifetime.
+ */
+export function getCollabDb(): BootstrapDb {
   if (collabDbOverride) return collabDbOverride;
   if (!defaultCollabDb) {
     const path = process.env.TORQCLAW_COLLAB_DB_PATH || join(DATA_DIR, 'collab.db');

@@ -122,6 +122,30 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     action: z.literal('GET_SAFE_EXPORT'),
     taskId: z.uuid(),
   }),
+  z.object({
+    // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S1: read-only channel listing for the
+    // connection's own resolved collab principal. Deliberately NO
+    // principalId/surfaceId/authorPrincipalId param — identity is always
+    // server-derived from the connection's authenticated surface credential
+    // (§2a), never trusted from the wire. A connection with no resolved
+    // principal is refused COLLAB_IDENTITY_REQUIRED; it never falls back to
+    // an operator-wide or unscoped listing.
+    action: z.literal('LIST_CHANNELS'),
+    limit: z.number().int().min(1).max(100).default(20),
+  }),
+  z.object({
+    // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S1: read-only, cursor-paged channel
+    // timeline read, scoped to the connection's own resolved collab
+    // principal (same identity rule as LIST_CHANNELS above). channelId
+    // confers no entitlement by itself -- the substrate re-checks
+    // membership server-side on every call (assertChannelVisible), and a
+    // hidden or nonexistent channel returns the SAME byte-identical
+    // COLLAB_NOT_FOUND payload either way.
+    action: z.literal('GET_CHANNEL_TIMELINE'),
+    channelId: z.string().min(1),
+    cursor: z.string().min(1).default('0'),
+    limit: z.number().int().min(1).max(100).default(20),
+  }),
 ]);
 export type ClientCommand = z.infer<typeof ClientCommandSchema>;
 
