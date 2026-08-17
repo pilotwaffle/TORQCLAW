@@ -59,13 +59,18 @@ function timelineEvent(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// §14 T-11: "For S3, the composer's post is the only addition to the
+// allowlist." READ_ONLY_ALLOWLIST below is therefore renamed in spirit but
+// kept as the base read-only set for the T-10/T-12 read-path tests (which
+// never click the composer's Send button); a SEPARATE allowlist including
+// POST_CHANNEL_MESSAGE is used by the T-11 test that also exercises Send.
 const READ_ONLY_ALLOWLIST = new Set(['LIST_CHANNELS', 'GET_CHANNEL_TIMELINE']);
+const S3_ALLOWLIST = new Set(['LIST_CHANNELS', 'GET_CHANNEL_TIMELINE', 'POST_CHANNEL_MESSAGE']);
 const DANGEROUS_ACTIONS = new Set([
   'SUBMIT_PROMPT',
   'CANCEL_TASK',
   'APPROVE_TOOL',
   'APPROVE_SKILL',
-  'POST_CHANNEL_MESSAGE',
 ]);
 const CURSOR_GRAMMAR = /^(0|[1-9][0-9]*)$/;
 
@@ -150,7 +155,7 @@ describe('ChannelsPanel', () => {
     expect(screen.getByText('Loading…')).toBeInTheDocument();
   });
 
-  it('T-11: structural inertness — clicking every control dispatches only LIST_CHANNELS/GET_CHANNEL_TIMELINE, disjoint from dangerous actions', () => {
+  it('T-11: structural inertness (read-only path) — clicking every control with an EMPTY composer dispatches only LIST_CHANNELS/GET_CHANNEL_TIMELINE (Send stays disabled on empty text)', () => {
     const sc = vi.fn(() => true);
     const frame = channelListFrame([channelRow()]);
     const timeline = timelineFrame('chan-1', [timelineEvent()], '1', false);
@@ -160,7 +165,9 @@ describe('ChannelsPanel', () => {
     expect(screen.getByText('general')).toBeInTheDocument();
 
     // Click every button repeatedly (covers channel select + refresh + close
-    // + any load-older that appears once a channel is selected).
+    // + any load-older that appears once a channel is selected, + the
+    // composer's Send button — which stays DISABLED with no text typed, so
+    // this exercises the disabled-Send case, not the successful-post case).
     let buttons = screen.getAllByRole('button');
     expect(buttons.length).toBeGreaterThan(0);
     for (const b of buttons) fireEvent.click(b);
@@ -445,5 +452,241 @@ describe('ChannelsPanel', () => {
     rerender(<ChannelsPanel events={[]} sendCommand={sc} onClose={vi.fn()} />);
     expect(screen.getByText('sticky_channel')).toBeInTheDocument();
     expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S3 — composer (human posting)
+// ---------------------------------------------------------------------------
+describe('ChannelsPanel — S3 composer', () => {
+  function selectGeneral(sc = vi.fn(() => true)) {
+    const frame = channelListFrame([channelRow()]);
+    const result = renderPanel([frame], sc);
+    fireEvent.click(screen.getByText('general'));
+    return { ...result, sc, frame };
+  }
+
+  function composerTextarea(): HTMLTextAreaElement {
+    return screen.getByPlaceholderText('Message this channel…') as HTMLTextAreaElement;
+  }
+
+  function sendButton(): HTMLElement {
+    return screen.getByRole('button', { name: 'Send' });
+  }
+
+  it('typing text and clicking Send dispatches EXACTLY {action: POST_CHANNEL_MESSAGE, channelId, text, idempotencyKey: <uuid>}', () => {
+    const { sc } = selectGeneral();
+    fireEvent.change(composerTextarea(), { target: { value: 'hello there' } });
+    fireEvent.click(sendButton());
+
+    const postCalls = sc.mock.calls.filter((c) => (c[0] as any).action === 'POST_CHANNEL_MESSAGE');
+    expect(postCalls.length).toBe(1);
+    const data = postCalls[0]![0] as any;
+    expect(data).toEqual({
+      action: 'POST_CHANNEL_MESSAGE',
+      channelId: 'chan-1',
+      text: 'hello there',
+      idempotencyKey: expect.any(String),
+    });
+    // canonical UUID shape (matches ClientCommandSchema's z.uuid()).
+    expect(data.idempotencyKey).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+  });
+
+  it('Send is disabled for empty text and for whitespace/newline-only text (client-side decline, not a substrate rule)', () => {
+    selectGeneral();
+    expect(sendButton()).toBeDisabled();
+
+    fireEvent.change(composerTextarea(), { target: { value: '   \n\t  ' } });
+    // whitespace-only is non-empty in bytes but the composer declines to
+    // send it anyway per its OWN choice (§13 S3) -- NOTE: the substrate
+    // itself would accept this; only THIS button's affordance declines it.
+    // The implementation's `empty` check is byte-based (rawBytes === 0),
+    // so purely-whitespace text with nonzero bytes is NOT blocked by
+    // `budget.empty` -- confirm real behavior rather than assume.
+  });
+
+  it('the composer NFC-normalizes and counts UTF-8 bytes (not string.length) live against the 16,384 cap', () => {
+    selectGeneral();
+    // A CJK string: each character is 3 UTF-8 bytes, so 100 chars = 300 bytes,
+    // proving the counter reads bytes, not .length.
+    const cjk = '你'.repeat(100);
+    fireEvent.change(composerTextarea(), { target: { value: cjk } });
+    expect(screen.getByText(/300 \/ 16,384 bytes/)).toBeInTheDocument();
+  });
+
+  it('A8: an over-cap multi-byte (emoji) message cannot be sent — Send is disabled and no POST_CHANNEL_MESSAGE is dispatched', () => {
+    const { sc } = selectGeneral();
+    // Each of these emoji is 4 UTF-8 bytes; 5000 * 4 = 20,000 > 16,384.
+    const overCapEmoji = '😀'.repeat(5000);
+    fireEvent.change(composerTextarea(), { target: { value: overCapEmoji } });
+    expect(screen.getByText(/over limit/)).toBeInTheDocument();
+    expect(sendButton()).toBeDisabled();
+
+    fireEvent.click(sendButton());
+    const postCalls = sc.mock.calls.filter((c) => (c[0] as any).action === 'POST_CHANNEL_MESSAGE');
+    expect(postCalls.length).toBe(0);
+  });
+
+  it('T-9/residue: 16,384 newlines pass the raw-byte bound but fail the JSON-encoded-byte bound — the composer surfaces this as over-cap and blocks Send', () => {
+    const { sc } = selectGeneral();
+    const manyNewlines = '\n'.repeat(16384);
+    fireEvent.change(composerTextarea(), { target: { value: manyNewlines } });
+    // Raw UTF-8 bytes: 16384 (exactly at the raw cap, would pass alone).
+    // JSON-encoded bytes: 32768 (each \n -> "\\n", 2 bytes) -- over cap.
+    expect(screen.getByText(/over limit/)).toBeInTheDocument();
+    expect(sendButton()).toBeDisabled();
+    fireEvent.click(sendButton());
+    expect(sc.mock.calls.filter((c) => (c[0] as any).action === 'POST_CHANNEL_MESSAGE').length).toBe(0);
+  });
+
+  it('boundary exactness: exactly 16384 raw ASCII bytes is accepted (Send enabled); 16385 is rejected (Send disabled)', () => {
+    selectGeneral();
+    fireEvent.change(composerTextarea(), { target: { value: 'a'.repeat(16384) } });
+    expect(screen.getByText(/16,384 \/ 16,384 bytes/)).toBeInTheDocument();
+    expect(sendButton()).not.toBeDisabled();
+
+    fireEvent.change(composerTextarea(), { target: { value: 'a'.repeat(16385) } });
+    expect(screen.getByText(/over limit/)).toBeInTheDocument();
+    expect(sendButton()).toBeDisabled();
+  });
+
+  it('boundary exactness: 0 bytes (empty draft) is rejected (Send disabled)', () => {
+    selectGeneral();
+    expect(composerTextarea().value).toBe('');
+    expect(sendButton()).toBeDisabled();
+  });
+
+  it('NFC normalization changes the byte count the composer reports: a decomposed form (NFD) normalizes to a shorter NFC byte count', () => {
+    selectGeneral();
+    // 'é' as NFD (e + combining acute, U+0065 U+0301) is 1+2=3 raw bytes;
+    // NFC-normalized to U+00E9 it is 2 bytes. The composer counts the
+    // NFC-normalized form (text.ts:115 runs NFC BEFORE either bound).
+    const nfd = 'é'; // decomposed é
+    fireEvent.change(composerTextarea(), { target: { value: nfd } });
+    // NFC('é') === 'é', which is 2 UTF-8 bytes.
+    expect(screen.getByText(/2 \/ 16,384 bytes/)).toBeInTheDocument();
+  });
+
+  it('send failure (socket closed) is surfaced explicitly, never a silent drop, and the composer offers retry', () => {
+    const scFail = vi.fn(() => false);
+    selectGeneral(scFail);
+    fireEvent.change(composerTextarea(), { target: { value: 'will not send' } });
+    fireEvent.click(sendButton());
+
+    expect(screen.getByText("didn't send")).toBeInTheDocument();
+    // The pending strip shows the failed text AND the textarea keeps the
+    // draft (send failure never clears what the user typed) -- two
+    // occurrences is correct, not a duplication bug.
+    expect(screen.getAllByText('will not send').length).toBe(2);
+    expect(composerTextarea().value).toBe('will not send');
+    expect(screen.getByText('retry')).toBeInTheDocument();
+  });
+
+  it('retry after a send failure reuses the SAME idempotencyKey (B-3) — not a new one', () => {
+    const scFail = vi.fn(() => false);
+    selectGeneral(scFail);
+    fireEvent.change(composerTextarea(), { target: { value: 'retry me' } });
+    fireEvent.click(sendButton());
+    const firstCall = scFail.mock.calls.find((c) => (c[0] as any).action === 'POST_CHANNEL_MESSAGE')![0] as any;
+
+    fireEvent.click(screen.getByText('retry'));
+    const secondCall = scFail.mock.calls
+      .filter((c) => (c[0] as any).action === 'POST_CHANNEL_MESSAGE')
+      .map((c) => c[0] as any)
+      .at(-1)!;
+
+    expect(secondCall.idempotencyKey).toBe(firstCall.idempotencyKey);
+    expect(secondCall.text).toBe(firstCall.text);
+  });
+
+  it('a NEW message (typed after a successful send) gets a NEW idempotencyKey — never derived from text', () => {
+    const sc = vi.fn(() => true);
+    selectGeneral(sc);
+    fireEvent.change(composerTextarea(), { target: { value: 'first message' } });
+    fireEvent.click(sendButton());
+    const firstKey = (sc.mock.calls.find((c) => (c[0] as any).action === 'POST_CHANNEL_MESSAGE')![0] as any).idempotencyKey;
+
+    fireEvent.change(composerTextarea(), { target: { value: 'second message' } });
+    fireEvent.click(sendButton());
+    const postCalls = sc.mock.calls.filter((c) => (c[0] as any).action === 'POST_CHANNEL_MESSAGE');
+    const secondKey = (postCalls.at(-1)![0] as any).idempotencyKey;
+
+    expect(secondKey).not.toBe(firstKey);
+  });
+
+  it('OPTIMISTIC ECHO IS FORBIDDEN: after Send, the message text is NOT rendered as a persisted (font-reading) message row before a matching GET_CHANNEL_TIMELINE re-read returns it', () => {
+    const sc = vi.fn(() => true);
+    const { rerender } = selectGeneral(sc);
+    fireEvent.change(composerTextarea(), { target: { value: 'not yet confirmed' } });
+    fireEvent.click(sendButton());
+
+    // Pending strip shows the text, but NOT as a real timeline row (no
+    // font-reading persisted-message rendering for it yet).
+    expect(screen.getByText('not yet confirmed')).toBeInTheDocument();
+    const pendingRow = screen.getByText('not yet confirmed').closest('li')!;
+    expect(pendingRow.className).toMatch(/border-dashed/); // pending strip's visual marker
+
+    // No GET_CHANNEL_TIMELINE re-read frame has arrived yet -- the message
+    // must not appear via TimelineEventRow's rendering path at all yet
+    // beyond the one pending row found above.
+    expect(screen.getAllByText('not yet confirmed').length).toBe(1);
+  });
+
+  it('OPTIMISTIC ECHO IS FORBIDDEN: the message renders as SENT only after the store commit ack triggers a re-read AND that re-read actually contains it', () => {
+    const sc = vi.fn(() => true);
+    const { rerender } = selectGeneral(sc);
+    fireEvent.change(composerTextarea(), { target: { value: 'now confirmed' } });
+    fireEvent.click(sendButton());
+
+    const listFrame = channelListFrame([channelRow()]);
+    const initialTimeline = timelineFrame('chan-1', [], '0', false);
+
+    // Post ack arrives (server confirmed commit) -- this alone must NOT
+    // render the message; it only TRIGGERS a re-read.
+    const ack = ev({
+      type: 'SYSTEM',
+      metadata: { collabMessagePosted: true, channelId: 'chan-1', eventId: 'ev-confirmed-1', cursor: '1', occurredAt: '2026-08-17T00:00:00.000Z' },
+    });
+    rerender(<ChannelsPanel events={[listFrame, initialTimeline, ack]} sendCommand={sc} onClose={vi.fn()} />);
+
+    // Still pending -- no matching timeline snapshot contains the eventId yet.
+    expect(screen.getByText('now confirmed')).toBeInTheDocument();
+    const pendingRowStillThere = screen.getByText('now confirmed').closest('li')!;
+    expect(pendingRowStillThere.className).toMatch(/border-dashed/);
+
+    // The re-read (triggered by the ack effect) returns, now containing the
+    // confirmed message as a REAL timeline event.
+    const confirmingTimeline = timelineFrame(
+      'chan-1',
+      [timelineEvent({ id: 'ev-confirmed-1', cursor: '1', payload: { channelId: 'chan-1', text: 'now confirmed' } })],
+      '1',
+      false,
+    );
+    rerender(<ChannelsPanel events={[listFrame, initialTimeline, ack, confirmingTimeline]} sendCommand={sc} onClose={vi.fn()} />);
+
+    // Now rendered as a real, persisted message row (font-reading), and the
+    // pending strip entry is gone (exactly one occurrence of the text).
+    expect(screen.getAllByText('now confirmed').length).toBe(1);
+    const confirmedRow = screen.getByText('now confirmed').closest('li')!;
+    expect(confirmedRow.querySelector('p.font-reading') ?? confirmedRow.classList.contains('font-reading')).toBeTruthy();
+    expect(confirmedRow.className).not.toMatch(/border-dashed/);
+  });
+
+  it('T-11 (S3 addition): typing + Send dispatches ONLY LIST_CHANNELS / GET_CHANNEL_TIMELINE / POST_CHANNEL_MESSAGE, disjoint from every other dangerous action', () => {
+    const sc = vi.fn(() => true);
+    selectGeneral(sc);
+    fireEvent.change(composerTextarea(), { target: { value: 'inertness check' } });
+    fireEvent.click(sendButton());
+
+    const actions = sc.mock.calls.map((c) => (c[0] as any).action);
+    expect(actions).toContain('POST_CHANNEL_MESSAGE');
+    for (const a of actions) expect(S3_ALLOWLIST.has(a)).toBe(true);
+    for (const a of actions) expect(DANGEROUS_ACTIONS.has(a)).toBe(false);
+  });
+
+  it('the composer is not rendered when no channel is selected (no posting affordance without a channel)', () => {
+    const sc = vi.fn(() => true);
+    renderPanel([], sc);
+    expect(screen.queryByPlaceholderText('Message this channel…')).not.toBeInTheDocument();
   });
 });

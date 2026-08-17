@@ -118,6 +118,11 @@ const ALLOW: AuthzDecision = { ok: true };
  *              unrelated to the authz posture above (which governs who may
  *              TRIGGER the export, not what a triggered export contains).
  *              Explicit deny so the decision is legible and pinned by a test.)
+ *              (PRD-TCLAW-COLLAB-PRESENCE-UI-005 S3: POST_CHANNEL_MESSAGE is
+ *              operator-seat-only for the same reason as LIST_CHANNELS/
+ *              GET_CHANNEL_TIMELINE above -- the seat lattice and the
+ *              substrate principal lattice are never conflated; explicit
+ *              deny so the decision is legible and pinned by a test.)
  *   node     — every action denied.
  */
 export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): AuthzDecision {
@@ -154,6 +159,15 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     // pinned by a test (house pattern, matching every other arm here).
     case 'LIST_CHANNELS':
     case 'GET_CHANNEL_TIMELINE':
+    // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S3: POST_CHANNEL_MESSAGE is the only
+    // new mutation this PRD's surface adds (§5), and it inherits the exact
+    // same seat-lattice ruling as the S1 reads above -- a channel seat is a
+    // transport identity (channel-http), not a collab surface credential
+    // holder, and gets no write entitlement to the collab wire surface
+    // regardless of what the default: arm below would otherwise resolve to.
+    // Explicit named deny so the decision is legible and pinned by a test
+    // (T-3), matching every other arm in this switch.
+    case 'POST_CHANNEL_MESSAGE':
       return DENY_NOT_PERMITTED;
     default:
       // Default deny for any future/unmapped action on a non-operator role.

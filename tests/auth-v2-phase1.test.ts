@@ -763,10 +763,14 @@ describe('Phase 4 protected semantic manifest', () => {
     const changed = execFileSync('git', ['diff', '--name-only', 'c2850f5', '--', ...frozenPaths], { cwd: root, encoding: 'utf8' });
     expect(changed.trim()).toBe('');
     // Post-phase1 authz baseline (authorizations: phase1 landing 985f8b9 +
-    // PRD-005 S1 deny arms, both 2026-08-16). Recompute and re-authorize
-    // deliberately on any future approved change; never delete this pin.
+    // PRD-005 S1 deny arms (2026-08-16) + PRD-005 S3 POST_CHANNEL_MESSAGE
+    // deny arm, 2026-08-17 -- same seat-lattice ruling as the S1 read
+    // commands, adding one explicit `case 'POST_CHANNEL_MESSAGE':` deny arm
+    // to the channel-seat switch plus its doc-comment entry). Recompute and
+    // re-authorize deliberately on any future approved change; never delete
+    // this pin.
     const authzSha = createHash('sha256').update(authz).digest('hex');
-    expect(authzSha).toBe('8167a08aa1d4655fc73be0045d8b72b1060bd098f5ff7823a5cf145b4e75e690');
+    expect(authzSha).toBe('cb2b76b454cd55a36c569b3cf06359bf7f633c8c2f76f9643d456d412623cb27');
     // The migration's own markers: the moved guard must not silently return,
     // and the relocation note must remain declared where it happened.
     expect(authz).not.toContain('export function checkResumeRole');

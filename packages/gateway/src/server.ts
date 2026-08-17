@@ -39,7 +39,7 @@ import { sweepExpiredApprovals, sweepExpiredGrants } from './approvalWriter.js';
 import { rebuildDeliveryProjection } from './approvalDelivery.js';
 import { revokeInertGrants, admitToolCall } from './grantAdmission.js';
 import { decideApprovalC2 } from './c2Broker.js';
-import { collabSurfaceCommandsEnabled, handleListChannels, handleGetChannelTimeline } from './collabSurface.js';
+import { collabSurfaceCommandsEnabled, handleListChannels, handleGetChannelTimeline, handlePostChannelMessage } from './collabSurface.js';
 
 /**
  * Re-minted requests built inside the C2 decision transaction, handed to
@@ -645,6 +645,29 @@ app.get('/ws', { websocket: true }, (socket) => {
           cmd.data.limit,
         );
         if (timelineErr) sendErr(timelineErr.code, timelineErr.detail);
+        break;
+      }
+      case 'POST_CHANNEL_MESSAGE': {
+        // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S3: same absent-deny narrowing
+        // flag as S1 -- turning the surface off removes posting too, without
+        // touching authz.ts or the C0/C1 identity hardening it protects.
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        // §2a / A3: the subject and the STAMPED AUTHOR are both the
+        // CONNECTION's resolved collab principal -- never a client-supplied
+        // value (the command carries no author field to spoof). No resolved
+        // principal => the handler returns the terminal
+        // COLLAB_IDENTITY_REQUIRED refusal and posts nothing (CO-1).
+        const postErr = await handlePostChannelMessage(
+          sid,
+          connectionAuth?.principalId ?? null,
+          cmd.data.channelId,
+          cmd.data.text,
+          cmd.data.idempotencyKey,
+        );
+        if (postErr) sendErr(postErr.code, postErr.detail);
         break;
       }
     }

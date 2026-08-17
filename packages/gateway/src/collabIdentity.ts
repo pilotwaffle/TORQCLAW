@@ -198,6 +198,37 @@ function principalAuthorityForPrincipal(
 }
 
 /**
+ * S3 (CO-1): exported so collabSurface.ts's `callerFor` never hardcodes a
+ * `CallerContext.kind` literal for a write path. Per the PRD's frozen
+ * "CallerContext.kind source" ruling (Cycle-3 NB-3): the substrate reads
+ * `principals.kind` from its OWN DB for every security-relevant check
+ * (assertOperatorCaller/assertChannelOwner -- store.ts:1966-2023) and never
+ * trusts `caller.kind` (grep-verified: `caller.kind` is read nowhere in
+ * store.ts) -- so `kind` on the CallerContext handed to the store is
+ * advisory plumbing, never an authorization input. Hardcoding it wrong is
+ * therefore not a live privilege-escalation bug for POST_CHANNEL_MESSAGE
+ * (assertChannelVisible ignores it entirely), but a CallerContext that
+ * *claims* `kind: 'operator'` for an agent principal is still a dishonest
+ * value living exactly where a future security-relevant read of it would
+ * silently inherit the lie -- the same "looks right, isn't" shape as D-1.
+ * Reuses the SAME query `resolveConnectIdentity` already runs
+ * (principalAuthorityForPrincipal, this module) rather than adding a
+ * second lookup path.
+ *
+ * Returns null on any lookup failure (unknown principal, closed/errored
+ * handle) -- callers MUST treat null as "kind unknown" and fail closed
+ * (never default to 'operator'), matching this module's house posture of
+ * never throwing across a connect-adjacent seam.
+ */
+export function getPrincipalKind(db: BootstrapDb, principalId: string): 'operator' | 'agent' | null {
+  try {
+    return principalAuthorityForPrincipal(db, principalId)?.principalKind ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Verify a presented surface credential and derive its PrincipalBinding.
  *
  * Returns null on ANY failure -- bad token, unknown/revoked credential,

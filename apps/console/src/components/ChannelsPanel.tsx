@@ -1,23 +1,30 @@
 'use client';
 
-// PRD-TCLAW-COLLAB-PRESENCE-UI-005 S2 — Console Channels view (read-only).
+// PRD-TCLAW-COLLAB-PRESENCE-UI-005 S2 + S3 — Console Channels view.
 //
 // Fourth nav view over the S1 wire read surface (LIST_CHANNELS /
-// GET_CHANNEL_TIMELINE, packages/gateway/src/collabSurface.ts). Read-only in
-// this slice: NO posting, NO presence/roster, NO live delivery — those are
-// S3/S4/S5. Flag-gated by NEXT_PUBLIC_COLLAB_UI at the TorqTerminal call
-// site; this component itself assumes it is only ever mounted when the flag
-// is on (mirrors ApprovalHistoryPanel/ReceiptsPanel/MemoryPanel, none of
+// GET_CHANNEL_TIMELINE, packages/gateway/src/collabSurface.ts) plus S3's
+// composer (POST_CHANNEL_MESSAGE). No presence/roster, no live delivery —
+// those are S4/S5. Flag-gated by NEXT_PUBLIC_COLLAB_UI at the TorqTerminal
+// call site; this component itself assumes it is only ever mounted when the
+// flag is on (mirrors ApprovalHistoryPanel/ReceiptsPanel/MemoryPanel, none of
 // which re-check their own flag either).
 //
-// SAFETY: this panel is STRICTLY READ-ONLY. The only sendCommand actions
-// reachable from anywhere in this file are LIST_CHANNELS (mount, manual
-// refresh) and GET_CHANNEL_TIMELINE (channel select, "Load more" — the wire
-// pages forward only, see B-2 fix note at the button below). There is
-// no composer, no posting affordance (not even a disabled one — S3), no
-// roster/presence (S5). ChannelRow and TimelineEventRow are MODULE-SCOPE
-// components whose props are plain data (zero function-typed fields) —
+// SAFETY: the ONLY sendCommand actions reachable from anywhere in this file
+// are LIST_CHANNELS (mount, manual refresh), GET_CHANNEL_TIMELINE (channel
+// select, "Load more", post-ack-triggered re-read — the wire pages forward
+// only, see B-2 fix note at the button below), and POST_CHANNEL_MESSAGE
+// (composer Send/retry — the ONLY addition to the allowlist, per §14 T-11).
+// No roster/presence (S5), no live delivery (S4). ChannelRow, TimelineEventRow,
+// and PendingSendRow are MODULE-SCOPE components whose props are plain data
+// (zero function-typed fields except PendingSendRow's narrow onRetry) —
 // mirrors ApprovalHistoryRow / ReplayEventRow's structural boundary.
+//
+// OPTIMISTIC ECHO IS FORBIDDEN (§13 S3): a posted message renders via the
+// pendingSends strip (visually distinct, dashed border) until — and ONLY
+// until — its server-acked eventId is found inside a REAL GET_CHANNEL_TIMELINE
+// snapshot; see the confirm effect above the composer state block. Nothing
+// in this file renders composer text as a persisted message before that.
 //
 // HONEST-STATE DISCIPLINE (ApprovalHistoryPanel pattern, copied exactly):
 // null = loading (no frame ever arrived); [] = a real frame reported zero
@@ -63,6 +70,109 @@ interface TimelineSnapshot {
 }
 
 type Phase = 'pending' | 'idle' | 'sendFailed' | 'timeout';
+
+// ── S3: composer byte-budget math ───────────────────────────────────────
+//
+// VERIFIED against packages/collab/src/text.ts (direct source read,
+// 2026-08-17): normalizeMessageText applies TWO INDEPENDENT byte bounds to
+// the NFC-normalized form, both of which the composer must honor or it will
+// let the user attempt to send text the substrate refuses (the D-1 shape --
+// a client guard that looks right and admits input the downstream validator
+// rejects):
+//   - text.ts:122 countUtf8Bytes(nfcText) in [1, 16384]        (raw bytes)
+//   - text.ts:137 countJsonEncodedBytes(nfcText) <= 16384      (JSON bytes)
+// countJsonEncodedBytes (text.ts:25-31) is JSON.stringify(text) minus the
+// two quote bytes -- i.e. UTF-8 bytes of the ESCAPED form. This is why a
+// message of 16,384 newlines passes the raw bound (1 byte each) but fails
+// the JSON bound (each \n escapes to two bytes, "\\n", = 32,768 total).
+// Both counters below run on raw.normalize('NFC') FIRST (text.ts:115, BEFORE
+// either bound is checked), matching the substrate exactly.
+const MESSAGE_MAX_BYTES = 16384;
+const MESSAGE_APPROACHING_RATIO = 0.9; // warn at 90% of either bound
+
+function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+function jsonEncodedByteLength(text: string): number {
+  const jsonString = JSON.stringify(text);
+  return utf8ByteLength(jsonString.slice(1, -1));
+}
+
+interface MessageByteBudget {
+  nfcText: string;
+  rawBytes: number;
+  jsonBytes: number;
+  /** The tighter of the two bounds -- what actually gates "can send". */
+  bindingBytes: number;
+  overCap: boolean;
+  approaching: boolean;
+  empty: boolean;
+}
+
+/** Mirrors normalizeMessageText's bound check exactly (text.ts:110-161),
+ *  client-side, on the client's own normalized copy -- this is a
+ *  pre-filter/UX aid, NEVER the authoritative rejection (the substrate
+ *  re-validates the exact same way server-side and is the only source of
+ *  truth for what actually gets persisted). */
+function computeMessageByteBudget(raw: string): MessageByteBudget {
+  const nfcText = raw.normalize('NFC');
+  const rawBytes = utf8ByteLength(nfcText);
+  const jsonBytes = jsonEncodedByteLength(nfcText);
+  const bindingBytes = Math.max(rawBytes, jsonBytes);
+  return {
+    nfcText,
+    rawBytes,
+    jsonBytes,
+    bindingBytes,
+    overCap: rawBytes > MESSAGE_MAX_BYTES || jsonBytes > MESSAGE_MAX_BYTES,
+    approaching: bindingBytes >= MESSAGE_MAX_BYTES * MESSAGE_APPROACHING_RATIO && bindingBytes <= MESSAGE_MAX_BYTES,
+    // The substrate permits empty/whitespace-only text (no trim -- text.ts
+    // has NO trim step for messages); the composer's decline-to-send-empty
+    // rule below is a CLIENT-SIDE choice (§13 S3), not a substrate rule --
+    // stated so it is never mistaken for one.
+    empty: rawBytes === 0,
+  };
+}
+
+type PendingSendPhase = 'sending' | 'awaitingConfirm' | 'sendFailed' | 'timeout';
+
+interface PendingSend {
+  idempotencyKey: string;
+  channelId: string;
+  text: string;
+  phase: PendingSendPhase;
+  /** Set once a collabMessagePosted ack names this send's eventId -- the
+   *  signal to trigger a re-read, NOT the signal to render as sent. */
+  ackedEventId: string | null;
+}
+
+/** Scans `events` BACKWARD for the newest POST_CHANNEL_MESSAGE ack
+ *  (collabSurface.ts's handlePostChannelMessage publishOnly frame) whose
+ *  idempotencyKey-correlated text/channel match a pending send. The ack
+ *  itself is produced ONLY after store.postChannelMessage's await resolves
+ *  (i.e. after commit) -- collabSurface.ts:handlePostChannelMessage -- so
+ *  seeing it is proof of commit, but it is used here ONLY to trigger a
+ *  re-read (GET_CHANNEL_TIMELINE), never to render the message directly --
+ *  optimistic echo is forbidden (§13 S3): a message renders exclusively via
+ *  the normal timeline snapshot path, once the re-read actually returns it. */
+function selectLatestPostAck(
+  events: GatewayEvent[],
+  channelId: string,
+): { eventId: string; cursor: string } | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const meta = (events[i]!.metadata ?? {}) as Record<string, any>;
+    if (
+      meta.collabMessagePosted === true &&
+      meta.channelId === channelId &&
+      typeof meta.eventId === 'string' &&
+      typeof meta.cursor === 'string'
+    ) {
+      return { eventId: meta.eventId, cursor: meta.cursor };
+    }
+  }
+  return null;
+}
 
 /** Scans `events` BACKWARD for the newest LIST_CHANNELS response frame,
  *  validating shape. Malformed frames (channels not an array) are skipped —
@@ -325,6 +435,162 @@ export default function ChannelsPanel({
   const isListRefreshing = listPhase === 'pending' && channels !== null;
   const isTimelineRefreshing = timelinePhase === 'pending' && selectedSnapshot !== null;
 
+  // ── S3: composer (human posting) ────────────────────────────────────────
+  //
+  // OPTIMISTIC ECHO IS FORBIDDEN (§13 S3): a pendingSends entry NEVER renders
+  // as a normal timeline row. It renders in a visually distinct "sending…"
+  // strip below the composer until the entry is cleared, which happens ONLY
+  // once the confirmed eventId is found inside a REAL timeline snapshot
+  // (selectedSnapshot.events, populated exclusively by GET_CHANNEL_TIMELINE
+  // responses) -- never on the POST ack alone.
+  const [draftText, setDraftText] = useState('');
+  const [pendingSends, setPendingSends] = useState<PendingSend[]>([]);
+  const [composerIdempotencyKey, setComposerIdempotencyKey] = useState<string | null>(null);
+
+  const budget = useMemo(() => computeMessageByteBudget(draftText), [draftText]);
+
+  // A fresh idempotency key is minted once per DRAFT, not once per send
+  // attempt: a retry after a dropped socket must reuse the SAME key (B-3) so
+  // it cannot commit a duplicate immortal message_posted event, while a NEW
+  // message (different text) always gets a NEW key -- never derived from the
+  // text itself, which would silently collapse two legitimate identical
+  // messages into one idempotency slot.
+  useEffect(() => {
+    if (composerIdempotencyKey === null) setComposerIdempotencyKey(crypto.randomUUID());
+  }, [composerIdempotencyKey]);
+
+  const resetComposer = () => {
+    setDraftText('');
+    setComposerIdempotencyKey(crypto.randomUUID()); // NEW message => NEW key
+  };
+
+  const sendMessage = () => {
+    if (!selectedChannelId) return;
+    if (budget.empty || budget.overCap) return; // client-side decline, not a substrate rule
+    const key = composerIdempotencyKey ?? crypto.randomUUID();
+    const channelId = selectedChannelId;
+    const text = budget.nfcText;
+
+    const sent = sendCommand({ action: 'POST_CHANNEL_MESSAGE', channelId, text, idempotencyKey: key });
+    if (!sent) {
+      // Send failure is explicit (§13 S3): surfaced in the pending strip,
+      // never a silent drop. The draft text and idempotency key are BOTH
+      // preserved so "retry" reuses the exact same key (B-3), not a new one.
+      setPendingSends((prev) => [
+        ...prev.filter((p) => p.idempotencyKey !== key),
+        { idempotencyKey: key, channelId, text, phase: 'sendFailed', ackedEventId: null },
+      ]);
+      return;
+    }
+
+    setPendingSends((prev) => [
+      ...prev.filter((p) => p.idempotencyKey !== key),
+      { idempotencyKey: key, channelId, text, phase: 'sending', ackedEventId: null },
+    ]);
+    // Clear the draft immediately (the pending strip carries the in-flight
+    // text) so the composer is ready for the next message; the idempotency
+    // key rotates to a fresh one for whatever the user types next.
+    resetComposer();
+  };
+
+  const retrySend = (p: PendingSend) => {
+    if (p.channelId !== selectedChannelId) return;
+    // Reuses p.idempotencyKey UNCHANGED (B-3) -- this is precisely what a
+    // client-supplied canonical UUID is for: a retry of the SAME logical
+    // message must not mint a second immortal event.
+    const sent = sendCommand({
+      action: 'POST_CHANNEL_MESSAGE',
+      channelId: p.channelId,
+      text: p.text,
+      idempotencyKey: p.idempotencyKey,
+    });
+    setPendingSends((prev) =>
+      prev.map((entry) =>
+        entry.idempotencyKey === p.idempotencyKey
+          ? { ...entry, phase: sent ? 'sending' : 'sendFailed' }
+          : entry,
+      ),
+    );
+  };
+
+  // Timeout sweep: a 'sending' entry that never receives a post ack within
+  // TIMEOUT_MS surfaces as 'timeout' (never silently stays "sending…"
+  // forever) -- same discipline as the list/timeline phase timers above.
+  const pendingTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  useEffect(() => {
+    for (const p of pendingSends) {
+      if (p.phase === 'sending' && !pendingTimers.current[p.idempotencyKey]) {
+        pendingTimers.current[p.idempotencyKey] = setTimeout(() => {
+          setPendingSends((prev) =>
+            prev.map((entry) =>
+              entry.idempotencyKey === p.idempotencyKey && entry.phase === 'sending'
+                ? { ...entry, phase: 'timeout' }
+                : entry,
+            ),
+          );
+        }, TIMEOUT_MS);
+      }
+    }
+    // Clear timers for entries no longer pending (acked/removed).
+    for (const key of Object.keys(pendingTimers.current)) {
+      if (!pendingSends.some((p) => p.idempotencyKey === key && p.phase === 'sending')) {
+        clearTimeout(pendingTimers.current[key]!);
+        delete pendingTimers.current[key];
+      }
+    }
+  }, [pendingSends]);
+  useEffect(() => {
+    return () => { for (const t of Object.values(pendingTimers.current)) clearTimeout(t); };
+  }, []);
+
+  // Post-ack -> trigger a re-read (never a direct render). Watches the
+  // latest collabMessagePosted ack for the selected channel; when a
+  // 'sending' entry's channel matches and no re-read for that ack has been
+  // requested yet, fire GET_CHANNEL_TIMELINE from the CURRENT known cursor
+  // so the confirmed message arrives through the ordinary timeline path.
+  const requestedAckEventIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!selectedChannelId) return;
+    const ack = selectLatestPostAck(events, selectedChannelId);
+    if (!ack) return;
+    if (requestedAckEventIds.current.has(ack.eventId)) return;
+    const hasSendingForChannel = pendingSends.some(
+      (p) => p.channelId === selectedChannelId && (p.phase === 'sending' || p.phase === 'awaitingConfirm'),
+    );
+    if (!hasSendingForChannel) return;
+    requestedAckEventIds.current.add(ack.eventId);
+    setPendingSends((prev) =>
+      prev.map((entry) =>
+        entry.channelId === selectedChannelId && entry.phase === 'sending'
+          ? { ...entry, phase: 'awaitingConfirm', ackedEventId: ack.eventId }
+          : entry,
+      ),
+    );
+    // Re-read from the snapshot's current cursor (or '0' if none yet) --
+    // the coalesced-refetch pattern S4 specifies; here driven by the ack
+    // hint rather than a live-delivery hint, same mechanism.
+    const snap = timelineSnapshots[selectedChannelId];
+    requestTimeline(selectedChannelId, snap?.cursor ?? '0');
+  }, [events, selectedChannelId, pendingSends, timelineSnapshots]);
+
+  // Clear a pendingSends entry ONLY once its acked eventId is found inside
+  // the REAL timeline snapshot -- the sole "rendered as sent" trigger. This
+  // is the structural enforcement of "optimistic echo is forbidden": nothing
+  // upstream of this effect ever removes a pending entry.
+  useEffect(() => {
+    if (!selectedChannelId) return;
+    const snap = timelineSnapshots[selectedChannelId];
+    if (!snap) return;
+    const confirmedIds = new Set(snap.events.map((e) => e.id));
+    setPendingSends((prev) =>
+      prev.filter((p) => !(p.channelId === selectedChannelId && p.ackedEventId && confirmedIds.has(p.ackedEventId))),
+    );
+  }, [selectedChannelId, timelineSnapshots]);
+
+  const channelPendingSends = selectedChannelId
+    ? pendingSends.filter((p) => p.channelId === selectedChannelId)
+    : [];
+
   return (
     <div className="absolute inset-0 z-20 flex bg-bg/98 text-[13px] leading-[1.6] text-muted">
       {/* CHANNEL LIST */}
@@ -393,76 +659,174 @@ export default function ChannelsPanel({
         )}
       </div>
 
-      {/* TIMELINE */}
-      <div className="flex-1 overflow-y-auto p-4">
-        {!selectedChannelId && <p className="text-faint/75">Select a channel from the list.</p>}
+      {/* TIMELINE + COMPOSER */}
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="flex-1 overflow-y-auto p-4">
+          {!selectedChannelId && <p className="text-faint/75">Select a channel from the list.</p>}
 
-        {selectedChannelId && (
-          <>
-            {/* Timeline honest states, same four-phase shape as the list. */}
-            {selectedSnapshot === null && timelinePhase === 'pending' && <p className="text-faint/75">Loading…</p>}
-            {selectedSnapshot === null && timelinePhase === 'sendFailed' && (
-              <p className="text-faint">
-                couldn&apos;t request the channel timeline — connection may be reconnecting;{' '}
-                <button
-                  type="button"
-                  onClick={() => selectedChannelId && requestTimeline(selectedChannelId, '0')}
-                  className="underline hover:text-muted"
-                >
-                  try again
-                </button>
-              </p>
-            )}
-            {selectedSnapshot === null && timelinePhase === 'timeout' && (
-              <p className="text-faint">No response — refresh to try again.</p>
-            )}
-
-            {selectedSnapshot && (
-              <>
-                {timelinePhase === 'timeout' && (
-                  <p className="mb-2 text-torque">Refresh didn&apos;t return — showing the last timeline received.</p>
-                )}
-                {selectedSnapshot.events.length === 0 ? (
-                  <div className="rounded-[10px] border border-dashed border-border-strong px-6 py-8 text-center">
-                    <p className="text-[20px] opacity-60" aria-hidden>◌</p>
-                    <p className="mt-2 text-[12px] text-muted">No messages yet</p>
-                    <p className="mx-auto mt-1 max-w-[44ch] text-[10.5px] leading-[1.7] tracking-[0.04em] text-faint">
-                      This channel has no timeline events yet.
-                    </p>
-                  </div>
-                ) : (
-                  <ul className="space-y-2">
-                    {selectedSnapshot.events.map((ev) => (
-                      <TimelineEventRow key={ev.id} event={ev} />
-                    ))}
-                  </ul>
-                )}
-                {/* "Load more" is an EXPLICIT control (§11 row 13 / §13 S2):
-                    the 64 KiB frame cut means a short page does NOT imply the
-                    end of history — hasMore is the only honest signal.
-                    B-2 FIX: the wire pages FORWARD only (channel_seq
-                    ascending, store.ts:1813) — there is no backward-paging
-                    capability. The control fetches events NEWER than what's
-                    held and the results ACCUMULATE (see the merge effect
-                    above), so it is labelled "Load more" rather than
-                    "Load older" — the previous label described a direction
-                    the wire cannot page in. */}
-                {selectedSnapshot.hasMore && (
+          {selectedChannelId && (
+            <>
+              {/* Timeline honest states, same four-phase shape as the list. */}
+              {selectedSnapshot === null && timelinePhase === 'pending' && <p className="text-faint/75">Loading…</p>}
+              {selectedSnapshot === null && timelinePhase === 'sendFailed' && (
+                <p className="text-faint">
+                  couldn&apos;t request the channel timeline — connection may be reconnecting;{' '}
                   <button
                     type="button"
-                    onClick={loadOlder}
-                    disabled={isTimelineRefreshing}
-                    className="mt-3 rounded border border-border-strong px-2 py-0.5 text-[11px] text-muted transition-colors hover:border-faint disabled:opacity-50"
+                    onClick={() => selectedChannelId && requestTimeline(selectedChannelId, '0')}
+                    className="underline hover:text-muted"
                   >
-                    {isTimelineRefreshing ? 'loading…' : 'Load more'}
+                    try again
                   </button>
-                )}
-              </>
-            )}
-          </>
+                </p>
+              )}
+              {selectedSnapshot === null && timelinePhase === 'timeout' && (
+                <p className="text-faint">No response — refresh to try again.</p>
+              )}
+
+              {selectedSnapshot && (
+                <>
+                  {timelinePhase === 'timeout' && (
+                    <p className="mb-2 text-torque">Refresh didn&apos;t return — showing the last timeline received.</p>
+                  )}
+                  {selectedSnapshot.events.length === 0 ? (
+                    <div className="rounded-[10px] border border-dashed border-border-strong px-6 py-8 text-center">
+                      <p className="text-[20px] opacity-60" aria-hidden>◌</p>
+                      <p className="mt-2 text-[12px] text-muted">No messages yet</p>
+                      <p className="mx-auto mt-1 max-w-[44ch] text-[10.5px] leading-[1.7] tracking-[0.04em] text-faint">
+                        This channel has no timeline events yet.
+                      </p>
+                    </div>
+                  ) : (
+                    <ul className="space-y-2">
+                      {selectedSnapshot.events.map((ev) => (
+                        <TimelineEventRow key={ev.id} event={ev} />
+                      ))}
+                    </ul>
+                  )}
+                  {/* "Load more" is an EXPLICIT control (§11 row 13 / §13 S2):
+                      the 64 KiB frame cut means a short page does NOT imply the
+                      end of history — hasMore is the only honest signal.
+                      B-2 FIX: the wire pages FORWARD only (channel_seq
+                      ascending, store.ts:1813) — there is no backward-paging
+                      capability. The control fetches events NEWER than what's
+                      held and the results ACCUMULATE (see the merge effect
+                      above), so it is labelled "Load more" rather than
+                      "Load older" — the previous label described a direction
+                      the wire cannot page in. */}
+                  {selectedSnapshot.hasMore && (
+                    <button
+                      type="button"
+                      onClick={loadOlder}
+                      disabled={isTimelineRefreshing}
+                      className="mt-3 rounded border border-border-strong px-2 py-0.5 text-[11px] text-muted transition-colors hover:border-faint disabled:opacity-50"
+                    >
+                      {isTimelineRefreshing ? 'loading…' : 'Load more'}
+                    </button>
+                  )}
+                </>
+              )}
+
+              {/* S3: pending-sends strip. NEVER a normal timeline row -- a
+                  distinct visual container so a "sending…"/"failed" entry can
+                  never be mistaken for a persisted message. Cleared ONLY by
+                  the confirm effect above (real re-read match), never by
+                  time or by receiving the post ack. Rendered REGARDLESS of
+                  timeline load state (outside the `selectedSnapshot &&`
+                  gate) -- a message can be composed and sent before the
+                  channel's timeline has ever successfully loaded, or while a
+                  timeline refresh has failed; the composer's own state must
+                  not depend on the read path's success. */}
+              {channelPendingSends.length > 0 && (
+                <ul className="mt-3 space-y-1.5" aria-label="Pending messages">
+                  {channelPendingSends.map((p) => (
+                    <PendingSendRow key={p.idempotencyKey} pending={p} onRetry={retrySend} />
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* S3: composer. Only rendered with a channel selected -- posting
+            with no selected channel is not offered as an affordance. */}
+        {selectedChannelId && (
+          <div className="shrink-0 border-t border-edge p-3">
+            <textarea
+              value={draftText}
+              onChange={(e) => setDraftText(e.target.value)}
+              placeholder="Message this channel…"
+              rows={2}
+              className="w-full resize-none rounded border border-border-strong bg-transparent px-2 py-1.5 text-[12px] text-ink placeholder:text-faint focus:border-torque/40 focus:outline-none"
+            />
+            <div className="mt-1.5 flex items-center justify-between gap-2">
+              {/* Live byte budget against the REAL cap (§13 S3) — counts
+                  BYTES, not string.length, on the NFC-normalized form,
+                  against the tighter of the two independent bounds
+                  (text.ts:122 raw / text.ts:137 JSON-encoded). */}
+              <span
+                className={`text-[10px] ${
+                  budget.overCap ? 'text-bad' : budget.approaching ? 'text-torque' : 'text-faint'
+                }`}
+              >
+                {budget.bindingBytes.toLocaleString()} / {MESSAGE_MAX_BYTES.toLocaleString()} bytes
+                {budget.overCap && ' — over limit'}
+              </span>
+              <button
+                type="button"
+                onClick={sendMessage}
+                disabled={budget.empty || budget.overCap}
+                className="rounded border border-border-strong px-2 py-0.5 text-[11px] text-muted transition-colors hover:border-faint disabled:opacity-50"
+              >
+                Send
+              </button>
+            </div>
+          </div>
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * STRUCTURAL SAFETY BOUNDARY — read this before touching this component.
+ *
+ * PendingSendRow renders a send-in-flight entry ONLY -- it is visually
+ * distinct from TimelineEventRow (dashed border, "sending…"/"didn't
+ * send"/"no response" labels) precisely so it can never be mistaken for a
+ * persisted message (optimistic echo is forbidden, §13 S3). Its only
+ * dispatch surface is onRetry, which re-sends the SAME idempotencyKey
+ * (B-3) -- never a new one.
+ */
+function PendingSendRow({
+  pending,
+  onRetry,
+}: {
+  pending: PendingSend;
+  onRetry: (p: PendingSend) => void;
+}) {
+  const label =
+    pending.phase === 'sending' || pending.phase === 'awaitingConfirm'
+      ? 'sending…'
+      : pending.phase === 'sendFailed'
+        ? "didn't send"
+        : 'no response — retry';
+  return (
+    <li className="rounded border border-dashed border-border-strong px-2 py-1.5 text-[12px]">
+      <div className="flex items-center justify-between gap-2 text-[10px] text-faint">
+        <span>{label}</span>
+        {(pending.phase === 'sendFailed' || pending.phase === 'timeout') && (
+          <button
+            type="button"
+            onClick={() => onRetry(pending)}
+            className="underline hover:text-muted"
+          >
+            retry
+          </button>
+        )}
+      </div>
+      <p className="mt-0.5 font-reading text-[13px] leading-[1.6] text-faint">{pending.text}</p>
+    </li>
   );
 }
 

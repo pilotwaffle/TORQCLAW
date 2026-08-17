@@ -151,6 +151,63 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     cursor: z.string().regex(/^(0|[1-9][0-9]*)$/).default('0'),
     limit: z.number().int().min(1).max(100).default(20),
   }),
+  z.object({
+    // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S3: human posting. Deliberately NO
+    // author/principalId/surfaceId field -- the server ALWAYS stamps the
+    // author from the connection's resolved collab principal (§2a), so
+    // spoofing the author in the command shape is structurally impossible
+    // (A3). Field name `text`, not `body`, matching the substrate's actual
+    // contract exactly (postChannelMessage(caller, { channelId, text },
+    // idempotencyKey) -- store.ts:1422-1425).
+    //
+    // A6(a) validator citations (file:line, evidence for the T-9 matrix):
+    //  - text: this grammar (1-16384 chars) is a coarse pre-filter only. The
+    //    substrate's REAL bound is TWO independent BYTE bounds on the
+    //    NFC-normalized form -- packages/collab/src/text.ts:122
+    //    (countUtf8Bytes(nfcText) in [1,16384]) AND text.ts:137
+    //    (countJsonEncodedBytes(nfcText) <= 16384) -- neither of which is a
+    //    JS-string-length check and neither of which is regex-expressible
+    //    (residue: a 16,384-newline string passes a naive char-length check
+    //    but JSON-encodes to 32,768 bytes and is REJECTED by text.ts:137).
+    //    normalizeMessageText (text.ts:110) is the consuming validator; its
+    //    caller is store.ts:1428. This contract's max(16384) bound on
+    //    JS .length is intentionally COARSER than the byte bound (a
+    //    multi-byte string can exceed the byte cap at far fewer than 16384
+    //    chars) so it can never falsely admit something the byte bound
+    //    would reject while still rejecting some inputs early; the
+    //    authoritative rejection for the byte/JSON-byte bounds is, and must
+    //    stay, server-side in text.ts. min(1) is likewise a coarse
+    //    pre-filter -- text.ts:123 is the real floor, evaluated on the
+    //    POST-NFC-normalization form (a string that normalizes to zero
+    //    length, e.g. some combining-mark-only inputs, could in principle
+    //    pass min(1) here and still be rejected by text.ts:123; that
+    //    rejection is a structured INVALID_REQUEST from store.ts:1430, not
+    //    a throw that escapes the handler -- see collabSurface.ts).
+    //  - channelId: no format is asserted by the substrate itself (any
+    //    non-empty string id) -- the REAL narrowing validator is
+    //    assertChannelVisible (store.ts:2032), which does a membership JOIN
+    //    and throws CollabError('COLLAB_NOT_FOUND') for absent, hidden, OR
+    //    malformed-but-syntactically-fine channelId alike (byte-identical
+    //    per T-2). min(1) here matches GET_CHANNEL_TIMELINE's existing
+    //    channelId grammar exactly (no new pattern invented for this field).
+    //  - idempotencyKey: NOTHING in the substrate validates its shape.
+    //    packages/collab/src/migration.ts:137 declares the backing column
+    //    `idempotency_key TEXT NOT NULL` with no length/format CHECK, and
+    //    runKeyedCommand (store.ts:2182-2253) uses it as an opaque dedup key
+    //    in a (principal_id, command, idempotency_key) lookup -- ANY
+    //    non-empty string is accepted and would silently "work" as a
+    //    dedup key. The PRD (§4 S3, A3/B-3) specifies this MUST be a
+    //    client-supplied canonical UUID specifically so a retry after a
+    //    dropped socket reuses one deterministic value instead of a
+    //    server/random one. Since the substrate enforces no shape at all,
+    //    THIS CONTRACT is the only enforcement point -- z.uuid() below is
+    //    added deliberately to close that gap, not because a downstream
+    //    validator required it.
+    action: z.literal('POST_CHANNEL_MESSAGE'),
+    channelId: z.string().min(1),
+    text: z.string().min(1).max(16384),
+    idempotencyKey: z.uuid(),
+  }),
 ]);
 export type ClientCommand = z.infer<typeof ClientCommandSchema>;
 
