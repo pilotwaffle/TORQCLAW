@@ -1,24 +1,78 @@
 'use client';
 
-// PRD-TCLAW-COLLAB-PRESENCE-UI-005 S2 + S3 — Console Channels view.
+// PRD-TCLAW-COLLAB-PRESENCE-UI-005 S2 + S3 + S4 — Console Channels view.
 //
 // Fourth nav view over the S1 wire read surface (LIST_CHANNELS /
 // GET_CHANNEL_TIMELINE, packages/gateway/src/collabSurface.ts) plus S3's
-// composer (POST_CHANNEL_MESSAGE). No presence/roster, no live delivery —
-// those are S4/S5. Flag-gated by NEXT_PUBLIC_COLLAB_UI at the TorqTerminal
-// call site; this component itself assumes it is only ever mounted when the
-// flag is on (mirrors ApprovalHistoryPanel/ReceiptsPanel/MemoryPanel, none of
-// which re-check their own flag either).
+// composer (POST_CHANNEL_MESSAGE) and S4's hint-then-refetch freshness.
+// No presence/roster (S5). Flag-gated by NEXT_PUBLIC_COLLAB_UI at the
+// TorqTerminal call site; this component itself assumes it is only ever
+// mounted when the flag is on (mirrors ApprovalHistoryPanel/ReceiptsPanel/
+// MemoryPanel, none of which re-check their own flag either).
 //
 // SAFETY: the ONLY sendCommand actions reachable from anywhere in this file
 // are LIST_CHANNELS (mount, manual refresh), GET_CHANNEL_TIMELINE (channel
-// select, "Load more", post-ack-triggered re-read — the wire pages forward
-// only, see B-2 fix note at the button below), and POST_CHANNEL_MESSAGE
-// (composer Send/retry — the ONLY addition to the allowlist, per §14 T-11).
-// No roster/presence (S5), no live delivery (S4). ChannelRow, TimelineEventRow,
-// and PendingSendRow are MODULE-SCOPE components whose props are plain data
-// (zero function-typed fields except PendingSendRow's narrow onRetry) —
-// mirrors ApprovalHistoryRow / ReplayEventRow's structural boundary.
+// select, "Load more", hint-triggered re-read, reconnect re-read — the wire
+// pages forward only, see B-2 fix note at the button below), and
+// POST_CHANNEL_MESSAGE (composer Send/retry — the ONLY addition to the
+// allowlist, per §14 T-11). No roster/presence (S5). ChannelRow,
+// TimelineEventRow, and PendingSendRow are MODULE-SCOPE components whose
+// props are plain data (zero function-typed fields except PendingSendRow's
+// narrow onRetry) — mirrors ApprovalHistoryRow / ReplayEventRow's structural
+// boundary.
+//
+// ── S4: HINT-THEN-REFETCH (§4 S4 / A4 / T-6) — read this before touching
+// the hint effect below. ──────────────────────────────────────────────────
+//
+// WHERE THE HINT COMES FROM (decision, with file:line evidence): this slice
+// adds NO new wire command. The hint is the publishOnly frame
+// packages/gateway/src/collabSurface.ts:353-361 already emits from
+// handlePostChannelMessage on every successful post
+// (`metadata: { collabMessagePosted: true, channelId, eventId, cursor,
+// occurredAt }`) -- S3 shipped this frame to drive its own optimistic-echo
+// confirmation; S4 reuses the SAME frame as a general "channel N advanced"
+// invalidation hint, decoupled from whether THIS composer has a pending
+// send outstanding. That frame is seq-less and non-persisted
+// (packages/gateway/src/events.ts:96-101's publishOnly), matching §4 S4's
+// description exactly ("the gateway's publishOnly frames are seq-less and
+// non-persisted"). It rides packages/gateway/src/events.ts's sessionBus,
+// keyed by sessionId (events.ts:15 `Map<string, Set<Listener>>`), and
+// sessionId is STABLE across reconnects -- the console persists it in
+// sessionStorage and replays it as `sessionId` on the CONNECT frame
+// (useGatewayStream.ts:35), and the gateway's session-resume path
+// (packages/gateway/src/server.ts:268/273) resubscribes the SAME sessionId.
+// Multiple concurrent sockets resuming the same session (two tabs, or a
+// live tab plus a reconnecting one) are BOTH members of the same
+// `Set<Listener>` (events.ts:19-20) and both receive the same publish --
+// this is the only multi-viewer freshness path this substrate supports
+// today (§11 row 20: the substrate's real per-channel pub/sub is built but
+// NOT wired to the gateway; wiring it is explicitly out of this slice's
+// scope). No new wire command means no new A6/T-9 matrix is owed by this
+// file; collabSurface.ts's existing handler-totality coverage for
+// POST_CHANNEL_MESSAGE already governs the frame this slice consumes.
+//
+// NO DELIVERY GUARANTEE: this file does not claim, test, or imply that a
+// hint frame is guaranteed to arrive. The re-read it triggers is a
+// convenience; the LIST_CHANNELS/GET_CHANNEL_TIMELINE cursor path (already
+// wired, S1) is what actually recovers the contiguous truth -- on every
+// channel selection AND on every detected reconnect, independent of
+// whether any hint ever fires. "No-loss holds because the store is
+// authoritative and channel_seq is monotonic, not because the socket
+// promises delivery" (§4 S4, verbatim).
+//
+// COALESCING IS MANDATORY (Cycle-2 NB-3 / A4): at most ONE
+// GET_CHANNEL_TIMELINE is in flight per selected channel at any time. A
+// hint that arrives while a re-read is already in flight does NOT fire a
+// second request -- it sets a per-channel `dirty` flag; when the in-flight
+// read resolves, if dirty, exactly ONE follow-up re-read fires and the flag
+// clears. N hints during one in-flight read collapse to exactly one
+// follow-up, never N (see hintDirtyRef / requestTimeline below).
+//
+// RECONNECT: every CONNECTED frame (packages/gateway/src/server.ts:282-288,
+// emitted on both fresh connect and resume) is watched by its own `id` --
+// a NEW CONNECTED event id (never seen before) re-reads the selected
+// channel's timeline from cursor '0', the same store-backed contiguous
+// path S1 already proves.
 //
 // OPTIMISTIC ECHO IS FORBIDDEN (§13 S3): a posted message renders via the
 // pendingSends strip (visually distinct, dashed border) until — and ONLY
@@ -159,17 +213,58 @@ interface PendingSend {
 function selectLatestPostAck(
   events: GatewayEvent[],
   channelId: string,
-): { eventId: string; cursor: string } | null {
+): { eventId: string; cursor: string; idempotencyKey: string } | null {
   for (let i = events.length - 1; i >= 0; i--) {
     const meta = (events[i]!.metadata ?? {}) as Record<string, any>;
     if (
       meta.collabMessagePosted === true &&
       meta.channelId === channelId &&
       typeof meta.eventId === 'string' &&
-      typeof meta.cursor === 'string'
+      typeof meta.cursor === 'string' &&
+      // G2A D-1: an ack with no key is NOT attributable to a send, and
+      // stamping an unattributable ack onto every in-flight entry is what
+      // let a rejected sibling be cleared as sent. Skip it rather than
+      // guess -- the pending row then times out honestly.
+      typeof meta.idempotencyKey === 'string'
     ) {
-      return { eventId: meta.eventId, cursor: meta.cursor };
+      return { eventId: meta.eventId, cursor: meta.cursor, idempotencyKey: meta.idempotencyKey };
     }
+  }
+  return null;
+}
+
+/** S4: scans `events` BACKWARD for the newest POST_CHANNEL_MESSAGE ack for
+ *  `channelId`, regardless of idempotencyKey/pending-send correlation --
+ *  this is the general "channel N advanced" invalidation hint (§4 S4), not
+ *  the S3 self-send confirmation path (selectLatestPostAck above, which
+ *  intentionally stays scoped to a matching 'sending' pendingSends entry
+ *  and is NOT reused here). `eventId` is the substrate's own message_posted
+ *  event id -- globally unique per post -- so it is a safe per-hint dedup
+ *  key independent of who posted or which composer instance (if any) sent
+ *  it. Returns null when no ack for this channel has ever been seen, which
+ *  this file treats as "no hint yet", never as a reason to skip the
+ *  unconditional initial/reconnect re-reads below. */
+function selectLatestHintEventId(events: GatewayEvent[], channelId: string): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const meta = (events[i]!.metadata ?? {}) as Record<string, any>;
+    if (meta.collabMessagePosted === true && meta.channelId === channelId && typeof meta.eventId === 'string') {
+      return meta.eventId;
+    }
+  }
+  return null;
+}
+
+/** S4 reconnect signal: scans `events` for the newest CONNECTED frame's id
+ *  (packages/gateway/src/server.ts:282-288, emitted on BOTH fresh connect
+ *  and session resume -- `resolved.resumed` distinguishes them but this
+ *  file treats both alike, since either one means the socket was re-armed
+ *  and any hint that fired while it was down was, by construction, never
+ *  seen). A fresh CONNECTED id (never seen before) triggers a from-cursor-
+ *  '0' re-read of the selected channel -- store-backed contiguous recovery,
+ *  independent of whether any hint frame arrived around the disconnect. */
+function selectLatestConnectedId(events: GatewayEvent[]): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i]!.type === 'CONNECTED') return events[i]!.id;
   }
   return null;
 }
@@ -200,6 +295,33 @@ function selectLatestTimeline(events: GatewayEvent[], channelId: string): Timeli
       typeof meta.hasMore === 'boolean'
     ) {
       return { events: meta.events as TimelineEventEntry[], cursor: meta.cursor, hasMore: meta.hasMore };
+    }
+  }
+  return null;
+}
+
+/** S4: the GatewayEvent.id of the newest GET_CHANNEL_TIMELINE response frame
+ *  for `channelId`, or null. Used ONLY to distinguish "a genuinely NEW
+ *  response frame landed" from "the same already-seen frame is still the
+ *  newest one in `events`" -- selectLatestTimeline's return is a freshly
+ *  allocated object on every call (new reference each render even when the
+ *  underlying frame hasn't changed), so a reference/value comparison on ITS
+ *  output cannot detect "nothing new arrived"; the frame's own stable
+ *  GatewayEvent.id can. This is what makes the in-flight/coalescing guard
+ *  correct: without it, the flag-clearing effect would fire on every render
+ *  where a timeline frame merely still exists (which is EVERY render once
+ *  one has ever landed), permanently defeating coalescing. */
+function selectLatestTimelineFrameId(events: GatewayEvent[], channelId: string): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const meta = (events[i]!.metadata ?? {}) as Record<string, any>;
+    if (
+      meta.collabTimeline === true &&
+      meta.channelId === channelId &&
+      Array.isArray(meta.events) &&
+      typeof meta.cursor === 'string' &&
+      typeof meta.hasMore === 'boolean'
+    ) {
+      return events[i]!.id;
     }
   }
   return null;
@@ -385,18 +507,66 @@ export default function ChannelsPanel({
   const [timelinePhase, setTimelinePhase] = useState<Phase>('idle');
   const timelineTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // ── S4: coalescing state (§4 S4 / Cycle-2 NB-3 / A4) ────────────────────
+  //
+  // At most one GET_CHANNEL_TIMELINE re-read is ever "in flight" for the
+  // selected channel from this file's own bookkeeping perspective. A hint
+  // (or reconnect signal) that arrives while `refetchInFlightRef` is true
+  // for that channel does NOT send a second request -- it sets
+  // `refetchDirtyRef` for that channel instead. When the in-flight read's
+  // response frame lands (the existing timelinePhase-\>'idle' transition
+  // below), if dirty, exactly ONE follow-up fires and both flags reset.
+  // This is a `Record<channelId, boolean>`, not a single boolean, purely so
+  // switching the selected channel mid-flight cannot cross-contaminate a
+  // different channel's coalescing state -- in practice only the currently
+  // selected channel's entry is ever touched, since hints for a
+  // non-selected channel are never read (selectLatestHintEventId is always
+  // called with the CURRENT selectedChannelId).
+  const refetchInFlightRef = useRef<Record<string, boolean>>({});
+  const refetchDirtyRef = useRef<Record<string, boolean>>({});
+  const lastHintEventIdRef = useRef<Record<string, string>>({});
+  const lastConnectedIdRef = useRef<string | null>(null);
+  // Tracks the GatewayEvent.id of the last GET_CHANNEL_TIMELINE response
+  // frame this component has already reacted to, per channel. Required
+  // because `timelineByChannelId[selectedChannelId]` is TRUTHY on every
+  // render once any response has ever landed (selectLatestTimeline just
+  // re-finds the same newest frame each time) -- without this, the
+  // in-flight-clearing effect below would fire on every render regardless
+  // of whether a NEW response actually arrived, permanently defeating
+  // coalescing (a hint arriving on any render would see `in flight = false`
+  // and fire its own request every time). See selectLatestTimelineFrameId's
+  // doc comment for the full explanation.
+  const lastTimelineFrameIdRef = useRef<Record<string, string>>({});
+
   const requestTimeline = (channelId: string, cursor: string) => {
     if (timelineTimer.current) { clearTimeout(timelineTimer.current); timelineTimer.current = null; }
+    refetchInFlightRef.current[channelId] = true;
     const sent = sendCommand({
       action: 'GET_CHANNEL_TIMELINE',
       channelId,
       cursor: safeCursor(cursor),
       limit: 50,
     });
-    if (!sent) { setTimelinePhase('sendFailed'); return; } // never arms the timer
+    if (!sent) {
+      // Send failure is terminal for THIS attempt -- never arms the timer,
+      // and never leaves the channel permanently marked in-flight (a stuck
+      // `true` here would silently swallow every future hint for this
+      // channel, since the coalescing guard below checks it before firing).
+      setTimelinePhase('sendFailed');
+      refetchInFlightRef.current[channelId] = false;
+      return;
+    }
     setTimelinePhase('pending');
     timelineTimer.current = setTimeout(() => {
-      setTimelinePhase((p) => (p === 'pending' ? 'timeout' : p));
+      setTimelinePhase((p) => {
+        if (p !== 'pending') return p;
+        // A request that times out is also no longer "in flight" from the
+        // coalescing guard's perspective -- an operator or reconnect hint
+        // that arrives after this must be able to trigger a fresh attempt
+        // rather than being coalesced into a response that will never come.
+        refetchInFlightRef.current[channelId] = false;
+        return 'timeout';
+      });
     }, TIMEOUT_MS);
   };
 
@@ -406,12 +576,101 @@ export default function ChannelsPanel({
     if (found) {
       if (timelineTimer.current) { clearTimeout(timelineTimer.current); timelineTimer.current = null; }
       setTimelinePhase('idle');
+
+      // S4: only treat this as "the in-flight read resolved" when the
+      // underlying response FRAME is genuinely new -- see
+      // lastTimelineFrameIdRef's doc comment. Without this guard, this
+      // branch runs on EVERY render once any timeline frame has ever
+      // landed (found is truthy forever after), clearing the in-flight
+      // flag unconditionally and defeating coalescing entirely.
+      const frameId = selectLatestTimelineFrameId(events, selectedChannelId);
+      const isNewFrame = frameId !== null && lastTimelineFrameIdRef.current[selectedChannelId] !== frameId;
+      if (isNewFrame) {
+        lastTimelineFrameIdRef.current[selectedChannelId] = frameId;
+        // The in-flight read (whichever triggered it -- select, "Load
+        // more", a hint, or a reconnect) has now resolved. If a hint
+        // arrived WHILE it was in flight, `refetchDirtyRef` was set
+        // instead of firing a second request (the coalescing guard in the
+        // hint/reconnect effects below); fire the single owed follow-up
+        // now and clear both flags. If nothing arrived, just clear the
+        // in-flight flag so the NEXT hint can fire normally.
+        refetchInFlightRef.current[selectedChannelId] = false;
+        if (refetchDirtyRef.current[selectedChannelId]) {
+          refetchDirtyRef.current[selectedChannelId] = false;
+          requestTimeline(selectedChannelId, found.cursor);
+        }
+      }
     }
-  }, [selectedChannelId, timelineByChannelId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedChannelId, timelineByChannelId, events]);
 
   useEffect(() => {
     return () => { if (timelineTimer.current) clearTimeout(timelineTimer.current); };
   }, []);
+
+  // ── S4: hint-triggered coalesced re-read ────────────────────────────────
+  //
+  // Fires on ANY collabMessagePosted ack for the selected channel -- not
+  // just this composer's own in-flight sends (that narrower correlation is
+  // selectLatestPostAck / the pendingSends-confirm effect below, UNCHANGED
+  // by this slice). "channel N advanced" is read here as "the newest
+  // message_posted eventId for this channel differs from the last one this
+  // effect reacted to" -- eventId is the substrate's own per-post id,
+  // globally unique, so it is immune to two DIFFERENT posts racing the same
+  // idempotencyKey namespace (they never share one).
+  //
+  // NO DELIVERY GUARANTEE: this effect is a convenience trigger only. If the
+  // hint frame never arrives (dropped connection, coalesced into the
+  // in-flight guard elsewhere, or simply never emitted because this session
+  // wasn't subscribed when it fired), the channel-select and reconnect
+  // re-reads below are what actually recover the contiguous truth -- this
+  // effect is never the ONLY path to a correct render.
+  useEffect(() => {
+    if (!selectedChannelId) return;
+    const hintEventId = selectLatestHintEventId(events, selectedChannelId);
+    if (!hintEventId) return;
+    if (lastHintEventIdRef.current[selectedChannelId] === hintEventId) return; // not a NEW hint
+    lastHintEventIdRef.current[selectedChannelId] = hintEventId;
+
+    if (refetchInFlightRef.current[selectedChannelId]) {
+      // COALESCING (mandatory, §4 S4 / Cycle-2 NB-3): a re-read is already
+      // in flight for this channel. Mark dirty for exactly ONE follow-up
+      // instead of firing a second request -- see the timelinePhase-\>'idle'
+      // effect above, which is what actually sends that follow-up once the
+      // in-flight read resolves. N hints arriving here while in-flight all
+      // set the SAME boolean, so they collapse to exactly one follow-up.
+      refetchDirtyRef.current[selectedChannelId] = true;
+      return;
+    }
+    const snap = timelineSnapshots[selectedChannelId];
+    requestTimeline(selectedChannelId, snap?.cursor ?? '0');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [events, selectedChannelId]);
+
+  // ── S4: reconnect-triggered re-read (A4 "disconnect, or reconnect") ─────
+  //
+  // A NEW CONNECTED frame id (fresh connect OR resume -- both treated
+  // alike, see selectLatestConnectedId's doc) re-reads the selected
+  // channel's timeline from cursor '0': whatever hints did or didn't arrive
+  // while the socket was down, this is the store-backed recovery that does
+  // not depend on any of them having been seen. Routed through the SAME
+  // coalescing guard as the hint effect above -- a reconnect landing while
+  // an unrelated re-read is already in flight marks dirty rather than
+  // double-firing.
+  useEffect(() => {
+    if (!selectedChannelId) return;
+    const connectedId = selectLatestConnectedId(events);
+    if (!connectedId) return;
+    if (lastConnectedIdRef.current === connectedId) return; // not a NEW connect/resume
+    lastConnectedIdRef.current = connectedId;
+
+    if (refetchInFlightRef.current[selectedChannelId]) {
+      refetchDirtyRef.current[selectedChannelId] = true;
+      return;
+    }
+    requestTimeline(selectedChannelId, '0');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [events, selectedChannelId]);
 
   const selectChannel = (channelId: string) => {
     setSelectedChannelId(channelId);
@@ -420,6 +679,13 @@ export default function ChannelsPanel({
     // a from-scratch page onto stale history from an earlier selection.
     setTimelineSnapshots((prev) => ({ ...prev, [channelId]: null }));
     if (timelineTimer.current) { clearTimeout(timelineTimer.current); timelineTimer.current = null; }
+    // S4: a stale in-flight/dirty/last-frame flag from a PRIOR selection of
+    // this same channelId must not leak into this fresh load and cause a
+    // spurious extra re-read (or, symmetrically, a missed "resolved"
+    // detection) once this request resolves.
+    refetchInFlightRef.current[channelId] = false;
+    refetchDirtyRef.current[channelId] = false;
+    delete lastTimelineFrameIdRef.current[channelId];
     setTimelinePhase('pending');
     requestTimeline(channelId, '0');
   };
@@ -554,14 +820,23 @@ export default function ChannelsPanel({
     const ack = selectLatestPostAck(events, selectedChannelId);
     if (!ack) return;
     if (requestedAckEventIds.current.has(ack.eventId)) return;
-    const hasSendingForChannel = pendingSends.some(
-      (p) => p.channelId === selectedChannelId && (p.phase === 'sending' || p.phase === 'awaitingConfirm'),
+    // G2A D-1: correlate the ack to the ONE send it acks, by idempotencyKey.
+    // Previously this matched on channelId + phase==='sending', so with two
+    // sends in flight on one channel the surviving ack stamped BOTH -- and
+    // the rejected sibling was then cleared by the confirm effect as though
+    // it had committed. Silent drop, forbidden in those words by §13 S3/A8.
+    // Realistic trigger (G2A): paste a control char like \x07 -- the
+    // composer checks byte bounds only, the contract admits it, the
+    // substrate rejects it, and the ERROR frame never reaches the console
+    // (CO-S3-1). The user loses the draft with no failure state.
+    const acked = pendingSends.find(
+      (p) => p.idempotencyKey === ack.idempotencyKey && p.channelId === selectedChannelId,
     );
-    if (!hasSendingForChannel) return;
+    if (!acked || acked.phase !== 'sending') return;
     requestedAckEventIds.current.add(ack.eventId);
     setPendingSends((prev) =>
       prev.map((entry) =>
-        entry.channelId === selectedChannelId && entry.phase === 'sending'
+        entry.idempotencyKey === ack.idempotencyKey && entry.phase === 'sending'
           ? { ...entry, phase: 'awaitingConfirm', ackedEventId: ack.eventId }
           : entry,
       ),

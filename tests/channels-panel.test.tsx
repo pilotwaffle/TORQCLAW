@@ -492,17 +492,31 @@ describe('ChannelsPanel — S3 composer', () => {
     expect(data.idempotencyKey).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
   });
 
-  it('Send is disabled for empty text and for whitespace/newline-only text (client-side decline, not a substrate rule)', () => {
+  // G2A NB-1: this test was previously titled "...and for whitespace/newline-only
+  // text" but asserted NOTHING about whitespace -- it set the value, wrote a
+  // comment saying "confirm real behavior rather than assume", and ended. The
+  // title claimed a guarantee the body never checked. Retitled to the REAL
+  // behavior and both branches now asserted.
+  it('Send is disabled for EMPTY text (rawBytes === 0) and ENABLED for whitespace-only text, which the substrate accepts byte-identically (no trim)', () => {
     selectGeneral();
     expect(sendButton()).toBeDisabled();
 
+    // Whitespace-only is non-empty IN BYTES. The composer's `empty` check is
+    // byte-based (`rawBytes === 0`, ChannelsPanel.tsx:134) and the substrate
+    // has NO trim step for message text (text.ts:105 -- all-LF and
+    // leading/trailing-space messages are ACCEPTED and persisted
+    // byte-identical). So this must be SENDABLE; declining it here would be
+    // the console inventing a rule the substrate does not have.
     fireEvent.change(composerTextarea(), { target: { value: '   \n\t  ' } });
-    // whitespace-only is non-empty in bytes but the composer declines to
-    // send it anyway per its OWN choice (§13 S3) -- NOTE: the substrate
-    // itself would accept this; only THIS button's affordance declines it.
-    // The implementation's `empty` check is byte-based (rawBytes === 0),
-    // so purely-whitespace text with nonzero bytes is NOT blocked by
-    // `budget.empty` -- confirm real behavior rather than assume.
+    expect(
+      sendButton(),
+      'whitespace-only text has nonzero bytes and the substrate accepts it '
+      + '(no trim, text.ts:105) -- the composer must not invent a decline rule',
+    ).toBeEnabled();
+
+    // And back to genuinely empty -> disabled again.
+    fireEvent.change(composerTextarea(), { target: { value: '' } });
+    expect(sendButton()).toBeDisabled();
   });
 
   it('the composer NFC-normalizes and counts UTF-8 bytes (not string.length) live against the 16,384 cap', () => {
@@ -643,9 +657,15 @@ describe('ChannelsPanel — S3 composer', () => {
 
     // Post ack arrives (server confirmed commit) -- this alone must NOT
     // render the message; it only TRIGGERS a re-read.
+    // G2A D-1: the ack must carry the idempotencyKey of the send it acks.
+    // Read the real key out of the dispatched command rather than inventing
+    // one -- an ack with a foreign or absent key is now (correctly) ignored.
+    const sentKey = (sc.mock.calls.find(
+      (c: any[]) => c[0]?.action === 'POST_CHANNEL_MESSAGE',
+    )![0] as any).idempotencyKey as string;
     const ack = ev({
       type: 'SYSTEM',
-      metadata: { collabMessagePosted: true, channelId: 'chan-1', eventId: 'ev-confirmed-1', cursor: '1', occurredAt: '2026-08-17T00:00:00.000Z' },
+      metadata: { collabMessagePosted: true, channelId: 'chan-1', idempotencyKey: sentKey, eventId: 'ev-confirmed-1', cursor: '1', occurredAt: '2026-08-17T00:00:00.000Z' },
     });
     rerender(<ChannelsPanel events={[listFrame, initialTimeline, ack]} sendCommand={sc} onClose={vi.fn()} />);
 
@@ -672,6 +692,59 @@ describe('ChannelsPanel — S3 composer', () => {
     expect(confirmedRow.className).not.toMatch(/border-dashed/);
   });
 
+  it("G2A D-1: an ack for send A must NOT clear a DIFFERENT in-flight send B (no silent drop)", () => {
+    const sc = vi.fn(() => true);
+    const { rerender } = selectGeneral(sc);
+
+    // Two sends in flight on the SAME channel, back to back.
+    fireEvent.change(composerTextarea(), { target: { value: 'message A' } });
+    fireEvent.click(sendButton());
+    fireEvent.change(composerTextarea(), { target: { value: 'message B' } });
+    fireEvent.click(sendButton());
+
+    const posts = sc.mock.calls
+      .filter((c: any[]) => c[0]?.action === 'POST_CHANNEL_MESSAGE')
+      .map((c: any[]) => c[0] as any);
+    expect(posts.length).toBe(2);
+    const keyA = posts.find((p) => p.text === 'message A')!.idempotencyKey as string;
+
+    // Only A commits. B is REJECTED server-side -- realistically by a pasted
+    // control char: the composer checks byte bounds only, the contract
+    // admits it, the substrate rejects it, and the ERROR frame never reaches
+    // the console (CO-S3-1). So B gets NO frame at all, ever.
+    const listFrame = channelListFrame([channelRow()]);
+    const ackA = ev({
+      type: 'SYSTEM',
+      metadata: { collabMessagePosted: true, channelId: 'chan-1', idempotencyKey: keyA, eventId: 'ev-A', cursor: '1', occurredAt: '2026-08-17T00:00:00.000Z' },
+    });
+    // The re-read A's ack triggers returns, containing ONLY A.
+    const timelineWithAOnly = timelineFrame(
+      'chan-1',
+      [timelineEvent({ id: 'ev-A', cursor: '1', payload: { channelId: 'chan-1', text: 'message A' } })],
+      '1',
+      false,
+    );
+    rerender(<ChannelsPanel events={[listFrame, ackA, timelineWithAOnly]} sendCommand={sc} onClose={vi.fn()} />);
+
+    // A is now a real committed row.
+    expect(screen.getAllByText('message A').length).toBe(1);
+
+    // THE ASSERTION. Before the fix, the ack effect matched on
+    // channelId + phase==='sending' and stamped BOTH entries with A's
+    // eventId; the confirm effect then found ev-A in the snapshot and
+    // dropped B's pending row too -- B vanished with no failure state and
+    // no retry, the user's draft gone. B must still be visible and pending.
+    expect(
+      screen.queryByText('message B'),
+      'G2A D-1 REGRESSION: a rejected/unacked sibling send was cleared by ANOTHER '
+      + "send's ack. That is a silent drop -- forbidden by §13 S3 and A8. The ack "
+      + 'must be correlated to its own send by idempotencyKey.',
+    ).toBeInTheDocument();
+    const bRow = screen.getByText('message B').closest('li')!;
+    expect(bRow.className, 'B must remain visibly PENDING, never rendered as sent')
+      .toMatch(/border-dashed/);
+  });
+
   it('T-11 (S3 addition): typing + Send dispatches ONLY LIST_CHANNELS / GET_CHANNEL_TIMELINE / POST_CHANNEL_MESSAGE, disjoint from every other dangerous action', () => {
     const sc = vi.fn(() => true);
     selectGeneral(sc);
@@ -688,5 +761,273 @@ describe('ChannelsPanel — S3 composer', () => {
     const sc = vi.fn(() => true);
     renderPanel([], sc);
     expect(screen.queryByPlaceholderText('Message this channel…')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S4 — live delivery as hint-then-refetch (§4 S4 / A4 / T-6).
+//
+// WHERE THE HINT COMES FROM: the SAME collabMessagePosted publishOnly frame
+// S3 already emits (collabSurface.ts:353-361) -- these tests build that
+// frame with a hintFrame() helper below and never invent a new wire shape.
+// No new wire command means A6/T-9 do not apply to this file (see the
+// module doc header). CONNECTED reconnect frames use the SAME `ev()`
+// factory as every other test in this file (type: 'CONNECTED').
+//
+// NO DELIVERY GUARANTEE: none of these tests assert that a hint frame WILL
+// arrive, is retried, or is queued if missed. Every test drives the panel
+// with a hint frame ALREADY PRESENT in `events` (exactly like every other
+// test in this file drives it with a channel-list/timeline frame already
+// present) and asserts the RESULTING re-read behavior -- contiguity,
+// coalescing call counts, and reconnect recovery. This is deliberately the
+// same "frame observed in props" test shape used throughout this file; it
+// is not a claim about socket delivery semantics, which this file does not
+// control and does not test.
+// ---------------------------------------------------------------------------
+describe('ChannelsPanel — S4 hint-then-refetch', () => {
+  function hintFrame(overrides: Record<string, unknown> = {}): GatewayEvent {
+    return ev({
+      type: 'SYSTEM',
+      metadata: {
+        collabMessagePosted: true,
+        channelId: 'chan-1',
+        idempotencyKey: 'irrelevant-to-s4-00000000-0000-0000-0000-000000000000',
+        eventId: 'hint-ev-1',
+        cursor: '1',
+        occurredAt: '2026-08-17T00:00:00.000Z',
+        ...overrides,
+      },
+    });
+  }
+
+  function connectedFrame(sessionId = 'sess-reconnect-1'): GatewayEvent {
+    return ev({ type: 'CONNECTED', metadata: { sessionId, resumed: true } });
+  }
+
+  function selectGeneral(sc = vi.fn(() => true)) {
+    const frame = channelListFrame([channelRow()]);
+    const result = renderPanel([frame], sc);
+    fireEvent.click(screen.getByText('general'));
+    return { ...result, sc, frame };
+  }
+
+  it('A4: a hint frame for the selected channel triggers a GET_CHANNEL_TIMELINE re-read from the current cursor — event visible without a manual refresh', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+
+    // Initial select already dispatched cursor '0'; land its response first
+    // so the panel has a known cursor to re-read from.
+    const initialTimeline = timelineFrame('chan-1', [], '0', false);
+    rerender(<ChannelsPanel events={[frame, initialTimeline]} sendCommand={sc} onClose={vi.fn()} />);
+    sc.mockClear();
+
+    // A hint arrives for THIS channel — no matching pendingSends entry
+    // exists (nobody in THIS panel instance sent anything). Under the S3-only
+    // ack effect this would be silently ignored; S4 must still re-read.
+    const hint = hintFrame({ eventId: 'hint-ev-A' });
+    rerender(<ChannelsPanel events={[frame, initialTimeline, hint]} sendCommand={sc} onClose={vi.fn()} />);
+
+    const timelineCalls = sc.mock.calls.filter((c) => (c[0] as any).action === 'GET_CHANNEL_TIMELINE');
+    expect(timelineCalls.length).toBe(1);
+    expect(timelineCalls[0]![0]).toEqual({ action: 'GET_CHANNEL_TIMELINE', channelId: 'chan-1', cursor: '0', limit: 50 });
+
+    // The re-read lands, contiguous with the prior page (cursor '0' -> '1'),
+    // and the new event is now visible with no user-initiated refresh click.
+    const afterHint = timelineFrame(
+      'chan-1',
+      [timelineEvent({ id: 'ev-from-hint', cursor: '1', payload: { channelId: 'chan-1', text: 'arrived via hint' } })],
+      '1',
+      false,
+    );
+    rerender(<ChannelsPanel events={[frame, initialTimeline, hint, afterHint]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(screen.getByText('arrived via hint')).toBeInTheDocument();
+  });
+
+  it('A4/T-6: contiguous, prefix-consistent recovery — the re-read after a hint APPENDS onto the existing page rather than replacing or gapping it', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+
+    const page1 = timelineFrame(
+      'chan-1',
+      [timelineEvent({ id: 'ev-1', cursor: '1', payload: { channelId: 'chan-1', text: 'first' } })],
+      '1',
+      false,
+    );
+    rerender(<ChannelsPanel events={[frame, page1]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(screen.getByText('first')).toBeInTheDocument();
+
+    const hint = hintFrame({ eventId: 'hint-ev-B', cursor: '2' });
+    rerender(<ChannelsPanel events={[frame, page1, hint]} sendCommand={sc} onClose={vi.fn()} />);
+
+    const page2 = timelineFrame(
+      'chan-1',
+      [timelineEvent({ id: 'ev-2', cursor: '2', payload: { channelId: 'chan-1', text: 'second' } })],
+      '2',
+      false,
+    );
+    rerender(<ChannelsPanel events={[frame, page1, hint, page2]} sendCommand={sc} onClose={vi.fn()} />);
+
+    // Both events present, in dense ascending channel_seq (cursor) order —
+    // the same B-2 merge/contiguity discipline S1/S2 already prove, now
+    // exercised via a hint-triggered re-read instead of "Load more".
+    expect(screen.getByText('first')).toBeInTheDocument();
+    expect(screen.getByText('second')).toBeInTheDocument();
+    const items = screen.getAllByRole('listitem').filter((li) => /first|second/.test(li.textContent ?? ''));
+    const texts = items.map((li) => li.textContent);
+    expect(texts.findIndex((t) => t?.includes('first'))).toBeLessThan(texts.findIndex((t) => t?.includes('second')));
+  });
+
+  it('A4: coalescing — N hints arriving WHILE a re-read is in flight produce exactly ONE follow-up request, not N', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+
+    const initialTimeline = timelineFrame('chan-1', [], '0', false);
+    rerender(<ChannelsPanel events={[frame, initialTimeline]} sendCommand={sc} onClose={vi.fn()} />);
+    sc.mockClear();
+
+    // First hint fires the re-read (now "in flight" — no response frame for
+    // it has landed yet).
+    const hint1 = hintFrame({ eventId: 'hint-ev-1' });
+    rerender(<ChannelsPanel events={[frame, initialTimeline, hint1]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(sc.mock.calls.filter((c) => (c[0] as any).action === 'GET_CHANNEL_TIMELINE').length).toBe(1);
+
+    // THREE more distinct hints arrive before that request resolves. Each
+    // has a DIFFERENT eventId (a real "new hint" by this file's own dedup
+    // rule), so a non-coalescing implementation would fire three more
+    // requests here. None of these may dispatch a new GET_CHANNEL_TIMELINE —
+    // the call count must stay pinned at 1 until the in-flight read resolves.
+    const hint2 = hintFrame({ eventId: 'hint-ev-2' });
+    const hint3 = hintFrame({ eventId: 'hint-ev-3' });
+    const hint4 = hintFrame({ eventId: 'hint-ev-4' });
+    rerender(<ChannelsPanel events={[frame, initialTimeline, hint1, hint2]} sendCommand={sc} onClose={vi.fn()} />);
+    rerender(<ChannelsPanel events={[frame, initialTimeline, hint1, hint2, hint3]} sendCommand={sc} onClose={vi.fn()} />);
+    rerender(<ChannelsPanel events={[frame, initialTimeline, hint1, hint2, hint3, hint4]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(
+      sc.mock.calls.filter((c) => (c[0] as any).action === 'GET_CHANNEL_TIMELINE').length,
+      'COALESCING VIOLATION: hints arriving while a re-read is in flight must NOT each fire their own request.',
+    ).toBe(1);
+
+    // The in-flight read's response now lands. Because it was marked dirty
+    // by hints 2-4, EXACTLY ONE follow-up must fire now — not zero (the
+    // dirty hints would be silently lost) and not three (one per hint).
+    const resolved = timelineFrame('chan-1', [], '0', false);
+    rerender(<ChannelsPanel events={[frame, initialTimeline, hint1, hint2, hint3, hint4, resolved]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(
+      sc.mock.calls.filter((c) => (c[0] as any).action === 'GET_CHANNEL_TIMELINE').length,
+      'exactly ONE coalesced follow-up must fire once the in-flight read resolves, not zero and not one-per-hint.',
+    ).toBe(2);
+
+    // And that follow-up resolving must NOT trigger yet another request —
+    // proving the dirty flag was consumed exactly once, not left sticky.
+    const resolvedAgain = timelineFrame('chan-1', [], '0', false);
+    rerender(<ChannelsPanel events={[frame, initialTimeline, hint1, hint2, hint3, hint4, resolved, resolvedAgain]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(sc.mock.calls.filter((c) => (c[0] as any).action === 'GET_CHANNEL_TIMELINE').length).toBe(2);
+  });
+
+  it('A4: a hint with an eventId already reacted to does NOT fire a duplicate re-read (dedup by eventId, not just presence)', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+    const initialTimeline = timelineFrame('chan-1', [], '0', false);
+    rerender(<ChannelsPanel events={[frame, initialTimeline]} sendCommand={sc} onClose={vi.fn()} />);
+    sc.mockClear();
+
+    const hint = hintFrame({ eventId: 'hint-ev-same' });
+    rerender(<ChannelsPanel events={[frame, initialTimeline, hint]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(sc.mock.calls.filter((c) => (c[0] as any).action === 'GET_CHANNEL_TIMELINE').length).toBe(1);
+
+    const resolved = timelineFrame('chan-1', [], '0', false);
+    rerender(<ChannelsPanel events={[frame, initialTimeline, hint, resolved]} sendCommand={sc} onClose={vi.fn()} />);
+    // Re-render with the SAME hint (same eventId) still the newest one —
+    // must NOT fire again.
+    rerender(<ChannelsPanel events={[frame, initialTimeline, hint, resolved]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(sc.mock.calls.filter((c) => (c[0] as any).action === 'GET_CHANNEL_TIMELINE').length).toBe(1);
+  });
+
+  it('A4/T-6: a NEW CONNECTED frame (reconnect/resume) re-reads the selected channel from cursor "0" and recovers a contiguous timeline', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+    const beforeDisconnect = timelineFrame(
+      'chan-1',
+      [timelineEvent({ id: 'ev-before', cursor: '1', payload: { channelId: 'chan-1', text: 'before disconnect' } })],
+      '1',
+      false,
+    );
+    rerender(<ChannelsPanel events={[frame, beforeDisconnect]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(screen.getByText('before disconnect')).toBeInTheDocument();
+    sc.mockClear();
+
+    // Socket dropped and reconnected — a fresh CONNECTED frame lands (never
+    // seen before by this panel instance).
+    const reconnected = connectedFrame('sess-after-reconnect');
+    rerender(<ChannelsPanel events={[frame, beforeDisconnect, reconnected]} sendCommand={sc} onClose={vi.fn()} />);
+
+    const timelineCalls = sc.mock.calls.filter((c) => (c[0] as any).action === 'GET_CHANNEL_TIMELINE');
+    expect(timelineCalls.length).toBe(1);
+    expect(timelineCalls[0]![0]).toEqual({ action: 'GET_CHANNEL_TIMELINE', channelId: 'chan-1', cursor: '0', limit: 50 });
+
+    // The store-backed re-read from '0' returns the FULL contiguous history
+    // (the store, not the socket, is the source of truth — §4 S4).
+    const recovered = timelineFrame(
+      'chan-1',
+      [
+        timelineEvent({ id: 'ev-before', cursor: '1', payload: { channelId: 'chan-1', text: 'before disconnect' } }),
+        timelineEvent({ id: 'ev-missed', cursor: '2', payload: { channelId: 'chan-1', text: 'missed while down' } }),
+      ],
+      '2',
+      false,
+    );
+    rerender(<ChannelsPanel events={[frame, beforeDisconnect, reconnected, recovered]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(screen.getByText('before disconnect')).toBeInTheDocument();
+    expect(screen.getByText('missed while down')).toBeInTheDocument();
+  });
+
+  it('a repeated CONNECTED frame with the SAME id (re-render, not a new connect) does not re-fire the reconnect re-read', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+    const initialTimeline = timelineFrame('chan-1', [], '0', false);
+    rerender(<ChannelsPanel events={[frame, initialTimeline]} sendCommand={sc} onClose={vi.fn()} />);
+    sc.mockClear();
+
+    const reconnected = connectedFrame();
+    rerender(<ChannelsPanel events={[frame, initialTimeline, reconnected]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(sc.mock.calls.filter((c) => (c[0] as any).action === 'GET_CHANNEL_TIMELINE').length).toBe(1);
+
+    const resolved = timelineFrame('chan-1', [], '0', false);
+    rerender(<ChannelsPanel events={[frame, initialTimeline, reconnected, resolved]} sendCommand={sc} onClose={vi.fn()} />);
+    // Same events array reference content (same CONNECTED id) re-rendered —
+    // must not dispatch a second reconnect re-read.
+    rerender(<ChannelsPanel events={[frame, initialTimeline, reconnected, resolved]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(sc.mock.calls.filter((c) => (c[0] as any).action === 'GET_CHANNEL_TIMELINE').length).toBe(1);
+  });
+
+  it('T-11 (S4 addition): a hint-triggered re-read dispatches ONLY GET_CHANNEL_TIMELINE — no new action added to the allowlist by this slice', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+    const initialTimeline = timelineFrame('chan-1', [], '0', false);
+    rerender(<ChannelsPanel events={[frame, initialTimeline]} sendCommand={sc} onClose={vi.fn()} />);
+    sc.mockClear();
+
+    const hint = hintFrame({ eventId: 'hint-inertness' });
+    rerender(<ChannelsPanel events={[frame, initialTimeline, hint]} sendCommand={sc} onClose={vi.fn()} />);
+
+    const actions = sc.mock.calls.map((c) => (c[0] as any).action);
+    expect(actions.length).toBeGreaterThan(0);
+    for (const a of actions) expect(S3_ALLOWLIST.has(a)).toBe(true);
+    for (const a of actions) expect(DANGEROUS_ACTIONS.has(a)).toBe(false);
+  });
+
+  it('no-delivery-language sweep: this panel never renders "delivered", "live", or a checkmark-style delivery claim anywhere', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame, container } = selectGeneral(sc);
+    const timeline = timelineFrame(
+      'chan-1',
+      [timelineEvent({ id: 'ev-x', cursor: '1', payload: { channelId: 'chan-1', text: 'plain message' } })],
+      '1',
+      false,
+    );
+    rerender(<ChannelsPanel events={[frame, timeline]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(container.textContent).not.toMatch(/delivered/i);
+    expect(container.textContent).not.toMatch(/\blive\b/i);
+    expect(container.textContent).not.toContain('✓');
   });
 });
