@@ -13,6 +13,7 @@ import ReceiptsPanel from './ReceiptsPanel';
 import CostPanel from './CostPanel';
 import ApprovalHistoryPanel from './ApprovalHistoryPanel';
 import MemoryPanel from './MemoryPanel';
+import ChannelsPanel from './ChannelsPanel';
 
 // TCLAW-5B-2 [G1R RC-5 proof, commit 2]: the terminal "copy safe export" chip
 // requires that an ERROR event's requestId equals the taskId GET_SAFE_EXPORT
@@ -48,6 +49,13 @@ const GATEWAY_TOKEN = process.env.NEXT_PUBLIC_GATEWAY_TOKEN ?? '';
 // without the files the operator attached. Flag OFF (default): no paperclip,
 // zero behavior change.
 const ATTACHMENTS_ENABLED = process.env.NEXT_PUBLIC_ATTACHMENTS === '1';
+
+// PRD-TCLAW-COLLAB-PRESENCE-UI-005 S2: Channels view (read-only). Module-
+// level const, strict '1' check — same discipline as ATTACHMENTS_ENABLED.
+// Flag OFF => zero behavior change: no nav item, no view, no collab command
+// ever dispatched (checked again at the render-branch call site below, not
+// just here).
+const COLLAB_UI_ENABLED = process.env.NEXT_PUBLIC_COLLAB_UI === '1';
 
 type ExecutionMode = 'AUTO' | 'LOCAL_ONLY' | 'CLOUD_OK';
 // '' = no budget (falls to env default). 'free' = local-only, $0.
@@ -157,7 +165,7 @@ export default function TorqTerminal() {
   // three may be open simultaneously, no coordination logic between them.
   const [approvalsOpen, setApprovalsOpen] = useState(false);
   // PRD-UI-1 §1/§3: sidebar view switching.
-  const [view, setView] = useState<'tasks' | 'approvals' | 'memory'>('tasks');
+  const [view, setView] = useState<'tasks' | 'approvals' | 'memory' | 'channels'>('tasks');
   // Stop-button UX: 'requested' once a cancel is sent (button shows "stopping…"),
   // 'failed' if the send was dropped so the user knows to retry. Cleared when the
   // next task starts.
@@ -846,6 +854,14 @@ export default function TorqTerminal() {
               </svg>
               Memory
             </button>
+            {COLLAB_UI_ENABLED && (
+              <button type="button" onClick={() => setView('channels')} className={navItemClass(view === 'channels')}>
+                <svg className="h-[15px] w-[15px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                  <path d="M8 10h8M8 14h5M21 12c0 4.4-4 8-9 8-1.3 0-2.5-.2-3.6-.6L3 21l1.7-4.3C3.6 15.5 3 13.8 3 12c0-4.4 4-8 9-8s9 3.6 9 8Z" />
+                </svg>
+                Channels
+              </button>
+            )}
           </nav>
           <div className="min-h-0 flex-1 overflow-y-auto px-2.5 pt-2">
             <p className="px-2.5 pb-2 text-[9px] font-bold uppercase tracking-[0.2em] text-faint">Sessions</p>
@@ -870,6 +886,9 @@ export default function TorqTerminal() {
         )}
         {view === 'memory' && (
           <MemoryPanel events={events} sendCommand={sendCommand} onClose={() => setView('tasks')} />
+        )}
+        {COLLAB_UI_ENABLED && view === 'channels' && (
+          <ChannelsPanel events={events} sendCommand={sendCommand} onClose={() => setView('tasks')} />
         )}
       <div
         ref={scrollRef}
