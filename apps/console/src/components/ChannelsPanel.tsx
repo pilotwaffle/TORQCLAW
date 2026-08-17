@@ -841,9 +841,29 @@ export default function ChannelsPanel({
           : entry,
       ),
     );
-    // Re-read from the snapshot's current cursor (or '0' if none yet) --
-    // the coalesced-refetch pattern S4 specifies; here driven by the ack
-    // hint rather than a live-delivery hint, same mechanism.
+    // G1R V-1: this comment used to claim "the coalesced-refetch pattern S4
+    // specifies... same mechanism" while SKIPPING the mechanism -- it called
+    // requestTimeline unconditionally. One collabMessagePosted ack for the
+    // operator's OWN send satisfies BOTH selectLatestPostAck (key-correlated)
+    // and selectLatestHintEventId (key-agnostic by design), and both effects
+    // carry [events, selectedChannelId] in their deps, so a single ack frame
+    // ran both in the same commit. They keep SEPARATE dedup ledgers
+    // (lastHintEventIdRef vs requestedAckEventIds) so neither suppressed the
+    // other: the hint effect armed in-flight, this one ignored it and fired a
+    // second concurrent read at the same cursor. Measured 1 extra read PER
+    // ACK, unbounded (1,2,3,4 for four sends) -- and the busy-channel burst is
+    // exactly the case §4 S4's coalescing clause exists to prevent
+    // ("so a busy channel cannot thundering-herd the store", verbatim).
+    //
+    // Secondary harm the guard also closes: two concurrent reads shared ONE
+    // timelineTimer ref, which requestTimeline clears and re-arms
+    // unconditionally -- so the second read's timer overwrote the first's and
+    // a genuinely hung first read had its timeout silently disarmed, masking
+    // a real timeout behind a stale-but-plausible state.
+    if (refetchInFlightRef.current[selectedChannelId]) {
+      refetchDirtyRef.current[selectedChannelId] = true;
+      return;
+    }
     const snap = timelineSnapshots[selectedChannelId];
     requestTimeline(selectedChannelId, snap?.cursor ?? '0');
   }, [events, selectedChannelId, pendingSends, timelineSnapshots]);

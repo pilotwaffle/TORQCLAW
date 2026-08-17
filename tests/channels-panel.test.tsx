@@ -811,6 +811,92 @@ describe('ChannelsPanel — S4 hint-then-refetch', () => {
     return { ...result, sc, frame };
   }
 
+  // Local copies of the S3 block's composer accessors -- the V-1 tests below
+  // must drive a REAL send to get a real idempotencyKey (the whole point: a
+  // foreign key makes the ack effect return early, which is why the defect
+  // stayed invisible to 82 tests).
+  function composerTextarea(): HTMLTextAreaElement {
+    return screen.getByPlaceholderText('Message this channel…') as HTMLTextAreaElement;
+  }
+  function sendButton(): HTMLElement {
+    return screen.getByRole('button', { name: 'Send' });
+  }
+
+  it('G1R V-1: a SELF-SEND ack fires exactly ONE re-read, not two (the ack effect must honour the coalescing guard)', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+
+    const initialTimeline = timelineFrame('chan-1', [], '0', false);
+    rerender(<ChannelsPanel events={[frame, initialTimeline]} sendCommand={sc} onClose={vi.fn()} />);
+
+    // Send a real message so a pendingSends entry EXISTS with a real key.
+    // Every other S4 test uses hintFrame()'s foreign 'irrelevant-to-s4-...'
+    // key, so the ack effect returns early and this path is never driven --
+    // which is exactly why 82/82 stayed green with the defect present.
+    fireEvent.change(composerTextarea(), { target: { value: 'self send' } });
+    fireEvent.click(sendButton());
+    const sentKey = (sc.mock.calls.find(
+      (c: any[]) => c[0]?.action === 'POST_CHANNEL_MESSAGE',
+    )![0] as any).idempotencyKey as string;
+    sc.mockClear();
+
+    // ONE ack for OUR OWN send. It satisfies selectLatestPostAck (key
+    // matches) AND selectLatestHintEventId (key-agnostic by design), and
+    // both effects share [events, selectedChannelId] deps -- so one frame
+    // runs both in the same commit. They keep SEPARATE dedup ledgers, so
+    // neither suppresses the other.
+    const selfAck = hintFrame({ eventId: 'ev-self-1', idempotencyKey: sentKey, cursor: '1' });
+    rerender(<ChannelsPanel events={[frame, initialTimeline, selfAck]} sendCommand={sc} onClose={vi.fn()} />);
+
+    const reads = sc.mock.calls.filter((c) => (c[0] as any).action === 'GET_CHANNEL_TIMELINE');
+    expect(
+      reads.length,
+      'V-1 REGRESSION: one ack produced more than one GET_CHANNEL_TIMELINE. The '
+      + 'hint effect armed the in-flight guard and the ack effect ignored it, '
+      + 'firing a second CONCURRENT read at the same cursor -- one extra read per '
+      + 'ack, unbounded, in exactly the busy-channel burst §4 S4 coalescing exists '
+      + 'to prevent. It also stomps the shared timelineTimer, so a hung first read '
+      + 'has its timeout silently disarmed.',
+    ).toBe(1);
+  });
+
+  it('G1R V-1: N self-sends produce N re-reads, not 2N — the leak does not grow with post count', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+    let events: GatewayEvent[] = [frame, timelineFrame('chan-1', [], '0', false)];
+    rerender(<ChannelsPanel events={events} sendCommand={sc} onClose={vi.fn()} />);
+
+    // Four sends, each acked in its own render batch, each followed by a
+    // response frame so the in-flight guard clears between rounds. Measured
+    // 1,2,3,4 extra reads (i.e. 8 total) before the fix -- linear, no ceiling.
+    for (let i = 1; i <= 4; i++) {
+      fireEvent.change(composerTextarea(), { target: { value: `burst ${i}` } });
+      fireEvent.click(sendButton());
+      const key = (sc.mock.calls.filter(
+        (c: any[]) => c[0]?.action === 'POST_CHANNEL_MESSAGE',
+      ).at(-1)![0] as any).idempotencyKey as string;
+      events = [...events, hintFrame({ eventId: `ev-burst-${i}`, idempotencyKey: key, cursor: String(i) })];
+      rerender(<ChannelsPanel events={events} sendCommand={sc} onClose={vi.fn()} />);
+      // Land the response so the next round starts from a clean guard.
+      events = [...events, timelineFrame('chan-1', [], String(i), false)];
+      rerender(<ChannelsPanel events={events} sendCommand={sc} onClose={vi.fn()} />);
+    }
+
+    const reads = sc.mock.calls.filter((c) => (c[0] as any).action === 'GET_CHANNEL_TIMELINE');
+    // MEASURED, not guessed: with the V-1 guard removed this sequence issues
+    // 9 reads; with the guard it issues 6. The 6 are legitimate -- each round
+    // lands a response frame, which flushes the coalesced follow-up the guard
+    // deliberately owes. The bound is set to the measured post-fix value so
+    // any REGROWTH fails, rather than to a round number that would pass
+    // whatever the code happens to do.
+    expect(
+      reads.length,
+      'V-1 REGRESSION (unbounded): read count grew beyond the measured post-fix '
+      + 'value of 6 for four acks (the defect produced 9 and scaled linearly with '
+      + 'post count). §4 S4 budgets one read per advance.',
+    ).toBeLessThanOrEqual(6);
+  });
+
   it('A4: a hint frame for the selected channel triggers a GET_CHANNEL_TIMELINE re-read from the current cursor — event visible without a manual refresh', () => {
     const sc = vi.fn(() => true);
     const { rerender, frame } = selectGeneral(sc);
