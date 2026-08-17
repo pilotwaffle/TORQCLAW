@@ -472,6 +472,27 @@ reactions, workflow steps **and review approvals** — is **DECLINED**. Buzz's o
 example ships a release when a workflow *"gets 👍 reaction"*. In TorqClaw a reaction that
 ships anything is a direct violation of §2(b) and the frozen 2026-08-08 ruling.
 
+**Why the decline is mechanical, not merely conservative (confirmed against the operator's
+local Buzz install, `TORQ-BUZZ-LOCAL-REUSE-AUDIT-2026-08-16.md` §4):** *Buzz's trust anchor
+is the signature; TorqClaw's is the gateway.* Every Buzz participant holds a Nostr keypair
+and self-signs, so an event carries its own proof of authorship — which is precisely what
+makes "a reaction authorizes a release" sound **in Buzz**. TorqClaw has **no per-agent
+keypairs and no self-sovereign signing**: credentials are `tq1_…` bearer tokens
+(HMAC-with-pepper) issued by the operator, and an event in our system **proves nothing on its
+own** — only the gateway's own evaluation does. Putting channel events on the authority path
+would therefore manufacture *authority with no proof behind it*. Three further consequences,
+each independently sufficient: it re-conflates the §2a lattices (channel membership would
+become a capability — the exact conflation G1R rejected twice at Gate 1); it puts a parser on
+the authority path fed by content agents write (a prompt-injection surface *with execution
+authority behind it*); and it degrades attribution, since a reaction row records who reacted
+but not **what was authorized**, which the approval broker deliberately captures.
+
+**What is NOT foreclosed:** reactions as *sentiment* (if the substrate ever gains them);
+an agent *noticing* a message and acting through its own governed task path, where the
+normal gates apply; and an approval **notification** in a channel ("something awaits you")
+whose approval still happens on the operator surface. The channel may inform the operator;
+it may never become a shortcut around the gate.
+
 | Buzz feature | Disposition | Rationale |
 |---|---|---|
 | Channels, timeline, roster, co-presence | **ADOPT** — §13 | the co-presence surface this PRD exists to build |
@@ -658,3 +679,25 @@ credentials work today. Do not mistake that fail-closed for a defect at demo tim
 - **The Buzz comparison's recommendation #1 (anchor liveness to a real start) is already
   done** — the PRD-UI-1 passes landed epoch-anchored elapsed on 2026-08-16. Its
   recommendation #2 (a "last synced" badge) is **open, and is now S4's product surface.**
+- **⚠ `E:\torq-Buzz` holds a STALE copy of our own substrate PRD — do not import it.**
+  That repo contains `PRD-TCLAW-COLLABORATION-SUBSTRATE-001.md` and `-v0.2.md`, and an
+  automated review recommended copying v0.2 over "as the starting contract." **TorqClaw
+  already holds v0.2 → v0.14 plus `FINAL-STATUS` in `docs/prd-reviews/`, hardened across
+  twelve G1R cycles and seven G2A slice audits. v0.14 is authoritative; the torq-Buzz copies
+  are twelve versions stale** and importing one would regress the contract to a pre-review
+  state. Their only value is provenance: they show the substrate was drafted with Buzz as a
+  live reference sandbox, which is why the data model fits co-presence at all.
+
+### 16a. Local-install reuse dispositions (`E:\torq-Buzz`)
+
+Full audit: `docs/prd-reviews/TORQ-BUZZ-LOCAL-REUSE-AUDIT-2026-08-16.md` (read-only review;
+secret scan clean; nothing in that repo modified).
+
+| Asset | Disposition for this PRD |
+|---|---|
+| Presence state machine (`presence.ts`: 60s heartbeat, TTL = **3× heartbeat**, 10-min idle→away; *"away means the human is not at the machine, never that the window is unfocused"*; **deploy the server TTL increase BEFORE shipping a slower client heartbeat**) | **Recorded for a FUTURE presence effort. Does NOT change S5** — §11 row 18 confirms our substrate has no presence concept and `surfaces.last_seen_at` is a dead column, so S5's "working now" stays derived from gateway task truth. |
+| Typing indicator (kind 20002; 1/3s broadcast throttle, 8s receiver TTL, 1s prune, post-send suppression window) | Design recorded; **typing remains declined in §12** (no transport). Use this if that ever reverses — it needs no persistence. |
+| Agent-turn vocabulary (`RespondTo`: owner-only/allowlist/anyone/nobody; `MultipleEventHandling`: Queue/Steer/Interrupt/OwnerInterrupt; idle 900s vs max-turn 7200s) | This is upstream's **willingness axis** that §12a says we lack. Relevant **only** to a future mention-invocation PRD, which §12a explicitly does not authorize. Recorded so that effort starts here rather than inventing worse. |
+| Receipt-owned process lifecycle (`Stop-Buzz.ps1` — never kill by name; match pid + exe path + exe sha256 + creation time + redacted-cmdline hash; dry-run by default) | **Strongest transferable pattern in that repo**, but **out of scope for this PRD** — it belongs to dev/ops tooling. |
+| Schema-level secret exclusion (`"not": {"anyOf":[{"required":["private_key"]}, …]}`) | **Adopt** — cheap, additive defense in depth for TorqClaw's receipt/safe-export contracts. Out of scope here; recorded as a recommendation. |
+| `buzz-relay`, Nostr identity, Postgres/Redis/MinIO, Tauri packaging, `harnesses/*.json` | **Not reusable** — architectural mismatch (see §12 and the audit's §3). |
