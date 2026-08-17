@@ -156,3 +156,42 @@ This is **not** PRD-005 work. PRD-005 is a read/co-presence surface and its slic
 capability. This audit is recorded here so the sandbox effort can be scoped separately and not
 silently absorbed into a UI slice. **Recommended: a dedicated PRD (`PRD-TCLAW-AGENT-SANDBOX-006`)
 for Phase B, with Phase A landing as a bounded hardening change beforehand.**
+
+---
+
+## 5. Cross-lane finding — `proxy_secret_required` defaults to false (TORQ-CONSOLE)
+
+**Discovered 2026-08-17** while identifying four orphaned `torq-console-verify:*` containers that had
+run ~45h from a single 2026-08-15 deploy. One (`torq-live-e2e-anthropic`) served an
+**unauthenticated loopback proxy** to a configured Anthropic credential on `127.0.0.1:8899`.
+
+**Mechanism:** the auth middleware guards a protected path only `if PROXY_SECRET:` — so an **unset**
+secret disables the check entirely rather than refusing to serve. `PROXY_SECRET` defaults to `""`.
+The identical fail-open shape guards `ADMIN_PATHS`, which includes the governed-learning
+`policy/approve` and `policy/rollback` endpoints. The endpoint reports
+`proxy_secret_required: false` — a value that **describes the absence of enforcement rather than
+requiring it**.
+
+**Severity, scoped honestly:** the operator ruled this **NOT an exposure** — loopback-only on a host
+with no internet path, so no remote reachability and no untrusted local party. **No rotation
+indicated.** It is recorded as a **latent insecure default**, not an incident.
+
+**Why it is still owed a fix** (operator ruling, 2026-08-17: *"it needs to be fixed as if it had
+internet access"*): an insecure **default** is only as safe as the environment it happens to land in,
+and this repo's own §2 corollary holds that a control safe only because of an ambient property of the
+current environment is not a control. Loopback is specifically not a trust boundary in the world
+`PRD-TCLAW-AGENT-SANDBOX-006` is building — that PRD's own E-7 demonstrates that any attached
+container network makes the host routable.
+
+**Fix owed:** default `proxy_secret_required` to **true** with startup refusal if unset, so the
+insecure mode requires an **explicit act rather than an omission**; same for `ADMIN_TOKEN`. Plus the
+container **label + TTL reaper** (`PRD-TCLAW-AGENT-SANDBOX-006` SB6 / SA-14), since 45h orphans are
+the mechanism by which a config drifts away from the context that made it safe.
+
+**JURISDICTION — specified here, NOT fixed here.** The code lives in the **TORQ-CONSOLE** lane, which
+`CLAUDE.md:34` forbids this lane from touching. **Owner: the operator (King Flowers)**, the only party
+with authority in both lanes. **Discharge condition:** this section is removed only when the default
+is flipped in the console lane, or the operator records an explicit accepted-risk decision. **No
+slice of PRD-006 may be marked complete on the grounds that this was specified.**
+
+Origin record and full disposition: `docs/PRD-TCLAW-AGENT-SANDBOX-006.md` §9 item 9.
