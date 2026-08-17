@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
   AUTH_FOUNDATION_MIGRATION_CHECKSUM,
@@ -744,13 +745,32 @@ describe('Phase 4 protected semantic manifest', () => {
     expect(phase4Tests).toContain('a single grant authorizes BOTH APPROVE_TOOL and APPROVE_SKILL');
     expect(guidance).toContain('describeSkillDecision');
 
-    const protectedPaths = [
-      'packages/gateway/src/authz.ts',
+    // OPERATOR RULING 2026-08-16 ("Re-pin phase1, leave 2a red"): the phase1
+    // server-owned-authority migration (landed 985f8b9 on operator
+    // instruction) deliberately moved resume-role enforcement out of
+    // authz.ts into sessions.resolve(), and PRD-TCLAW-COLLAB-PRESENCE-UI-005
+    // S1 added explicit channel-seat deny arms for the two collab read
+    // commands. authz.ts therefore no longer matches the c2850f5 bytes.
+    // The seam-freeze survives as an EXPLICIT baseline pin: any change to
+    // authz.ts still fails this test until the pin is re-authorized with a
+    // dated note — incidental drift stays caught, authorized migration
+    // does not. The semantic containment assertions above (approve
+    // predicate, holdsAuthority) are unchanged and still enforced.
+    const frozenPaths = [
       'packages/gateway/src/skillDecision.ts',
       'tests/collab-h1-operator-subordination.test.ts',
     ];
-    const changed = execFileSync('git', ['diff', '--name-only', 'c2850f5', '--', ...protectedPaths], { cwd: root, encoding: 'utf8' });
+    const changed = execFileSync('git', ['diff', '--name-only', 'c2850f5', '--', ...frozenPaths], { cwd: root, encoding: 'utf8' });
     expect(changed.trim()).toBe('');
+    // Post-phase1 authz baseline (authorizations: phase1 landing 985f8b9 +
+    // PRD-005 S1 deny arms, both 2026-08-16). Recompute and re-authorize
+    // deliberately on any future approved change; never delete this pin.
+    const authzSha = createHash('sha256').update(authz).digest('hex');
+    expect(authzSha).toBe('8167a08aa1d4655fc73be0045d8b72b1060bd098f5ff7823a5cf145b4e75e690');
+    // The migration's own markers: the moved guard must not silently return,
+    // and the relocation note must remain declared where it happened.
+    expect(authz).not.toContain('export function checkResumeRole');
+    expect(authz).toContain('sessions.resolve()');
   });
 });
 
