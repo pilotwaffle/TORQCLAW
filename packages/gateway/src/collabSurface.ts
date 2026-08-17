@@ -355,6 +355,13 @@ export async function handlePostChannelMessage(
       metadata: {
         collabMessagePosted: true,
         channelId,
+        // G2A D-1: the ack MUST carry the key it is acking. Without it the
+        // console can only correlate by channelId, so with two sends in
+        // flight on one channel the surviving ack stamps BOTH -- and a
+        // rejected sibling is cleared as sent (a silent drop, forbidden by
+        // §13 S3 / A8). This is the only field that makes the ack
+        // attributable to a specific send.
+        idempotencyKey,
         eventId: result.eventId,
         cursor: result.cursor,
         occurredAt: result.occurredAt,

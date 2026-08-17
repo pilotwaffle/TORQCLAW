@@ -13,11 +13,22 @@
  *   CO-1 — callerFor derives kind from a real DB read, never hardcodes it;
  *          NULL principal refuses and posts nothing
  *
- * T-9 falsifiability probes (four RED/GREEN pairs) are recorded in this
- * file's own describe block at the bottom, each reverting the SPECIFIC
- * guard under test and recording the observed RED output verbatim in a
- * comment immediately above the assertion, per §8 T-9's falsifiability
- * obligation.
+ * T-9 falsifiability (§8): the probes for this matrix were executed as
+ * source mutations, not as tests living in this file.
+ *
+ * G2A NB-2: this header previously claimed the RED excerpts were "recorded
+ * in this file's own describe block at the bottom" -- they were not, and no
+ * such block exists. A pointer to evidence that isn't there is worse than no
+ * pointer, because it reads as discharged. The RED output for each probe is
+ * recorded where it was actually observed:
+ *   - builder-side probes (contract-boundary rejection, residue enumeration,
+ *     throw-class totality, no-new-oracle): commit c404a24's message.
+ *   - G2A's five independent re-runs, all reproduced RED and restored
+ *     byte-identical: docs/prd-reviews/G2A-OPUS48-COLLAB-PRESENCE-UI-005-S3.md
+ *   - the C-1 fallback probe and the D-1 ack-correlation probe: recorded in
+ *     the commit that introduced each guard.
+ * Per §8, a probe reported without its RED output is not a discharged probe
+ * -- so the evidence lives at those paths, not in a comment claiming it does.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
