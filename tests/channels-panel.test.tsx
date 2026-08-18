@@ -1239,13 +1239,16 @@ describe('ChannelsPanel — S5 roster (render)', () => {
     rerender(<ChannelsPanel events={[frame, timeline]} sendCommand={sc} onClose={vi.fn()} />);
 
     expect(screen.getByText('Members')).toBeInTheDocument();
-    expect(screen.getByText('Working now')).toBeInTheDocument();
+    // G2A C-S5-2: label scoped from "Working now" (which read as a roster of
+    // everyone) to what one session can actually know. A rename tracked here,
+    // not a weakened assertion -- getByText still throws if absent.
+    expect(screen.getByText("This console's task")).toBeInTheDocument();
     // 'principal-member01'.slice(0,8) === 'principa' -- appears TWICE: once
     // as the roster's member chip, once as the timeline's own member_added
     // system-event row detail (systemEventDetail already renders it there;
     // both are correct, independent renderings of the same wire fact).
     expect(screen.getAllByText('principa').length).toBe(2);
-    expect(screen.getByText('Nothing running right now.')).toBeInTheDocument();
+    expect(screen.getByText('Nothing running in this console.')).toBeInTheDocument();
   });
 
   it('A9: a fixture with a WORKING NON-MEMBER proves presence never implies membership -- the working row renders unconditionally, never filtered by the member list', () => {
@@ -1271,7 +1274,7 @@ describe('ChannelsPanel — S5 roster (render)', () => {
     // membership gate exists on the "working now" path.
     expect(screen.getByText('Using read file (filesystem)')).toBeInTheDocument();
     expect(screen.getByText(/turn r-nonmem/)).toBeInTheDocument();
-    expect(screen.queryByText('Nothing running right now.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Nothing running in this console.')).not.toBeInTheDocument();
   });
 
   it('elapsed is EPOCH-ANCHORED across a simulated remount -- unmount/remount does not reset the clock to 0:00', () => {
@@ -1323,17 +1326,41 @@ describe('ChannelsPanel — S5 roster (render)', () => {
       '1',
       false,
     );
-    rerender(<ChannelsPanel events={[frame, timeline]} sendCommand={sc} onClose={vi.fn()} />);
+    // G2A C-S5-1: the fixture previously carried a member_added event ONLY, so
+    // the Working-now branch NEVER RENDERED and this test could not see a rogue
+    // affordance on the one row that names a live task. G2A injected a button
+    // there and 62/62 stayed green -- the fourth instance this session of a
+    // suite passing identically with and without its guard (after V-1, RC-1,
+    // B-1). An in-flight TIER_SELECTED with no terminal populates that branch.
+    const liveTask = ev({
+      type: 'TIER_SELECTED', requestId: 'r-roster-live',
+      timestamp: '2026-01-01T00:00:05.000Z',
+    });
+    rerender(
+      <ChannelsPanel events={[frame, timeline, liveTask]} sendCommand={sc} onClose={vi.fn()} />,
+    );
 
     const rosterHeading = screen.getByText('Members');
     const rosterSection = rosterHeading.closest('div')!.parentElement!;
-    // No button/link/onClick affordance anywhere inside the roster block.
+
+    // Anti-vacuity: the Working-now branch MUST actually be populated, or the
+    // affordance assertions below sweep an empty region and prove nothing.
+    expect(
+      within(rosterSection).queryByText('Nothing running in this console.'),
+      'C-S5-1: the T-11 fixture must render a LIVE Working-now row -- an empty '
+      + 'branch makes the zero-affordance assertions vacuous on exactly the row '
+      + 'that names a running task.',
+    ).not.toBeInTheDocument();
+
+    // No button/link/onClick affordance anywhere inside the roster block --
+    // now covering BOTH the Members chips and the populated Working-now row.
     expect(within(rosterSection).queryAllByRole('button').length).toBe(0);
     expect(within(rosterSection).queryAllByRole('link').length).toBe(0);
 
     sc.mockClear();
     fireEvent.click(rosterHeading);
     fireEvent.click(within(rosterSection).getByText('principa')); // the member chip, scoped
+    fireEvent.click(within(rosterSection).getByText("This console's task")); // the live section
     const actions = sc.mock.calls.map((c) => (c[0] as any).action);
     for (const a of actions) expect(READ_ONLY_ALLOWLIST.has(a)).toBe(true);
     for (const a of actions) expect(DANGEROUS_ACTIONS.has(a)).toBe(false);
@@ -1383,6 +1410,6 @@ describe('ChannelsPanel — S5 roster (render)', () => {
     const sc = vi.fn(() => true);
     renderPanel([], sc);
     expect(screen.queryByText('Members')).not.toBeInTheDocument();
-    expect(screen.queryByText('Working now')).not.toBeInTheDocument();
+    expect(screen.queryByText("This console's task")).not.toBeInTheDocument();
   });
 });

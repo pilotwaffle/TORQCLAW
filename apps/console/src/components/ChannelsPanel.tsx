@@ -1359,9 +1359,27 @@ function RosterSection({
         )}
       </div>
       <div>
-        <h3 className="text-[10px] font-bold uppercase tracking-widest text-muted">Working now</h3>
+        {/* G1R ruling (c) / G2A C-S5-2: the label must not claim more than one
+            session can know. GatewayEventSchema carries no principalId
+            (contracts/src/events.ts:19-29), CONNECTED sends only
+            {sessionId, resumed} (server.ts:282-288), and sessionBus is keyed by
+            sessionId with each socket subscribed only to its own
+            (events.ts:17-28) -- so this section can ONLY ever render the
+            VIEWER'S OWN task, never another principal's. "Working now" read as
+            a roster of everyone; it is a roster of one. The honesty was present
+            throughout this file's comments and never reached the label the
+            operator actually reads. Scoped here; a real cross-participant
+            roster is S5b (pull-only, membership-intersected). */}
+        <h3 className="text-[10px] font-bold uppercase tracking-widest text-muted">
+          This console&apos;s task
+        </h3>
+        {/* The empty state previously read "Nothing running right now.",
+            asserting SYSTEM-WIDE idleness -- a claim this console cannot make,
+            since it sees only its own session. Scoped to what is knowable. */}
         {workingNow === null ? (
-          <p className="mt-1 text-[10.5px] text-faint/75">Nothing running right now.</p>
+          <p className="mt-1 text-[10.5px] text-faint/75">
+            Nothing running in this console.
+          </p>
         ) : (
           <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10.5px] text-muted">
             <span className="inline-flex items-center gap-1.5">
