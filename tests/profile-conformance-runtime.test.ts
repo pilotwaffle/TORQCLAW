@@ -249,7 +249,7 @@ describe('AC-7 path semantics (no arbitrary shell/process containment claim)', (
 });
 
 describe('contract-module provenance controls', () => {
-  it('source-backed policy is semantically equivalent for all four profiles and records normalized paths', async () => {
+  it('source-backed policy is semantically equivalent for all built-in profiles and records normalized paths', async () => {
     const tools = immutableSnapshot(SYNTHETIC_TOOLS as readonly RegisteredTool[]);
     const ids = Object.keys(BUILT_IN_PROFILE_DEFINITIONS) as ProfileId[];
     const builtPolicies = Object.fromEntries(ids.map((id) => [id, resolveEffectiveProfile(id, tools)]));
@@ -257,10 +257,10 @@ describe('contract-module provenance controls', () => {
     assertRequiredPolicyExports(builtContracts as unknown as Record<string, unknown>, 'built contracts package');
 
     await withFreshSourceContracts(async ({ contracts, policy }) => {
-      expect(contracts.BUILT_IN_PROFILE_DEFINITIONS, 'source and built definitions have the same four-profile snapshot')
+      expect(contracts.BUILT_IN_PROFILE_DEFINITIONS, 'source and built definitions have the same profile snapshot')
         .toEqual(BUILT_IN_PROFILE_DEFINITIONS);
       const sourcePolicies = Object.fromEntries(ids.map((id) => [id, policy.resolveEffectiveProfile(id, tools)]));
-      expect(sourcePolicies, 'source-backed and built policies are semantically equal for all four profiles')
+      expect(sourcePolicies, 'source-backed and built policies are semantically equal for all built-in profiles')
         .toEqual(builtPolicies);
     });
 

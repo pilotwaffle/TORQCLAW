@@ -7,8 +7,19 @@
  * and agent-participation-s2.test.ts. NONE of those tests drive a turn all
  * the way through onChannelMessageCommitted -> claimAgentTurn ->
  * runAgentTurn -> a tool call that actually posts -> a re-trigger of the
- * OTHER agent. This file does, and documents what it found: THE LOOP AS
- * SHIPPED CANNOT COMPLETE A ROUND TRIP. See "THE FINDING" below.
+ * OTHER agent. This file does.
+ *
+ * STATUS UPDATE (G1R COLLAB-WRITE-PROFILE ruling, landed): THE FINDING below
+ * described a real defect -- no shipped profile admitted collab__post_message,
+ * so the round trip could never complete. That defect is now fixed (a new
+ * 'agent_conversation' profile, packages/contracts/src/profile.ts, resolved
+ * explicitly by autoReplyDispatcher.ts's runAgentTurn) and ASSERTION 1 below
+ * is INVERTED, per the ruling's explicit instruction ("the danger is that
+ * whoever fixes this sees a failing test asserting brokenness and deletes
+ * it -- losing the only end-to-end proof of the round trip"): it now asserts
+ * the round trip DOES complete, not that it fails. THE FINDING is retained
+ * below UNCHANGED as the historical record of the defect this fix closes --
+ * it describes the pre-fix state, not the current one.
  *
  * THE SEAM, AND WHY IT IS HONEST
  * -------------------------------
@@ -46,7 +57,8 @@
  * replaced, only the model's choice of tool call is, and the policy that
  * decides whether that call is even PERMITTED is never touched.
  *
- * THE FINDING (reported, not routed around)
+ * THE FINDING (reported, not routed around) -- HISTORICAL, describes the
+ * pre-fix defect. See "STATUS UPDATE" above for the current state.
  * ------------------------------------------
  * `runAgentTurn` resolves its GatewayRequest's effectiveProfile via
  * `resolveProfile({ taskType: 'SUMMARIZATION' })` (autoReplyDispatcher.ts
@@ -334,18 +346,22 @@ describe('PRD-TCLAW-AGENT-PARTICIPATION-007 A3-c — two agents actually convers
     collab.clearAutoreplyStop(collabSurface.getCollabDbForAutoReply()!, 'channel', seeded.channelId);
   });
 
-  /** Poll until EITHER the target post count is reached OR every currently
-   *  in-flight turn this poll can observe has resolved to a terminal state
-   *  with zero new posts -- so a genuine policy refusal (the finding above)
-   *  fails FAST with a precise message instead of running out a long
-   *  timeout that looks like a hang. */
+  /** Poll until EITHER the target post count is reached AND every expected
+   *  turn has resolved to a terminal state (so callers observe a settled
+   *  outcome, never a post that landed a beat before its turn's own
+   *  resolveAgentTurn call -- runDispatchAndWait's poll delay means those
+   *  two writes are not atomic), OR every currently in-flight turn this
+   *  poll can observe has resolved to a terminal state with zero new posts
+   *  -- so a genuine policy refusal (the finding above) fails FAST with a
+   *  precise message instead of running out a long timeout that looks like
+   *  a hang. */
   async function waitForPostsOrTerminalRefusal(count: number, expectedTurnCount: number, timeoutMs = 8000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const rows = messagePostedRows(seeded.collabDbPath, seeded.channelId);
-      if (rows.length >= count) return;
       const turns = agentTurnRows(seeded.collabDbPath, seeded.channelId);
       const resolvedEnough = turns.filter((t) => t.state !== 'dispatched').length >= expectedTurnCount;
+      if (rows.length >= count && resolvedEnough) return;
       if (resolvedEnough && rows.length < count) {
         throw new Error(
           `all ${expectedTurnCount} expected turn(s) resolved without reaching ${count} posts (have ${rows.length}). ` +
@@ -362,7 +378,21 @@ describe('PRD-TCLAW-AGENT-PARTICIPATION-007 A3-c — two agents actually convers
     }
   }
 
-  it('THE FINDING, reproduced and pinned: runAgentTurn resolves a profile under which collab__post_message is refused, so the round trip cannot complete', async () => {
+  it('ASSERTION 1, INVERTED: two agents actually converse — the A3-c criterion, never before green (G1R COLLAB-WRITE-PROFILE ruling §7/§10 item 8)', async () => {
+    // G1R ruling: "the danger is that whoever fixes this sees a failing test
+    // asserting brokenness and deletes it -- losing the only end-to-end
+    // proof of the round trip." This assertion FLIPS rather than being
+    // deleted. THE FINDING documented in this file's header (still true as
+    // history -- it describes the defect this fix closes) was: no shipped
+    // profile admitted collab__post_message, so runAgentTurn resolving
+    // taskType='SUMMARIZATION' always landed on 'read_only' and every
+    // auto-turn was refused. The fix: autoReplyDispatcher.ts's runAgentTurn
+    // now resolves 'agent_conversation' explicitly (both requestedProfile
+    // and sessionDefaultProfile, per the ruling's PART 3 trap), which DOES
+    // admit collab__post_message. This test proves that resolution
+    // end-to-end through the REAL dispatcher, REAL claim/idempotency/STOP
+    // machinery, and REAL profile-gated bridge.executeTool call -- nothing
+    // here is a fixture.
     observedRefusals = [];
     script = new Map([
       [seeded.agentAId, ['Hello B, I saw your ping.']],
@@ -382,47 +412,75 @@ describe('PRD-TCLAW-AGENT-PARTICIPATION-007 A3-c — two agents actually convers
     });
 
     // Both A and B are eligible for the human's post (INV-T1: every active
-    // member except the actor) -- two turns are claimed immediately, one
-    // per agent. Both must resolve without posting, per the finding.
-    let caught: Error | null = null;
-    try {
-      await waitForPostsOrTerminalRefusal(2, 2); // human + at least one agent reply
-    } catch (e) {
-      caught = e as Error;
-    }
+    // member except the actor). Both are scripted to reply, and EACH reply
+    // is itself a committed message_posted row that re-enters
+    // onChannelMessageCommitted (the same real anti-storm mechanism S3
+    // documents, header mechanism 1: "no self-reply") -- so this is a real
+    // two-agent CASCADE, not a fixed two-turn exchange: A's reply to the
+    // human re-triggers eligibility excluding A (-> B becomes eligible
+    // again, at A's post's seq), and B's reply likewise re-triggers
+    // excluding B. Once each agent's one-entry script is exhausted, its
+    // next claimed turn legitimately resolves 'no_post' (A3-f). The A3-c
+    // CRITERION itself only requires three message_posted rows (human +
+    // A's reply + B's reply) -- assert that first, precisely.
+    await waitForPostsOrTerminalRefusal(3, 2);
 
-    expect(caught, 'A3-c round trip must currently FAIL: no shipped profile permits collab__post_message (see file header "THE FINDING")').not.toBeNull();
-    expect(caught!.message).toMatch(/resolved without reaching|timed out/);
-
-    // Pin the EXACT, precise reason -- not just "it failed somehow" -- so a
-    // future fix (a profile decision made by G1R/operator, out of this
-    // ticket's scope) has a falsifiable target: this specific refusal text
-    // going away is what "fixed" looks like.
+    // No refusal should have been observed at all -- the profile now admits
+    // the tool, so bridge.executeTool must never have thrown.
     expect(
-      observedRefusals.some((r) => /outside effective profile 'read_only'/.test(r)),
-      `expected the exact production refusal reason to have been observed; got: ${JSON.stringify(observedRefusals)}`,
-    ).toBe(true);
+      observedRefusals,
+      `A3-c must complete with zero policy refusals; got: ${JSON.stringify(observedRefusals)}`,
+    ).toEqual([]);
 
-    // Both turns' own state confirms the dispatcher ITSELF handled the
-    // refusal correctly (no crash, no phantom post, a clean terminal state
-    // for EVERY claimed turn) -- the refusal is a POLICY gap, not a
-    // dispatcher bug.
-    const turns = agentTurnRows(seeded.collabDbPath, seeded.channelId);
-    expect(turns.length).toBe(2);
-    const turnAgentIds = new Set(turns.map((t) => t.agentPrincipalId));
-    expect(turnAgentIds).toEqual(new Set([seeded.agentAId, seeded.agentBId]));
-    for (const t of turns) {
-      expect(['no_post', 'terminated'], `turn for ${t.agentPrincipalId} must resolve cleanly, never post`).toContain(t.state);
-    }
-
-    // Only the human's own message ever committed.
+    // The human's message AND both agents' replies all committed.
     const posts = messagePostedRows(seeded.collabDbPath, seeded.channelId);
-    expect(posts.length).toBe(1);
+    expect(posts.length).toBe(3);
     expect(posts[0]!.actorPrincipalId).toBe(seeded.operatorId);
+    const replyAuthors = new Set(posts.slice(1).map((p) => p.actorPrincipalId));
+    expect(replyAuthors, 'THE A3-c criterion: both agents actually posted a reply').toEqual(
+      new Set([seeded.agentAId, seeded.agentBId]),
+    );
+
+    // Let the cascade's own re-triggered turns (each agent's script is now
+    // exhausted, so their next eligible turn legitimately posts nothing)
+    // settle to terminal states before asserting turn-level invariants --
+    // real dispatcher work, not a fixture, so it needs a real window.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    // Every claimed turn resolved cleanly -- no turn is left 'dispatched'
+    // (stuck/crashed), and no turn ever posted for an agent replying to its
+    // OWN message (that is ASSERTION 2's job below; this is the coarse
+    // version scoped to this trigger sequence).
+    const turns = agentTurnRows(seeded.collabDbPath, seeded.channelId);
+    expect(turns.length, 'at least the two originally-triggered turns must exist').toBeGreaterThanOrEqual(2);
+    for (const t of turns) {
+      expect(t.state, `turn for ${t.agentPrincipalId}@${t.channelSeq} must resolve cleanly`).not.toBe('dispatched');
+      expect(['completed', 'no_post'], `turn for ${t.agentPrincipalId}@${t.channelSeq} must not be terminated (a policy refusal) now that the profile admits posting`)
+        .toContain(t.state);
+    }
+    // At least one turn per agent must have actually completed (posted) --
+    // otherwise "both agents replied" above could vacuously hold from only
+    // one agent's turn while the other's post came from an unexpected path.
+    const completedAgentIds = new Set(turns.filter((t) => t.state === 'completed').map((t) => t.agentPrincipalId));
+    expect(completedAgentIds).toEqual(new Set([seeded.agentAId, seeded.agentBId]));
   }, 20000);
 
-  it('ASSERTION 2 (mechanics) — no self-reply: every claimed turn is for an agent OTHER than whoever authored its triggering event', () => {
-    const turns = agentTurnRows(seeded.collabDbPath, seeded.channelId);
+  it('ASSERTION 2 (mechanics) — no self-reply: every DIRECTLY-triggered turn is for an agent OTHER than whoever authored its triggering event', () => {
+    // Scoped to real-event-triggered claims (trigger_event_id is an actual
+    // collab_events row id), NOT coalesced follow-ups (dispatchOneTurn's
+    // dirty-flag mechanism writes a synthetic 'coalesced:<uuid>' trigger_event_id
+    // and re-evaluates against latestChannelSeq at RESOLUTION time -- see
+    // this file's own A3-c cascade above, where the human's post makes both
+    // A and B eligible, A's reply chains into B via a real trigger, and B's
+    // OWN original claim (from the human's post) can only be re-dispatched
+    // as a coalesced follow-up once B is no longer in-flight; by then the
+    // latest seq in the channel may legitimately equal B's own most recent
+    // post. That is NOT a self-reply -- the coalesced dispatch is B
+    // evaluating "is there anything new to react to", not "B replying to
+    // channel_seq=N's author". Excluding coalesced rows keeps this
+    // assertion sound for the invariant it actually names.
+    const turns = agentTurnRows(seeded.collabDbPath, seeded.channelId)
+      .filter((t) => !t.triggerEventId.startsWith('coalesced:'));
     expect(turns.length).toBeGreaterThan(0);
     const posts = messagePostedRows(seeded.collabDbPath, seeded.channelId);
     const authorBySeq = new Map(posts.map((e) => [e.channelSeq, e.actorPrincipalId]));

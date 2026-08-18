@@ -1,6 +1,6 @@
 {
   "schemaVersion": "torqclaw.profile-conformance-golden/v1",
-  "baseCommit": "9324cbc6e195807ff6849c6b2d646e745e66fa0d",
+  "baseCommit": "8dfa98fe7dd03d6ef45804b37bb2a09e980dd6c2",
   "profiles": {
     "read_only": {
       "profileId": "read_only",
@@ -41,6 +41,16 @@
       "allowedTiers": ["LOCAL_EDGE", "FRONTIER"],
       "scopes": { "path": "configured", "network": "configured" },
       "approvalRequirements": { "write": true, "exec": true, "send": false }
+    },
+    "agent_conversation": {
+      "profileId": "agent_conversation",
+      "profileVersion": 1,
+      "allowedNamespaces": ["collab"],
+      "allowedCapabilities": ["read"],
+      "allowedSideEffects": ["none", "collab_write"],
+      "allowedTiers": ["LOCAL_EDGE"],
+      "scopes": { "path": "none", "network": "none" },
+      "approvalRequirements": { "write": false, "exec": false, "send": false }
     }
   },
   "classifierFixtures": [

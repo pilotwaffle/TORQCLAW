@@ -179,7 +179,18 @@ async function dispatchOneTurn(
   const key = turnKey(channelId, agentPrincipalId);
   inFlight.add(key);
   try {
+    // runAgentTurn can throw deliberately (the §5A structural-defect
+    // assertion above): this repo's gateway has NO unhandledRejection net
+    // (packages/gateway/src/server.ts), so a throw escaping this await would
+    // kill the whole process, not just this turn. The throw is caught HERE
+    // -- one level up from where the turn is already resolved 'terminated'
+    // -- so the loud failure stays loud (console.error already fired inside
+    // runAgentTurn; this is a second, generic net) without taking the
+    // gateway down. Mirrors collabSurface.ts's existing
+    // catch-and-console.warn discipline for this exact trigger path.
     await runAgentTurn(store, db, channelId, agentPrincipalId, channelSeq);
+  } catch (err: any) {
+    console.error(`[gateway] agent turn failed unexpectedly (${err?.message ?? err})`);
   } finally {
     inFlight.delete(key);
     // Coalescing: exactly one follow-up evaluation, using the LATEST
@@ -234,9 +245,64 @@ async function runAgentTurn(
     return;
   }
 
-  const taskType = 'SUMMARIZATION' as const; // includes collab__ (toolFilter.ts); read_only admits the free-speech post_message tool
-  const effectiveProfile = resolveProfile({ taskType }).profile;
+  // G1R COLLAB-WRITE-PROFILE ruling PART 3. `taskType='SUMMARIZATION'` is
+  // RETAINED deliberately -- TOOL_ROUTING_MAP.SUMMARIZATION (toolFilter.ts)
+  // is what carries the `collab__` prefix that makes collab tools RENDER to
+  // the model at all. Admission (below) does NOT make a tool render; if this
+  // now-vestigial-looking line is ever "cleaned up", the tool silently
+  // disappears from the model's list again -- same silent failure, new
+  // cause. The stale claim this comment replaces ("read_only admits the
+  // free-speech post_message tool") was made false by 7c0a4af (G1R V-S2-1)
+  // and is exactly the kind of comment-only fix this ruling says is
+  // necessary but insufficient -- comments cannot be gated, code must be.
+  const taskType = 'SUMMARIZATION' as const;
+  // Both requestedProfile AND sessionDefaultProfile are set to the SAME
+  // profile so requestedId === sessionId inside resolveProfile -- the
+  // broader/incomparable guard at profileResolver.ts's resolveProfile is
+  // therefore never engaged (agent_conversation IS incomparable to
+  // read_only: different namespaces, collab_write not in read_only's
+  // allowedSideEffects). Passing requestedProfile ALONE would throw on
+  // EVERY auto-turn, converting yesterday's silent failure into today's
+  // dispatcher crash-loop. operatorAuthorized stays false: no authority is
+  // fabricated, because none is needed once the two ids are made equal.
+  const effectiveProfile = resolveProfile({
+    taskType,
+    requestedProfile: 'agent_conversation',
+    sessionDefaultProfile: 'agent_conversation',
+    operatorAuthorized: false,
+  }).profile;
+  // Derived from the SAME predictTools the model's rendered tool list comes
+  // from (toolFilter.ts) -- never a parallel reimplementation that could
+  // drift from it. That drift is a recorded failure mode in this program
+  // (the "mirroring-validator" class): a check that mirrors its source of
+  // truth instead of calling it is a second copy that can silently diverge.
   const requiredTools = predictTools(taskType, effectiveProfile, agentPrincipalId);
+
+  // G1R COLLAB-WRITE-PROFILE ruling §5A -- THE STRUCTURAL FIX, the primary
+  // deliverable of this ruling. A turn that structurally cannot post is a
+  // POLICY DEFECT, not a silent 'no_post'. A3-f (below) makes silence a
+  // valid MODEL choice; it must never also be reachable as a valid
+  // STRUCTURAL outcome -- those two must never be able to look alike. This
+  // assertion fires BEFORE any GatewayRequest is minted (no model call has
+  // happened yet), so it is T-2-clean by placement: there is no model
+  // transcript for this message to leak into. The needed/provided detail
+  // goes to the OPERATOR-facing log only, per the ruling's T-2 split --
+  // NEVER add this detail to profilePolicy.ts's assertOperationAllowed
+  // throw, which DOES reach a model transcript mid-turn and must stay
+  // exactly as opaque as it is today.
+  if (!requiredTools.includes('collab__post_message')) {
+    resolveAgentTurn(db, { channelId, agentPrincipalId, channelSeq, state: 'terminated', nowIso: nowIso() });
+    console.error(
+      `[gateway] agent turn cannot post: 'collab__post_message' not admitted by effective ` +
+      `profile '${effectiveProfile.profileId}' (needed side-effect 'collab_write'; profile ` +
+      `provides [${effectiveProfile.sideEffectClasses.join(', ')}]) -- agentPrincipalId=` +
+      `${agentPrincipalId} channelId=${channelId} channelSeq=${channelSeq}`,
+    );
+    throw new Error(
+      `agent turn cannot post: 'collab__post_message' not admitted by effective profile ` +
+      `'${effectiveProfile.profileId}'`,
+    );
+  }
 
   const prompt =
     `You are participating in a channel conversation as agent principal ${agentPrincipalId}. ` +
@@ -410,7 +476,12 @@ export async function recoverStrandedAgentTurns(graceSeconds = 30): Promise<numb
     inFlight.add(key);
     void (async () => {
       try {
+        // See dispatchOneTurn's identical catch for why this cannot be a
+        // bare try/finally: runAgentTurn's §5A assertion can throw, and this
+        // repo's gateway has no unhandledRejection net.
         await runAgentTurn(store, db, turn.channelId, turn.agentPrincipalId, turn.channelSeq);
+      } catch (err: any) {
+        console.error(`[gateway] recovered agent turn failed unexpectedly (${err?.message ?? err})`);
       } finally {
         inFlight.delete(key);
       }

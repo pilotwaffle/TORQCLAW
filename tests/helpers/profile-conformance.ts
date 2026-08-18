@@ -12,7 +12,7 @@ import type { RegisteredTool } from '../../packages/bridge/src/registry.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(here, '..', '..');
-export const PINNED_BASE = '9324cbc6e195807ff6849c6b2d646e745e66fa0d';
+export const PINNED_BASE = '8dfa98fe7dd03d6ef45804b37bb2a09e980dd6c2';
 export const DOC_START = '<!-- PROFILE-CONFORMANCE:START -->';
 export const DOC_END = '<!-- PROFILE-CONFORMANCE:END -->';
 

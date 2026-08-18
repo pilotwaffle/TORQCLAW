@@ -13,11 +13,11 @@ import {
 } from './helpers/profile-conformance.js';
 
 describe('AC-1 declared profile manifest', () => {
-  it('AC-1 exact manifest: all fields of all four definitions equal the pinned golden', () => {
+  it('AC-1 exact manifest: all fields of all five definitions equal the pinned golden', () => {
     const golden = readGolden();
     expect(golden.baseCommit).toBe(PINNED_BASE);
     expect(Object.keys(golden.profiles)).toEqual([
-      'read_only', 'workspace_write', 'browser_research', 'terminal_power',
+      'read_only', 'workspace_write', 'browser_research', 'terminal_power', 'agent_conversation',
     ]);
     expect(BUILT_IN_PROFILE_DEFINITIONS).toEqual(golden.profiles);
   });
@@ -67,6 +67,13 @@ describe('AC-2 executable classifier inventory', () => {
   });
 
   it('P3a real classifier label: send is reachable but no built-in declares send admission', () => {
+    // This is the bespoke, one-off form of the general reachability check.
+    // G1R COLLAB-WRITE-PROFILE ruling §9C: the general form now lives in
+    // packages/contracts/src/profile.ts's CAPABILITY_ADMISSION /
+    // SIDE_EFFECT_ADMISSION maps (send and network_send are both explicitly
+    // RESERVED there, validated by assertCapabilityAdmissionMap /
+    // assertSideEffectAdmissionMap in tests/profile-policy.test.ts). Kept
+    // here, unrelaxed, as the original, narrower pin.
     expect(classifyCapability('send_email', undefined, undefined)).toBe('send');
     for (const definition of Object.values(BUILT_IN_PROFILE_DEFINITIONS)) {
       expect(definition.allowedCapabilities).not.toContain('send');

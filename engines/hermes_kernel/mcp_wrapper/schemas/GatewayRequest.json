@@ -150,7 +150,8 @@
             "read_only",
             "workspace_write",
             "browser_research",
-            "terminal_power"
+            "terminal_power",
+            "agent_conversation"
           ]
         },
         "profileVersion": {
