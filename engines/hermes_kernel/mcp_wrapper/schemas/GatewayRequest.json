@@ -188,7 +188,8 @@
               "filesystem_write",
               "browser_mutation",
               "process",
-              "network_send"
+              "network_send",
+              "collab_write"
             ]
           }
         },
@@ -229,7 +230,8 @@
               "filesystem_write",
               "browser_mutation",
               "process",
-              "network_send"
+              "network_send",
+              "collab_write"
             ]
           }
         },

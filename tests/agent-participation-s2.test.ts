@@ -211,6 +211,45 @@ describe('PRD-TCLAW-AGENT-PARTICIPATION-007 S2 — registration (OQ-6 mechanism 
     expect(postTool.pathArgKeys).toBeUndefined();
     expect(readTool.pathArgKeys).toBeUndefined();
 
+    // ── G1R V-S2-1: capability:'read' must NOT also claim "no side effect" ──
+    //
+    // `capability` was overloaded. It correctly drives requiresApproval (the
+    // operator's speech ruling, asserted above) AND it drove sideEffectFor(),
+    // where 'read' short-circuited to side-effect class 'none' -- an assertion
+    // that the tool mutates NOTHING. False: post_message commits a durable
+    // collab_events row.
+    //
+    // Consequence proven by G1R against the built artifact BEFORE this fix:
+    // read_only -- the repo's MOST restrictive profile, allowedSideEffects
+    // ['none'] -- admitted collab__post_message, rendered it to the model with
+    // requiresApproval:false, and executing it committed a row (0 -> 1).
+    // isOperationAllowed could not catch it: the registry entry and the profile
+    // snapshot carried the SAME false claim, and policyHash then certified it.
+    //
+    // "Free of approval" and "free of effect" are different claims. The
+    // operator ruled the first. Nobody ruled the second.
+    const readOnly = bridge.resolveEffectiveProfile('read_only');
+    expect(
+      readOnly.allowedOperationIds,
+      'V-S2-1 REGRESSION: read_only admits a substrate-MUTATING tool. Its '
+      + 'contract is that nothing it exposes mutates anything.',
+    ).not.toContain('collab__post_message');
+    expect(
+      readOnly.operationSideEffects['collab__post_message'],
+      'V-S2-1 REGRESSION: post_message still claims side-effect class none. It '
+      + 'commits a collab_events row.',
+    ).not.toBe('none');
+
+    // POSITIVE CONTROL -- without this the assertions above pass against a
+    // build where read_only admits NOTHING, which is the vacuous shape this
+    // program has hit seven times. read_channel genuinely only reads, so it
+    // must STILL be admitted and must still be side-effect 'none'.
+    expect(
+      readOnly.allowedOperationIds,
+      'read_channel is a genuine read and must remain available under read_only',
+    ).toContain('collab__read_channel');
+    expect(readOnly.operationSideEffects['collab__read_channel']).toBe('none');
+
     // sourceServerId proves this went through the SAME registerFromConnectedClient
     // tail as a remote server — namespacing is `${id}__${rawName}`.
     expect(postTool.sourceServerId).toBe('collab');

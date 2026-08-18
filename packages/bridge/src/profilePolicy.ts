@@ -38,6 +38,34 @@ function isNamespaceAllowed(tool: RegisteredTool, namespaces: readonly string[])
 }
 
 function sideEffectFor(tool: RegisteredTool): SideEffectClass {
+  // G1R V-S2-1 -- THIS ARM MUST STAY FIRST, ahead of the capability
+  // short-circuits below.
+  //
+  // collab__post_message carries capability:'read' because the operator ruled
+  // posting is SPEECH and requires no approval (capability drives
+  // requiresApproval via isWriteClass -- that encoding is correct and must not
+  // change). But `capability` is overloaded: the `=== 'read'` line below
+  // short-circuits to side-effect 'none', asserting the tool mutates NOTHING.
+  // For post_message that is false -- it commits a durable collab_events row.
+  //
+  // Proven by execution before this fix: resolveEffectiveProfile('read_only')
+  // -- the repo's MOST restrictive profile, allowedSideEffects ['none'] --
+  // admitted collab__post_message, rendered it to the model with
+  // requiresApproval:false, and executing it committed a row (before=0,
+  // after=1). isOperationAllowed could not catch it because the registry entry
+  // and the profile snapshot shared the same false claim, and the policyHash
+  // then certified it.
+  //
+  // Namespace-based, not capability-based, precisely so the two meanings stop
+  // sharing one field. A future collab tool that only READS must set its own
+  // truthful class rather than inherit this one.
+  // Keyed on the tool's own name, NOT on capability -- capability is the very
+  // field whose overloading caused this defect, so reusing it here would
+  // rebuild the bug. A collab tool that genuinely only reads (read_channel)
+  // must fall through to 'none'; anything that writes must be named here.
+  if (namespaceOf(tool.name) === 'collab' && /post|write|send|create|delete|update/i.test(tool.name)) {
+    return 'collab_write';
+  }
   if (tool.capability === 'read') return 'none';
   if (tool.capability === 'exec') return 'process';
   if (tool.capability === 'send') return 'network_send';

@@ -22,6 +22,23 @@ export const SideEffectClassSchema = z.enum([
   'browser_mutation',
   'process',
   'network_send',
+  // G1R V-S2-1. Commits a row to the collab substrate (collab_events) --
+  // durable, visible to every channel member, and NOT reversible by the
+  // caller. Distinct from 'none' because it mutates, and distinct from
+  // 'filesystem_write'/'network_send' because it touches neither.
+  //
+  // WHY THIS EXISTS AS ITS OWN CLASS: the operator ruled that posting a
+  // message is SPEECH and requires no approval, and that ruling is encoded
+  // faithfully as capability:'read' (which drives requiresApproval via
+  // isWriteClass). But `capability` carries a SECOND meaning in
+  // profilePolicy.ts's sideEffectFor(), where 'read' short-circuits to
+  // 'none' -- an assertion that the tool mutates NOTHING. That is false for
+  // collab__post_message, and it let the read_only profile (allowedSideEffects
+  // ['none']) admit it, render it to the model, and commit a row.
+  //
+  // "Free of approval" and "free of effect" are different claims. The operator
+  // ruled the first. Nobody ruled the second.
+  'collab_write',
 ]);
 export type SideEffectClass = z.infer<typeof SideEffectClassSchema>;
 
