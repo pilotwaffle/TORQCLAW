@@ -297,4 +297,75 @@ describe('operator C1 self-heal (POST_CHANNEL_MESSAGE reachable for the ONLY cre
     expect(JSON.stringify(errReal)).toBe(JSON.stringify(errAbsent));
     expect(countMessageEvents(seeded.collabDbPath, seeded.memberChannelId)).toBe(0);
   }, 30000);
+
+  // ── G1R B-SH-1: the partial-write brick ────────────────────────────────
+  //
+  // A complete provision is THREE writes across TWO databases: the surfaces
+  // row + its surface_credentials link (atomic inside tx()), and the state.db
+  // enforcement projection (activateSurfaceProjection), which necessarily runs
+  // OUTSIDE that transaction because it targets a different database.
+  //
+  // The original idempotence guard read ONLY the surfaces row. A crash between
+  // the tx() commit and the projection left collab.db provisioned and state.db
+  // empty -- and on every later connect validatePresentingSurface returned null
+  // (no projection), control fell to the legacy branch, and the guard saw the
+  // orphan row and RETURNED WITHOUT RETRYING. The operator was bricked
+  // PERMANENTLY by the routine that exists to un-brick them.
+  //
+  // G1R reproduced this twice on the real booted gateway before the fix.
+  // Simulated here by running the FIRST connect to completion, then deleting
+  // only the state.db projection -- byte-exactly the state a crash leaves.
+  //
+  // Asserts the message COMMITS (an event row), not merely that no ERROR frame
+  // arrived: a frame-only assertion is the vacuous shape this program has hit
+  // seven times.
+  it('B-SH-1: a partial provision (collab rows present, state.db projection MISSING) is REPAIRED on the next connect, not permanently bricked', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'torq-opheal-partial-'));
+    const pepper = Buffer.alloc(32, 0x63);
+    const seeded = seedDb(dataDir, pepper);
+    const stateDbPath = join(dataDir, 'state.db');
+
+    // First connect: provisions fully.
+    gateway = await launchGateway(BASE_ENV(dataDir, seeded, pepper));
+    await gateway.ready;
+    const warm = { expectedRole: 'operator', clientInfo: { name: 'op-warm', version: '0.1.0' }, auth: { kind: 'surface', credential: seeded.issuedOperator.token } };
+    await wsRoundtrip(gateway.url, [warm]);
+    expect(operatorSurfaceRole(seeded.collabDbPath, seeded.operatorId)).toBe('operator');
+    expect(liveSurfaceProjectionCount(stateDbPath, seeded.operatorId)).toBe(1);
+    await gateway.stop();
+
+    // Simulate the crash window: collab.db keeps its rows, state.db loses the
+    // projection. This is exactly what dying between write 2 and write 3 leaves.
+    const sdb = new Database(stateDbPath);
+    sdb.prepare("DELETE FROM gateway_surface_security WHERE principal_id = ? AND surface_role = 'operator'").run(seeded.operatorId);
+    sdb.close();
+    expect(operatorSurfaceRole(seeded.collabDbPath, seeded.operatorId)).toBe('operator'); // orphan survives
+    expect(liveSurfaceProjectionCount(stateDbPath, seeded.operatorId)).toBe(0); // projection gone
+
+    // Next connect must REPAIR rather than return early on the orphan row.
+    gateway = await launchGateway(BASE_ENV(dataDir, seeded, pepper));
+    await gateway.ready;
+    const text = 'post after partial-provision repair ' + randomUUID();
+    const connectFrame = { expectedRole: 'operator', clientInfo: { name: 'op-repair', version: '0.1.0' }, auth: { kind: 'surface', credential: seeded.issuedOperator.token } };
+    const postFrame = { action: 'POST_CHANNEL_MESSAGE', channelId: seeded.memberChannelId, text, idempotencyKey: randomUUID() };
+    const frames = await wsRoundtrip(gateway.url, [connectFrame, postFrame]);
+
+    const errorFrame = frames.find((f) => f.type === 'ERROR');
+    expect(
+      errorFrame,
+      'B-SH-1 REGRESSION: the operator is bricked by a partial provision. The '
+      + 'idempotence guard saw the orphan surfaces row and returned without '
+      + 're-running activateSurfaceProjection, so connectionAuth stays null '
+      + 'FOREVER. Got: ' + JSON.stringify(frames),
+    ).toBeUndefined();
+
+    // THE LOAD-BEARING ASSERTION: the message actually committed.
+    expect(
+      actorForMessageText(seeded.collabDbPath, seeded.memberChannelId, text),
+      'the repaired connect must COMMIT the message, not merely avoid an ERROR frame',
+    ).toBe(seeded.operatorId);
+
+    // And the projection is genuinely restored.
+    expect(liveSurfaceProjectionCount(stateDbPath, seeded.operatorId)).toBe(1);
+  }, 45000);
 });

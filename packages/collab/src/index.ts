@@ -17,7 +17,9 @@ export {
   type SecretStore,
   InMemorySecretStore,
   WindowsCredentialManagerStore,
+  FileSecretStore,
   NotImplementedError,
+  SecretAlreadyExistsError,
 } from './secrets.js';
 
 // Bootstrap and recovery

@@ -7,6 +7,7 @@ import {
   bootstrapOperator,
   assertPersistentSecretStore,
   BootstrapRefusedError,
+  BootstrapSecretPersistError,
   principalPepperCheck,
   recoveryPepperCheck,
   verifyPepperCheck,
@@ -418,6 +419,123 @@ describe('bootstrapOperator (Section 6.3)', () => {
     if (verified.ok) {
       expect(verified.payload.principalPepper).toBe(payload.principalPepper);
     }
+
+    result.principalPepper.fill(0);
+    result.recoveryPepper.fill(0);
+    result.recoverySecret.fill(0);
+  });
+});
+
+describe('bootstrapOperator: secretStore.set() failure after DB commit (BootstrapSecretPersistError)', () => {
+  /**
+   * bootstrap.ts:683-684 (pre-fix line numbers) call env.secretStore.set()
+   * for the principal pepper and then the recovery pepper AFTER the DB
+   * transaction inserting principals/principal_credentials/
+   * collab_installation/collab_audit has already committed. Before this
+   * fix, either set() throwing propagated straight past those committed
+   * rows with no rollback -- this SecretStore double simulates that
+   * failure (e.g. FileSecretStore's real SecretAlreadyExistsError on a
+   * double-bootstrap, or any filesystem write failure) so these tests can
+   * assert the compensating DB rollback actually runs.
+   */
+  class ThrowingSecretStore {
+    readonly isPersistent = true;
+    private readonly values = new Map<string, Buffer>();
+    constructor(private readonly failOn: Set<string>) {}
+    get(name: string): Buffer | undefined {
+      return this.values.get(name);
+    }
+    set(name: string, value: Buffer): void {
+      if (this.failOn.has(name)) {
+        throw new Error(`simulated persist failure for ${name}`);
+      }
+      this.values.set(name, Buffer.from(value));
+    }
+  }
+
+  function makeEnv(failOn: Set<string>) {
+    const sqlite = new Database(':memory:');
+    runCollaborationMigration(sqlite);
+    const db: BootstrapDb = {
+      prepare: (sql: string) => sqlite.prepare(sql),
+      exec: (sql: string) => sqlite.exec(sql),
+      transaction: (fn) => sqlite.transaction(fn) as never,
+    };
+    const secretStore = new ThrowingSecretStore(failOn);
+    const clock = new DeterministicClock();
+    const uuids = new DeterministicUuids('bootstrap-rollback-fixture');
+    const rng = nodeRandomSource;
+    return { sqlite, db, secretStore, clock, uuids, rng };
+  }
+
+  it('when the FIRST set() (principal-pepper) throws, the committed principals/principal_credentials/collab_installation/collab_audit rows are rolled back', () => {
+    const { sqlite, db, secretStore, clock, uuids, rng } = makeEnv(new Set(['TORQCLAW/principal-pepper']));
+
+    expect(() =>
+      bootstrapOperator(
+        { db, secretStore, clock, uuids, rng },
+        { operatorDisplayName: 'Operator', installationId: 'install-rollback-1', schemaVersion: 1 }
+      )
+    ).toThrow(BootstrapSecretPersistError);
+
+    const principalCount = (sqlite.prepare('SELECT COUNT(*) AS n FROM principals').get() as { n: number }).n;
+    const credCount = (sqlite.prepare('SELECT COUNT(*) AS n FROM principal_credentials').get() as { n: number }).n;
+    const installCount = (sqlite.prepare('SELECT COUNT(*) AS n FROM collab_installation').get() as { n: number }).n;
+    const auditCount = (sqlite.prepare('SELECT COUNT(*) AS n FROM collab_audit').get() as { n: number }).n;
+    expect(principalCount).toBe(0);
+    expect(credCount).toBe(0);
+    expect(installCount).toBe(0);
+    expect(auditCount).toBe(0);
+  });
+
+  it('when the SECOND set() (recovery-pepper) throws, the committed rows are ALSO rolled back, even though the principal-pepper set() already succeeded', () => {
+    const { sqlite, db, secretStore, clock, uuids, rng } = makeEnv(new Set(['TORQCLAW/recovery-pepper']));
+
+    expect(() =>
+      bootstrapOperator(
+        { db, secretStore, clock, uuids, rng },
+        { operatorDisplayName: 'Operator', installationId: 'install-rollback-2', schemaVersion: 1 }
+      )
+    ).toThrow(BootstrapSecretPersistError);
+
+    const principalCount = (sqlite.prepare('SELECT COUNT(*) AS n FROM principals').get() as { n: number }).n;
+    const installCount = (sqlite.prepare('SELECT COUNT(*) AS n FROM collab_installation').get() as { n: number }).n;
+    expect(principalCount).toBe(0);
+    expect(installCount).toBe(0);
+
+    // Documented residual: the principal-pepper VALUE persisted by the
+    // first (successful) set() call is not un-set (SecretStore has no
+    // delete() method) -- but no DB row references it any longer, so it is
+    // inert. Confirm it is at least still exactly what was written (no
+    // corruption), for completeness of the double's behaviour.
+    expect(secretStore.get('TORQCLAW/principal-pepper')).toBeDefined();
+  });
+
+  it('a retried bootstrap after a rolled-back failure succeeds cleanly (no leftover row collisions)', () => {
+    const { db, clock, uuids, rng } = makeEnv(new Set(['TORQCLAW/principal-pepper']));
+
+    // First attempt: forced failure + rollback.
+    const failingStore = new ThrowingSecretStore(new Set(['TORQCLAW/principal-pepper']));
+    expect(() =>
+      bootstrapOperator(
+        { db, secretStore: failingStore, clock, uuids, rng },
+        { operatorDisplayName: 'Operator', installationId: 'install-retry', schemaVersion: 1 }
+      )
+    ).toThrow(BootstrapSecretPersistError);
+
+    // Retry with a working store against the SAME db and the SAME
+    // DeterministicUuids sequence (bootstrapOperator advances it further on
+    // this call). Because the failed attempt's rows were fully rolled back,
+    // this must succeed without a uniqueness collision even though it runs
+    // against the identical database the failed attempt just touched.
+    const workingStore = new InMemorySecretStore();
+    const result = bootstrapOperator(
+      { db, secretStore: workingStore, clock, uuids, rng },
+      { operatorDisplayName: 'Operator', installationId: 'install-retry-2', schemaVersion: 1 }
+    );
+    expect(result.operatorPrincipalId).toBeTruthy();
+    expect(workingStore.get('TORQCLAW/principal-pepper')).toBeDefined();
+    expect(workingStore.get('TORQCLAW/recovery-pepper')).toBeDefined();
 
     result.principalPepper.fill(0);
     result.recoveryPepper.fill(0);

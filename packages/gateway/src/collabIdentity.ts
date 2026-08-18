@@ -32,16 +32,16 @@
  *
  * PEPPER / DB PROVISIONING
  * -------------------------
- * The principal pepper lives outside SQLite in a SecretStore (Windows
- * Credential Manager in production; PRD Section 6.1/6.3). The real adapter
- * is a stub that throws NOT_IMPLEMENTED (packages/collab/src/secrets.ts) --
- * a known, separately-tracked gap, not something this transport slice can
- * or should paper over. Both the pepper source and the credential DB handle
- * are injectable (mirrors the `db` singleton pattern in storage.ts) so
- * tests and the built-artifact harness can wire a real, working pepper +
- * database without touching production wiring, and so production fails
- * CLOSED (AUTH_FAILED, never a crash or a silent bypass) until a real
- * SecretStore adapter lands.
+ * The principal pepper lives outside SQLite in a SecretStore (PRD Section
+ * 6.1/6.3). Production now uses `FileSecretStore` (packages/collab/src/
+ * secrets.ts), a file-backed persistent store under `TORQCLAW_DATA_DIR`; a
+ * native OS-keyring adapter (`WindowsCredentialManagerStore`) remains a
+ * deferred stub behind the same interface. Both the pepper source and the
+ * credential DB handle are injectable (mirrors the `db` singleton pattern
+ * in storage.ts) so tests and the built-artifact harness can wire a real,
+ * working pepper + database without touching production wiring, and so
+ * production fails CLOSED (AUTH_FAILED, never a crash or a silent bypass)
+ * whenever no pepper has been provisioned yet.
  */
 
 import { join } from 'node:path';
@@ -50,7 +50,7 @@ import Database from 'better-sqlite3';
 import {
   verifyCredential,
   credentialLookupFromDb,
-  WindowsCredentialManagerStore,
+  FileSecretStore,
   runCollaborationMigration,
   runSurfaceIdentityMigration,
   runSurfaceAuditMigration,
@@ -66,7 +66,7 @@ import {
   bindingFor,
   type ConnectionAuthContext,
 } from './surfaceGate.js';
-import { activateSurfaceProjection } from './surfaceSecurity.js';
+import { activateSurfaceProjection, liveSurfaceSecurity } from './surfaceSecurity.js';
 
 const PRINCIPAL_PEPPER_SECRET_NAME = 'TORQCLAW/principal-pepper';
 
@@ -85,9 +85,23 @@ export function setCollabDbForTest(db: BootstrapDb | null): void {
   collabDbOverride = db;
 }
 
+/**
+ * Production SecretStore. `FileSecretStore` is scoped to the SAME
+ * `TORQCLAW_DATA_DIR` resolution `storage.ts`/`getCollabDb` already use
+ * (the `DATA_DIR` import above), not a re-derived path. It reads
+ * `process.env.TORQCLAW_DATA_DIR` live (via `DATA_DIR`'s own module-load
+ * resolution, mirrored here) rather than caching, matching this module's
+ * existing lazy-open pattern for `getCollabDb()`.
+ *
+ * Replaces the throwing `WindowsCredentialManagerStore` stub that
+ * previously made the collab feature entirely inert in production (every
+ * `.get()` call threw, every credential failed AUTH_FAILED). A native
+ * keyring-backed store remains DEFERRED (see secrets.ts) and can drop in
+ * here later with zero call-site changes elsewhere in this module.
+ */
 function getSecretStore(): SecretStore {
   if (secretStoreOverride) return secretStoreOverride;
-  if (!defaultSecretStore) defaultSecretStore = new WindowsCredentialManagerStore();
+  if (!defaultSecretStore) defaultSecretStore = new FileSecretStore(DATA_DIR);
   return defaultSecretStore;
 }
 
@@ -326,10 +340,56 @@ function ensureOperatorSurfaceProvisioned(
   operatorPrincipalId: string,
 ): void {
   try {
+    // G1R B-SH-1: "already provisioned" means ALL THREE writes across BOTH
+    // databases -- the surfaces row, its surface_credentials link (atomic
+    // together inside tx() below), and the state.db enforcement projection
+    // (activateSurfaceProjection, which necessarily runs OUTSIDE that
+    // transaction because it targets a different database).
+    //
+    // The original guard read only the first. A crash, throw, or closed
+    // handle between the tx() commit and the projection left collab.db
+    // provisioned and state.db empty -- and on every later connect
+    // validatePresentingSurface returned null (no projection), control fell
+    // to the legacy branch, and THIS GUARD saw the orphan row and returned
+    // without re-attempting the projection. The operator was bricked
+    // PERMANENTLY by the very routine that exists to un-brick them. G1R
+    // reproduced it twice on the real booted gateway: COLLAB_IDENTITY_REQUIRED,
+    // zero committed messages, surfacesRows=1, stateProjections=0.
+    //
+    // So: resolve the EXISTING surface only when its credential link is also
+    // active, and treat a missing projection as work still to do rather than
+    // as done. Re-running activateSurfaceProjection for an existing surface_id
+    // is idempotent by construction (INSERT ... ON CONFLICT(surface_id) DO
+    // UPDATE), and carrying the same surface_role means the role-change epoch
+    // bump is not triggered.
     const already = collabDb
-      .prepare('SELECT 1 FROM surfaces WHERE principal_id = ? AND surface_role = ?')
-      .get(operatorPrincipalId, 'operator');
-    if (already) return; // already provisioned by an earlier connect
+      .prepare(
+        `SELECT s.surface_id AS surfaceId
+           FROM surfaces s
+           JOIN surface_credentials sc ON sc.surface_id = s.surface_id
+          WHERE s.principal_id = ? AND s.surface_role = ?
+            AND s.state = 'active' AND sc.state = 'active'`,
+      )
+      .get(operatorPrincipalId, 'operator') as { surfaceId: string } | undefined;
+
+    if (already) {
+      if (liveSurfaceSecurity(stateDb, already.surfaceId) !== null) return; // fully provisioned
+      // Collab side is intact but the state.db projection is missing -- the
+      // partial-write state. Repair it rather than returning.
+      activateSurfaceProjection(stateDb, {
+        surfaceId: already.surfaceId,
+        principalId: operatorPrincipalId,
+        surfaceKind: 'desktop',
+        surfaceRole: 'operator',
+        // G1R ruling: [] is the schema's own declared default and the
+        // fail-closed value. See the note at the fresh-provision call below.
+        allowedCapabilityClasses: [],
+        authEpoch: 1,
+        capabilityRevision: 1,
+        sourceIdentityRevision: already.surfaceId,
+      });
+      return;
+    }
 
     const credRow = collabDb
       .prepare('SELECT secret_hmac AS secretHmac FROM principal_credentials WHERE id = ? AND principal_id = ?')
@@ -377,7 +437,29 @@ function ensureOperatorSurfaceProvisioned(
       principalId: operatorPrincipalId,
       surfaceKind: 'desktop',
       surfaceRole: 'operator',
-      allowedCapabilityClasses: ['read', 'write', 'exec', 'send'],
+      // G1R ruling on the builder's flagged judgment call. The original value
+      // was ['read','write','exec','send'], justified as "preserving the
+      // operator's prior unconditional legacy authority" -- but that rationale
+      // is wrong on the facts: the operator had NO surface row at all, which
+      // IS the defect being fixed. There is nothing to preserve. Choosing the
+      // MAXIMUM for a field that never had a value is a decision, not a
+      // continuation.
+      //
+      // The field is currently stored and projected but consulted by NO
+      // authorization gate anywhere in packages/gateway/src, so this changes
+      // no live behavior today. It is a LATENT WIDENING: the moment any slice
+      // adds an allowedCapabilityClasses check, every self-healed operator
+      // surface would silently arrive pre-authorized for 'exec' -- the
+      // highest-consequence class -- via a connect-path auto-provisioner no
+      // human reviewed for that install.
+      //
+      // [] is the schema's own declared default (allowed_capability_classes_json
+      // TEXT NOT NULL DEFAULT '[]') and the fail-closed value, matching this
+      // repo's stated posture ("UNKNOWN NEVER MEANS READ", capability.ts).
+      // Widening later is trivial and safe (ON CONFLICT DO UPDATE); narrowing
+      // later, after installs have accumulated exec-bearing rows, is not.
+      // Take the reversible direction.
+      allowedCapabilityClasses: [],
       authEpoch: 1,
       capabilityRevision: 1,
       sourceIdentityRevision: surfaceId,
