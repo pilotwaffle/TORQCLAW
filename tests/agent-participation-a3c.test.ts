@@ -465,22 +465,25 @@ describe('PRD-TCLAW-AGENT-PARTICIPATION-007 A3-c — two agents actually convers
     expect(completedAgentIds).toEqual(new Set([seeded.agentAId, seeded.agentBId]));
   }, 20000);
 
-  it('ASSERTION 2 (mechanics) — no self-reply: every DIRECTLY-triggered turn is for an agent OTHER than whoever authored its triggering event', () => {
-    // Scoped to real-event-triggered claims (trigger_event_id is an actual
-    // collab_events row id), NOT coalesced follow-ups (dispatchOneTurn's
-    // dirty-flag mechanism writes a synthetic 'coalesced:<uuid>' trigger_event_id
-    // and re-evaluates against latestChannelSeq at RESOLUTION time -- see
-    // this file's own A3-c cascade above, where the human's post makes both
-    // A and B eligible, A's reply chains into B via a real trigger, and B's
-    // OWN original claim (from the human's post) can only be re-dispatched
-    // as a coalesced follow-up once B is no longer in-flight; by then the
-    // latest seq in the channel may legitimately equal B's own most recent
-    // post. That is NOT a self-reply -- the coalesced dispatch is B
-    // evaluating "is there anything new to react to", not "B replying to
-    // channel_seq=N's author". Excluding coalesced rows keeps this
-    // assertion sound for the invariant it actually names.
-    const turns = agentTurnRows(seeded.collabDbPath, seeded.channelId)
-      .filter((t) => !t.triggerEventId.startsWith('coalesced:'));
+  it('ASSERTION 2 (mechanics) — no self-reply: EVERY turn, coalesced included, is for an agent OTHER than whoever authored its triggering event', () => {
+    // G2A C-1: this assertion used to EXCLUDE coalesced follow-ups, on the
+    // reasoning that they re-evaluate against latestChannelSeq and could
+    // legitimately land on the agent's own most recent post.
+    //
+    // The reasoning was factually right about the BEHAVIOUR and wrong about
+    // whether that behaviour was acceptable. Both review seats found that the
+    // coalesced path called dispatchOneTurn directly for the SAME agent,
+    // bypassing resolveEligibleAgents -- whose `m.principal_id != ?` is the
+    // ONLY structural no-self-reply guard in the system. So a coalesced
+    // dispatch onto the agent's own commit WAS a genuine self-reply, and
+    // excluding those rows here meant the one place it could occur was the one
+    // place this assertion did not look. G2A promoted it to blocking because
+    // this commit is what makes the loop actually runnable.
+    //
+    // The dispatcher now skips a coalesced follow-up when the latest event's
+    // author is the agent itself, so the exclusion is no longer needed -- and
+    // keeping it would leave the blind spot open. Every turn is checked.
+    const turns = agentTurnRows(seeded.collabDbPath, seeded.channelId);
     expect(turns.length).toBeGreaterThan(0);
     const posts = messagePostedRows(seeded.collabDbPath, seeded.channelId);
     const authorBySeq = new Map(posts.map((e) => [e.channelSeq, e.actorPrincipalId]));

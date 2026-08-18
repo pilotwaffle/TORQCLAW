@@ -193,18 +193,30 @@ async function dispatchOneTurn(
     console.error(`[gateway] agent turn failed unexpectedly (${err?.message ?? err})`);
   } finally {
     inFlight.delete(key);
-    // Coalescing: exactly one follow-up evaluation, using the LATEST
-    // channel state (re-resolve eligibility + highest seq at the current
-    // moment) rather than the stale seq that triggered this turn.
+    // Coalescing: exactly one follow-up evaluation against the LATEST channel
+    // state rather than the stale seq that triggered this turn.
+    //
+    // G2A C-1: this comment used to claim it would "re-resolve eligibility".
+    // IT DOES NOT -- it calls dispatchOneTurn directly for the SAME agent,
+    // bypassing resolveEligibleAgents entirely. The self-reply exclusion is
+    // therefore applied HERE, explicitly, rather than being inherited from a
+    // resolver this path never calls.
     if (dirty.has(key)) {
       dirty.delete(key);
       // STOP re-checked here (per this file's header): an in-flight turn
       // completes, but its own coalesced follow-up must not fire if STOP
       // landed while it was running.
       if (!isAutoreplyStopped(db, channelId)) {
-        const latestSeq = latestChannelSeq(db, channelId);
-        if (latestSeq !== null) {
-          await dispatchOneTurn(store, db, channelId, agentPrincipalId, latestSeq, `coalesced:${randomUUID()}`);
+        const latest = latestChannelSeqAuthor(db, channelId);
+        // NO SELF-REPLY. If the newest event is this agent's own commit, the
+        // follow-up would dispatch the agent to answer itself -- the exact
+        // property resolveEligibleAgents' `m.principal_id != ?` exists to
+        // prevent, and which this path silently skipped. Skipping the dispatch
+        // is correct rather than advancing to an older seq: any seq below the
+        // latest has either already been claimed (PK idempotency refuses it)
+        // or was authored by someone whose own trigger already fired.
+        if (latest !== null && latest.actorPrincipalId !== agentPrincipalId) {
+          await dispatchOneTurn(store, db, channelId, agentPrincipalId, latest.seq, `coalesced:${randomUUID()}`);
         }
       }
     }
@@ -216,6 +228,42 @@ function latestChannelSeq(db: NonNullable<ReturnType<typeof collabDbHandle>>, ch
     .prepare('SELECT COALESCE(MAX(channel_seq), 0) AS m FROM collab_events WHERE channel_id = ?')
     .get(channelId) as { m: number };
   return row.m > 0 ? row.m : null;
+}
+
+/**
+ * G2A C-1 (promoted from G1R F1): the author of the channel's newest event.
+ *
+ * The coalesced follow-up below re-dispatches THE SAME agent against
+ * `latestChannelSeq` WITHOUT calling `resolveEligibleAgents` -- whose SQL
+ * (`AND m.principal_id != ?`, autoReply.ts:80) is the ONLY structural
+ * enforcement of no-self-reply anywhere in the system. When the latest seq is
+ * that agent's OWN commit, the follow-up is a genuine self-reply: the agent is
+ * dispatched to respond to itself.
+ *
+ * The old comment claimed the follow-up would "re-resolve eligibility". It did
+ * not -- it called dispatchOneTurn directly. A comment asserting a guard that
+ * the code does not perform is this program's recurring defect, and here it
+ * concealed a real one.
+ *
+ * A3-c's assertion 2 currently EXCLUDES coalesced rows from its self-reply
+ * check for exactly this reason, which means a true self-reply on this path
+ * would pass unasserted. Both review seats found the bypass; G2A promoted it to
+ * blocking because THIS commit is what makes the loop actually runnable.
+ */
+function latestChannelSeqAuthor(
+  db: NonNullable<ReturnType<typeof collabDbHandle>>,
+  channelId: string,
+): { seq: number; actorPrincipalId: string } | null {
+  const row = db
+    .prepare(
+      `SELECT channel_seq AS seq, actor_principal_id AS actorPrincipalId
+         FROM collab_events
+        WHERE channel_id = ?
+        ORDER BY channel_seq DESC
+        LIMIT 1`,
+    )
+    .get(channelId) as { seq: number; actorPrincipalId: string } | undefined;
+  return row ?? null;
 }
 
 async function runAgentTurn(

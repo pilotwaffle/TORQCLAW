@@ -182,10 +182,17 @@ export const BUILT_IN_PROFILE_DEFINITIONS = {
  * to make a "is this class reachable" test pass is to GRANT the class to
  * some profile -- turning a detector into a privilege-escalation pump. Each
  * 'INTENTIONALLY_UNADMITTED' entry is validated (assertSideEffectAdmissionMap
- * / assertCapabilityAdmissionMap below, and profile-conformance-runtime.test
- * ts at runtime) against BUILT_IN_PROFILE_DEFINITIONS itself, so this map
- * cannot drift into a second, lying copy of the truth -- it is checked, not
- * merely documented.
+ * / assertCapabilityAdmissionMap below) against BUILT_IN_PROFILE_DEFINITIONS
+ * itself, so this map cannot drift into a second, lying copy of the truth --
+ * it is checked, not merely documented.
+ *
+ * G2A NB-3: this comment previously named `profile-conformance-runtime.test.ts`
+ * as the exercising suite. It is NOT -- the validators are called from
+ * `tests/profile-conformance-declared.test.ts` and `tests/profile-policy.test.ts`
+ * (grep-verified). The wrong pointer cost a reviewer a misleading 18/18 from the
+ * file it named before they found the real one. A citation that sends the next
+ * reader to the wrong place is the same defect class as a comment asserting a
+ * guard the code does not perform.
  */
 export const SIDE_EFFECT_ADMISSION: Record<SideEffectClass, ProfileId[] | 'INTENTIONALLY_UNADMITTED'> = {
   none: ['read_only', 'workspace_write', 'browser_research', 'terminal_power', 'agent_conversation'],

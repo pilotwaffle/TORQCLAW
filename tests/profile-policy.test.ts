@@ -299,16 +299,48 @@ describe('G1R COLLAB-WRITE-PROFILE ruling — reachability conformance (the clas
       network_send: 'INTENTIONALLY_UNADMITTED' as const,
       collab_write: ['agent_conversation'] as const,
     };
-    for (const [sideEffect, entry] of Object.entries(lyingMap)) {
-      if (entry === 'INTENTIONALLY_UNADMITTED') continue;
-      for (const profileId of entry) {
-        const def = BUILT_IN_PROFILE_DEFINITIONS[profileId as keyof typeof BUILT_IN_PROFILE_DEFINITIONS];
-        if (sideEffect === 'browser_mutation') {
-          expect(def.allowedSideEffects, `${profileId} must NOT actually admit ${sideEffect} (this is the planted lie)`)
-            .not.toContain(sideEffect);
-        }
-      }
-    }
+    // G2A NB-2: this test was VACUOUS. It built lyingMap and then inspected
+    // BUILT_IN_PROFILE_DEFINITIONS directly -- the planted lie NEVER REACHED
+    // the validator, so the test proved nothing about the detector and would
+    // have passed against a detector that did nothing at all. It merely
+    // restated a fact the very next test already covers. Instance nine of this
+    // program's guard-that-enforces-nothing pattern, inside the test whose
+    // entire purpose was to prove a guard is real.
+    //
+    // The map cannot be injected -- assertSideEffectAdmissionMap takes ONLY
+    // `definitions` and reads SIDE_EFFECT_ADMISSION from module scope. That is
+    // itself a good property (the registry is not caller-substitutable), and
+    // it means `lyingMap` above can only ever be inert documentation. So the
+    // detector is proven from the side that IS injectable: lie in the
+    // DEFINITIONS and require the validator to catch the drift.
+    void lyingMap; // retained as the documented shape of the lie being described
+
+    const lyingDefinitions = {
+      ...BUILT_IN_PROFILE_DEFINITIONS,
+      browser_research: {
+        ...BUILT_IN_PROFILE_DEFINITIONS.browser_research,
+        // THE PLANTED LIE: browser_mutation is registered
+        // INTENTIONALLY_UNADMITTED, so a profile admitting it is exactly the
+        // drift the registry exists to detect.
+        allowedSideEffects: [...BUILT_IN_PROFILE_DEFINITIONS.browser_research.allowedSideEffects, 'browser_mutation'],
+      },
+    } as typeof BUILT_IN_PROFILE_DEFINITIONS;
+
+    expect(
+      () => assertSideEffectAdmissionMap(lyingDefinitions),
+      'the validator must REJECT definitions where a profile admits a class the '
+      + 'registry marks INTENTIONALLY_UNADMITTED. If this does not throw, the '
+      + 'registry is decorative and a future dead class goes unnoticed exactly as '
+      + 'collab_write did.',
+    ).toThrow(/browser_mutation/);
+
+    // POSITIVE CONTROL, same test: the REAL definitions must PASS. Without it
+    // the assertion above is satisfied by a validator that throws on anything.
+    expect(
+      () => assertSideEffectAdmissionMap(BUILT_IN_PROFILE_DEFINITIONS),
+      'the real definitions must PASS -- otherwise the throw above proves only '
+      + 'that the validator is broken, not that it discriminates',
+    ).not.toThrow();
   });
 
   it('DETECTOR PROOF: browser_mutation stays RESERVED-BY-DEFECT — granting it to satisfy a naive test would be the privilege-escalation-pump failure mode', () => {
