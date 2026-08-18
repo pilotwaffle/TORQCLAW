@@ -14,7 +14,8 @@ import { dispatch, mintGrantedRequest, emitToolDenied } from './dispatch.js';
 import { decideApproval, handleListApprovals } from './approvals.js';
 import { makeEmitter, sessionBus, persistAndPublish, taskStore } from './events.js';
 import { router } from '@torqclaw/router';
-import { connectBridge, approveSkill, getSkillDraft, cancelHermesTask } from '@torqclaw/bridge';
+import { connectBridge, connectInProcessServer, approveSkill, getSkillDraft, cancelHermesTask } from '@torqclaw/bridge';
+import { buildCollabAgentMcpServer, COLLAB_AGENT_SERVER_ID, COLLAB_AGENT_TOOL_CAPABILITIES } from './collabAgentTools.js';
 import { describeSkillDecision } from './skillDecision.js';
 import { assertResolvedProfile, constrainTier } from './profileResolver.js';
 import { setCancelCheck, setToolAdmissionCheck } from '@torqclaw/inference';
@@ -404,7 +405,15 @@ app.get('/ws', { websocket: true }, (socket) => {
         const emit = makeEmitter(sid, null, null);
         emit('USER_PROMPT', cmd.data.prompt); // feeds getContextWindow Tier 1
 
-         const request = await enrichCommand(cmd.data, sid, 'torq-console');
+         // S2: authz denies SUBMIT_PROMPT outright for role 'node' (the only
+         // seat an agent's own connection can hold — authz.ts), so
+         // agentCollabPrincipalId is always null on every connection that
+         // can reach this arm today. Passed through anyway so this call site
+         // stays correct if a future slice (S3's dispatch-time binding)
+         // changes that, rather than needing to be found and rewired later.
+         const request = await enrichCommand(
+           cmd.data, sid, 'torq-console', agentCollabPrincipalId ?? undefined,
+         );
          GatewayRequestSchema.parse(request); // throws = our bug; fail loud
          assertResolvedProfile(request);
 
@@ -764,6 +773,35 @@ app.get('/ws', { websocket: true }, (socket) => {
 });
 
 await connectBridge(); // discover + namespace MCP servers before traffic
+
+// PRD-TCLAW-AGENT-PARTICIPATION-007 S2: register the in-process collab
+// tool server AFTER connectBridge() returns — never inside it, and never
+// reachable from loadServerConfigs()/servers.json (G1R B-2; see
+// registry.ts's connectInProcessServer doc comment for why that boundary
+// holds by construction). Gated on agentParticipationEnabled() (S2 inherits
+// S1's flag, which itself requires collabSurfaceCommandsEnabled() ->
+// collabEnabled() -- so this can never register a surface those flags left
+// off). Read once at boot (not per-call) because tool REGISTRATION, unlike
+// the wire-command flag checks elsewhere in this file, is not something a
+// live connection can race against: no traffic has been accepted yet
+// (connectBridge() runs before the listener opens, and this runs
+// immediately after). A boot-time flag flip requires a restart to take
+// effect, matching how every other bridge server registers (connectServer
+// above is equally boot-time-only).
+if (agentParticipationEnabled()) {
+  try {
+    await connectInProcessServer(
+      COLLAB_AGENT_SERVER_ID,
+      buildCollabAgentMcpServer(),
+      { capabilities: COLLAB_AGENT_TOOL_CAPABILITIES },
+    );
+  } catch (err: any) {
+    // Same degrade-one-server posture as the user roster loop below: a
+    // failure here must never take the gateway down (CLAUDE.md §4: "a
+    // malformed or unreachable server must degrade only that server").
+    console.warn(`[gateway] collab agent tools failed to register (${err?.message ?? err}) — agent participation tools unavailable this session`);
+  }
+}
 
 // C2 startup recovery + projection rebuild (§1.4, §3.13, §6.6, A10).
 //

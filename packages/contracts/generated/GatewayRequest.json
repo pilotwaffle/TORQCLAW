@@ -54,6 +54,9 @@
           "items": {
             "type": "string"
           }
+        },
+        "callerCollabPrincipalId": {
+          "type": "string"
         }
       },
       "required": [

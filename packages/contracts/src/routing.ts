@@ -42,6 +42,22 @@ export const GatewayRequestSchema = z.object({
      *  command; set solely by the APPROVE_TOOL re-mint. default([]) so fresh
      *  requests carry [] and the gate fires on the first attempt. */
     grantedTools: z.array(z.string()).default([]),
+    /** PRD-TCLAW-AGENT-PARTICIPATION-007 S2: the collab principal id this
+     *  task is bound to execute AS, when the task was dispatched on behalf
+     *  of an agent principal (S1's `agentCollabPrincipalId`). GATEWAY-OWNED
+     *  ONLY — never present on a ClientCommand and never spread from one; a
+     *  ClientCommand schema (SUBMIT_PROMPT et al.) carries no field this
+     *  could be read from, so there is nothing on the wire for a client to
+     *  set it from (mirrors grantedTools' "never spread from cmd"
+     *  discipline). Absent/undefined means "no bound agent identity" — the
+     *  collab__* MCP tools then refuse COLLAB_IDENTITY_REQUIRED, never
+     *  falling back to the operator or synthesizing a principal (§2a).
+     *  Nothing in this repo sets this field yet; S1 binds identity only at
+     *  the connection layer for POST_CHANNEL_MESSAGE, and the dispatch-time
+     *  binding for a task (the mechanism S3's auto-reply loop will use) is
+     *  intentionally out of S2's scope. S2 builds and proves the tool
+     *  surface against this field as a precondition. */
+    callerCollabPrincipalId: z.string().optional(),
   }),
   constraints: z.object({
     latencySensitivity: z.enum(['HIGH', 'LOW']),

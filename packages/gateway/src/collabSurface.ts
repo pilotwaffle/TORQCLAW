@@ -129,19 +129,20 @@ export function setCollabSurfaceStoreForTest(store: CollaborationStore | null): 
 }
 
 /**
- * Lazily construct the production read-path store, sharing the exact
- * migrated collab.db handle and principal pepper collabIdentity.ts already
- * uses (getCollabDb/getPrincipalPepper) -- no second DB connection, no
+ * Lazily construct the production store, sharing the exact migrated
+ * collab.db handle and principal pepper collabIdentity.ts already uses
+ * (getCollabDb/getPrincipalPepper) -- no second DB connection, no
  * duplicated SecretStore selection.
  *
- * The store's `uuids`/`rng` fields are required by CollaborationStoreEnv's
- * type but are never read by the two read-path methods this module calls
- * (listChannels/getChannelTimeline take no idempotencyKey and mint no
- * credential) -- nodeRandomSource plus a UUID source are supplied only to
- * satisfy the constructor, matching the "production RandomSource" already
- * exported for exactly this purpose.
+ * Exported (PRD-TCLAW-AGENT-PARTICIPATION-007 S2) so the in-process collab
+ * MCP tool server (packages/gateway/src/collabAgentTools.ts) can reuse the
+ * SAME store singleton and error taxonomy this module's own handlers use,
+ * rather than constructing a second store instance or re-deriving the
+ * CollabError -> structured-error mapping -- the T-2 byte-identity
+ * guarantee (a hidden channel indistinguishable from a nonexistent one)
+ * depends on there being exactly one mapping, not two that could drift.
  */
-function getStore(): CollaborationStore | null {
+export function getStore(): CollaborationStore | null {
   if (storeOverride) return storeOverride;
   const pepper = getPrincipalPepper();
   if (!pepper) return null; // same fail-closed posture as the connect path
@@ -191,8 +192,9 @@ export const COLLAB_IDENTITY_REQUIRED: CollabSurfaceError = { code: 'COLLAB_IDEN
  * only predicate POST_CHANNEL_MESSAGE's predicate slot calls) ignores
  * caller.kind entirely, so this fallback choice is not reachable as a live
  * escalation today, and is chosen for future-proofing only.
+ * Exported (S2) for the same reuse reason as getStore() above.
  */
-function callerFor(principalId: string): CallerContext {
+export function callerFor(principalId: string): CallerContext {
   return { principalId, kind: resolvePrincipalKindForCaller(principalId) };
 }
 

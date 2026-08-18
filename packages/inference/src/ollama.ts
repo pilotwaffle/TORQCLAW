@@ -185,8 +185,12 @@ export async function executeLocalEdge(
   const start = performance.now();
 
   // Task-filtered, namespaced, alias-mapped, approval-gated toolset.
-  const { openAITools, resolveAlias, requiresApproval } =
-    await getToolsForTask(req.payload.taskType, 'LOCAL_EDGE', req.effectiveProfile);
+  // S2: callerCollabPrincipalId gates collab__* tool visibility — omitted
+  // (undefined) for a task with no bound agent identity, which is every
+  // task dispatched by this repo today.
+  const { openAITools, resolveAlias, requiresApproval } = await getToolsForTask(
+    req.payload.taskType, 'LOCAL_EDGE', req.effectiveProfile, req.payload.callerCollabPrincipalId,
+  );
   const requestedTools = requestedLocalToolSequence(
     req.payload.prompt,
     openAITools.map((t) => t.function.name),
@@ -381,7 +385,15 @@ export async function executeLocalEdge(
 
       emit('TOOL_CALL', `Executing ${realName}`, { args: toolArgs });
       try {
-        const toolResult = await executeTool(realName, toolArgs, req.effectiveProfile);
+        // PRD-TCLAW-AGENT-PARTICIPATION-007 S2: threaded ONLY from
+        // req.payload.callerCollabPrincipalId — a gateway-owned field no
+        // ClientCommand can populate (contracts/routing.ts) — never from
+        // toolArgs (model output). A task with no bound agent identity
+        // passes undefined here, and executeTool omits the _meta key
+        // entirely in that case (byte-identical to pre-S2 behavior).
+        const toolResult = await executeTool(
+          realName, toolArgs, req.effectiveProfile, req.payload.callerCollabPrincipalId,
+        );
         // P3: head+tail truncation — keep the start AND end. Errors and the
         // useful tail of a result cluster at log ends; a head-only cut drops them.
         const content = truncateHeadTail(JSON.stringify(toolResult), MAX_TOOL_RESULT_CHARS);

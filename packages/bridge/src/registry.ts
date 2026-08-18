@@ -1,6 +1,8 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { EffectiveProfile } from '@torqclaw/contracts';
 
 import { type PathScope, checkPath, extractPaths } from './pathScope.js';
@@ -120,6 +122,53 @@ async function attemptHermesReconnect(): Promise<void> {
   }
 }
 
+/** Shared registration tail for BOTH connectServer and connectInProcessServer:
+ *  list tools over an already-connected client, classify each one through the
+ *  SAME capability/approval expression, and push into the SAME registry array.
+ *  This is the load-bearing property from OQ-6 (G1R Gate-1 ruling): an
+ *  in-process server must be indistinguishable, past this point, from a
+ *  remote one — there is no second dispatch path, only a second TRANSPORT
+ *  feeding the identical registration and (later) executeTool code. */
+async function registerFromConnectedClient(
+  id: string,
+  client: Client,
+  opts: {
+    approvalPatterns?: RegExp[];
+    paths?: PathScope;
+    pathArgKeys?: string[];
+    tools?: string[];
+    capabilities?: Record<string, Capability>;
+  },
+): Promise<void> {
+  clients.set(id, client);
+
+  const { tools } = await client.listTools();
+  const patterns = opts.approvalPatterns ?? DEFAULT_WRITE_PATTERNS;
+  // Optional allowlist: register only the named tools. Drops the rest so a
+  // large server (80+ tools) can't overflow the local context window.
+  const allow = opts.tools ? new Set(opts.tools) : null;
+  const selected = allow ? tools.filter((t) => allow.has(t.name)) : tools;
+  // Idempotent re-registration: drop any prior entries for this server so a
+  // reconnect never duplicates its tools in the registry.
+  registry = registry.filter((entry) => entry.sourceServerId !== id);
+  for (const t of selected) {
+    const cap = classifyCapability(t.name, (t as any).annotations, opts.capabilities?.[t.name]);
+    registry.push({
+      name: `${id}__${t.name}`,
+      rawName: t.name,
+      description: t.description ?? '',
+      inputSchema: t.inputSchema as object,
+      sourceServerId: id,
+      capability: cap,
+      requiresApproval: isWriteClass(cap) || patterns.some((p) => p.test(t.name)),
+      pathScope: opts.paths,
+      pathArgKeys: opts.pathArgKeys,
+    });
+  }
+  const note = allow ? ` (allowlisted from ${tools.length})` : '';
+  console.log(`[bridge] ${id}: registered ${selected.length} tools${note}`);
+}
+
 export async function connectServer(cfg: ServerConfig): Promise<void> {
   const client = new Client(
     { name: 'torqclaw-gateway', version: '0.1.0' },
@@ -141,33 +190,72 @@ export async function connectServer(cfg: ServerConfig): Promise<void> {
     try { await transport.close(); } catch { /* best-effort cleanup */ }
     throw error;
   }
-  clients.set(cfg.id, client);
 
-  const { tools } = await client.listTools();
-  const patterns = cfg.approvalPatterns ?? DEFAULT_WRITE_PATTERNS;
-  // Optional allowlist: register only the named tools. Drops the rest so a
-  // large server (80+ tools) can't overflow the local context window.
-  const allow = cfg.tools ? new Set(cfg.tools) : null;
-  const selected = allow ? tools.filter((t) => allow.has(t.name)) : tools;
-  // Idempotent re-registration: drop any prior entries for this server so a
-  // reconnect never duplicates its tools in the registry.
-  registry = registry.filter((entry) => entry.sourceServerId !== cfg.id);
-  for (const t of selected) {
-    const cap = classifyCapability(t.name, (t as any).annotations, cfg.capabilities?.[t.name]);
-    registry.push({
-      name: `${cfg.id}__${t.name}`,
-      rawName: t.name,
-      description: t.description ?? '',
-      inputSchema: t.inputSchema as object,
-      sourceServerId: cfg.id,
-      capability: cap,
-      requiresApproval: isWriteClass(cap) || patterns.some((p) => p.test(t.name)),
-      pathScope: cfg.paths,
-      pathArgKeys: cfg.pathArgKeys,
-    });
+  await registerFromConnectedClient(cfg.id, client, {
+    approvalPatterns: cfg.approvalPatterns,
+    paths: cfg.paths,
+    pathArgKeys: cfg.pathArgKeys,
+    tools: cfg.tools,
+    capabilities: cfg.capabilities,
+  });
+}
+
+/**
+ * PRD-TCLAW-AGENT-PARTICIPATION-007 S2 / G1R OQ-6 ruling: connect an
+ * in-process McpServer as a bridge server, via a real InMemoryTransport pair
+ * (`@modelcontextprotocol/sdk`, already a dependency). This is a TRANSPORT
+ * change, not a dispatch change — `client.connect(transport)` at the call
+ * below is the identical call `connectServer` makes for a remote server, so
+ * `listTools()`, `classifyCapability`, `requiresApproval`, and (later)
+ * `executeTool`'s full enforcement stack (assertOperationAllowed, path-scope,
+ * result.isError totality) all run on the SAME code path as every remote
+ * server — via `registerFromConnectedClient` above. There is no second arm
+ * and no `RegisteredTool.handler` field; this repo's own source documents
+ * (dispatch.ts) that a second dispatch path has been the same defect three
+ * times, and a handler field would be a fourth.
+ *
+ * BINDING (G1R B-2): this function is the ONLY way an in-process server may
+ * be registered. It is called exclusively from gateway code (connectBridge's
+ * caller, packages/gateway/src/server.ts, after connectBridge() returns) —
+ * NEVER from loadServerConfigs() / serverConfig.ts, whose zod
+ * discriminatedUnion continues to admit exactly `stdio` and `streamable-http`
+ * and has no `in-process` member. A servers.json entry can therefore never
+ * construct one, by construction, not by a runtime check: there is no code
+ * path from parsed user JSON to this function's `mcpServer` parameter (an
+ * McpServer object) at all — see serverConfig.ts and its own tests.
+ */
+export async function connectInProcessServer(
+  id: string,
+  mcpServer: McpServer,
+  opts: {
+    approvalPatterns?: RegExp[];
+    paths?: PathScope;
+    pathArgKeys?: string[];
+    tools?: string[];
+    capabilities?: Record<string, Capability>;
+  } = {},
+): Promise<void> {
+  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client(
+    { name: 'torqclaw-gateway', version: '0.1.0' },
+    { capabilities: {} },
+  );
+
+  try {
+    // Connect the SERVER side first so it is listening before the client's
+    // initialize handshake can reach it (mirrors any real transport's
+    // ordering requirement; InMemoryTransport delivers synchronously but
+    // the API contract is the same either way).
+    await mcpServer.connect(serverTransport);
+    await client.connect(clientTransport);
+  } catch (error) {
+    // A failed connect must not leak either half-open transport.
+    try { await serverTransport.close(); } catch { /* best-effort cleanup */ }
+    try { await clientTransport.close(); } catch { /* best-effort cleanup */ }
+    throw error;
   }
-  const note = allow ? ` (allowlisted from ${tools.length})` : '';
-  console.log(`[bridge] ${cfg.id}: registered ${selected.length} tools${note}`);
+
+  await registerFromConnectedClient(id, client, opts);
 }
 
 export function getRegistry(): RegisteredTool[] {
@@ -186,10 +274,22 @@ export function isHermesAvailable(): boolean {
   return clients.has('hermes');
 }
 
+/** PRD-TCLAW-AGENT-PARTICIPATION-007 S2: the `_meta` key carrying the calling
+ *  task's bound collab principal id through to an in-process collab tool
+ *  handler. Deliberately namespaced (never a bare key like "principalId")
+ *  so it cannot collide with a real MCP client's own `_meta` usage on a
+ *  remote server. This is protocol request metadata, NOT a tool argument —
+ *  it is built by executeTool itself from its OWN `callerCollabPrincipalId`
+ *  parameter, never derived from `args` (model output), so a model has no
+ *  path to set or influence it. See collabAgentTools.ts (gateway) for the
+ *  reader side. */
+export const COLLAB_CALLER_META_KEY = 'io.torqclaw/collab-caller-principal-id';
+
 export async function executeTool(
   namespacedName: string,
   args: unknown,
   effectiveProfile?: EffectiveProfile,
+  callerCollabPrincipalId?: string,
 ): Promise<unknown> {
   const entry = registry.find((t) => t.name === namespacedName);
   if (!entry) throw new Error(`Unknown tool '${namespacedName}'`);
@@ -222,6 +322,14 @@ export async function executeTool(
   const result = await getClient(entry.sourceServerId).callTool({
     name: entry.rawName,
     arguments: args as Record<string, unknown>,
+    // Only ever attached when the CALLER supplied an id (executeTool's own
+    // parameter, gateway-derived) — never conditioned on anything in `args`.
+    // A remote server that ignores unknown `_meta` keys (per MCP's `$loose`
+    // params shape) is unaffected; only the in-process collab server reads
+    // this key.
+    ...(callerCollabPrincipalId
+      ? { _meta: { [COLLAB_CALLER_META_KEY]: callerCollabPrincipalId } }
+      : {}),
   });
   if (result.isError) {
     const text = (result.content as any[])?.map((c) => c.text).join('\n') ?? 'tool error';
