@@ -1,5 +1,8 @@
 // Core modules
-export { runCollaborationMigration, runAgentAutoreplyMigration, AGENT_AUTOREPLY_MIGRATION_ID } from './migration.js';
+export {
+  runCollaborationMigration, runAgentAutoreplyMigration, AGENT_AUTOREPLY_MIGRATION_ID,
+  runAgentCronMigration, AGENT_CRON_MIGRATION_ID,
+} from './migration.js';
 export { DeterministicClock, DeterministicUuids } from './harness.js';
 
 // Validators
@@ -294,3 +297,23 @@ export {
   type AgentTurnState,
   type StrandedTurn,
 } from './autoReply.js';
+
+// CRON — scheduled autonomous agent turns (G1R Gate-1 §2A).
+export {
+  createSchedule,
+  setScheduleState,
+  getSchedule,
+  listSchedulesForChannel,
+  findDueSchedules,
+  claimScheduleFire,
+  recordScheduleRunDispatched,
+  attachScheduleRunDispatchRequestId,
+  resolveScheduleRun,
+  findStrandedScheduleRuns,
+  assertScheduleStillAuthorized,
+  type CronDb,
+  type ScheduleState,
+  type ScheduleRunState,
+  type AgentSchedule,
+  type StrandedScheduleRun,
+} from './cron.js';

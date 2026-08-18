@@ -55,6 +55,7 @@ import {
   runSurfaceIdentityMigration,
   runSurfaceAuditMigration,
   runAgentAutoreplyMigration,
+  runAgentCronMigration,
   writeSurfaceAudit,
   type SecretStore,
   type BootstrapDb,
@@ -158,6 +159,12 @@ function migrateCollabDb(db: BootstrapDb): void {
     // until AFTER whatever inspects that ledger has already run -- exactly
     // how C1's own migrations already coexist with that check today.
     runAgentAutoreplyMigration(handle);
+    // CRON: additive, same "runs last" discipline as S3's own migration
+    // immediately above and for the identical reason -- it must not appear
+    // in collab_schema_migrations until AFTER assertShippedCollabLedger's
+    // exactly-two-row check (inside runSurfaceIdentityMigration, earlier in
+    // this sequence) has already run.
+    runAgentCronMigration(handle);
   } catch {
     /* fail closed: an unmigrated DB authenticates nobody */
   }

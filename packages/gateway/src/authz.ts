@@ -222,6 +222,16 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     // named deny keeps the decision legible and test-pinned rather than
     // falling through to the default: arm below.
     case 'SET_AUTOREPLY_STOP':
+    // CRON slice (G1R Gate-1 §2A): schedule management is operator-seat-only,
+    // matching SET_AUTOREPLY_STOP's exact reasoning above -- a schedule is a
+    // control-plane action (it creates a TRIGGER, never an authority grant;
+    // see cron.ts's module doc), not a conversational one. No agent-reachable
+    // path exists to any of the three actions below: they are not collab
+    // tools, so no message content or model output can ever reach them
+    // (mirrors INV-T1 Corollary C's sibling for STOP).
+    case 'CREATE_SCHEDULE':
+    case 'SET_SCHEDULE_STATE':
+    case 'LIST_SCHEDULES':
       return DENY_NOT_PERMITTED;
     default:
       // Default deny for any future/unmapped action on a non-operator role.

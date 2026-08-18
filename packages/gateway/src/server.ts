@@ -44,6 +44,8 @@ import { collabSurfaceCommandsEnabled, agentParticipationEnabled, isAgentSurface
 import { onChannelMessageCommitted, recoverStrandedAgentTurns } from './autoReplyDispatcher.js';
 import { getCollabDbForAutoReply } from './collabSurface.js';
 import { handleSetAutoreplyStop } from './autoReplyStopHandler.js';
+import { recoverStrandedScheduleRuns, tickSchedules } from './cronDispatcher.js';
+import { handleCreateSchedule, handleSetScheduleState, handleListSchedules } from './cronScheduleHandler.js';
 
 /**
  * Re-minted requests built inside the C2 decision transaction, handed to
@@ -793,6 +795,38 @@ app.get('/ws', { websocket: true }, (socket) => {
         if (stopErr) sendErr(stopErr.code, stopErr.detail);
         break;
       }
+      case 'CREATE_SCHEDULE': {
+        // Operator-seat-only (authz.ts). Same no-absent-deny-flag-gate
+        // reasoning as SET_AUTOREPLY_STOP: this is control-plane, not a
+        // data surface, so it is reached only via authz's operator gate,
+        // never a second time behind collabSurfaceCommandsEnabled().
+        const createErr = await handleCreateSchedule(
+          sid,
+          connectionAuth?.principalId ?? null,
+          getCollabDbForAutoReply(),
+          {
+            channelId: cmd.data.channelId,
+            agentPrincipalId: cmd.data.agentPrincipalId,
+            intervalSeconds: cmd.data.intervalSeconds,
+            promptHint: cmd.data.promptHint,
+            idempotencyKey: cmd.data.idempotencyKey,
+          },
+        );
+        if (createErr) sendErr(createErr.code, createErr.detail);
+        break;
+      }
+      case 'SET_SCHEDULE_STATE': {
+        const stateErr = await handleSetScheduleState(
+          sid, getCollabDbForAutoReply(), { scheduleId: cmd.data.scheduleId, state: cmd.data.state },
+        );
+        if (stateErr) sendErr(stateErr.code, stateErr.detail);
+        break;
+      }
+      case 'LIST_SCHEDULES': {
+        const listErr = await handleListSchedules(sid, getCollabDbForAutoReply(), cmd.data.channelId);
+        if (listErr) sendErr(listErr.code, listErr.detail);
+        break;
+      }
     }
   });
 
@@ -898,6 +932,38 @@ try {
 } catch (error) {
   console.error('[torqclaw] agent auto-reply recovery sweep failed (continuing):', error);
 }
+
+// CRON slice (G1R Gate-1 §2A): boot-time recovery for stranded schedule
+// runs, same discipline as recoverStrandedAgentTurns immediately above --
+// a crash between claim and resolution is RE-DISPATCHED, never left
+// silently indistinguishable from a legitimate outcome. Runs
+// unconditionally, before the listener opens, for the identical reason.
+try {
+  const recoveredSchedules = await recoverStrandedScheduleRuns();
+  if (recoveredSchedules > 0) {
+    console.log(`[torqclaw] scheduled-turn recovery: ${recoveredSchedules} stranded run(s) re-dispatched`);
+  }
+} catch (error) {
+  console.error('[torqclaw] scheduled-turn recovery sweep failed (continuing):', error);
+}
+
+// CRON slice: the scheduler ticker. A schedule "fires" only when this
+// interval calls tickSchedules() -- there is no other path to a scheduled
+// dispatch. tickSchedules() itself is the absent-deny gate (its own first
+// line: `if (!agentCronEnabled()) return 0`), so this timer is harmless to
+// start unconditionally, matching every other unconditional-wiring/
+// internal-gate pattern in this file (setAutoReplyTrigger above, C2's
+// admission check). The interval is intentionally SHORT (polling
+// granularity, not the schedule's own interval, which is >=60s by
+// migration CHECK) so a due schedule fires close to its due time rather
+// than drifting by however long between ticks. unref() so this timer alone
+// never keeps the process alive past a deliberate shutdown.
+const cronTickTimer = setInterval(() => {
+  tickSchedules().catch((err) => {
+    console.error(`[torqclaw] scheduler tick failed (continuing):`, err);
+  });
+}, 15_000);
+cronTickTimer.unref();
 
 // Delivery-projection rebuild stays flag-gated: it is UI-delivery routing
 // for the collab approval surface, not part of the exact-action admission

@@ -786,10 +786,20 @@ describe('Phase 4 protected semantic manifest', () => {
     // branch (authorizeOperator) is untouched; STOP falls through its
     // existing blanket ALLOW for any non-APPROVE_TOOL/APPROVE_SKILL action,
     // exactly like every other pre-existing operator-only command.
+    // CRON slice (G1R Gate-1 §2A, 2026-08-18): added three explicit
+    // `case 'CREATE_SCHEDULE':` / `case 'SET_SCHEDULE_STATE':` /
+    // `case 'LIST_SCHEDULES':` arms to the 'channel'-seat switch, grouped
+    // with the existing SET_AUTOREPLY_STOP deny (identical seat-lattice
+    // reasoning: schedule management is a control-plane action, no
+    // agent-reachable path exists to any of the three). The 'node'-seat
+    // branch is UNCHANGED -- all three fall through the existing
+    // `return DENY_NOT_PERMITTED;` default, so an agent connection has no
+    // path to any of them regardless of TORQCLAW_AGENT_CRON. The operator
+    // branch (authorizeOperator) is untouched.
     // Recompute and re-authorize deliberately on any future approved
     // change; never delete this pin.
     const authzSha = createHash('sha256').update(authz).digest('hex');
-    expect(authzSha).toBe('80cf29c50c2eac1835830ea282613d4b1cb21f571812655f670e81b472198d10');
+    expect(authzSha).toBe('f0d6446978a795de9981bb12887a344fc94be61622cfbaedebba39421feedeb6');
     // The migration's own markers: the moved guard must not silently return,
     // and the relocation note must remain declared where it happened.
     expect(authz).not.toContain('export function checkResumeRole');

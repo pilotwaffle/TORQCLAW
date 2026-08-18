@@ -228,6 +228,44 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     scope: z.enum(['global', 'channel']),
     channelId: z.string().min(1).optional(),
   }),
+  z.object({
+    // CRON slice (G1R Gate-1 §2A): create a schedule that wakes an agent,
+    // already a member of channelId, on a fixed interval. Deliberately NO
+    // authority field of any kind -- the creating connection's OWN resolved
+    // operator principal is what the handler stamps as
+    // created_by_principal_id (audit only, never consulted for
+    // authorization; every wake independently re-validates membership at
+    // fire time -- packages/collab/src/cron.ts's assertScheduleStillAuthorized).
+    // A6(a): intervalSeconds' floor of 60 matches the migration's own
+    // CHECK(interval_seconds >= 60) (packages/collab/src/migration.ts) --
+    // this contract enforces the SAME floor the substrate would otherwise
+    // reject with a raw SQLite CHECK constraint violation (an unhandled
+    // throw), so the client gets a structured 400-shape refusal instead.
+    // promptHint is NEVER a command or an authority grant -- cronDispatcher.ts
+    // renders it into the model's prompt as inert text, exactly like any
+    // other channel content; it cannot widen what tools render or what
+    // profile resolves (see cronDispatcher.ts's hintLine comment).
+    action: z.literal('CREATE_SCHEDULE'),
+    channelId: z.string().min(1),
+    agentPrincipalId: z.string().min(1),
+    intervalSeconds: z.number().int().min(60).max(86400 * 7),
+    promptHint: z.string().max(2000).optional(),
+    idempotencyKey: z.uuid(),
+  }),
+  z.object({
+    // Operator-visible on/off switch for one schedule (distinct from
+    // SET_AUTOREPLY_STOP, which is the channel/global auto-reply kill
+    // switch cron ALSO obeys -- see cron.ts's module doc). 'stopped' also
+    // survives restart (same collab.db persistence discipline as every
+    // other collab-surface write).
+    action: z.literal('SET_SCHEDULE_STATE'),
+    scheduleId: z.string().min(1),
+    state: z.enum(['active', 'stopped']),
+  }),
+  z.object({
+    action: z.literal('LIST_SCHEDULES'),
+    channelId: z.string().min(1),
+  }),
 ]);
 export type ClientCommand = z.infer<typeof ClientCommandSchema>;
 

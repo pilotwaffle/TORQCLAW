@@ -150,11 +150,18 @@ describe('C1 built-artifact enforcement (§5(c))', () => {
     // additionally cascades to the agent-autoreply migration -- a real,
     // additive migration the booted artifact now applies at boot, same as
     // every other collab migration in this list.
+    //
+    // CRON slice (G1R Gate-1 §2A, 2026-08-18): collabIdentity.ts's
+    // migrateCollabDb now ALSO runs runAgentCronMigration last (after
+    // runAgentAutoreplyMigration, for the same "runs after the exactly-two-
+    // row ledger check" reason S3's migration already documents) -- a real,
+    // additive migration the booted artifact now applies at boot.
     expect(applied).toEqual([
       '20260806_001_collaboration_v1',
       '20260811_002_surface_identity_c1',
       '20260811_003_surface_audit_c1',
       '20260818_001_agent_autoreply_v1',
+      '20260818_002_agent_cron_v1',
     ]);
     collab.close();
 
@@ -172,9 +179,11 @@ describe('C1 built-artifact enforcement (§5(c))', () => {
     // PRD-TCLAW-AGENT-PARTICIPATION-007 S3: 4, not 3 -- collabIdentity.ts's
     // migrateCollabDb now additionally runs runAgentAutoreplyMigration
     // alongside the two C1 calls (same seam, same idempotency guarantee).
-    expect((again.prepare('SELECT COUNT(*) AS n FROM collab_schema_migrations').get() as { n: number }).n).toBe(4);
+    // CRON slice (G1R Gate-1 §2A, 2026-08-18): 5, not 4 -- migrateCollabDb
+    // now ALSO runs runAgentCronMigration, same seam, same guarantee.
+    expect((again.prepare('SELECT COUNT(*) AS n FROM collab_schema_migrations').get() as { n: number }).n).toBe(5);
     again.close();
-    console.log('C1_ARTIFACT_SELF_MIGRATED collab=4 migrations, state=3 tables');
+    console.log('C1_ARTIFACT_SELF_MIGRATED collab=5 migrations, state=3 tables');
   }, 120000);
 
   it('the booted dist ACCEPTS a valid C1 surface and REFUSES revoked/expired/inert ones', async () => {

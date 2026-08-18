@@ -345,3 +345,119 @@ CREATE UNIQUE INDEX IF NOT EXISTS collab_autoreply_stop_channel_singleton
     throw error;
   }
 }
+
+/**
+ * CRON — additive migration for scheduled autonomous agent turns.
+ * G1R Gate-1 §2A ruling: cron is the SAME threat shape as auto-reply, and
+ * strictly worse (no human proximity, no natural terminator, durable state
+ * that outlives the regime it was created under). Prerequisite order per
+ * that ruling: S0 (argument-scoped grants, shipped) FIRST, then auto-reply
+ * and cron in either order. S0 and auto-reply (S3) are both shipped as of
+ * this migration; this is the cron slice.
+ *
+ * Migration ID: 20260818_002_agent_cron_v1
+ *
+ * Strictly additive: two new tables, `CREATE TABLE IF NOT EXISTS`, no
+ * change to any existing table or column. Idempotent.
+ *
+ * collab_agent_schedules — THE SCHEDULE (a TRIGGER, never a stored
+ * authorization; G1R §2A.5(d))
+ * -----------------------------------------------------------------------
+ * A schedule names WHEN to wake an agent in a channel it is ALREADY a
+ * member of. It does NOT store, cache, or widen any authority: every wake
+ * re-reads live membership, principal status, and profile delegation from
+ * the SAME tables resolveEligibleAgents/admitToolCall already trust
+ * (cron.ts's assertScheduleStillAuthorized, called at fire time, never at
+ * creation time). Deleting or deactivating a schedule never needs to
+ * "revoke" anything beyond itself, because the schedule never held
+ * authority to begin with -- only the channel membership row does, and that
+ * is unaffected by this table.
+ *
+ * `interval_seconds` (not a cron expression) is a deliberate scope choice:
+ * the brief requires "the smallest honest thing", and a cron-expression
+ * parser is a new correctness surface with its own bug class (timezone,
+ * DST, month-length edge cases) unrelated to the authority question this
+ * slice exists to answer. A fixed-interval scheduler is the smallest
+ * mechanism that has a wake time with no natural terminator (G1R's
+ * defining cron property) and therefore fully exercises every ruling this
+ * slice is scoped to prove.
+ *
+ * `state` follows the same operator-visible STOP discipline as
+ * collab_autoreply_stop: 'active' | 'stopped'. A channel-level or
+ * global autoreply STOP (collab_autoreply_stop, already shipped) is ALSO
+ * consulted at fire time (cron.ts) -- an operator stopping a channel must
+ * stop scheduled turns into it too, without requiring a second STOP
+ * command per schedule.
+ *
+ * collab_agent_schedule_runs — THE WAKE RECORD, and the THIRD STATE
+ * -----------------------------------------------------------------------
+ * One row per fire attempt. `state` extends the collab_agent_turns state
+ * machine with exactly one new terminal: 'blocked_awaiting_approval' --
+ * G1R B-8's required THIRD, EXPLICITLY DISTINGUISHABLE state for an
+ * unattended run whose approval went unanswered. Never bare 'completed',
+ * never bare 'failed' (there is no bare 'failed' in this state machine at
+ * all, matching collab_agent_turns' own choice of 'terminated' over a
+ * generic failure state), and never silently absent. PRIMARY KEY
+ * (schedule_id, fire_seq) is the idempotency mechanism, exactly mirroring
+ * collab_agent_turns' (channel_id, agent_principal_id, channel_seq).
+ */
+export const AGENT_CRON_MIGRATION_ID = '20260818_002_agent_cron_v1';
+
+export function runAgentCronMigration(db: Database.Database): void {
+  const transaction = db.transaction(() => {
+    const existing = db
+      .prepare('SELECT 1 FROM collab_schema_migrations WHERE id = ?')
+      .get(AGENT_CRON_MIGRATION_ID);
+    if (existing) return;
+
+    db.exec(`
+CREATE TABLE IF NOT EXISTS collab_agent_schedules (
+  id TEXT PRIMARY KEY,
+  channel_id TEXT NOT NULL REFERENCES collab_channels(id),
+  agent_principal_id TEXT NOT NULL REFERENCES principals(id),
+  created_by_principal_id TEXT NOT NULL REFERENCES principals(id),
+  interval_seconds INTEGER NOT NULL CHECK(interval_seconds >= 60),
+  prompt_hint TEXT,
+  state TEXT NOT NULL CHECK(state IN ('active','stopped')),
+  next_fire_seq INTEGER NOT NULL DEFAULT 0,
+  next_fire_at TEXT NOT NULL,
+  last_fired_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS collab_agent_schedules_due
+  ON collab_agent_schedules(state, next_fire_at);
+
+CREATE TABLE IF NOT EXISTS collab_agent_schedule_runs (
+  schedule_id TEXT NOT NULL REFERENCES collab_agent_schedules(id),
+  fire_seq INTEGER NOT NULL CHECK(fire_seq > 0),
+  channel_id TEXT NOT NULL,
+  agent_principal_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('dispatched','completed','no_post','terminated','blocked_awaiting_approval')),
+  dispatch_request_id TEXT,
+  refusal_reason TEXT,
+  fired_at TEXT NOT NULL,
+  resolved_at TEXT,
+  PRIMARY KEY(schedule_id, fire_seq)
+);
+
+CREATE INDEX IF NOT EXISTS collab_agent_schedule_runs_state_fired
+  ON collab_agent_schedule_runs(state, fired_at);
+    `);
+
+    db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
+      AGENT_CRON_MIGRATION_ID,
+      new Date().toISOString(),
+    );
+  });
+
+  try {
+    db.exec('BEGIN EXCLUSIVE');
+    transaction();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
