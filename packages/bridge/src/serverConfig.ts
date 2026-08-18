@@ -77,6 +77,27 @@ export function loadServerConfigs(): ServerConfig[] {
     .filter((s) => s.enabled)
     .map((s) => ({
       id: s.id,
+      // LOAD-BEARING TERNARY — do NOT refactor this into a lookup map or a
+      // generic dispatch table (G1R B-2, second layer).
+      //
+      // The zod schema above admits exactly `stdio` and `streamable-http`, and
+      // that is the runtime half of the guarantee that a user-editable
+      // ~/.torqclaw/servers.json can never construct an IN-PROCESS MCP server
+      // (which would bypass nothing today, but is registered only from gateway
+      // code and must stay that way -- see connectInProcessServer's BINDING
+      // note in registry.ts).
+      //
+      // This exhaustive two-arm ternary is the COMPILE-TIME half. A probe that
+      // deliberately widened the discriminatedUnion to admit a third transport
+      // did not merely fail at runtime -- it FAILED TO COMPILE here, because
+      // this expression has no arm for it. That is strictly stronger: the zod
+      // schema protects against a bad config FILE; this protects against a
+      // future DEVELOPER quietly making in-process user-configurable, by
+      // forcing the change through a build error and therefore through review.
+      //
+      // A lookup map (`TRANSPORTS[s.transport.type](...)`) would still satisfy
+      // the schema and still look correct, while silently deleting that second
+      // layer. Keep the ternary exhaustive.
       transport: s.transport.type === 'stdio'
         ? { type: 'stdio' as const, command: s.transport.command, args: s.transport.args }
         : { type: 'streamable-http' as const, url: s.transport.url, token: s.transport.token },
