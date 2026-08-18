@@ -3,7 +3,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, within, act } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import type { GatewayEvent } from '@torqclaw/contracts';
-import ChannelsPanel from '../apps/console/src/components/ChannelsPanel.js';
+import ChannelsPanel, { selectChannelMembers, selectWorkingNow } from '../apps/console/src/components/ChannelsPanel.js';
 
 afterEach(cleanup); // LOAD-BEARING: root config has no globals:true, so RTL
                     // auto-cleanup is off; without this a second render leaks
@@ -1115,5 +1115,274 @@ describe('ChannelsPanel — S4 hint-then-refetch', () => {
     expect(container.textContent).not.toMatch(/delivered/i);
     expect(container.textContent).not.toMatch(/\blive\b/i);
     expect(container.textContent).not.toContain('✓');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S5 — agent co-presence roster (§4 S5 / A5 / A9 / T-9 n/a / T-10 / T-11).
+//
+// A6/T-9 NOT APPLICABLE: this slice adds no new sendCommand action and no new
+// wire command (see the S5 module-doc block in ChannelsPanel.tsx). Every test
+// below drives the SAME `events` prop shape every other describe block in
+// this file already uses; there is no new GatewayEvent field to grammar-test.
+// ---------------------------------------------------------------------------
+describe('ChannelsPanel — S5 selectors (pure, no render)', () => {
+  it('selectChannelMembers: replays member_added -> current member', () => {
+    const added = timelineEvent({
+      id: 'ev-add', cursor: '1', kind: 'member_added',
+      payload: { channelId: 'chan-1', principalId: 'principal-agent0001', membershipEpoch: 1 },
+    });
+    const members = selectChannelMembers([added] as any);
+    expect(members).toEqual([{ principalId: 'principal-agent0001', role: 'member', since: added.occurredAt }]);
+  });
+
+  it('selectChannelMembers: a later member_removed for the same principal nets to REMOVED (not a member)', () => {
+    const added = timelineEvent({
+      id: 'ev-add', cursor: '1', kind: 'member_added',
+      payload: { channelId: 'chan-1', principalId: 'principal-agent0001', membershipEpoch: 1 },
+    });
+    const removed = timelineEvent({
+      id: 'ev-rm', cursor: '2', kind: 'member_removed',
+      payload: { channelId: 'chan-1', principalId: 'principal-agent0001', membershipEpoch: 2 },
+    });
+    // Order in the array must not matter -- reduce is by cursor, not position.
+    expect(selectChannelMembers([removed, added] as any)).toEqual([]);
+    expect(selectChannelMembers([added, removed] as any)).toEqual([]);
+  });
+
+  it('selectChannelMembers: add -> remove -> re-add nets to MEMBER (latest cursor wins)', () => {
+    const p = 'principal-agent0002';
+    const events = [
+      timelineEvent({ id: 'e1', cursor: '1', kind: 'member_added', payload: { channelId: 'c', principalId: p, membershipEpoch: 1 } }),
+      timelineEvent({ id: 'e2', cursor: '2', kind: 'member_removed', payload: { channelId: 'c', principalId: p, membershipEpoch: 2 } }),
+      timelineEvent({ id: 'e3', cursor: '3', kind: 'member_added', payload: { channelId: 'c', principalId: p, membershipEpoch: 3 } }),
+    ];
+    const members = selectChannelMembers(events as any);
+    expect(members.map((m) => m.principalId)).toEqual([p]);
+  });
+
+  it('selectChannelMembers: message_posted / channel_created / other kinds never contribute a member row', () => {
+    const events = [
+      timelineEvent({ id: 'e1', cursor: '1', kind: 'message_posted', payload: { channelId: 'c', text: 'hi' } }),
+      timelineEvent({ id: 'e2', cursor: '2', kind: 'channel_created', payload: { channelId: 'c', name: 'general' } }),
+    ];
+    expect(selectChannelMembers(events as any)).toEqual([]);
+  });
+
+  it('selectChannelMembers: empty timeline -> [] (real-empty, not null -- this function never returns null)', () => {
+    expect(selectChannelMembers([])).toEqual([]);
+  });
+
+  it('selectWorkingNow: no active task -> null', () => {
+    expect(selectWorkingNow([])).toBeNull();
+    expect(selectWorkingNow([ev({ type: 'RESULT', requestId: 'r1' })])).toBeNull();
+  });
+
+  it('selectWorkingNow: an in-flight task (TIER_SELECTED, no terminal yet) is reported with its requestId, anchor, and phase', () => {
+    const events = [
+      ev({ type: 'TIER_SELECTED', requestId: 'r1', timestamp: '2026-01-01T00:00:05.000Z' }),
+      ev({ type: 'TOOL_CALL', requestId: 'r1', message: 'Executing filesystem__read_file', timestamp: '2026-01-01T00:00:06.000Z' }),
+    ];
+    const working = selectWorkingNow(events);
+    expect(working).not.toBeNull();
+    expect(working!.requestId).toBe('r1');
+    expect(working!.turnStartMs).toBe(Date.parse('2026-01-01T00:00:05.000Z'));
+    expect(working!.phaseText).toBe('Using read file (filesystem)');
+  });
+
+  it('selectWorkingNow: a RESULT/ERROR for the active request clears it back to null', () => {
+    const events = [
+      ev({ type: 'TIER_SELECTED', requestId: 'r1' }),
+      ev({ type: 'RESULT', requestId: 'r1' }),
+    ];
+    expect(selectWorkingNow(events)).toBeNull();
+  });
+});
+
+describe('ChannelsPanel — S5 roster (render)', () => {
+  function selectGeneral(sc = vi.fn(() => true)) {
+    const frame = channelListFrame([channelRow()]);
+    const result = renderPanel([frame], sc);
+    fireEvent.click(screen.getByText('general'));
+    return { ...result, sc, frame };
+  }
+
+  it('T-10: no timeline loaded yet -> Members section renders nothing extra (no premature roster claim)', () => {
+    selectGeneral();
+    // Only the timeline's own "Loading..." should be present; no member
+    // chips can exist before any timeline frame has ever landed.
+    expect(screen.queryByText('Members')).not.toBeInTheDocument();
+  });
+
+  it('T-10 / A9: an empty-but-loaded timeline renders "Members" (real-empty) distinct from not-yet-loaded', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+    const emptyTimeline = timelineFrame('chan-1', [], '0', false);
+    rerender(<ChannelsPanel events={[frame, emptyTimeline]} sendCommand={sc} onClose={vi.fn()} />);
+
+    expect(screen.getByText('Members')).toBeInTheDocument();
+    expect(screen.getByText('No members seen yet.')).toBeInTheDocument();
+  });
+
+  it('A9: Members and Working now render as two separately-labeled sections', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+    const timeline = timelineFrame(
+      'chan-1',
+      [timelineEvent({
+        id: 'ev-add', cursor: '1', kind: 'member_added',
+        payload: { channelId: 'chan-1', principalId: 'principal-member01', membershipEpoch: 1 },
+      })],
+      '1',
+      false,
+    );
+    rerender(<ChannelsPanel events={[frame, timeline]} sendCommand={sc} onClose={vi.fn()} />);
+
+    expect(screen.getByText('Members')).toBeInTheDocument();
+    expect(screen.getByText('Working now')).toBeInTheDocument();
+    // 'principal-member01'.slice(0,8) === 'principa' -- appears TWICE: once
+    // as the roster's member chip, once as the timeline's own member_added
+    // system-event row detail (systemEventDetail already renders it there;
+    // both are correct, independent renderings of the same wire fact).
+    expect(screen.getAllByText('principa').length).toBe(2);
+    expect(screen.getByText('Nothing running right now.')).toBeInTheDocument();
+  });
+
+  it('A9: a fixture with a WORKING NON-MEMBER proves presence never implies membership -- the working row renders unconditionally, never filtered by the member list', () => {
+    const sc = vi.fn(() => true);
+    const frame = channelListFrame([channelRow()]);
+    const emptyTimeline = timelineFrame('chan-1', [], '0', false); // zero members
+    // A task is actively running (a TIER_SELECTED with no terminal event) --
+    // this principal-less "working now" row has NO membership claim at all,
+    // and must render in full even though the Members section is real-empty.
+    const workingEvents: GatewayEvent[] = [
+      frame,
+      emptyTimeline,
+      ev({ type: 'TIER_SELECTED', requestId: 'r-nonmember', timestamp: '2026-01-01T00:00:05.000Z' }),
+      ev({ type: 'TOOL_CALL', requestId: 'r-nonmember', message: 'Executing filesystem__read_file', timestamp: '2026-01-01T00:00:06.000Z' }),
+    ];
+    const { rerender } = renderPanel([frame], sc);
+    fireEvent.click(screen.getByText('general'));
+    rerender(<ChannelsPanel events={workingEvents} sendCommand={sc} onClose={vi.fn()} />);
+
+    // Members: real-empty, zero members.
+    expect(screen.getByText('No members seen yet.')).toBeInTheDocument();
+    // Working now: renders in full regardless -- proving no implicit
+    // membership gate exists on the "working now" path.
+    expect(screen.getByText('Using read file (filesystem)')).toBeInTheDocument();
+    expect(screen.getByText(/turn r-nonmem/)).toBeInTheDocument();
+    expect(screen.queryByText('Nothing running right now.')).not.toBeInTheDocument();
+  });
+
+  it('elapsed is EPOCH-ANCHORED across a simulated remount -- unmount/remount does not reset the clock to 0:00', () => {
+    const sc = vi.fn(() => true);
+    const frame = channelListFrame([channelRow()]);
+    const emptyTimeline = timelineFrame('chan-1', [], '0', false);
+    const events: GatewayEvent[] = [
+      frame,
+      emptyTimeline,
+      ev({ type: 'TIER_SELECTED', requestId: 'r-anchor', timestamp: '2026-01-01T00:00:00.000Z' }),
+      ev({ type: 'TOOL_CALL', requestId: 'r-anchor', message: 'Executing filesystem__read_file', timestamp: '2026-01-01T00:00:05.000Z' }),
+    ];
+
+    const originalNow = Date.now;
+    try {
+      Date.now = () => Date.parse('2026-01-01T00:00:30.000Z'); // 30s after the anchor
+      const first = render(<ChannelsPanel events={[frame]} sendCommand={sc} onClose={vi.fn()} />);
+      fireEvent.click(screen.getByText('general'));
+      first.rerender(<ChannelsPanel events={events} sendCommand={sc} onClose={vi.fn()} />);
+      expect(screen.getByText('0:30')).toBeInTheDocument();
+      first.unmount();
+      cleanup();
+
+      // SIMULATED REMOUNT: a fresh mount, same events (same anchor), later
+      // wall clock. If the anchor were a mount-time counter this would read
+      // 0:00 again; because it is selectTurnStartMs (an epoch from the real
+      // event timestamps), the SAME events array must recompute the SAME
+      // real elapsed at the new "now".
+      Date.now = () => Date.parse('2026-01-01T00:01:00.000Z'); // 60s after the anchor
+      const second = render(<ChannelsPanel events={[frame]} sendCommand={sc} onClose={vi.fn()} />);
+      fireEvent.click(screen.getByText('general'));
+      second.rerender(<ChannelsPanel events={events} sendCommand={sc} onClose={vi.fn()} />);
+      expect(screen.getByText('1:00')).toBeInTheDocument();
+      expect(screen.queryByText('0:00')).not.toBeInTheDocument();
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  it('T-11: the roster renders zero buttons/links and clicking anywhere in it dispatches nothing beyond the ordinary read-only allowlist', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+    const timeline = timelineFrame(
+      'chan-1',
+      [timelineEvent({
+        id: 'ev-add', cursor: '1', kind: 'member_added',
+        payload: { channelId: 'chan-1', principalId: 'principal-inert001', membershipEpoch: 1 },
+      })],
+      '1',
+      false,
+    );
+    rerender(<ChannelsPanel events={[frame, timeline]} sendCommand={sc} onClose={vi.fn()} />);
+
+    const rosterHeading = screen.getByText('Members');
+    const rosterSection = rosterHeading.closest('div')!.parentElement!;
+    // No button/link/onClick affordance anywhere inside the roster block.
+    expect(within(rosterSection).queryAllByRole('button').length).toBe(0);
+    expect(within(rosterSection).queryAllByRole('link').length).toBe(0);
+
+    sc.mockClear();
+    fireEvent.click(rosterHeading);
+    fireEvent.click(within(rosterSection).getByText('principa')); // the member chip, scoped
+    const actions = sc.mock.calls.map((c) => (c[0] as any).action);
+    for (const a of actions) expect(READ_ONLY_ALLOWLIST.has(a)).toBe(true);
+    for (const a of actions) expect(DANGEROUS_ACTIONS.has(a)).toBe(false);
+  });
+
+  it('T-12: no-fabrication -- a member row shows only the principal id, never an invented role/display-name/online-status field', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+    const timeline = timelineFrame(
+      'chan-1',
+      [timelineEvent({
+        id: 'ev-add', cursor: '1', kind: 'member_added',
+        payload: { channelId: 'chan-1', principalId: 'principal-nofab0001', membershipEpoch: 1 },
+      })],
+      '1',
+      false,
+    );
+    rerender(<ChannelsPanel events={[frame, timeline]} sendCommand={sc} onClose={vi.fn()} />);
+
+    // 'principal-nofab0001'.slice(0,8) === 'principa' -- renders twice (the
+    // roster chip and the timeline's own member_added system row); both are
+    // legitimate independent renderings of the same wire fact.
+    expect(screen.getAllByText('principa').length).toBe(2);
+    expect(screen.queryByText(/online/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/offline/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/away/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/idle/i)).not.toBeInTheDocument();
+  });
+
+  it('malformed-frame resilience: a member_added event missing principalId is skipped, never crashes, never renders "undefined"', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+    const timeline = timelineFrame(
+      'chan-1',
+      [timelineEvent({ id: 'ev-bad', cursor: '1', kind: 'member_added', payload: { channelId: 'chan-1' } })],
+      '1',
+      false,
+    );
+    expect(() => {
+      rerender(<ChannelsPanel events={[frame, timeline]} sendCommand={sc} onClose={vi.fn()} />);
+    }).not.toThrow();
+    expect(screen.getByText('No members seen yet.')).toBeInTheDocument();
+    expect(screen.queryByText('undefined')).not.toBeInTheDocument();
+  });
+
+  it('no roster row is rendered without a selected channel (no presence affordance with no channel context)', () => {
+    const sc = vi.fn(() => true);
+    renderPanel([], sc);
+    expect(screen.queryByText('Members')).not.toBeInTheDocument();
+    expect(screen.queryByText('Working now')).not.toBeInTheDocument();
   });
 });

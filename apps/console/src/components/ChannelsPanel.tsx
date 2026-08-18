@@ -1,22 +1,24 @@
 'use client';
 
-// PRD-TCLAW-COLLAB-PRESENCE-UI-005 S2 + S3 + S4 — Console Channels view.
+// PRD-TCLAW-COLLAB-PRESENCE-UI-005 S2 + S3 + S4 + S5 — Console Channels view.
 //
 // Fourth nav view over the S1 wire read surface (LIST_CHANNELS /
 // GET_CHANNEL_TIMELINE, packages/gateway/src/collabSurface.ts) plus S3's
-// composer (POST_CHANNEL_MESSAGE) and S4's hint-then-refetch freshness.
-// No presence/roster (S5). Flag-gated by NEXT_PUBLIC_COLLAB_UI at the
-// TorqTerminal call site; this component itself assumes it is only ever
-// mounted when the flag is on (mirrors ApprovalHistoryPanel/ReceiptsPanel/
-// MemoryPanel, none of which re-check their own flag either).
+// composer (POST_CHANNEL_MESSAGE), S4's hint-then-refetch freshness, and
+// S5's agent co-presence roster (read-only, see the S5 doc block below).
+// Flag-gated by NEXT_PUBLIC_COLLAB_UI at the TorqTerminal call site; this
+// component itself assumes it is only ever mounted when the flag is on
+// (mirrors ApprovalHistoryPanel/ReceiptsPanel/MemoryPanel, none of which
+// re-check their own flag either).
 //
 // SAFETY: the ONLY sendCommand actions reachable from anywhere in this file
 // are LIST_CHANNELS (mount, manual refresh), GET_CHANNEL_TIMELINE (channel
 // select, "Load more", hint-triggered re-read, reconnect re-read — the wire
 // pages forward only, see B-2 fix note at the button below), and
 // POST_CHANNEL_MESSAGE (composer Send/retry — the ONLY addition to the
-// allowlist, per §14 T-11). No roster/presence (S5). ChannelRow,
-// TimelineEventRow, and PendingSendRow are MODULE-SCOPE components whose
+// allowlist, per §14 T-11). S5's roster adds NO new sendCommand action —
+// it is a pure render-time join over data the component already receives
+// (see the S5 doc block below). ChannelRow,
 // props are plain data (zero function-typed fields except PendingSendRow's
 // narrow onRetry) — mirrors ApprovalHistoryRow / ReplayEventRow's structural
 // boundary.
@@ -94,9 +96,89 @@
 // timestamp-of-last-activity, and no numeric unread badge is derivable (the
 // API never returns the channel's max seq). None of those fields are
 // rendered or invented anywhere in this file.
+//
+// ── S5: AGENT CO-PRESENCE ROSTER (§4 S5 / A5 / A9 / T-9 n/a) — read this
+// before touching selectChannelMembers / selectWorkingNow below. ──────────
+//
+// PRESENCE ONLY, READ-SIDE ONLY. This section adds ZERO mutation and ZERO
+// new sendCommand action. The v0.1 design (mirroring task lifecycle events
+// INTO collab_events) was CUT by the PRD (§4 S5) precisely because it built
+// a second, uncorrectable source of task-state truth — that design does not
+// exist anywhere in this file and must never be reintroduced.
+//
+// A6/T-9 DECLARED NOT-APPLICABLE: S5 adds no wire command (§15 build order:
+// "S5 requires the gateway-side task-truth join (row 19)... this is gateway
+// render-time work, not a substrate change"). Both roster sections below are
+// pure client-side selectors over data ALREADY flowing into this component's
+// existing `events` prop — no new ClientCommand variant, no new
+// GatewayEvent field, no server change. A6/T-9's handler-totality matrix
+// therefore has no new command to grade.
+//
+// TWO SECTIONS, TWO DISTINCT SOURCES, NEVER MERGED (A9):
+//
+// 1. "Working now" — selectWorkingNow(events), sourced from the SAME
+//    gateway task-truth stream LivenessChip/PresenceCard already render
+//    (apps/console/src/components/presence.ts's selectTurnStartMs /
+//    selectLivePhase, and TorqTerminal.tsx:244's activeRequestId scan over
+//    TIER_SELECTED -> RESULT|ERROR). This is the console's OWN live task —
+//    packages/gateway/src/events.ts's sessionBus is keyed by sessionId
+//    (events.ts:66-80/117) and every socket subscribes only its own
+//    session's bus (server.ts:273), so no cross-session task registry is
+//    reachable from this or any console component today (§11 row 19: "no
+//    join key from principals to any task; task truth lives in the
+//    gateway"). Elapsed time reuses <LiveDuration since={...}> unchanged —
+//    epoch-anchored to selectTurnStartMs's earliest-timestamp anchor, so a
+//    remount recomputes from the real start instead of resetting to 0:00
+//    (LiveDuration.tsx:24-38 ticks off `now - since`, never a counter).
+//
+// 2. "Members" — selectChannelMembers(selectedSnapshot.events), sourced
+//    from the member_added/member_removed timeline event kinds ALREADY
+//    wired and rendered as system rows by this file (see
+//    SYSTEM_EVENT_LABELS above; payload shape verified at store.ts:1100-
+//    1101/:1221, {channelId, principalId, membershipEpoch}). LIST_CHANNELS
+//    never returns a member list for any channel (§11 row 14: "returns
+//    only channelId, name, state, role, lastAcknowledgedCursor") and no
+//    listChannelMembers/getChannelMembers read command exists anywhere in
+//    packages/collab/src/store.ts — so replaying the add/remove events
+//    already present in the LOADED timeline page is the only wire-sourced
+//    membership view available without a new command. This is a reduce,
+//    not an invention: last event per principalId (by cursor/channel_seq,
+//    ascending) wins, exactly mirroring how the store itself computes
+//    membership_epoch transitions.
+//
+// HONEST INCOMPLETENESS (does not overclaim): the member replay reflects
+// ONLY member_added/member_removed events inside the currently loaded
+// timeline page(s) for the selected channel — a channel whose earliest
+// membership event is older than the oldest loaded page will UNDERCOUNT
+// until "Load more" reaches it. The panel says so explicitly (see the
+// "as loaded so far" caption) rather than presenting a partial replay as a
+// complete roster.
+//
+// NO IDENTITY JOIN BETWEEN THE TWO SECTIONS (recorded, not silently
+// assumed): GatewayEventSchema (packages/contracts/src/events.ts:19-29)
+// carries no principalId/agentId field, and the CONNECTED frame
+// (server.ts:282-288) sends only {sessionId, resumed} — the connected
+// principal's own identity is resolved server-side (connectionAuth) but is
+// NEVER broadcast to the client on any frame today. "Working now" therefore
+// cannot be identity-matched against "Members" from data on the wire; A9's
+// "presence never implies membership, membership never implies presence"
+// is enforced STRUCTURALLY instead — the two sections are independent
+// renders with independent empty/loading states, one is never filtered or
+// gated by the other, and the "working now" row carries no membership
+// claim of any kind. Wiring a real identity join would require broadcasting
+// connectionAuth.principalId to the client, a wire-shape change to an
+// existing disclosure-sensitive frame — exactly the class of decision this
+// PRD's identity/disclosure rulings (§2a) route through G1R, not a Builder
+// judgment call. Flagged in the S5 build report rather than decided here.
+//
+// NO DISPATCH AFFORDANCE (A5): every roster row below is plain data with
+// zero function-typed props and zero onClick/button/link — presence is
+// information, never a control.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ClientCommand, GatewayEvent } from '@torqclaw/contracts';
+import { LiveDuration } from './LiveDuration';
+import { selectTurnStartMs, selectLivePhase } from './presence';
 
 const TIMEOUT_MS = 5000;
 
@@ -325,6 +407,86 @@ function selectLatestTimelineFrameId(events: GatewayEvent[], channelId: string):
     }
   }
   return null;
+}
+
+// ── S5: roster selectors (§4 S5 / A5 / A9) ─────────────────────────────────
+// See the S5 module-doc block above for the full source/authority rationale.
+
+/** A single "member" row derived from replaying member_added/member_removed
+ *  timeline events. `since` is that principal's own membership-change
+ *  timestamp (their most recent add/remove), never a mount-time value. */
+export interface ChannelMemberEntry {
+  principalId: string;
+  role: 'owner' | 'agent' | string;
+  since: string;
+}
+
+/** Replays member_added/member_removed events from the (possibly partial —
+ *  see the S5 doc block's HONEST INCOMPLETENESS note) loaded timeline page
+ *  for one channel into a current-membership view. Reduces by principalId,
+ *  keeping the LATEST event (highest numeric cursor, i.e. channel_seq) per
+ *  principal — mirrors the store's own membership_epoch transition, which is
+ *  exactly what makes "latest wins" correct here rather than an invented
+ *  rule: an add followed by a later remove for the same principal nets to
+ *  removed, and vice versa. Returns [] (not null) when the timeline is
+ *  loaded but carries no membership events yet — the caller distinguishes
+ *  "no timeline loaded" (null selectedSnapshot) from "loaded, zero members
+ *  seen so far" ([]) using the SAME null-vs-empty discipline as the rest of
+ *  this file.
+ *
+ *  `role` is NOT on member_added/member_removed's payload (only
+ *  {channelId, principalId, membershipEpoch} — store.ts:1100-1101/:1221), so
+ *  it is never fabricated here: every derived row's role is the literal
+ *  string 'member' (an event-kind fact, not a role claim) unless the caller
+ *  layers in LIST_CHANNELS' own role field for a principal that happens to
+ *  be the connected caller (S1's ChannelListEntry.role) — this function
+ *  itself makes no such claim and always returns 'member'. */
+export function selectChannelMembers(events: TimelineEventEntry[]): ChannelMemberEntry[] {
+  const latestByPrincipal = new Map<string, TimelineEventEntry>();
+  for (const ev of events) {
+    if (ev.kind !== 'member_added' && ev.kind !== 'member_removed') continue;
+    const principalId = ev.payload?.principalId;
+    if (typeof principalId !== 'string' || principalId.length === 0) continue;
+    const prior = latestByPrincipal.get(principalId);
+    if (!prior || Number(ev.cursor) >= Number(prior.cursor)) {
+      latestByPrincipal.set(principalId, ev);
+    }
+  }
+  const members: ChannelMemberEntry[] = [];
+  for (const [principalId, ev] of latestByPrincipal) {
+    if (ev.kind !== 'member_added') continue; // latest event was a removal
+    members.push({ principalId, role: 'member', since: ev.occurredAt });
+  }
+  return members.sort((a, b) => a.principalId.localeCompare(b.principalId));
+}
+
+/** The console's OWN currently-running task, if any — the "working now"
+ *  overlay's only data source (see the S5 doc block: no cross-session task
+ *  registry is reachable from this component). Mirrors
+ *  TorqTerminal.tsx:244-251's activeRequestId scan EXACTLY (same TIER_
+ *  SELECTED -> RESULT|ERROR state machine) rather than importing it, since
+ *  that scan is a local const inside TorqTerminal's function body, not an
+ *  exported selector — duplicated here at module scope so this file stays
+ *  independently testable without mounting TorqTerminal. `turnStartMs` and
+ *  `phaseText` are the same selectTurnStartMs/selectLivePhase every other
+ *  liveness surface (LivenessChip, PresenceCard) already renders — one
+ *  epoch, every reader agrees. */
+export interface WorkingNowEntry {
+  requestId: string;
+  turnStartMs: number | null;
+  phaseText: string | null;
+}
+
+export function selectWorkingNow(events: GatewayEvent[]): WorkingNowEntry | null {
+  let requestId: string | null = null;
+  for (const ev of events) {
+    if (ev.type === 'TIER_SELECTED' && ev.requestId) requestId = ev.requestId;
+    if ((ev.type === 'RESULT' || ev.type === 'ERROR') && ev.requestId === requestId) requestId = null;
+  }
+  if (!requestId) return null;
+  const turnStartMs = selectTurnStartMs(events, requestId);
+  const phase = selectLivePhase(events, requestId);
+  return { requestId, turnStartMs, phaseText: phase?.text ?? null };
 }
 
 /** Grammar the wire actually accepts (packages/contracts/src/commands.ts):
@@ -701,6 +863,16 @@ export default function ChannelsPanel({
   const isListRefreshing = listPhase === 'pending' && channels !== null;
   const isTimelineRefreshing = timelinePhase === 'pending' && selectedSnapshot !== null;
 
+  // ── S5: roster (§4 S5 / A5 / A9) — see the module-doc block above. Two
+  // independent selectors, two independent sources, never merged. Members
+  // is null (not []) exactly when no timeline has loaded yet for the
+  // selected channel, matching this file's null=loading/[]=real-empty rule.
+  const channelMembers = useMemo(
+    () => (selectedSnapshot ? selectChannelMembers(selectedSnapshot.events) : null),
+    [selectedSnapshot],
+  );
+  const workingNow = useMemo(() => selectWorkingNow(events), [events]);
+
   // ── S3: composer (human posting) ────────────────────────────────────────
   //
   // OPTIMISTIC ECHO IS FORBIDDEN (§13 S3): a pendingSends entry NEVER renders
@@ -961,6 +1133,12 @@ export default function ChannelsPanel({
 
           {selectedChannelId && (
             <>
+              {/* S5: roster — two separately-labeled sections, two distinct
+                  sources (A9). NO dispatch affordance anywhere in this
+                  block: RosterSection's props are plain data, zero
+                  function-typed fields, zero buttons/links/onClick. */}
+              <RosterSection members={channelMembers} workingNow={workingNow} />
+
               {/* Timeline honest states, same four-phase shape as the list. */}
               {selectedSnapshot === null && timelinePhase === 'pending' && <p className="text-faint/75">Loading…</p>}
               {selectedSnapshot === null && timelinePhase === 'sendFailed' && (
@@ -1122,6 +1300,82 @@ function PendingSendRow({
       </div>
       <p className="mt-0.5 font-reading text-[13px] leading-[1.6] text-faint">{pending.text}</p>
     </li>
+  );
+}
+
+/**
+ * S5 — agent co-presence roster (§4 S5 / A5 / A9). STRUCTURAL SAFETY
+ * BOUNDARY: every prop here is plain data — no sendCommand, no callback of
+ * any kind in scope, zero buttons/links/onClick anywhere in this component.
+ * Presence is information, never a control (A5's "no roster row carries any
+ * dispatch affordance").
+ *
+ * Two sections, two distinct sources, rendered independently — see the
+ * module-doc S5 block at the top of this file for the full source
+ * rationale. `members === null` means no timeline has loaded yet for the
+ * selected channel (the section renders nothing, matching the timeline's
+ * own null=loading convention — there is no separate loading affordance
+ * here because the member data rides the SAME frame the timeline already
+ * shows a Loading state for). `members === []` is the real-empty case: a
+ * timeline loaded but no member_added event has been seen in it yet.
+ * `workingNow === null` means the console has no active task right now.
+ */
+function RosterSection({
+  members,
+  workingNow,
+}: {
+  members: ChannelMemberEntry[] | null;
+  workingNow: WorkingNowEntry | null;
+}) {
+  if (members === null && workingNow === null) return null;
+  return (
+    <div className="mb-4 space-y-3 border-b border-edge pb-3">
+      <div>
+        <h3 className="text-[10px] font-bold uppercase tracking-widest text-muted">Members</h3>
+        {members === null ? null : members.length === 0 ? (
+          <p className="mt-1 text-[10.5px] text-faint/75">No members seen yet.</p>
+        ) : (
+          <>
+            <ul className="mt-1 flex flex-wrap gap-1.5">
+              {members.map((m) => (
+                <li
+                  key={m.principalId}
+                  className="rounded border border-border-strong px-1.5 py-0.5 text-[10px] text-muted"
+                  // G1R NB-2: `since` was computed and rendered NOWHERE. It is
+                  // that principal's own membership-change timestamp (real
+                  // data, correctly derived), so surface it rather than delete
+                  // it -- the tooltip already carries the full principal id and
+                  // is the honest place for a detail this dense chip cannot
+                  // show inline. formatOccurredAt keeps "Invalid Date" out of
+                  // the DOM for a malformed or absent value (T-10).
+                  title={`${m.principalId} · member since ${formatOccurredAt(m.since)}`}
+                >
+                  {m.principalId.slice(0, 8)}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1 text-[9px] text-faint/60">as loaded so far — earlier pages may add more</p>
+          </>
+        )}
+      </div>
+      <div>
+        <h3 className="text-[10px] font-bold uppercase tracking-widest text-muted">Working now</h3>
+        {workingNow === null ? (
+          <p className="mt-1 text-[10.5px] text-faint/75">Nothing running right now.</p>
+        ) : (
+          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10.5px] text-muted">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-1 w-1 rounded-full bg-torque" aria-hidden />
+              <LiveDuration since={workingNow.turnStartMs} />
+            </span>
+            {workingNow.phaseText && <span className="min-w-0 truncate text-faint">{workingNow.phaseText}</span>}
+            <span className="text-[9px] uppercase tracking-wide text-faint/70">
+              turn {workingNow.requestId.slice(0, 8)}
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
