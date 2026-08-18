@@ -334,6 +334,88 @@ describe('PRD-TCLAW-AGENT-PARTICIPATION-007 S2 — collab__post_message (A2-a, A
     expect(countMessageEvents(seeded.collabDbPath, seeded.outsiderChannelId)).toBe(before);
   });
 
+  // ── G2A C-S2-1: the _meta identity channel must be UNSPOOFABLE, and that
+  //    must be PINNED BY A TEST rather than by argument. ──────────────────
+  //
+  // Both G1R and the builder verified unspoofability by hand and neither
+  // committed the proof. G2A then mutated executeTool so a model-supplied
+  // `args._meta` OVERRIDES the verified caller -- a working
+  // privilege-escalation shape -- and the whole suite stayed 13/13 GREEN.
+  //
+  // Instance EIGHT of this program's guard-that-enforces-nothing pattern, and
+  // the first that is an identity-spoofing hole. Latent only because S2 has no
+  // production trigger today; live the moment S3 binds a real task to an agent
+  // principal.
+  //
+  // The property under test: executeTool builds `_meta` ITSELF, as a SIBLING
+  // of `arguments`, from its OWN gateway-derived parameter (registry.ts:322-333)
+  // -- never from `args`. So a model that stuffs `_meta` into its arguments
+  // cannot reach the identity the handler reads.
+  it('C-S2-1: a model-supplied args._meta CANNOT override the verified caller identity (privilege escalation refused)', async () => {
+    await registerCollabTools();
+
+    // The escalation payload: the OUTSIDER (a real principal, but NOT a member
+    // of memberChannelId) calls, while its own arguments claim to be the real
+    // member. If args._meta could reach the handler, this posts.
+    const spoofArgs = {
+      channelId: seeded.memberChannelId,
+      text: 'escalation attempt ' + randomUUID(),
+      _meta: { 'io.torqclaw/collab-caller-principal-id': seeded.agentId },
+    } as Record<string, unknown>;
+
+    const before = countMessageEvents(seeded.collabDbPath, seeded.memberChannelId);
+
+    await expect(
+      bridge.executeTool('collab__post_message', spoofArgs, undefined, seeded.outsiderAgentId),
+      'C-S2-1 REGRESSION: a model-supplied args._meta reached the identity the '
+      + 'handler trusts. The caller was the OUTSIDER; its arguments claimed to be '
+      + 'a member. executeTool must build _meta from its OWN parameter as a '
+      + 'sibling of arguments, never from args.',
+    ).rejects.toThrow(/COLLAB_NOT_FOUND/);
+
+    // Side-effect absence, not just a thrown string: nothing committed.
+    expect(
+      countMessageEvents(seeded.collabDbPath, seeded.memberChannelId),
+      'C-S2-1 REGRESSION: the escalation COMMITTED a row.',
+    ).toBe(before);
+
+    // POSITIVE CONTROL in the same test -- without it, everything above passes
+    // against a build that refuses every call. The REAL member, with NO _meta
+    // in its args, must still post successfully.
+    const okText = 'legitimate post ' + randomUUID();
+    await bridge.executeTool(
+      'collab__post_message', { channelId: seeded.memberChannelId, text: okText }, undefined, seeded.agentId,
+    );
+    expect(
+      countMessageEvents(seeded.collabDbPath, seeded.memberChannelId),
+      'positive control: the genuine member must still be able to post',
+    ).toBe(before + 1);
+  });
+
+  // Absence of identity must REFUSE, never fall back to a default. Pairs with
+  // the escalation test above: that one proves args cannot RAISE authority,
+  // this one proves missing identity cannot be silently SUPPLIED.
+  it('C-S2-1: a caller with NO bound identity is refused even when args._meta names a real member', async () => {
+    await registerCollabTools();
+    const before = countMessageEvents(seeded.collabDbPath, seeded.memberChannelId);
+
+    await expect(
+      bridge.executeTool(
+        'collab__post_message',
+        {
+          channelId: seeded.memberChannelId,
+          text: 'no-identity escalation ' + randomUUID(),
+          _meta: { 'io.torqclaw/collab-caller-principal-id': seeded.agentId },
+        } as Record<string, unknown>,
+        undefined,
+        undefined, // NO caller identity — the field executeTool actually reads
+      ),
+      'C-S2-1 REGRESSION: an unbound caller obtained identity from its own args.',
+    ).rejects.toThrow(/COLLAB_IDENTITY_REQUIRED/);
+
+    expect(countMessageEvents(seeded.collabDbPath, seeded.memberChannelId)).toBe(before);
+  });
+
   it('T-2: COLLAB_NOT_FOUND for a non-member channel is byte-identical to a nonexistent channel, and carries no "not a member" hint', async () => {
     let hiddenMsg = '';
     try {
