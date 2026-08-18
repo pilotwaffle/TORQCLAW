@@ -39,7 +39,7 @@ import { sweepExpiredApprovals, sweepExpiredGrants } from './approvalWriter.js';
 import { rebuildDeliveryProjection } from './approvalDelivery.js';
 import { revokeInertGrants, admitToolCall } from './grantAdmission.js';
 import { decideApprovalC2 } from './c2Broker.js';
-import { collabSurfaceCommandsEnabled, handleListChannels, handleGetChannelTimeline, handlePostChannelMessage } from './collabSurface.js';
+import { collabSurfaceCommandsEnabled, agentParticipationEnabled, isAgentSurfaceCaller, handleListChannels, handleGetChannelTimeline, handlePostChannelMessage } from './collabSurface.js';
 
 /**
  * Re-minted requests built inside the C2 decision transaction, handed to
@@ -121,28 +121,50 @@ setCancelCheck((requestId) => cancellations.isCancelled(requestId));
 // LOCAL_EDGE loop calls this immediately before any gated side effect,
 // with the ACTUAL model-generated arguments.
 //
-// TWO conditions gate the fence, and the second is load-bearing:
+// S0 (PRD-TCLAW-AGENT-PARTICIPATION-007 G1R Gate-1, B-1): this used to be
+// gated `if (!collabEnabled()) return { ok: true }`. That mirrors the exact
+// mistake `72b4d36` fixed on FRONTIER's `frontierGrantFenced` the same day:
+// "a security refusal that a feature flag can switch off is not a
+// refusal." `collabEnabled()` defaults FALSE (principalBridge.ts:71-72;
+// `.env.example` sets no collab flag), so the LOCAL_EDGE exact-action seam
+// was inert in every default install. Under human pacing a permissive
+// `grantedTools.includes(name)` allowlist (ollama.ts:356) is weak but a
+// human is standing next to it; the reasoning that makes that tolerable
+// does not survive unattended execution (cron / agent auto-reply), where a
+// once-approved tool name can be re-invoked with ANY arguments while nobody
+// is watching. The flag is now REMOVED from this fence -- it runs on every
+// LOCAL_EDGE dispatch, flag on or off.
 //
-//   1. the flag is on -- flag-off is byte-identical legacy (SI-4), no
-//      grant table read, `grantedTools` alone still authorizes; and
-//   2. this dispatch request actually CARRIES a C2 grant.
+// The remaining condition is load-bearing and is NOT the same defect:
 //
-// Condition 2 exists because "flag on" is not the same as "this request
-// went through C2". A legacy connection (no surface credential presented)
-// still registers and decides through the legacy path even with the
-// subsystem enabled, so its re-run has no grant by design. Fencing it on
-// `collabEnabled()` alone refused those runs `grant-missing` -- a real
-// SI-4 break that the APPROVE leg of the flag-on identity transcript
-// caught (G2A D-3).
+//   this dispatch request actually CARRIES a C2 grant (`carriesGrant`).
 //
-// This does NOT weaken the control. A request that went through C2 always
-// has its grant row minted inside the deciding transaction, so for those
-// requests the lookup finds it and the full check runs. What condition 2
-// skips is only requests for which C2 never issued a licence in the first
-// place -- and those are exactly the requests whose approval row is
-// unbound and therefore inert/reissue-required at the decision seam.
+// This exists because a request can reach this seam without ever having
+// gone through C2 registration at all -- a legacy connection (no surface
+// credential presented) still registers and decides through the legacy
+// register/decide path even with C2 available, so its re-run has no grant
+// by design (D-3/SI-4: a legacy human-paced connection must stay
+// byte-identical to pre-C2 behaviour). Refusing those runs `grant-missing`
+// would be a real regression the APPROVE leg of the flag-on identity
+// transcript already caught (G2A D-3), and it is preserved here unchanged.
+//
+// A request that went through C2 always has its grant row minted inside
+// the deciding transaction, so for those requests the lookup finds it and
+// the full check runs regardless of the flag. What `!carriesGrant` skips is
+// only requests for which C2 never issued a licence in the first place.
+//
+// KNOWN GAP (not closed by this change, and not silently claimed to be):
+// there is not yet an unattended-run caller in this codebase (no cron, no
+// agent auto-reply loop exists yet), so there is no signal at this seam
+// today to distinguish "legacy human-paced connection, no grant by design"
+// from "an unattended run whose grantedTools should never have been
+// re-minted without an args-bound grant". G1R's B-1 fix (ii) -- refusing an
+// unattended dispatch that carries `grantedTools` with no matching grant
+// row -- requires that signal to exist first. TODO(S3/cron prerequisite):
+// once an unattended-run marker is threaded onto GatewayRequest, add
+// `!carriesGrant && isUnattendedRun(requestId) => refuse` here, preserving
+// this exact arm for every other (human-paced legacy) caller.
 setToolAdmissionCheck((requestId, toolName, args) => {
-  if (!collabEnabled()) return { ok: true };
   const carriesGrant = db.prepare(
     'SELECT 1 FROM gateway_action_grants WHERE dispatch_request_id = ?',
   ).get(requestId) !== undefined;
@@ -179,6 +201,20 @@ app.get('/ws', { websocket: true }, (socket) => {
   // several concurrent connections presenting different valid
   // same-principal surfaces -- §2.13.
   let connectionAuth: ConnectionAuthContext | null = null;
+  // PRD-TCLAW-AGENT-PARTICIPATION-007 S1: server-derived, CONNECTION-scoped
+  // collab principal id for a VERIFIED agent-kind principal, set ONLY when
+  // TORQCLAW_AGENT_PARTICIPATION is on (agentParticipationEnabled()) and the
+  // connection's own resolved principal (from caller.binding, never a client
+  // frame) reads back kind==='agent' from the collab DB. Deliberately kept
+  // SEPARATE from connectionAuth: connectionAuth is populated only for a C1
+  // surface, and a createAgent()-minted credential (the only agent-minting
+  // path that exists -- store.ts:426) has no C1 surface row, so it always
+  // falls to the C0.1 legacy branch of resolveConnectIdentity, which returns
+  // auth: null. Gating S1's new posting path on connectionAuth alone would
+  // make it permanently unreachable for every agent this program can mint.
+  // NULL here means "no verified agent identity for this connection" and
+  // must never be widened or substituted (§2a).
+  let agentCollabPrincipalId: string | null = null;
 
   const sendErr = (code: string, detail?: unknown) =>
     socket.send(JSON.stringify({ type: 'ERROR', code, detail }));
@@ -231,6 +267,40 @@ app.get('/ws', { websocket: true }, (socket) => {
         sendErr('AUTH_FAILED');
         return socket.close(4001, 'auth failed');
       }
+
+      // PRD-TCLAW-AGENT-PARTICIPATION-007 S1: resolve (never assert) this
+      // connection's verified agent collab principal. Every input here is
+      // server-derived: caller.binding and caller.authClass both came from a
+      // cryptographically verified tq1_ credential
+      // (connectionAuth.ts/collabIdentity.ts), never a client frame field.
+      //
+      // WHY authClass === 'agent_surface' AND NOT A SECOND DB READ:
+      // collabIdentity.ts computes authClass from the SAME verified-
+      // principal lookup that already produced caller.role -- 'agent_surface'
+      // is set (both the C1 and C0.1-legacy branches) if-and-only-if the
+      // resolved principal's kind is 'agent' AND (for a C1 surface) its
+      // surfaceRole is specifically 'agent', not 'automation' or 'operator'.
+      // A second, independent principals.kind lookup here would read the
+      // SAME collab.db handle collabIdentity.ts already read microseconds
+      // earlier in this same synchronous connect path -- it cannot
+      // observe a different answer, so it would be untestable dead
+      // redundancy (verified by mutation: removing such a check left every
+      // test green, because no reachable input can make the two reads
+      // disagree). authClass is therefore the correct, non-redundant,
+      // already-verified signal to gate on. It also correctly EXCLUDES a C1
+      // 'automation_surface' principal, which role-collapses to the same
+      // 'node' seat but is a distinct authClass -- automation is not agent
+      // participation and this slice grants it nothing.
+      //
+      // Flag-gated: with TORQCLAW_AGENT_PARTICIPATION off (its default),
+      // agentParticipationEnabled() short-circuits this to false
+      // immediately, so agentCollabPrincipalId stays null and every path
+      // this slice adds is byte-identical to pre-S1 behaviour (A1-d, the
+      // absent-deny discipline).
+      if (agentParticipationEnabled() && isAgentSurfaceCaller(caller.authClass, caller.binding)) {
+        agentCollabPrincipalId = caller.binding!.principalId;
+      }
+
       const knownResume = Boolean(conn.data.sessionId && sessions.has(conn.data.sessionId));
       // Fresh and unknown-id frames can be checked before resolve, preventing
       // mismatch attempts from inserting an orphan session. Known resumes run
@@ -311,8 +381,17 @@ app.get('/ws', { websocket: true }, (socket) => {
       holdsAuthority: (authority: 'approve' | 'cancel' | 'delegate') =>
         holdsAuthority(db, connectionAuth!.surfaceId, authority),
     };
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S1: the ONE seat-lattice widening
+    // this slice adds (authz.ts's AuthzContext.agentCollabWrite doc comment
+    // has the full precondition). Re-read the flag live per-call (never
+    // cached from connect time) so a mid-connection flag flip takes effect
+    // on the very next command, matching this file's existing discipline
+    // for surfaceAuthz above. agentCollabPrincipalId itself was resolved
+    // ONCE at connect from a verified credential and never changes for the
+    // life of the socket -- only the flag gate is re-read live.
+    const agentCollabWrite = agentCollabPrincipalId !== null && agentParticipationEnabled();
     const decision = authorize(role!, cmd.data, {
-      sessionId: sid, lookupTaskSession, surface: surfaceAuthz,
+      sessionId: sid, lookupTaskSession, surface: surfaceAuthz, agentCollabWrite,
     });
     if (!decision.ok) {
       app.log.warn({ role, action: cmd.data.action }, 'authz denied');
@@ -660,9 +739,17 @@ app.get('/ws', { websocket: true }, (socket) => {
         // value (the command carries no author field to spoof). No resolved
         // principal => the handler returns the terminal
         // COLLAB_IDENTITY_REQUIRED refusal and posts nothing (CO-1).
+        //
+        // PRD-TCLAW-AGENT-PARTICIPATION-007 S1: agentCollabPrincipalId takes
+        // precedence when set. By construction it is non-null here ONLY for
+        // a node-seat connection that just cleared authz's agentCollabWrite
+        // gate (a verified agent principal); for every other seat it is
+        // always null (never set for an operator-kind principal, per A1-e),
+        // so this falls through to connectionAuth?.principalId -- the exact,
+        // unchanged 005 S3 behaviour for the operator seat.
         const postErr = await handlePostChannelMessage(
           sid,
-          connectionAuth?.principalId ?? null,
+          agentCollabPrincipalId ?? connectionAuth?.principalId ?? null,
           cmd.data.channelId,
           cmd.data.text,
           cmd.data.idempotencyKey,
@@ -680,35 +767,59 @@ await connectBridge(); // discover + namespace MCP servers before traffic
 
 // C2 startup recovery + projection rebuild (§1.4, §3.13, §6.6, A10).
 //
-// Gated on the flag: with collab off, no C2 table is read or written, which
-// is the SI-4 requirement. With it on, this runs BEFORE the listener opens
-// so no client can observe a half-recovered state:
+// S0 (PRD-TCLAW-AGENT-PARTICIPATION-007 G1R Gate-1, B-7): the three sweep
+// calls below used to sit INSIDE the `if (collabEnabled())` block below,
+// which defaults false. Same defect class as B-1, in the recovery path: a
+// gateway that crashes between an admission decision and tool execution
+// leaves an inert grant unrevoked, and a gateway that crashes with a
+// pending approval past its deadline leaves it actionable indefinitely --
+// in the DEFAULT configuration. This matters materially more than for a
+// human-paced run, because nobody is watching a crashed-and-restarted
+// gateway's boot log for a stale grant. Run unconditionally, still BEFORE
+// the listener opens so no client can observe a half-recovered state:
 //
 //   1. Revoke grants left inert by a crash between decision and admission.
 //      Recovery only ever REDUCES authority -- it never completes,
 //      dispatches, or reissues a grant (§6.6).
-//   2. Sweep approvals past their deadline through the one centralized
-//      writer, so a restart cannot leave a stale row indefinitely
-//      actionable.
-//   3. Rebuild the delivery projection against CURRENTLY eligible operator
-//      surfaces, so a surface that lost authority while the gateway was
-//      down is not re-targeted (A10).
+//   2. Sweep approvals and grants past their deadline through the one
+//      centralized writer, so a restart cannot leave a stale row
+//      indefinitely actionable.
+//
+// This is safe unconditionally: with collab off, these three sweeps read
+// and write ONLY the C2 tables (`gateway_action_grants`, `tool_approvals`'
+// C2 columns), which `ensureApprovalBrokerSchema(db)` above already creates
+// unconditionally at boot (C2-1, additive migration) and which no flag-off
+// path writes to in the first place -- so with the flag off these sweeps
+// simply find nothing to revoke or expire and are a no-op in practice, not
+// merely in principle.
+try {
+  const revokedInert = revokeInertGrants(db);
+  const expired = sweepExpiredApprovals(db);
+  sweepExpiredGrants(db);
+  console.log(
+    `[torqclaw] C2 recovery: ${revokedInert} inert grant(s) revoked, `
+    + `${expired} approval(s) expired`,
+  );
+} catch (error) {
+  // Recovery must never prevent the gateway from starting: every C2
+  // consumer already fails closed without its evidence, so a failed sweep
+  // denies rather than opens.
+  console.error('[torqclaw] C2 grant/approval sweep failed (continuing fail-closed):', error);
+}
+
+// Delivery-projection rebuild stays flag-gated: it is UI-delivery routing
+// for the collab approval surface, not part of the exact-action admission
+// fence, and it is out of this slice's scope (task names only the three
+// sweep calls above).
 if (collabEnabled()) {
   try {
-    const revokedInert = revokeInertGrants(db);
-    const expired = sweepExpiredApprovals(db);
-    sweepExpiredGrants(db);
     const projection = rebuildDeliveryProjection(db);
     console.log(
-      `[torqclaw] C2 recovery: ${revokedInert} inert grant(s) revoked, `
-      + `${expired} approval(s) expired, ${projection.created} delivery row(s) projected`
+      `[torqclaw] C2 recovery: ${projection.created} delivery row(s) projected`
       + (projection.reason ? ` (${projection.reason})` : ''),
     );
   } catch (error) {
-    // Recovery must never prevent the gateway from starting: every C2
-    // consumer already fails closed without its evidence, so a failed
-    // rebuild denies rather than opens.
-    console.error('[torqclaw] C2 recovery failed (continuing fail-closed):', error);
+    console.error('[torqclaw] C2 delivery projection rebuild failed (continuing fail-closed):', error);
   }
 }
 

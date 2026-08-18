@@ -65,6 +65,41 @@ export function collabSurfaceCommandsEnabled(): boolean {
   return TRUTHY.has((process.env.TORQCLAW_COLLAB_SURFACE_COMMANDS ?? '').trim().toLowerCase());
 }
 
+/**
+ * PRD-TCLAW-AGENT-PARTICIPATION-007 S1's own narrowing flag. Additionally
+ * requires collabSurfaceCommandsEnabled() (which itself requires
+ * collabEnabled()), so this can NEVER re-enable a surface 005's flags
+ * turned off -- it only ever narrows further, matching the house pattern
+ * collabSurfaceCommandsEnabled() itself already established over
+ * collabEnabled(). Read per-call, never captured at import, for the same
+ * stale-module-constant reason as its sibling above.
+ */
+export function agentParticipationEnabled(): boolean {
+  if (!collabSurfaceCommandsEnabled()) return false;
+  return TRUTHY.has((process.env.TORQCLAW_AGENT_PARTICIPATION ?? '').trim().toLowerCase());
+}
+
+/**
+ * S1: the exact predicate server.ts uses to decide whether a just-connected
+ * caller's binding may become this connection's agentCollabPrincipalId.
+ * Pulled out as a small, named, directly-unit-testable function (rather than
+ * inlined in server.ts's connect closure) specifically so its ONE
+ * discriminating case -- a C1 'automation_surface' caller, which shares
+ * role:'node' with a real agent but must NOT gain write access here -- can
+ * be pinned by a fast unit test without booting a full gateway subprocess
+ * and provisioning a live C1 surface projection end-to-end.
+ *
+ * `authClass === 'agent_surface'` is produced by collabIdentity.ts in
+ * exactly two places (the C1 branch when ctx.surfaceRole === 'agent', and
+ * the C0.1 legacy branch when principalKind !== 'operator') -- both already
+ * required principalKind/surfaceRole to be the agent case before returning
+ * it, so this performs no additional DB read (see server.ts's connect-path
+ * comment for why a second read would be untestable dead redundancy).
+ */
+export function isAgentSurfaceCaller(authClass: string, binding: unknown): boolean {
+  return authClass === 'agent_surface' && binding != null;
+}
+
 let storeOverride: CollaborationStore | null = null;
 let defaultStore: CollaborationStore | null = null;
 

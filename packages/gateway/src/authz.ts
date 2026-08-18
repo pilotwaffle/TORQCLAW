@@ -22,6 +22,31 @@ export interface AuthzContext {
    * identically (§2.7.1 flag semantics).
    */
   surface?: SurfaceAuthzContext;
+  /**
+   * PRD-TCLAW-AGENT-PARTICIPATION-007 S1: true when — and ONLY when — ALL of
+   * the following hold, all computed by the caller (server.ts) from live
+   * server-derived state, never from a client frame:
+   *   1. TORQCLAW_AGENT_PARTICIPATION is truthy (this slice's own flag);
+   *   2. collabSurfaceCommandsEnabled() is true (inherits 005's narrowing,
+   *      so this can never re-enable a surface 005's flags turned off);
+   *   3. this connection's resolved collab principal is REAL (a non-null
+   *      binding from a verified tq1_ credential) AND that principal's
+   *      `kind` — read from the collab DB, never asserted by the caller —
+   *      is 'agent'.
+   *
+   * This is the ONE seat-lattice widening this slice adds (§2 of the PRD):
+   * a `node`-seat connection backed by a verified agent collab principal may
+   * reach POST_CHANNEL_MESSAGE. It grants NOTHING else — every other action
+   * on the `node` role is still DENY_NOT_PERMITTED below, unchanged. The
+   * gateway SEAT decision here is deliberately kept separate from the
+   * substrate SUBJECT check: this field only says "this seat may attempt
+   * the command class"; assertChannelVisible (store.ts) still independently
+   * decides whether THIS principal may write to THIS channel.
+   *
+   * Absent (undefined/false) is today's behaviour byte-identically: role
+   * 'node' denies every action, exactly as before this slice.
+   */
+  agentCollabWrite?: boolean;
 }
 
 /**
@@ -123,11 +148,32 @@ const ALLOW: AuthzDecision = { ok: true };
  *              GET_CHANNEL_TIMELINE above -- the seat lattice and the
  *              substrate principal lattice are never conflated; explicit
  *              deny so the decision is legible and pinned by a test.)
- *   node     — every action denied.
+ *   node     — every action denied, EXCEPT: PRD-TCLAW-AGENT-PARTICIPATION-007
+ *              S1 admits POST_CHANNEL_MESSAGE when ctx.agentCollabWrite is
+ *              true (see AuthzContext's doc comment for the full, narrow
+ *              precondition the caller must have already verified). This is
+ *              the ONE widening this slice makes to the node seat; every
+ *              other action on 'node' is unaffected and still denies.
  */
 export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): AuthzDecision {
   if (role === 'operator') return authorizeOperator(cmd, ctx);
-  if (role === 'node') return DENY_NOT_PERMITTED;
+  if (role === 'node') {
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S1: the gateway SEAT lattice and the
+    // substrate PRINCIPAL lattice are never conflated (§2a, inherited from
+    // 005). This is a SEAT-class decision only -- "may a node-seat
+    // connection attempt POST_CHANNEL_MESSAGE at all" -- never a membership
+    // or visibility decision, which remains entirely the substrate's
+    // (assertChannelVisible, store.ts) regardless of this branch's outcome.
+    // ctx.agentCollabWrite is computed by the caller (server.ts) from live,
+    // server-derived state -- the flag, collabSurfaceCommandsEnabled(), and
+    // a real DB read of the connected principal's kind -- never from
+    // anything a client frame carries. Absent/false is byte-identical to
+    // pre-S1 behaviour: DENY_NOT_PERMITTED for every action.
+    if (cmd.action === 'POST_CHANNEL_MESSAGE' && ctx.agentCollabWrite === true) {
+      return ALLOW;
+    }
+    return DENY_NOT_PERMITTED;
+  }
 
   // role === 'channel'
   switch (cmd.action) {

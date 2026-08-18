@@ -766,11 +766,18 @@ describe('Phase 4 protected semantic manifest', () => {
     // PRD-005 S1 deny arms (2026-08-16) + PRD-005 S3 POST_CHANNEL_MESSAGE
     // deny arm, 2026-08-17 -- same seat-lattice ruling as the S1 read
     // commands, adding one explicit `case 'POST_CHANNEL_MESSAGE':` deny arm
-    // to the channel-seat switch plus its doc-comment entry). Recompute and
-    // re-authorize deliberately on any future approved change; never delete
-    // this pin.
+    // to the channel-seat switch plus its doc-comment entry +
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S1 (2026-08-17): added
+    // AuthzContext.agentCollabWrite, the ONE seat-lattice widening this
+    // slice makes -- role 'node' now admits POST_CHANNEL_MESSAGE when the
+    // caller (server.ts) has already verified the connection is a real
+    // agent-kind collab principal AND TORQCLAW_AGENT_PARTICIPATION is on;
+    // every other action on 'node' is unchanged (still DENY_NOT_PERMITTED)
+    // and the flag-off/absent-field case is byte-identical to before this
+    // slice). Recompute and re-authorize deliberately on any future approved
+    // change; never delete this pin.
     const authzSha = createHash('sha256').update(authz).digest('hex');
-    expect(authzSha).toBe('cb2b76b454cd55a36c569b3cf06359bf7f633c8c2f76f9643d456d412623cb27');
+    expect(authzSha).toBe('e638b97eb552099818a45f05804a5d0df001cdfdc352f38b74577687c4025c30');
     // The migration's own markers: the moved guard must not silently return,
     // and the relocation note must remain declared where it happened.
     expect(authz).not.toContain('export function checkResumeRole');
