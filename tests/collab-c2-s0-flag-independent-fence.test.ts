@@ -39,14 +39,16 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import {
   ensureSurfaceSecuritySchema, activateSurfaceProjection, grantAuthority,
   grantProfileDelegation, revokeSurfaceProjection,
 } from '../packages/gateway/src/surfaceSecurity.js';
+import { GATEWAY_DIST_ENTRY as GATEWAY_DIST_ENTRY_BS01 } from './helpers/collab-gateway-harness.js';
 import { ensureApprovalBrokerSchema } from '../packages/gateway/src/approvalSchema.js';
 import {
   registerC2Approval, decideC2Approval, sweepExpiredApprovals, sweepExpiredGrants,
@@ -488,6 +490,300 @@ describe('S0 B-1: the REAL c2Broker.ts wrapper functions (not the low-level writ
 
     resetStateDbForTest({ close: true });
   }, 30000);
+});
+
+// ── G1R B-S0-1: the SHIPPED setToolAdmissionCheck closure, not the replica ──
+//
+// Everything above this point calls `localEdgeAdmissionCheck` (line 148), a
+// hand-rolled COPY of server.ts's closure -- already fixed, never able to
+// regress. G1R proved by mutation that 13 of that 14-test block still pass
+// with the real gate restored at server.ts:168; only the source-text
+// STRUCTURAL test caught it.
+//
+// WHY THIS IS NOT A WEBSOCKET TEST (traced, not assumed):
+// `authenticateConnection`'s `resolveSurface` closure
+// (server.ts:256-261) is `if (!collabEnabled()) return null;` -- a surface
+// credential cannot authenticate AT ALL with the flag unset, so a C1
+// connection (required for C2 registration, since `recordTaskOrigin`
+// (server.ts:98) is ALSO still `if (!collabEnabled() || auth === null)
+// return;` BY DESIGN -- see its comment: "That is the SI-4 requirement")
+// can never produce a real C2-bound grant over the live wire, flag off.
+// That is not the S0 defect -- it is SI-4 working as intended. So a
+// wire-driven flag-off test could only ever exercise the legacy
+// `!carriesGrant => ok:true` arm, which the existing "D-3/SI-4 arm"
+// describe block already covers.
+//
+// What actually needs proving is narrower and is what B-S0-1 is really
+// about: that `setToolAdmissionCheck`'s installed closure -- the ACTUAL
+// object `@torqclaw/inference`'s module-singleton `admitTool` variable
+// holds once the real `server.ts` has run its top-level
+// `setToolAdmissionCheck(...)` call -- performs the real exact-action check
+// with NO `collabEnabled()` term anywhere in its own logic, REGARDLESS of
+// how the grant it is checking against came to exist. A grant that already
+// exists in `gateway_action_grants` must be honoured or refused on its own
+// terms by the shipped closure, flag on or off; the flag must never be a
+// second, silent way past it.
+//
+// HOW THIS IS DRIVEN WITHOUT A RACE: importing `dist/server.js` in-process
+// runs its module-top-level code -- including `setToolAdmissionCheck(...)`
+// at server.ts:167-176 -- against the SAME `@torqclaw/inference` module
+// instance this test process holds, exactly as the existing "REAL
+// c2Broker.ts wrapper functions" block above already does for
+// `registerApprovalC2`/`decideApprovalC2` (importing c2Broker.js by name
+// against a live TORQCLAW_DATA_DIR). Then `dispatch()` is called DIRECTLY
+// (also imported from the built dist graph) with a HAND-BUILT
+// GatewayRequest whose `id` this test chooses -- never a client-visible
+// value, so there is no server-random id to race against, and no
+// websocket round-trip between "seed the grant" and "dispatch reads it".
+// The forced-tool branch (ollama.ts:228-253, `TORQCLAW_E2E_FORCE_GATED_TOOL`)
+// then calls the REAL `admitTool` synchronously inside `executeLocalEdge`,
+// which is the exact function `setToolAdmissionCheck` installed.
+//
+// The grant is seeded with the low-level writer (`registerC2Approval` +
+// `decideC2Approval` from approvalWriter.ts, the same functions the
+// in-memory tests above use, here pointed at the LIVE dist `storage.js`
+// db instead of an in-memory one) bound to APPROVED_ARGS. The dispatched
+// request then carries either APPROVED_ARGS (positive control) or
+// DIFFERENT_ARGS (attack) as its forced-tool prompt, so the closure's own
+// `actionHash` comparison is what decides admission -- nothing in this
+// test computes or asserts that hash itself.
+describe('G1R B-S0-1: the SHIPPED setToolAdmissionCheck closure is flag-independent (booted artifact, no websocket)', () => {
+  const TOOL = 'filesystem__write_file';
+
+  it('POSITIVE CONTROL: matching args are ADMITTED and the tool executes; ATTACK: mismatched args are REFUSED action-binding-mismatch and the tool does NOT execute -- both decided by the SHIPPED setToolAdmissionCheck closure, TORQCLAW_COLLAB_ENABLED unset', async () => {
+    expect(process.env.TORQCLAW_COLLAB_ENABLED).toBeUndefined();
+
+    const dataDir = mkdtempSync(join(tmpdir(), 'torq-bs01-'));
+    const prevDir = process.env.TORQCLAW_DATA_DIR;
+    const prevFlag = process.env.TORQCLAW_COLLAB_ENABLED;
+    const prevForce = process.env.TORQCLAW_E2E_FORCE_GATED_TOOL;
+    process.env.TORQCLAW_DATA_DIR = dataDir;
+    delete process.env.TORQCLAW_COLLAB_ENABLED; // THE PREMISE
+    // Deterministic tool-choice seam (ollama.ts:228-253): without this the
+    // executor falls through to the REAL Ollama /v1 loop and hangs/times
+    // out against whatever (or no) local model is on this host. This does
+    // not weaken what is proven -- the forced branch still calls the SAME
+    // `admitTool` the real tool-call loop calls, and it is the documented
+    // E2E determinism seam every other booted-artifact C2 test in this repo
+    // already relies on (collab-c2-flag-on-e2e.test.ts, etc).
+    process.env.TORQCLAW_E2E_FORCE_GATED_TOOL = TOOL;
+
+    try {
+      const distDir = join(GATEWAY_DIST_ENTRY_BS01, '..');
+
+      // Re-point the dist module's state.db handle at THIS case's data dir
+      // BEFORE importing server.js -- mirrors the existing FRONTIER
+      // in-process test's own documented reason: ESM caches modules across
+      // test files in the same worker, and a statement prepared against a
+      // stale handle throws "database connection is not open".
+      const { resetStateDbForTest, db: liveDb } = await import(
+        pathToFileURL(join(distDir, 'storage.js')).href
+      ) as { resetStateDbForTest: (o?: { close?: boolean }) => void; db: import('better-sqlite3').Database };
+      resetStateDbForTest({ close: false });
+
+      // Import server.js -- this is the ENTIRE point. Its top-level code
+      // runs `setToolAdmissionCheck((requestId, toolName, args) => { ... })`
+      // (server.ts:167-176) against the live `@torqclaw/inference` module
+      // instance this process holds. It also binds a real Fastify listener
+      // (no client of this test ever connects to it) and calls
+      // `connectBridge()`, which degrades gracefully with no MCP servers
+      // configured -- the same boot path `launchGateway`'s child process
+      // takes, just in this process instead of a spawned one.
+      await import(pathToFileURL(join(distDir, 'server.js')).href);
+
+      const { dispatch } = await import(pathToFileURL(join(distDir, 'dispatch.js')).href) as {
+        dispatch: (req: unknown, diag: unknown) => void;
+      };
+      const {
+        registerC2Approval, decideC2Approval,
+      } = await import(pathToFileURL(join(distDir, 'approvalWriter.js')).href) as {
+        registerC2Approval: (db: unknown, params: unknown) => void;
+        decideC2Approval: (db: unknown, params: unknown) => { dispatchRequestId: string | null } | null;
+      };
+      const {
+        validateAndCanonicalizeArgs, privacyContextHash, routingContextHash, securityPolicyHash,
+      } = await import(pathToFileURL(join(distDir, 'approvalContext.js')).href) as {
+        validateAndCanonicalizeArgs: (a: unknown) => string;
+        privacyContextHash: (i: unknown) => string;
+        routingContextHash: (i: unknown) => string;
+        securityPolicyHash: (i: unknown) => string;
+      };
+      const {
+        ensureSurfaceSecuritySchema: ensureSchemaLive, activateSurfaceProjection: activateLive,
+        grantAuthority: grantAuthorityLive, grantProfileDelegation: grantDelegationLive,
+      } = await import(pathToFileURL(join(distDir, 'surfaceSecurity.js')).href) as {
+        ensureSurfaceSecuritySchema: (db: unknown) => void;
+        activateSurfaceProjection: (db: unknown, p: unknown) => void;
+        grantAuthority: (db: unknown, surfaceId: string, kind: string, id: string) => void;
+        grantProfileDelegation: (db: unknown, p: unknown) => void;
+      };
+      const { ensureApprovalBrokerSchema: ensureApprovalLive } = await import(
+        pathToFileURL(join(distDir, 'approvalSchema.js')).href
+      ) as { ensureApprovalBrokerSchema: (db: unknown) => void };
+
+      ensureSchemaLive(liveDb);
+      ensureApprovalLive(liveDb);
+
+      const sid = randomUUID();
+      const wrapperPrincipal = 'prn_bs01_operator';
+      const wrapperSurface = 'srf_bs01_desktop';
+      const wrapperProfile = 'bs01_profile';
+      const wrapperPolicyHash = 'a'.repeat(64);
+      const wrapperRegistryHash = 'b'.repeat(64);
+      liveDb.prepare("INSERT INTO sessions (id, role, client_name) VALUES (?, 'operator','bs01-test')").run(sid);
+
+      activateLive(liveDb, {
+        surfaceId: wrapperSurface, principalId: wrapperPrincipal, surfaceKind: 'desktop', surfaceRole: 'operator',
+        allowedCapabilityClasses: ['read', 'write'], authEpoch: 1, capabilityRevision: 1,
+        sourceIdentityRevision: 'rev-1',
+      });
+      grantAuthorityLive(liveDb, wrapperSurface, 'approve', randomUUID());
+      const delegationId = randomUUID();
+      grantDelegationLive(liveDb, {
+        delegationId, surfaceId: wrapperSurface, profileId: wrapperProfile,
+        profileDelegationRevision: 1, profileSchemaVersion: 'torqclaw.effective-profile/v1',
+        profileVersion: 1, toolRegistryVersion: 'torqclaw.tools/v1',
+        effectiveProfilePolicyHash: wrapperPolicyHash, registryEnforcementHash: wrapperRegistryHash,
+      });
+
+      const APPROVED_ARGS_BS01 = { e2e: true, prompt: 'bs01 approved prompt' };
+      const ATTACK_ARGS_BS01 = { e2e: true, prompt: 'bs01 SWAPPED prompt -- never approved' };
+
+      /** Seed a real C2-bound approval + grant for a CHOSEN dispatchRequestId,
+       *  bound to APPROVED_ARGS_BS01 -- the same low-level writer path the
+       *  in-memory tests above use, pointed at the live dist db. */
+      function seedGrant(dispatchRequestId: string, sourceRequestId: string): void {
+        const canonicalArgs = validateAndCanonicalizeArgs(APPROVED_ARGS_BS01);
+        const approvalId = randomUUID();
+        const ctxInput = {
+          originPrincipalId: wrapperPrincipal, originSurfaceId: wrapperSurface,
+          sourceRequestId, originSurfaceKind: 'desktop', profileId: wrapperProfile,
+          toolName: TOOL, canonicalArgs,
+          privacyContextHash: privacyContextHash({ containsSensitiveData: false }),
+          routingContextHash: routingContextHash({
+            executionMode: 'AUTO', selectedTier: 'OLLAMA_LOCAL', ruleId: null,
+          }),
+          securityPolicyHash: securityPolicyHash({
+            effectiveProfile: {
+              schemaVersion: 'torqclaw.effective-profile/v1', profileId: wrapperProfile,
+              profileVersion: 1, toolRegistryVersion: 'torqclaw.tools/v1',
+              effectiveProfilePolicyHash: wrapperPolicyHash,
+            },
+            capabilityRevision: 1, profileDelegationRevision: 1,
+            registryEnforcementHash: wrapperRegistryHash,
+          }),
+        };
+        liveDb.prepare(
+          `INSERT INTO tasks (request_id, session_id, tier, router_reason, state, request_json)
+           VALUES (?, ?, 'LOCAL_EDGE', 'r', 'completed', '{}')`,
+        ).run(sourceRequestId, sid);
+        registerC2Approval(liveDb, {
+          approvalId, requestId: sourceRequestId, toolName: TOOL, canonicalArgs,
+          originPrincipalId: wrapperPrincipal, originSurfaceId: wrapperSurface, contextInput: ctxInput,
+          binding: {
+            delegationId, profileDelegationRevision: 1, registeredProfileId: wrapperProfile,
+            registeredProfileVersion: 1, registeredToolRegistryVersion: 'torqclaw.tools/v1',
+            registeredEffectiveProfilePolicyHash: wrapperPolicyHash, registeredCapabilityRevision: 1,
+            registeredRegistryEnforcementHash: wrapperRegistryHash,
+            registeredPrivacyContextHash: ctxInput.privacyContextHash,
+            registeredRoutingContextHash: ctxInput.routingContextHash,
+            registeredSecurityPolicyHash: ctxInput.securityPolicyHash,
+          },
+        });
+        const decided = decideC2Approval(liveDb, {
+          approvalId, decision: 'APPROVE', decidingPrincipalId: wrapperPrincipal,
+          decidingSurfaceId: wrapperSurface, currentContext: ctxInput, dispatchRequestId,
+          mintDispatchTask: (id: string) => {
+            liveDb.prepare(
+              `INSERT INTO tasks (request_id, session_id, tier, router_reason, state, request_json)
+               VALUES (?, ?, 'LOCAL_EDGE', 'remint', 'running', '{}')`,
+            ).run(id, sid);
+          },
+        });
+        expect(decided, 'seedGrant: decideC2Approval must mint the grant').not.toBeNull();
+      }
+
+      function makeReq(dispatchRequestId: string, args: { prompt: string }) {
+        return {
+          id: dispatchRequestId,
+          sessionId: sid,
+          sourceChannel: 'test',
+          receivedAt: new Date().toISOString(),
+          payload: {
+            prompt: args.prompt, assembledContext: '', contextSize: 0,
+            requiredTools: [], taskType: 'general', grantedTools: [TOOL],
+          },
+          constraints: { latencySensitivity: 'LOW', containsSensitiveData: false, executionMode: 'LOCAL_ONLY' },
+          enrichment: { memoryUsed: false },
+        } as any;
+      }
+      const { ComputeTier: ComputeTierBs01 } = await import('@torqclaw/contracts');
+      const diag = { score: 1, reason: 'bs01 test', tier: ComputeTierBs01.LOCAL_EDGE } as any;
+
+      async function waitForTaskResult(requestId: string, timeoutMs = 15000): Promise<{ result: string | null; state: string }> {
+        const deadline = Date.now() + timeoutMs;
+        for (;;) {
+          const row = liveDb.prepare('SELECT result, state FROM tasks WHERE request_id=?')
+            .get(requestId) as { result: string | null; state: string } | undefined;
+          if (row && row.state !== 'running') return row;
+          if (Date.now() >= deadline) throw new Error('timed out waiting for task ' + requestId + '; last row=' + JSON.stringify(row));
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      }
+
+      // ═══════════════════ ATTACK: mismatched args ═══════════════════
+      const attackSourceId = randomUUID();
+      const attackDispatchId = randomUUID();
+      seedGrant(attackDispatchId, attackSourceId);
+      const attackGrantBefore = liveDb.prepare(
+        'SELECT consumed_at, revoked_at FROM gateway_action_grants WHERE dispatch_request_id=?',
+      ).get(attackDispatchId) as { consumed_at: string | null; revoked_at: string | null };
+      expect(attackGrantBefore.consumed_at).toBeNull();
+
+      dispatch(makeReq(attackDispatchId, ATTACK_ARGS_BS01), diag);
+      const attackResult = await waitForTaskResult(attackDispatchId);
+
+      // ── THE LOAD-BEARING ASSERTIONS (attack) ──
+      expect(attackResult.state, 'the attack dispatch must reach a terminal state').toBe('completed');
+      expect(attackResult.result, 'the SHIPPED closure must refuse the mismatched args')
+        .toContain('action-binding-mismatch');
+      expect(attackResult.result, 'the tool must NOT report having executed')
+        .not.toContain('[e2e] executed');
+      const attackGrantAfter = liveDb.prepare(
+        'SELECT consumed_at, revoked_at FROM gateway_action_grants WHERE dispatch_request_id=?',
+      ).get(attackDispatchId) as { consumed_at: string | null; revoked_at: string | null };
+      expect(attackGrantAfter.consumed_at, 'the attack must leave the grant UNCONSUMED (side-effect absence)').toBeNull();
+      expect(attackGrantAfter.revoked_at).toBeNull();
+
+      // ═══════════════════ POSITIVE CONTROL: matching args ═══════════════════
+      const controlSourceId = randomUUID();
+      const controlDispatchId = randomUUID();
+      seedGrant(controlDispatchId, controlSourceId);
+
+      dispatch(makeReq(controlDispatchId, APPROVED_ARGS_BS01), diag);
+      const controlResult = await waitForTaskResult(controlDispatchId);
+
+      // ── THE LOAD-BEARING ASSERTIONS (control) ──
+      expect(controlResult.state, 'the control dispatch must reach a terminal state').toBe('completed');
+      expect(controlResult.result, 'the SHIPPED closure MUST admit matching args and the tool MUST execute')
+        .toContain('[e2e] executed');
+      expect(controlResult.result).not.toContain('action-binding-mismatch');
+      const controlGrantAfter = liveDb.prepare(
+        'SELECT consumed_at, revoked_at FROM gateway_action_grants WHERE dispatch_request_id=?',
+      ).get(controlDispatchId) as { consumed_at: string | null; revoked_at: string | null };
+      expect(controlGrantAfter.consumed_at, 'the control run MUST consume its grant').not.toBeNull();
+      expect(controlGrantAfter.revoked_at).toBeNull();
+
+      resetStateDbForTest({ close: false });
+    } finally {
+      if (prevDir === undefined) delete process.env.TORQCLAW_DATA_DIR;
+      else process.env.TORQCLAW_DATA_DIR = prevDir;
+      if (prevFlag === undefined) delete process.env.TORQCLAW_COLLAB_ENABLED;
+      else process.env.TORQCLAW_COLLAB_ENABLED = prevFlag;
+      if (prevForce === undefined) delete process.env.TORQCLAW_E2E_FORCE_GATED_TOOL;
+      else process.env.TORQCLAW_E2E_FORCE_GATED_TOOL = prevForce;
+    }
+  }, 120000);
 });
 
 describe('S0 B-1: the legacy D-3/SI-4 arm is preserved (no grant row => admitted)', () => {
