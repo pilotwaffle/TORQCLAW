@@ -208,6 +208,26 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     text: z.string().min(1).max(16384),
     idempotencyKey: z.uuid(),
   }),
+  z.object({
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S3 (R-3a): the STOP control. A
+    // visible, operator-reachable halt for agent auto-reply. `scope`
+    // determines whether this stops one channel or every channel
+    // (global); `channelId` is required for scope='channel' and forbidden
+    // for scope='global' -- that combination cannot be expressed inside a
+    // discriminatedUnion member (zod v4 requires each member to be a bare
+    // object so the literal discriminant stays directly inspectable, which
+    // rules out a `.refine()`-wrapped member), so it is validated in the
+    // gateway handler (autoReplyStopHandler.ts) instead, returning a
+    // structured COLLAB_INVALID_REQUEST rather than a schema rejection.
+    // `stop: true` sets the halt; `stop: false` clears it. Operator-seat-
+    // only (see authz.ts) -- an agent has no path to this command: it is
+    // not a collab tool, so no message content or model output can ever
+    // reach it (INV-T1 Corollary C's sibling for STOP).
+    action: z.literal('SET_AUTOREPLY_STOP'),
+    stop: z.boolean(),
+    scope: z.enum(['global', 'channel']),
+    channelId: z.string().min(1).optional(),
+  }),
 ]);
 export type ClientCommand = z.infer<typeof ClientCommandSchema>;
 

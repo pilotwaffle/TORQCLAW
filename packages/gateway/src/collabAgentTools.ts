@@ -86,7 +86,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { CollabError } from '@torqclaw/collab';
 import { COLLAB_CALLER_META_KEY } from '@torqclaw/bridge';
-import { getStore, callerFor } from './collabSurface.js';
+import { getStore, callerFor, triggerAutoReply } from './collabSurface.js';
 
 /** The bridge server id these tools register under — fixed, gateway-code-only
  *  (see registry.ts's connectInProcessServer doc: never constructible from
@@ -258,6 +258,18 @@ export function buildCollabAgentMcpServer(): McpServer {
           { channelId: args.channelId, text: args.text },
           idempotencyKey,
         );
+        // PRD-TCLAW-AGENT-PARTICIPATION-007 S3: the SAME trigger
+        // collabSurface.ts's human POST_CHANNEL_MESSAGE path fires, after
+        // THIS commit -- an agent's own post is exactly as capable of
+        // triggering another agent's turn as a human's post is (§4 S3's
+        // "Agent A posts -> agent B ... takes a turn -> its post
+        // re-triggers A" -- capability 3). Fire-and-forget for the same
+        // reason: an agent's own tool call must not block on however many
+        // downstream turns its post triggers.
+        triggerAutoReply({
+          channelId: args.channelId, channelSeq: Number(result.cursor),
+          eventId: result.eventId, actorPrincipalId: principalId,
+        });
         return {
           content: [{ type: 'text', text: JSON.stringify(result) }],
           structuredContent: result as unknown as Record<string, unknown>,

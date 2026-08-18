@@ -774,10 +774,22 @@ describe('Phase 4 protected semantic manifest', () => {
     // agent-kind collab principal AND TORQCLAW_AGENT_PARTICIPATION is on;
     // every other action on 'node' is unchanged (still DENY_NOT_PERMITTED)
     // and the flag-off/absent-field case is byte-identical to before this
-    // slice). Recompute and re-authorize deliberately on any future approved
+    // slice) +
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S3 (2026-08-18): added an explicit
+    // `case 'SET_AUTOREPLY_STOP': return DENY_NOT_PERMITTED;` arm to the
+    // 'channel'-seat switch (grouped with the existing POST_CHANNEL_MESSAGE
+    // deny, same seat-lattice reasoning) plus its doc-comment entry. The
+    // 'node'-seat branch is UNCHANGED -- STOP falls through its existing
+    // `return DENY_NOT_PERMITTED;` default with no new allow-arm, so an
+    // agent connection has no path to this command regardless of
+    // TORQCLAW_AGENT_PARTICIPATION/TORQCLAW_AGENT_AUTOREPLY. The operator
+    // branch (authorizeOperator) is untouched; STOP falls through its
+    // existing blanket ALLOW for any non-APPROVE_TOOL/APPROVE_SKILL action,
+    // exactly like every other pre-existing operator-only command.
+    // Recompute and re-authorize deliberately on any future approved
     // change; never delete this pin.
     const authzSha = createHash('sha256').update(authz).digest('hex');
-    expect(authzSha).toBe('e638b97eb552099818a45f05804a5d0df001cdfdc352f38b74577687c4025c30');
+    expect(authzSha).toBe('80cf29c50c2eac1835830ea282613d4b1cb21f571812655f670e81b472198d10');
     // The migration's own markers: the moved guard must not silently return,
     // and the relocation note must remain declared where it happened.
     expect(authz).not.toContain('export function checkResumeRole');

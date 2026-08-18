@@ -54,6 +54,7 @@ import {
   runCollaborationMigration,
   runSurfaceIdentityMigration,
   runSurfaceAuditMigration,
+  runAgentAutoreplyMigration,
   writeSurfaceAudit,
   type SecretStore,
   type BootstrapDb,
@@ -147,6 +148,16 @@ function migrateCollabDb(db: BootstrapDb): void {
     runCollaborationMigration(handle);
     runSurfaceIdentityMigration(handle);
     runSurfaceAuditMigration(handle);
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S3: the auto-reply watermark + STOP
+    // tables. A separate, explicitly-invoked call here (NOT cascaded inside
+    // runCollaborationMigration itself) for the same reason C1's two calls
+    // above are separate: tests/auth-v2-phase2a.test.ts's
+    // assertShippedCollabLedger deliberately fails closed on any
+    // "unexpected" extra row in collab_schema_migrations beyond its own
+    // known two-row ledger, so this table's migration id must not appear
+    // until AFTER whatever inspects that ledger has already run -- exactly
+    // how C1's own migrations already coexist with that check today.
+    runAgentAutoreplyMigration(handle);
   } catch {
     /* fail closed: an unmigrated DB authenticates nobody */
   }

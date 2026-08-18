@@ -146,10 +146,15 @@ describe('C1 built-artifact enforcement (§5(c))', () => {
     expect(collabTables).toContain('collab_surface_audit');  // C1-6
     const applied = (collab.prepare('SELECT id FROM collab_schema_migrations').all() as { id: string }[])
       .map((r) => r.id).sort();
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S3: runCollaborationMigration now
+    // additionally cascades to the agent-autoreply migration -- a real,
+    // additive migration the booted artifact now applies at boot, same as
+    // every other collab migration in this list.
     expect(applied).toEqual([
       '20260806_001_collaboration_v1',
       '20260811_002_surface_identity_c1',
       '20260811_003_surface_audit_c1',
+      '20260818_001_agent_autoreply_v1',
     ]);
     collab.close();
 
@@ -164,9 +169,12 @@ describe('C1 built-artifact enforcement (§5(c))', () => {
     // Re-booting is a no-op, not a crash or a duplicate migration row.
     await bootAndMigrate(dataDir, collabPath, pepper);
     const again = new Database(collabPath, { readonly: true });
-    expect((again.prepare('SELECT COUNT(*) AS n FROM collab_schema_migrations').get() as { n: number }).n).toBe(3);
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S3: 4, not 3 -- collabIdentity.ts's
+    // migrateCollabDb now additionally runs runAgentAutoreplyMigration
+    // alongside the two C1 calls (same seam, same idempotency guarantee).
+    expect((again.prepare('SELECT COUNT(*) AS n FROM collab_schema_migrations').get() as { n: number }).n).toBe(4);
     again.close();
-    console.log('C1_ARTIFACT_SELF_MIGRATED collab=3 migrations, state=3 tables');
+    console.log('C1_ARTIFACT_SELF_MIGRATED collab=4 migrations, state=3 tables');
   }, 120000);
 
   it('the booted dist ACCEPTS a valid C1 surface and REFUSES revoked/expired/inert ones', async () => {

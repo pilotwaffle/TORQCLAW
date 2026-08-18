@@ -415,6 +415,35 @@
         "idempotencyKey"
       ],
       "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "SET_AUTOREPLY_STOP"
+        },
+        "stop": {
+          "type": "boolean"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "global",
+            "channel"
+          ]
+        },
+        "channelId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "action",
+        "stop",
+        "scope"
+      ],
+      "additionalProperties": false
     }
   ]
 }

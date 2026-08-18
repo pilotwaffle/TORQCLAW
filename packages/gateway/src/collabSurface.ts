@@ -100,6 +100,56 @@ export function isAgentSurfaceCaller(authClass: string, binding: unknown): boole
   return authClass === 'agent_surface' && binding != null;
 }
 
+/**
+ * PRD-TCLAW-AGENT-PARTICIPATION-007 S3: injected, never imported directly.
+ * autoReplyDispatcher.ts imports getStore/callerFor/getCollabDbForAutoReply
+ * FROM this module, so this module cannot import autoReplyDispatcher.ts
+ * back without a circular import -- the same injection pattern this
+ * codebase already uses for setToolAdmissionCheck (ollama.ts) and
+ * setCancelCheck (ollama.ts). server.ts wires the real implementation at
+ * boot; the default is a no-op so this module stays independently
+ * importable (e.g. by tests that never call the wiring function) with S3
+ * behaving as fully absent, matching every other injected-seam default in
+ * this codebase.
+ */
+export type AutoReplyTrigger = (params: {
+  channelId: string; channelSeq: number; eventId: string; actorPrincipalId: string;
+}) => void | Promise<void>;
+let autoReplyTrigger: AutoReplyTrigger = () => {};
+export function setAutoReplyTrigger(fn: AutoReplyTrigger): void {
+  autoReplyTrigger = fn;
+}
+/** Fire-and-forget by construction: the injected function itself is async
+ *  (onChannelMessageCommitted), and this wrapper deliberately does not
+ *  await it -- a human's POST_CHANNEL_MESSAGE ack must not wait on however
+ *  many downstream agent turns the post triggers. Any rejection is caught
+ *  here so a trigger failure can never become an unhandled rejection that
+ *  terminates the gateway process (the same A6(b) totality discipline this
+ *  file's own module doc requires of every handler).
+ *
+ *  Exported (S3) so collabAgentTools.ts's post_message tool handler -- the
+ *  OTHER commit path a message_posted event can come from -- fires the
+ *  identical trigger after ITS OWN commit, under the name
+ *  triggerAutoReplyForAgentPost. Both commit paths call the exact same
+ *  underlying wrapper; there is no second, divergent trigger
+ *  implementation. */
+export function triggerAutoReply(params: {
+  channelId: string; channelSeq: number; eventId: string; actorPrincipalId: string;
+}): void {
+  try {
+    const result = autoReplyTrigger(params);
+    // The injected fn may return a Promise (it does in production); guard
+    // against an unhandled rejection without assuming the return type.
+    if (result && typeof (result as unknown as Promise<unknown>).then === 'function') {
+      (result as unknown as Promise<unknown>).catch((err) => {
+        console.warn(`[gateway] auto-reply trigger failed (${err?.message ?? err})`);
+      });
+    }
+  } catch (err: any) {
+    console.warn(`[gateway] auto-reply trigger failed (${err?.message ?? err})`);
+  }
+}
+
 let storeOverride: CollaborationStore | null = null;
 let defaultStore: CollaborationStore | null = null;
 
@@ -158,6 +208,24 @@ export function getStore(): CollaborationStore | null {
     });
   }
   return defaultStore;
+}
+
+/**
+ * PRD-TCLAW-AGENT-PARTICIPATION-007 S3: expose the SAME db handle storeDb
+ * tracks (set by getStore()) so autoReplyDispatcher.ts's watermark/STOP
+ * reads and writes run against the identical collab.db connection the
+ * store itself uses -- never a second, independent connection (the exact
+ * reuse discipline getStore()'s own doc comment establishes for
+ * collabAgentTools.ts, extended here to the auto-reply dispatcher). Callers
+ * must call getStore() first (directly or transitively) so storeDb is
+ * populated; if it is not, this returns null and the caller's own
+ * fail-closed handling (no store => do nothing) applies identically.
+ */
+export function getCollabDbForAutoReply(): BootstrapDb | null {
+  // Ensure the store (and therefore storeDb) has been resolved at least
+  // once -- getStore() is idempotent and side-effect-free on repeat calls.
+  getStore();
+  return storeDb;
 }
 
 export type CollabSurfaceError = {
@@ -403,6 +471,16 @@ export async function handlePostChannelMessage(
         cursor: result.cursor,
         occurredAt: result.occurredAt,
       },
+    });
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S3: fire the auto-reply trigger
+    // AFTER the message has committed (result resolved successfully above)
+    // and AFTER the human-facing ack has been published -- never before.
+    // Fire-and-forget deliberately: a human posting a message must not wait
+    // on however many agent turns that post triggers. Failures inside the
+    // trigger must never surface as a failure of the POST itself (the
+    // message is already durably committed regardless).
+    triggerAutoReply({
+      channelId, channelSeq: Number(result.cursor), eventId: result.eventId, actorPrincipalId: principalId,
     });
     return null;
   } catch (err: any) {

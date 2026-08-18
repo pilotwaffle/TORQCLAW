@@ -214,6 +214,14 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     // Explicit named deny so the decision is legible and pinned by a test
     // (T-3), matching every other arm in this switch.
     case 'POST_CHANNEL_MESSAGE':
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S3 (R-3a): SET_AUTOREPLY_STOP is
+    // operator-seat-only, explicit deny for a channel seat, matching every
+    // other collab-surface command above. STOP is a control-plane action,
+    // not a conversational one -- there is no product reason for a
+    // channel-transport seat (channel-http) to hold it, and an explicit
+    // named deny keeps the decision legible and test-pinned rather than
+    // falling through to the default: arm below.
+    case 'SET_AUTOREPLY_STOP':
       return DENY_NOT_PERMITTED;
     default:
       // Default deny for any future/unmapped action on a non-operator role.

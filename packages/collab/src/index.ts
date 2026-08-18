@@ -1,5 +1,5 @@
 // Core modules
-export { runCollaborationMigration } from './migration.js';
+export { runCollaborationMigration, runAgentAutoreplyMigration, AGENT_AUTOREPLY_MIGRATION_ID } from './migration.js';
 export { DeterministicClock, DeterministicUuids } from './harness.js';
 
 // Validators
@@ -277,3 +277,20 @@ export {
   type RevokeSurfaceResult,
   type SurfaceAuditKind,
 } from './surfaceStore.js';
+
+// PRD-TCLAW-AGENT-PARTICIPATION-007 S3 — auto-reply trigger resolver
+// (INV-T1), turn watermark, and the STOP control.
+export {
+  resolveEligibleAgents,
+  claimAgentTurn,
+  attachDispatchRequestId,
+  resolveAgentTurn,
+  findStrandedAgentTurns,
+  reclaimStrandedAgentTurn,
+  isAutoreplyStopped,
+  setAutoreplyStop,
+  clearAutoreplyStop,
+  type AutoreplyDb,
+  type AgentTurnState,
+  type StrandedTurn,
+} from './autoReply.js';

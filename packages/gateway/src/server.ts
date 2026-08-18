@@ -40,7 +40,10 @@ import { sweepExpiredApprovals, sweepExpiredGrants } from './approvalWriter.js';
 import { rebuildDeliveryProjection } from './approvalDelivery.js';
 import { revokeInertGrants, admitToolCall } from './grantAdmission.js';
 import { decideApprovalC2 } from './c2Broker.js';
-import { collabSurfaceCommandsEnabled, agentParticipationEnabled, isAgentSurfaceCaller, handleListChannels, handleGetChannelTimeline, handlePostChannelMessage } from './collabSurface.js';
+import { collabSurfaceCommandsEnabled, agentParticipationEnabled, isAgentSurfaceCaller, handleListChannels, handleGetChannelTimeline, handlePostChannelMessage, setAutoReplyTrigger } from './collabSurface.js';
+import { onChannelMessageCommitted, recoverStrandedAgentTurns } from './autoReplyDispatcher.js';
+import { getCollabDbForAutoReply } from './collabSurface.js';
+import { handleSetAutoreplyStop } from './autoReplyStopHandler.js';
 
 /**
  * Re-minted requests built inside the C2 decision transaction, handed to
@@ -766,6 +769,30 @@ app.get('/ws', { websocket: true }, (socket) => {
         if (postErr) sendErr(postErr.code, postErr.detail);
         break;
       }
+      case 'SET_AUTOREPLY_STOP': {
+        // PRD-TCLAW-AGENT-PARTICIPATION-007 S3: no absent-deny narrowing
+        // flag gate here, deliberately -- unlike LIST_CHANNELS/
+        // GET_CHANNEL_TIMELINE/POST_CHANNEL_MESSAGE (which surface
+        // conversational data behind collabSurfaceCommandsEnabled()), STOP
+        // is a pure control-plane halt with no data to leak. It is reached
+        // only via authz's operator-seat-only gate above (authz.ts denies
+        // it for role 'channel'/'node' unconditionally), so gating it a
+        // second time on a data-surface flag would only make STOP
+        // unavailable exactly when an operator might need it (e.g. to
+        // confirm auto-reply is off before flipping the flag back on).
+        // Read-vs-write of the underlying table is itself still gated: with
+        // no collab.db resolved (getCollabDbForAutoReply() returns null
+        // when getStore() has never succeeded -- e.g. no pepper), the
+        // handler returns COLLAB_UNAVAILABLE, never a throw.
+        const stopErr = await handleSetAutoreplyStop(
+          sid,
+          connectionAuth?.principalId ?? null,
+          getCollabDbForAutoReply(),
+          { stop: cmd.data.stop, scope: cmd.data.scope, channelId: cmd.data.channelId },
+        );
+        if (stopErr) sendErr(stopErr.code, stopErr.detail);
+        break;
+      }
     }
   });
 
@@ -843,6 +870,33 @@ try {
   // consumer already fails closed without its evidence, so a failed sweep
   // denies rather than opens.
   console.error('[torqclaw] C2 grant/approval sweep failed (continuing fail-closed):', error);
+}
+
+// PRD-TCLAW-AGENT-PARTICIPATION-007 S3 (G1R B-3b): wire the trigger BEFORE
+// running the recovery sweep below, so a stranded turn the sweep
+// re-dispatches has somewhere to go. Injected (never a direct import from
+// collabSurface.ts) to avoid a circular import -- see collabSurface.ts's
+// setAutoReplyTrigger doc comment. Unconditional wiring is safe: with
+// either flag off, onChannelMessageCommitted's own first line returns
+// immediately (absent-deny), matching every other flag-gated seam in this
+// file.
+setAutoReplyTrigger(onChannelMessageCommitted);
+
+// Boot-time recovery for the auto-reply watermark (G1R B-3b's required
+// recovery, same discipline as revokeInertGrants above): find every
+// collab_agent_turns row left 'dispatched' by a crash between claim and
+// resolution, and RE-DISPATCH it rather than leaving it silently
+// indistinguishable from legitimate A3-f silence. Runs unconditionally,
+// before the listener opens, for the identical reason the C2 sweep above
+// does. Safe with the flag off: with no auto-reply ever having run, there
+// are no rows to find.
+try {
+  const recovered = await recoverStrandedAgentTurns();
+  if (recovered > 0) {
+    console.log(`[torqclaw] agent auto-reply recovery: ${recovered} stranded turn(s) re-dispatched`);
+  }
+} catch (error) {
+  console.error('[torqclaw] agent auto-reply recovery sweep failed (continuing):', error);
 }
 
 // Delivery-projection rebuild stays flag-gated: it is UI-delivery routing
