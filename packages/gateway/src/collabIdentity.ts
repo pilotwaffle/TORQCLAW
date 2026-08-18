@@ -45,6 +45,7 @@
  */
 
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import {
   verifyCredential,
@@ -53,6 +54,7 @@ import {
   runCollaborationMigration,
   runSurfaceIdentityMigration,
   runSurfaceAuditMigration,
+  writeSurfaceAudit,
   type SecretStore,
   type BootstrapDb,
 } from '@torqclaw/collab';
@@ -64,6 +66,7 @@ import {
   bindingFor,
   type ConnectionAuthContext,
 } from './surfaceGate.js';
+import { activateSurfaceProjection } from './surfaceSecurity.js';
 
 const PRINCIPAL_PEPPER_SECRET_NAME = 'TORQCLAW/principal-pepper';
 
@@ -270,6 +273,122 @@ function verifyLegacySurfaceAuthority(
 }
 
 /**
+ * S1 (PRD-TCLAW-AGENT-PARTICIPATION-007 follow-on) — self-heal the missing
+ * C1 `surfaces` row for an OPERATOR-kind principal authenticated through
+ * the C0.1 legacy path.
+ *
+ * ROOT CAUSE THIS FIXES: no shipped path (`bootstrapOperator`,
+ * packages/collab/src/bootstrap.ts) has ever called `createSurface`, so an
+ * operator's `principal_credentials` row has never had a matching C1
+ * `surfaces` row. `resolveConnectIdentity` therefore always missed the C1
+ * branch for the operator and returned `auth: null`, which left
+ * `connectionAuth` permanently null for the ONLY credential any shipped
+ * path mints for an operator -- POST_CHANNEL_MESSAGE read
+ * `connectionAuth?.principalId` and always saw null, and (separately,
+ * reported not fixed here) C2 approval registration's `taskOrigin`/
+ * `liveProfileDelegation` evidence chain (c2Broker.ts:69-75) was
+ * unreachable for the operator for the same reason.
+ *
+ * WHY THIS PROJECTS THE EXISTING CREDENTIAL RATHER THAN MINTING A NEW ONE:
+ * `issueSurfaceCredential` (surfaceStore.ts) always mints a brand-new
+ * `tq1_...` token -- there is no API to bind an already-distributed token
+ * to a surface. Minting a second, different credential the operator does
+ * not hold and has no way to receive would fix nothing (the operator would
+ * keep presenting their ORIGINAL token, which would still miss). Instead
+ * this inserts a `surfaces` row and a `surface_credentials` row keyed by
+ * the operator's EXISTING `principal_credentials.id` and its EXISTING
+ * `secret_hmac` -- not a re-derivation, the identical stored bytes. Because
+ * `verifyCredential` (credentials.ts) recomputes the presented token's HMAC
+ * from the token bytes themselves and compares against whatever `secretHmac`
+ * the lookup returns, the operator's one physical token now verifies
+ * successfully against EITHER table under the identical pepper -- this is
+ * not principal synthesis (§2a): the subject is the same already-verified
+ * principal, projected into the table C1 checks, not a new or substituted
+ * identity.
+ *
+ * NEVER RUNS FOR AN AGENT. `createAgent`-minted credentials are S1's
+ * concern (agentCollabPrincipalId in server.ts) and are deliberately left
+ * on the C0.1 legacy path unchanged -- widening surface auto-provisioning
+ * to agents was never scoped or reviewed here.
+ *
+ * Idempotent and fail-open-to-legacy: a duplicate surface/credential (this
+ * function already ran for this principal on an earlier connect) is caught
+ * and treated as already-provisioned, not an error. ANY failure here
+ * (missing schema, closed handle, constraint violation from concurrent
+ * connects) is swallowed and the caller falls back to the untouched C0.1
+ * legacy path -- this function may only ever WIDEN what the operator can
+ * reach relative to today's shipped (broken) behaviour, never narrow or
+ * crash the connect seam.
+ */
+function ensureOperatorSurfaceProvisioned(
+  collabDb: Database.Database,
+  legacyCredentialId: string,
+  operatorPrincipalId: string,
+): void {
+  try {
+    const already = collabDb
+      .prepare('SELECT 1 FROM surfaces WHERE principal_id = ? AND surface_role = ?')
+      .get(operatorPrincipalId, 'operator');
+    if (already) return; // already provisioned by an earlier connect
+
+    const credRow = collabDb
+      .prepare('SELECT secret_hmac AS secretHmac FROM principal_credentials WHERE id = ? AND principal_id = ?')
+      .get(legacyCredentialId, operatorPrincipalId) as { secretHmac: Buffer } | undefined;
+    if (!credRow) return; // nothing to project
+
+    const surfaceId = randomUUID();
+    const now = new Date();
+
+    const tx = collabDb.transaction(() => {
+      collabDb
+        .prepare('SELECT 1 FROM surfaces WHERE surface_id = ?')
+        .get(surfaceId); // uniqueness is enforced by the INSERTs below; this read is a no-op guard
+      collabDb
+        .prepare(
+          `INSERT INTO surfaces
+             (surface_id, principal_id, surface_kind, surface_role, display_name,
+              capability_json, state, created_at)
+           VALUES (?,?,?,?,?,?,'active',?)`,
+        )
+        .run(surfaceId, operatorPrincipalId, 'desktop', 'operator', 'Legacy operator surface', '[]', now.toISOString());
+      collabDb
+        .prepare(
+          `INSERT INTO surface_credentials
+             (credential_id, surface_id, secret_hmac, state, issued_at, expires_at)
+           VALUES (?,?,?,'active',?,NULL)`,
+        )
+        .run(legacyCredentialId, surfaceId, credRow.secretHmac, now.toISOString());
+      writeSurfaceAudit(
+        collabDb,
+        'surface_created',
+        { principalId: operatorPrincipalId, surfaceId, credentialId: legacyCredentialId },
+        { surfaceKind: 'desktop', surfaceRole: 'operator', selfHealed: true, reason: 'legacy-operator-c1-backfill' },
+        now,
+      );
+    });
+    tx();
+
+    // Grant-last (§1.4): activate the state.db enforcement projection only
+    // after the collab-side identity row committed. authEpoch/
+    // capabilityRevision start at 1 -- this is a fresh surface, not a
+    // re-activation, so there is no prior epoch to respect.
+    activateSurfaceProjection(stateDb, {
+      surfaceId,
+      principalId: operatorPrincipalId,
+      surfaceKind: 'desktop',
+      surfaceRole: 'operator',
+      allowedCapabilityClasses: ['read', 'write', 'exec', 'send'],
+      authEpoch: 1,
+      capabilityRevision: 1,
+      sourceIdentityRevision: surfaceId,
+    });
+  } catch {
+    // Fail closed to the pre-existing legacy path -- never let a
+    // provisioning race or schema hiccup escape the connect seam.
+  }
+}
+
+/**
  * C1-5 — resolve the connect-path identity, preferring a REAL C1 surface.
  *
  * This is the seam server.ts calls. It runs step 2 of the §2.6 ordered
@@ -326,6 +445,38 @@ export function resolveConnectIdentity(
     // C0.1 legacy fallback (see above).
     const legacy = verifyLegacySurfaceAuthority(credential);
     if (legacy !== null) {
+      // Self-heal (see ensureOperatorSurfaceProvisioned doc comment): the
+      // ONLY shipped path that mints an operator credential
+      // (bootstrapOperator) never provisions a matching C1 `surfaces` row,
+      // so every operator permanently missed the C1 branch above and
+      // connectionAuth stayed null for the operator's one real credential.
+      // Runs ONLY for principalKind === 'operator' -- agent credentials are
+      // untouched and keep taking the unchanged legacy branch below.
+      if (legacy.principalKind === 'operator') {
+        ensureOperatorSurfaceProvisioned(collabDb, legacy.binding.surfaceId, legacy.binding.principalId);
+        // Re-run the C1 gate ONCE on this same connection now that
+        // provisioning (if it happened) has committed. A provisioning
+        // failure (schema hiccup, race) leaves this a no-op and ctx2 stays
+        // null, which falls through to the untouched legacy return below --
+        // fail-closed, never worse than pre-fix behaviour.
+        const ctx2 = validatePresentingSurface(
+          { collabDb, stateDb, principalPepper: pepper },
+          credential,
+        );
+        if (ctx2 !== null) {
+          const authority2 = principalAuthorityForPrincipal(collabDb as unknown as BootstrapDb, ctx2.principalId);
+          if (authority2 && authority2.principalStatus === 'active') {
+            const operator2 = authority2.principalKind === 'operator' && ctx2.surfaceRole === 'operator';
+            const role2 = operator2 ? 'operator' : 'node';
+            const authClass2 = operator2
+              ? 'operator_surface'
+              : ctx2.surfaceRole === 'automation'
+                ? 'automation_surface'
+                : 'agent_surface';
+            return { caller: { binding: bindingFor(ctx2), role: role2, authClass: authClass2 }, auth: ctx2 };
+          }
+        }
+      }
       const role = legacy.principalKind === 'operator' ? 'operator' : 'node';
       const authClass = legacy.principalKind === 'operator' ? 'operator_surface' : 'agent_surface';
       return { caller: { binding: legacy.binding, role, authClass }, auth: null };
