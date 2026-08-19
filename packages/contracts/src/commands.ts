@@ -122,6 +122,150 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     action: z.literal('GET_SAFE_EXPORT'),
     taskId: z.uuid(),
   }),
+  z.object({
+    // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S1: read-only channel listing for the
+    // connection's own resolved collab principal. Deliberately NO
+    // principalId/surfaceId/authorPrincipalId param — identity is always
+    // server-derived from the connection's authenticated surface credential
+    // (§2a), never trusted from the wire. A connection with no resolved
+    // principal is refused COLLAB_IDENTITY_REQUIRED; it never falls back to
+    // an operator-wide or unscoped listing.
+    action: z.literal('LIST_CHANNELS'),
+    limit: z.number().int().min(1).max(100).default(20),
+  }),
+  z.object({
+    // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S1: read-only, cursor-paged channel
+    // timeline read, scoped to the connection's own resolved collab
+    // principal (same identity rule as LIST_CHANNELS above). channelId
+    // confers no entitlement by itself -- the substrate re-checks
+    // membership server-side on every call (assertChannelVisible), and a
+    // hidden or nonexistent channel returns the SAME byte-identical
+    // COLLAB_NOT_FOUND payload either way.
+    // G2A D-1 fix: the grammar below mirrors the substrate's own
+    // parseCursor (packages/collab/src/store.ts) exactly -- an unsigned
+    // base-10 integer with no leading zeroes -- so a malformed cursor is
+    // refused at the wire boundary (SCHEMA_VIOLATION) instead of reaching
+    // the handler and throwing past it.
+    action: z.literal('GET_CHANNEL_TIMELINE'),
+    channelId: z.string().min(1),
+    cursor: z.string().regex(/^(0|[1-9][0-9]*)$/).default('0'),
+    limit: z.number().int().min(1).max(100).default(20),
+  }),
+  z.object({
+    // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S3: human posting. Deliberately NO
+    // author/principalId/surfaceId field -- the server ALWAYS stamps the
+    // author from the connection's resolved collab principal (§2a), so
+    // spoofing the author in the command shape is structurally impossible
+    // (A3). Field name `text`, not `body`, matching the substrate's actual
+    // contract exactly (postChannelMessage(caller, { channelId, text },
+    // idempotencyKey) -- store.ts:1422-1425).
+    //
+    // A6(a) validator citations (file:line, evidence for the T-9 matrix):
+    //  - text: this grammar (1-16384 chars) is a coarse pre-filter only. The
+    //    substrate's REAL bound is TWO independent BYTE bounds on the
+    //    NFC-normalized form -- packages/collab/src/text.ts:122
+    //    (countUtf8Bytes(nfcText) in [1,16384]) AND text.ts:137
+    //    (countJsonEncodedBytes(nfcText) <= 16384) -- neither of which is a
+    //    JS-string-length check and neither of which is regex-expressible
+    //    (residue: a 16,384-newline string passes a naive char-length check
+    //    but JSON-encodes to 32,768 bytes and is REJECTED by text.ts:137).
+    //    normalizeMessageText (text.ts:110) is the consuming validator; its
+    //    caller is store.ts:1428. This contract's max(16384) bound on
+    //    JS .length is intentionally COARSER than the byte bound (a
+    //    multi-byte string can exceed the byte cap at far fewer than 16384
+    //    chars) so it can never falsely admit something the byte bound
+    //    would reject while still rejecting some inputs early; the
+    //    authoritative rejection for the byte/JSON-byte bounds is, and must
+    //    stay, server-side in text.ts. min(1) is likewise a coarse
+    //    pre-filter -- text.ts:123 is the real floor, evaluated on the
+    //    POST-NFC-normalization form (a string that normalizes to zero
+    //    length, e.g. some combining-mark-only inputs, could in principle
+    //    pass min(1) here and still be rejected by text.ts:123; that
+    //    rejection is a structured INVALID_REQUEST from store.ts:1430, not
+    //    a throw that escapes the handler -- see collabSurface.ts).
+    //  - channelId: no format is asserted by the substrate itself (any
+    //    non-empty string id) -- the REAL narrowing validator is
+    //    assertChannelVisible (store.ts:2032), which does a membership JOIN
+    //    and throws CollabError('COLLAB_NOT_FOUND') for absent, hidden, OR
+    //    malformed-but-syntactically-fine channelId alike (byte-identical
+    //    per T-2). min(1) here matches GET_CHANNEL_TIMELINE's existing
+    //    channelId grammar exactly (no new pattern invented for this field).
+    //  - idempotencyKey: NOTHING in the substrate validates its shape.
+    //    packages/collab/src/migration.ts:137 declares the backing column
+    //    `idempotency_key TEXT NOT NULL` with no length/format CHECK, and
+    //    runKeyedCommand (store.ts:2182-2253) uses it as an opaque dedup key
+    //    in a (principal_id, command, idempotency_key) lookup -- ANY
+    //    non-empty string is accepted and would silently "work" as a
+    //    dedup key. The PRD (§4 S3, A3/B-3) specifies this MUST be a
+    //    client-supplied canonical UUID specifically so a retry after a
+    //    dropped socket reuses one deterministic value instead of a
+    //    server/random one. Since the substrate enforces no shape at all,
+    //    THIS CONTRACT is the only enforcement point -- z.uuid() below is
+    //    added deliberately to close that gap, not because a downstream
+    //    validator required it.
+    action: z.literal('POST_CHANNEL_MESSAGE'),
+    channelId: z.string().min(1),
+    text: z.string().min(1).max(16384),
+    idempotencyKey: z.uuid(),
+  }),
+  z.object({
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S3 (R-3a): the STOP control. A
+    // visible, operator-reachable halt for agent auto-reply. `scope`
+    // determines whether this stops one channel or every channel
+    // (global); `channelId` is required for scope='channel' and forbidden
+    // for scope='global' -- that combination cannot be expressed inside a
+    // discriminatedUnion member (zod v4 requires each member to be a bare
+    // object so the literal discriminant stays directly inspectable, which
+    // rules out a `.refine()`-wrapped member), so it is validated in the
+    // gateway handler (autoReplyStopHandler.ts) instead, returning a
+    // structured COLLAB_INVALID_REQUEST rather than a schema rejection.
+    // `stop: true` sets the halt; `stop: false` clears it. Operator-seat-
+    // only (see authz.ts) -- an agent has no path to this command: it is
+    // not a collab tool, so no message content or model output can ever
+    // reach it (INV-T1 Corollary C's sibling for STOP).
+    action: z.literal('SET_AUTOREPLY_STOP'),
+    stop: z.boolean(),
+    scope: z.enum(['global', 'channel']),
+    channelId: z.string().min(1).optional(),
+  }),
+  z.object({
+    // CRON slice (G1R Gate-1 §2A): create a schedule that wakes an agent,
+    // already a member of channelId, on a fixed interval. Deliberately NO
+    // authority field of any kind -- the creating connection's OWN resolved
+    // operator principal is what the handler stamps as
+    // created_by_principal_id (audit only, never consulted for
+    // authorization; every wake independently re-validates membership at
+    // fire time -- packages/collab/src/cron.ts's assertScheduleStillAuthorized).
+    // A6(a): intervalSeconds' floor of 60 matches the migration's own
+    // CHECK(interval_seconds >= 60) (packages/collab/src/migration.ts) --
+    // this contract enforces the SAME floor the substrate would otherwise
+    // reject with a raw SQLite CHECK constraint violation (an unhandled
+    // throw), so the client gets a structured 400-shape refusal instead.
+    // promptHint is NEVER a command or an authority grant -- cronDispatcher.ts
+    // renders it into the model's prompt as inert text, exactly like any
+    // other channel content; it cannot widen what tools render or what
+    // profile resolves (see cronDispatcher.ts's hintLine comment).
+    action: z.literal('CREATE_SCHEDULE'),
+    channelId: z.string().min(1),
+    agentPrincipalId: z.string().min(1),
+    intervalSeconds: z.number().int().min(60).max(86400 * 7),
+    promptHint: z.string().max(2000).optional(),
+    idempotencyKey: z.uuid(),
+  }),
+  z.object({
+    // Operator-visible on/off switch for one schedule (distinct from
+    // SET_AUTOREPLY_STOP, which is the channel/global auto-reply kill
+    // switch cron ALSO obeys -- see cron.ts's module doc). 'stopped' also
+    // survives restart (same collab.db persistence discipline as every
+    // other collab-surface write).
+    action: z.literal('SET_SCHEDULE_STATE'),
+    scheduleId: z.string().min(1),
+    state: z.enum(['active', 'stopped']),
+  }),
+  z.object({
+    action: z.literal('LIST_SCHEDULES'),
+    channelId: z.string().min(1),
+  }),
 ]);
 export type ClientCommand = z.infer<typeof ClientCommandSchema>;
 
@@ -137,13 +281,18 @@ export type ClientCommand = z.infer<typeof ClientCommandSchema>;
  *  principalId/surfaceId — identity is always server-derived from the
  *  verified credential, never trusted from the wire (H-1). */
 export const ConnectFrameSchema = z.object({
-  role: z.enum(['operator', 'channel', 'node']),
-  token: z.string(),
+  // Compatibility assertions only. The gateway derives authority from the
+  // authenticated credential and rejects either field when it disagrees.
+  role: z.enum(['operator', 'channel', 'node']).optional(),
+  expectedRole: z.enum(['operator', 'channel', 'node']).optional(),
+  // Deprecated legacy transport. Production rejects this path regardless of
+  // value; it remains optional for the bounded development migration window.
+  token: z.string().optional(),
   sessionId: z.uuid().optional(),
   clientInfo: z.object({ name: z.string(), version: z.string() }),
-  auth: z.object({
-    kind: z.literal('surface'),
-    credential: z.string(),
-  }).optional(),
+  auth: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('surface'), credential: z.string() }),
+    z.object({ kind: z.literal('channel_service'), credential: z.string() }),
+  ]).optional(),
 });
 export type ConnectFrame = z.infer<typeof ConnectFrameSchema>;

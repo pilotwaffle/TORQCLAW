@@ -3,10 +3,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GatewayEvent, ClientCommand, RouterDiagnostics } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
-import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, isOperatorOnlyEvent, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, type SafeExportFrameLike } from './friendly';
+import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, isOperatorOnlyEvent, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, groupStreamIntoTasks, derivePreflightEstimate, approvalTierFromGate, attachmentKind, type SafeExportFrameLike, type TaskGroup, type PreflightEstimate, type AttachmentKind } from './friendly';
+import { selectTurnStartMs, selectLastSyncedMs, isStale, selectCostSummaryMeta, selectLivePhase, isPhaseStuck, STALE_AFTER_MS } from './presence';
+import { LiveDuration, formatElapsed } from './LiveDuration';
+import { LivenessChip } from './LivenessChip';
+import { GlyphSpinner } from './GlyphSpinner';
+import PresenceCard from './PresenceCard';
 import ReceiptsPanel from './ReceiptsPanel';
 import CostPanel from './CostPanel';
 import ApprovalHistoryPanel from './ApprovalHistoryPanel';
+import MemoryPanel from './MemoryPanel';
+import ChannelsPanel from './ChannelsPanel';
 
 // TCLAW-5B-2 [G1R RC-5 proof, commit 2]: the terminal "copy safe export" chip
 // requires that an ERROR event's requestId equals the taskId GET_SAFE_EXPORT
@@ -33,6 +40,22 @@ import ApprovalHistoryPanel from './ApprovalHistoryPanel';
 
 const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL ?? 'ws://localhost:18790/ws';
 const GATEWAY_TOKEN = process.env.NEXT_PUBLIC_GATEWAY_TOKEN ?? '';
+
+// Redesign 7/7: composer attachments are feature-flagged. KERNEL GAP: the
+// wire carries attachmentIds on SUBMIT_PROMPT, but the gateway exposes NO
+// upload command and NO storage (gatewayClient hardcodes attachmentIds: []),
+// so with the flag ON the composer collects files, warns on the cloud route,
+// and GATES submission — it never sends fake ids and never silently submits
+// without the files the operator attached. Flag OFF (default): no paperclip,
+// zero behavior change.
+const ATTACHMENTS_ENABLED = process.env.NEXT_PUBLIC_ATTACHMENTS === '1';
+
+// PRD-TCLAW-COLLAB-PRESENCE-UI-005 S2: Channels view (read-only). Module-
+// level const, strict '1' check — same discipline as ATTACHMENTS_ENABLED.
+// Flag OFF => zero behavior change: no nav item, no view, no collab command
+// ever dispatched (checked again at the render-branch call site below, not
+// just here).
+const COLLAB_UI_ENABLED = process.env.NEXT_PUBLIC_COLLAB_UI === '1';
 
 type ExecutionMode = 'AUTO' | 'LOCAL_ONLY' | 'CLOUD_OK';
 // '' = no budget (falls to env default). 'free' = local-only, $0.
@@ -61,6 +84,15 @@ function loadControls(): Controls {
   } catch {
     return DEFAULT_CONTROLS;
   }
+}
+
+/** Redesign 7/7: a composer attachment awaiting a kernel upload pipeline.
+ *  `id` is a LOCAL identity only — it is never sent as an attachmentId. */
+interface PendingAttachment {
+  id: string;
+  file: File;
+  kind: AttachmentKind;
+  previewUrl: string | null;
 }
 
 /** TCLAW-2D-2: the judgment fields shared verbatim by SUBMIT_PROMPT and
@@ -95,8 +127,29 @@ function buildSubmit(prompt: string, c: Controls): Extract<ClientCommand, { acti
   return { action: 'SUBMIT_PROMPT', ...buildJudgment(prompt, c), attachmentIds: [] };
 }
 
+/** §6 attachment chip size line. */
+function formatFileSize(b: number): string {
+  if (b < 1024) return `${b} B`;
+  if (b < 1048576) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / 1048576).toFixed(1)} MB`;
+}
+
+/** §6 composer chip chrome (cchip): 9.5px 600 uppercase over panel. */
+const CCHIP =
+  'inline-flex items-center gap-1.5 rounded border border-edge bg-panel px-2 py-[3px] text-[9.5px] font-semibold uppercase tracking-[0.12em] text-muted transition-colors';
+
+/** PRD-UI-1 §3 sidebar nav-item chrome: active = torque text over 14% torque
+ *  fill with a 25% torque border; inactive = muted with panel-2 hover. */
+function navItemClass(active: boolean): string {
+  return `mb-0.5 flex w-full items-center gap-2.5 rounded-md border px-2.5 py-2 text-left text-[12px] font-medium transition-colors ${
+    active
+      ? 'border-torque/25 bg-torque/[.14] text-torque'
+      : 'border-transparent text-muted hover:bg-panel-2 hover:text-ink'
+  }`;
+}
+
 export default function TorqTerminal() {
-  const { events, isConnected, sendCommand } = useGatewayStream(GATEWAY_URL, GATEWAY_TOKEN);
+  const { events, isConnected, sendCommand, reconnect } = useGatewayStream(GATEWAY_URL, GATEWAY_TOKEN);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [input, setInput] = useState('');
   const [debouncedInput, setDebouncedInput] = useState('');
@@ -111,10 +164,48 @@ export default function TorqTerminal() {
   // same pattern. No mutual-exclusion with receipts/cost (G1R SC-3): all
   // three may be open simultaneously, no coordination logic between them.
   const [approvalsOpen, setApprovalsOpen] = useState(false);
+  // PRD-UI-1 §1/§3: sidebar view switching.
+  const [view, setView] = useState<'tasks' | 'approvals' | 'memory' | 'channels'>('tasks');
   // Stop-button UX: 'requested' once a cancel is sent (button shows "stopping…"),
   // 'failed' if the send was dropped so the user knows to retry. Cleared when the
   // next task starts.
   const [stopState, setStopState] = useState<'idle' | 'requested' | 'failed'>('idle');
+  // Redesign 7/7: composer attachments (flag-gated; see ATTACHMENTS_ENABLED).
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [attachmentGateNote, setAttachmentGateNote] = useState(false);
+  // §6: drag-over visual state for the composer box (flag-gated drop target).
+  const [dragging, setDragging] = useState(false);
+  // §6: REAL ↑/↓ prompt history over prompts submitted this mount — the kbd
+  // hint only advertises a shortcut that actually works.
+  const [promptHistory, setPromptHistory] = useState<string[]>([]);
+  const historyIdx = useRef<number | null>(null);
+  const onComposerKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'ArrowUp') {
+      if (promptHistory.length === 0) return;
+      e.preventDefault();
+      const next = historyIdx.current === null ? promptHistory.length - 1 : Math.max(0, historyIdx.current - 1);
+      historyIdx.current = next;
+      setInput(promptHistory[next]!);
+    } else if (e.key === 'ArrowDown') {
+      if (historyIdx.current === null) return;
+      e.preventDefault();
+      const next = historyIdx.current + 1;
+      if (next >= promptHistory.length) {
+        historyIdx.current = null;
+        setInput('');
+      } else {
+        historyIdx.current = next;
+        setInput(promptHistory[next]!);
+      }
+    }
+  };
+  // §6: route chip cycles the SAME executionMode control the selects drove.
+  const cycleMode = () => {
+    setControls((c) => ({
+      ...c,
+      mode: c.mode === 'AUTO' ? 'LOCAL_ONLY' : c.mode === 'LOCAL_ONLY' ? 'CLOUD_OK' : 'AUTO',
+    }));
+  };
 
   // TCLAW-2D-2: route preview. previewNonce = latest-SENT nonce (the ONLY
   // staleness key). previewState is the RENDER SOURCE (useState snapshot,
@@ -207,6 +298,43 @@ export default function TorqTerminal() {
     return !!last && !['RESULT', 'ERROR', 'CONNECTED', 'PENDING_APPROVAL'].includes(last.type);
   }, [events]);
 
+  // Live-turn liveness anchor: real task start read from event timestamps, so
+  // a mid-task remount never resets the elapsed clock (see LiveDuration). The
+  // anchor is a property of the task, not of this component's mount.
+  const turnStartMs = useMemo(
+    () => selectTurnStartMs(events, activeRequestId),
+    [events, activeRequestId],
+  );
+
+  // Global liveness chip (redesign 2/7): phase text from the freshest kernel
+  // event of the active task. Gated on activeRequestId (NOT busy) — a task
+  // paused for approval is still in flight and the chip must say so, exactly
+  // like the route chip's gating invariant below.
+  const livePhase = useMemo(
+    () => selectLivePhase(events, activeRequestId),
+    [events, activeRequestId],
+  );
+
+  // Staleness: the newest event's timestamp vs now. The console is push-based,
+  // so there is nothing to refetch — this is derived state from data already
+  // in memory. `stale` is only surfaced as a warning while a task should be
+  // producing events (`busy`) or the socket is down; an idle healthy console
+  // is not "out of date".
+  const lastSyncedMs = useMemo(() => selectLastSyncedMs(events), [events]);
+  const nowMs = useNow(5000);
+  const stale = isStale(lastSyncedMs, nowMs, STALE_AFTER_MS);
+  // Chip stuck-state: the active task's own stream quiet for 30s+. Never fires
+  // while the task waits on the operator (see isPhaseStuck).
+  const phaseStuck = isPhaseStuck(livePhase, nowMs);
+
+  // Presence meta for the current task: budget remaining from the live
+  // costSummary frame (display-only — never fetches, never writes a cap).
+  const budgetRemaining = useMemo(() => {
+    const meta = selectCostSummaryMeta(events);
+    const r = meta ? meta.sessionRemaining : null;
+    return typeof r === 'number' ? (r as number) : null;
+  }, [events]);
+
   // P2.5: friendly tool names actually executed, per request — reconstructed
   // from TOOL_CALL events so the receipt's toolsUsed is from real activity.
   const toolsByRequest = useMemo(() => {
@@ -219,6 +347,38 @@ export default function TorqTerminal() {
     }
     return map;
   }, [events]);
+
+  // Redesign 3/7: the raw log stream grouped into per-task cards. Pure
+  // selector (friendly.ts) — events with a requestId join their task's card;
+  // session-level frames stay loose and render exactly as before.
+  const streamItems = useMemo(() => groupStreamIntoTasks(events), [events]);
+
+  // PRD-UI-1 §3: live Approvals badge — counts exactly what the inline cards
+  // still consider decidable (PENDING_APPROVAL whose approval/queue id has no
+  // local decision). Same predicate as the card render, so badge and cards
+  // can never disagree.
+  const pendingApprovalCount = useMemo(() => {
+    let n = 0;
+    for (const ev of events) {
+      if (ev.type !== 'PENDING_APPROVAL') continue;
+      const meta = (ev.metadata ?? {}) as Record<string, any>;
+      const cardId = meta.approvalId ?? meta.approval_id ?? meta.queueId ?? meta.queue_id;
+      if (cardId && !decided[cardId]) n++;
+    }
+    return n;
+  }, [events, decided]);
+
+  // §3: the one session the console truly has — title from the first prompt,
+  // meta from the real task-card count. A browsable past-session list needs a
+  // backend session listing that doesn't exist on the wire; omitted, not faked.
+  const sessionInfo = useMemo(() => {
+    let title: string | null = null;
+    for (const ev of events) {
+      if (ev.type === 'USER_PROMPT') { title = ev.message; break; }
+    }
+    const taskCount = streamItems.reduce((n, it) => n + (it.kind === 'loose' ? 0 : 1), 0);
+    return { title, taskCount };
+  }, [events, streamItems]);
 
   // Privacy SUGGESTION (suggest-only — never sets the flag, never blocks).
   // Debounced 500ms so the regex pass never runs on the keystroke hot path,
@@ -233,11 +393,54 @@ export default function TorqTerminal() {
   );
   useEffect(() => { setHintDismissed(false); }, [debouncedInput]);
 
+  // Redesign 7/7: attachment handlers. Files never leave the browser until
+  // the kernel ships an upload pipeline — addFiles collects, removeAttachment
+  // releases, submit GATES (never fake ids, never silent drop).
+  const addFiles = (list: FileList | null) => {
+    if (!ATTACHMENTS_ENABLED || !list || list.length === 0) return;
+    const canPreview = typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
+    const added: PendingAttachment[] = Array.from(list).map((file) => {
+      const kind = attachmentKind(file.name, file.type);
+      return {
+        id: crypto.randomUUID(),
+        file,
+        kind,
+        previewUrl: kind === 'image' && canPreview ? URL.createObjectURL(file) : null,
+      };
+    });
+    setAttachments((prev) => [...prev, ...added]);
+    setAttachmentGateNote(false);
+  };
+  const removeAttachment = (id: string) => {
+    setAttachments((prev) => {
+      const gone = prev.find((a) => a.id === id);
+      if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
+      return prev.filter((a) => a.id !== id);
+    });
+    setAttachmentGateNote(false);
+  };
+  // Revoke any live object URLs on unmount (ref keeps the latest list).
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
+  useEffect(() => () => {
+    for (const a of attachmentsRef.current) {
+      if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+    }
+  }, []);
+
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     const prompt = input.trim();
     if (!prompt) return;
+    if (ATTACHMENTS_ENABLED && attachments.length > 0) {
+      // KERNEL GAP: no upload command exists — never send fake attachmentIds,
+      // and never silently submit without the files the operator attached.
+      setAttachmentGateNote(true);
+      return;
+    }
     sendCommand(buildSubmit(prompt, controls));
+    setPromptHistory((h) => [...h, prompt]); // §6 ↑ history ring
+    historyIdx.current = null;
     setInput('');
     setStopState('idle'); // a fresh run clears any prior stop feedback
   };
@@ -419,6 +622,73 @@ export default function TorqTerminal() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input, controls]);
 
+  // Redesign 4/7: pre-flight estimate chip — the kernel's REAL sizing pass
+  // (PREVIEW_ROUTE: real enrichment + real router evaluation, no dispatch).
+  // Rides its OWN nonce channel, separate from the manual simulate-route
+  // panel: each reads only frames matching its own nonce, so the two surfaces
+  // never clobber each other.
+  const [estimateNonce, setEstimateNonce] = useState<string | null>(null);
+  // A changing draft invalidates the last estimate immediately — never show a
+  // number sized for text that is no longer in the box.
+  useEffect(() => { setEstimateNonce(null); }, [input]);
+  useEffect(() => {
+    const prompt = debouncedInput.trim();
+    if (!prompt) { setEstimateNonce(null); return; }
+    const nonce = crypto.randomUUID(); // fresh per settled draft
+    const sent = sendCommand({ action: 'PREVIEW_ROUTE', previewOf: nonce, ...buildJudgment(prompt, controls) });
+    if (sent) setEstimateNonce(nonce); // a dropped send never arms a lookup
+  }, [debouncedInput, controls, sendCommand]);
+  const estimateFrame = useMemo(
+    () => selectLatestRoutePreview(events, estimateNonce),
+    [events, estimateNonce],
+  );
+  const estimate = useMemo(() => derivePreflightEstimate(estimateFrame), [estimateFrame]);
+
+  // Redesign 4/7: the working card's est-cap line must read the SAME number
+  // the composer chip showed — snapshotted per request while the task is in
+  // flight (write-on-present, never cleared on absent; mirrors the route-chip
+  // snapshot discipline), never recomputed into a different figure that could
+  // exceed its own cap.
+  const [estimateByRequest, setEstimateByRequest] = useState<Record<string, PreflightEstimate>>({});
+  useEffect(() => {
+    if (activeRequestId && estimate) {
+      setEstimateByRequest((prev) => (prev[activeRequestId] ? prev : { ...prev, [activeRequestId]: estimate }));
+    }
+  }, [activeRequestId, estimate]);
+  const activeEstimate: PreflightEstimate | null = activeRequestId
+    ? (estimateByRequest[activeRequestId] ?? estimate)
+    : null;
+
+  // Redesign 4/7: session budget meter + working-card spend readout. Events
+  // are push-based, but cost totals are pull-based (GET_COST_SUMMARY) — poll
+  // every 5s WHILE A TASK IS IN FLIGHT, so the meter climbs with REAL
+  // recorded spend and the header and per-task panel read one frame source
+  // (selectCostSummaryMeta) — they can never contradict each other. Idle
+  // console, no poll: no new spend can land while idle, so an empty meter is
+  // the honest read (it also fills whenever the cost panel's own mount fetch
+  // lands a frame). Deliberately NO mount-time fetch — keeps the console's
+  // dispatch surface event-driven.
+  useEffect(() => {
+    if (!busy) return;
+    const t = setInterval(() => sendCommand({ action: 'GET_COST_SUMMARY', recentLimit: 20 }), 5000);
+    return () => clearInterval(t);
+  }, [busy, sendCommand]);
+  const costMeta = useMemo(
+    () => selectCostSummaryMeta(events) as Record<string, any> | null,
+    [events],
+  );
+  // Redesign 6/7: budget context for the spend tier's approval cards — real
+  // costSummary facts only (null when no frame has landed, never a guess).
+  const budgetLine = useMemo(() => {
+    if (!costMeta) return null;
+    const remaining = typeof costMeta.sessionRemaining === 'number' ? costMeta.sessionRemaining : null;
+    const cap = typeof costMeta.sessionCap === 'number' ? costMeta.sessionCap : null;
+    if (remaining === null) return null;
+    return cap !== null
+      ? `$${remaining.toFixed(2)} remaining of $${cap.toFixed(2)} session cap`
+      : `$${remaining.toFixed(2)} session budget remaining (no cap)`;
+  }, [costMeta]);
+
   const simulateRoute = () => {
     const prompt = input.trim();
     if (!prompt) return; // belt-and-braces with the disabled attr
@@ -434,72 +704,297 @@ export default function TorqTerminal() {
     );
   };
 
+  const sessionTotal = costMeta && typeof costMeta.sessionTotal === 'number' ? costMeta.sessionTotal : null;
+  const sessionCap = costMeta && typeof costMeta.sessionCap === 'number' ? costMeta.sessionCap : null;
+  // §6 route chip: the same effective mode the submit path computes.
+  const effectiveMode: ExecutionMode = controls.budget === 'free' ? 'LOCAL_ONLY' : controls.mode;
+  const budgetPct =
+    sessionTotal !== null && sessionCap !== null && sessionCap > 0
+      ? `${Math.min(100, (sessionTotal / sessionCap) * 100)}%`
+      : '0%';
+
   return (
-    <section className="flex h-screen flex-col bg-[#0a0a0a] p-4 font-mono text-sm text-neutral-300">
-      <header className="mb-4 flex items-center justify-between border-b border-neutral-800 pb-4">
-        <div className="flex items-center gap-3">
-          <span
-            className={`h-2 w-2 rounded-full ${isConnected ? 'bg-[#E24B4A]' : 'animate-pulse bg-neutral-600'}`}
-            aria-hidden
-          />
-          <h1 className="text-xs font-bold tracking-[0.3em] text-neutral-100">
-            TORQCLAW <span className="text-[#E24B4A]">//</span> ORCHESTRATOR
-          </h1>
+    <section className="flex h-screen flex-col bg-bg font-mono text-[13px] leading-[1.6] text-muted">
+      {/* PRD-UI-1 §2 header: 52px, --panel, bottom hairline. */}
+      <header className="flex h-[52px] shrink-0 items-center gap-3.5 border-b border-edge bg-panel px-3.5">
+        <div className="flex items-center gap-2.5">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden>
+            <path d="M12 3 L20 7.5 V16.5 L12 21 L4 16.5 V7.5 Z" stroke="#FF9E40" strokeWidth="1.4" />
+            <path d="M12 8 L12 13 M12 13 L8.5 15.5 M12 13 L15.5 15.5" stroke="#FF9E40" strokeWidth="1.6" strokeLinecap="round" />
+            <circle cx="12" cy="7" r="1.4" fill="#FF9E40" />
+          </svg>
+          <span className="text-[14px] font-bold tracking-[0.18em] text-ink">
+            TORQ<span className="text-torque">CLAW</span>
+          </span>
         </div>
-        <span className="text-[10px] uppercase tracking-widest text-neutral-500">
-          {isConnected ? 'connected' : 'reconnecting — your work is safe'}
-        </span>
+        {/* PRD §2: fresh + connected -> CONNECTED (good, pulsing dot). Stale
+            >30s OR disconnected -> the 'stale · reconnecting…' badge REPLACES
+            the element entirely. The badge stays actionable (click forces a
+            reconnect) so the dead-WS affordance survives the restyle. */}
+        {isConnected && !stale ? (
+          <span className="flex items-center gap-2 text-[10px] font-semibold tracking-[0.16em] text-good">
+            <span className="h-[7px] w-[7px] animate-pulse rounded-full bg-good shadow-[0_0_8px_var(--good)]" aria-hidden />
+            CONNECTED
+          </span>
+        ) : !isConnected ? (
+          /* §2: socket down — dot + text go torque, RECONNECTING…; stays a
+             button so the force-reconnect affordance survives. */
+          <button
+            type="button"
+            onClick={reconnect}
+            title="force reconnect"
+            className="flex items-center gap-2 text-[10px] font-semibold tracking-[0.16em] text-torque"
+          >
+            <span className="h-[7px] w-[7px] animate-pulse rounded-full bg-torque shadow-[0_0_8px_var(--torque)]" aria-hidden />
+            RECONNECTING…
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={reconnect}
+            title="force reconnect"
+            className="flex items-center gap-2 rounded border border-torque/40 bg-torque/10 px-2 py-0.5 text-[10px] font-semibold tracking-[0.16em] text-torque"
+          >
+            <span className="h-[7px] w-[7px] animate-pulse rounded-full bg-torque" aria-hidden />
+            stale · reconnecting…
+          </button>
+        )}
+        {/* Global liveness chip (redesign 2/7, polish in PRD §5): visible on
+            EVERY view while a task is in flight. Reads the SAME turnStartMs
+            anchor as the in-stream presence block. */}
+        {livePhase && activeRequestId && (
+          <LivenessChip
+            phase={livePhase.text}
+            stuck={phaseStuck}
+            waitingOnApproval={livePhase.waitingOnApproval}
+            turnStartMs={turnStartMs}
+            turnId={activeRequestId}
+            onScrollToTask={() => {
+              // §5: the chip jumps to the Task Stream from ANY view.
+              setView('tasks');
+              scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+            }}
+          />
+        )}
+        <div className="ml-auto flex items-center gap-3">
+          {/* PRD §2 session budget meter: sync dot (amber pulse when stale),
+              SESSION BUDGET micro-label, 110x4 gradient meter, $X.XX / $Y.YY,
+              refresh, synced M:SS. Climbs with REAL costSummary frames only;
+              absent frame renders '—', never a fabricated $0. */}
+          <span className="flex items-center gap-2 whitespace-nowrap text-[10px] tabular-nums">
+            <span
+              className={`h-[5px] w-[5px] rounded-full ${stale ? 'animate-pulse bg-torque' : 'bg-good'}`}
+              aria-hidden
+            />
+            <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-faint">Session budget</span>
+            <span className="h-1 w-[110px] overflow-hidden rounded-sm bg-panel-3">
+              <span
+                className="block h-full rounded-sm"
+                style={{ width: budgetPct, background: 'linear-gradient(90deg, var(--torque), #FFC38A)' }}
+              />
+            </span>
+            <span className="text-[11px] text-muted">
+              {sessionTotal !== null ? (
+                <>
+                  <b className="font-semibold text-ink">${sessionTotal.toFixed(2)}</b>
+                  {sessionCap !== null ? ` / $${sessionCap.toFixed(2)}` : ''}
+                </>
+              ) : (
+                '—'
+              )}
+            </span>
+            <button
+              type="button"
+              onClick={() => sendCommand({ action: 'GET_COST_SUMMARY', recentLimit: 20 })}
+              title="refresh from runtime"
+              className="rounded p-0.5 text-faint transition-colors hover:bg-torque/10 hover:text-torque"
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                <path d="M21 12a9 9 0 1 1-2.6-6.3M21 4v5h-5" />
+              </svg>
+            </button>
+            <span className="text-[8.5px] tracking-[0.06em] text-[#4A505A]">
+              {lastSyncedMs !== null
+                ? `synced ${formatElapsed(Math.max(0, Math.round((nowMs - lastSyncedMs) / 1000)))}`
+                : 'synced —'}
+            </span>
+          </span>
+          {/* KERNEL GAP (PRD §2): the 'hermes kernel · vX' tag is OMITTED — no
+              kernel version rides the WS wire, and reading a config file would
+              be a lie. Add when the handshake carries it. */}
+        </div>
       </header>
 
-      <div className="relative flex-1 overflow-hidden">
-      <div ref={scrollRef} className="h-full space-y-1 overflow-y-auto pr-2" aria-live="polite">
+      {/* PRD-UI-1 §1 shell row: 236px sidebar (hidden <900px) + main view. */}
+      <div className="flex min-h-0 flex-1">
+        <aside className="hidden w-[236px] shrink-0 flex-col border-r border-edge bg-panel min-[900px]:flex">
+          <nav className="px-2.5 pb-1.5 pt-3.5">
+            <p className="px-2.5 pb-2 text-[9px] font-bold uppercase tracking-[0.2em] text-faint">Console</p>
+            <button type="button" onClick={() => setView('tasks')} className={navItemClass(view === 'tasks')}>
+              <svg className="h-[15px] w-[15px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                <path d="M4 6h16M4 12h10M4 18h13" />
+              </svg>
+              Task Stream
+            </button>
+            <button type="button" onClick={() => setView('approvals')} className={navItemClass(view === 'approvals')}>
+              <svg className="h-[15px] w-[15px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                <path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z" />
+              </svg>
+              Approvals
+              {pendingApprovalCount > 0 && (
+                <span className="ml-auto rounded-full bg-torque px-[7px] text-[9px] font-bold leading-[1.6] text-[#0A0B0D]">
+                  {pendingApprovalCount}
+                </span>
+              )}
+            </button>
+            <button type="button" onClick={() => setView('memory')} className={navItemClass(view === 'memory')}>
+              <svg className="h-[15px] w-[15px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                <rect x="5" y="5" width="14" height="14" rx="2" />
+                <path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4" />
+              </svg>
+              Memory
+            </button>
+            {COLLAB_UI_ENABLED && (
+              <button type="button" onClick={() => setView('channels')} className={navItemClass(view === 'channels')}>
+                <svg className="h-[15px] w-[15px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                  <path d="M8 10h8M8 14h5M21 12c0 4.4-4 8-9 8-1.3 0-2.5-.2-3.6-.6L3 21l1.7-4.3C3.6 15.5 3 13.8 3 12c0-4.4 4-8 9-8s9 3.6 9 8Z" />
+                </svg>
+                Channels
+              </button>
+            )}
+          </nav>
+          <div className="min-h-0 flex-1 overflow-y-auto px-2.5 pt-2">
+            <p className="px-2.5 pb-2 text-[9px] font-bold uppercase tracking-[0.2em] text-faint">Sessions</p>
+            <div className="rounded-md bg-panel-2 px-2.5 py-2 shadow-[inset_2px_0_0_var(--torque)]">
+              <p className="truncate text-[11.5px] text-ink">{sessionInfo.title ?? 'this session'}</p>
+              <p className="mt-0.5 text-[9.5px] uppercase tracking-[0.06em] text-faint">
+                now · {sessionInfo.taskCount} {sessionInfo.taskCount === 1 ? 'task' : 'tasks'}
+              </p>
+            </div>
+            {/* KERNEL GAP (§3): past sessions + EPISODES/UPTIME footer need
+                backend listings that aren't on the wire — omitted, not faked. */}
+          </div>
+        </aside>
+        <div className="relative min-w-0 flex-1 overflow-hidden">
+        {view === 'approvals' && (
+          <ApprovalHistoryPanel
+            events={events}
+            sendCommand={sendCommand}
+            onClose={() => setView('tasks')}
+            decidedCount={Object.keys(decided).length}
+          />
+        )}
+        {view === 'memory' && (
+          <MemoryPanel events={events} sendCommand={sendCommand} onClose={() => setView('tasks')} />
+        )}
+        {COLLAB_UI_ENABLED && view === 'channels' && (
+          <ChannelsPanel events={events} sendCommand={sendCommand} onClose={() => setView('tasks')} />
+        )}
+      <div
+        ref={scrollRef}
+        className={`h-full overflow-y-auto px-4 pr-2 pt-7 ${view === 'tasks' ? '' : 'hidden'}`}
+        aria-live="polite"
+      >
+      <div className="mx-auto max-w-[860px] space-y-1">
         {events.length === 0 && (
-          <p className="pt-8 text-center text-neutral-600">
+          <p className="pt-8 text-center text-faint/75">
             Nothing yet. Type what you need below — simple tasks run free on this
             machine, complex ones go to a cloud model automatically. Set a budget
             or keep a task local with the controls under the box.
           </p>
         )}
-        {events.map((ev) => (
-          <EventRow
-            key={ev.id}
-            event={ev}
-            decided={decided}
-            toolsByRequest={toolsByRequest}
-            draftsByQueue={draftsByQueue}
-            onDecideSkill={decideSkill}
-            onGetDraft={getDraft}
-            onDecideTool={decideTool}
-            onResendLocal={resendLocal}
-            onResendCloud={resendCloud}
-            onRetry={retry}
-            onCopyDiagnostic={copyDiagnostic}
-            safeExportFrame={ev.requestId ? (safeExportViewByTaskId[ev.requestId] ?? null) : null}
-            safeExportChipPhase={ev.requestId ? (safeExportChipPhase[ev.requestId] ?? 'initial') : 'initial'}
-            safeExportChipCopied={ev.requestId ? !!safeExportChipCopied[ev.requestId] : false}
-            onGetSafeExportChip={requestSafeExportChip}
-            onCopySafeExportChip={copySafeExportChip}
-          />
-        ))}
-        {busy && (
-          <p className="flex items-center gap-3 px-2 py-1 text-neutral-500">
+        {streamItems.map((item) => {
+          if (item.kind === 'loose') {
+            const ev = item.event;
+            return (
+              <EventRow
+                key={ev.id}
+                event={ev}
+                decided={decided}
+                toolsByRequest={toolsByRequest}
+                draftsByQueue={draftsByQueue}
+                onDecideSkill={decideSkill}
+                onGetDraft={getDraft}
+                onDecideTool={decideTool}
+                onResendLocal={resendLocal}
+                onResendCloud={resendCloud}
+                onRetry={retry}
+                onCopyDiagnostic={copyDiagnostic}
+                safeExportFrame={ev.requestId ? (safeExportViewByTaskId[ev.requestId] ?? null) : null}
+                safeExportChipPhase={ev.requestId ? (safeExportChipPhase[ev.requestId] ?? 'initial') : 'initial'}
+                safeExportChipCopied={ev.requestId ? !!safeExportChipCopied[ev.requestId] : false}
+                onGetSafeExportChip={requestSafeExportChip}
+                onCopySafeExportChip={copySafeExportChip}
+                budgetLine={budgetLine}
+              />
+            );
+          }
+          return (
+            <TaskCard
+              key={item.group.requestId}
+              group={item.group}
+              working={
+                busy && item.group.requestId === activeRequestId
+                  ? {
+                      phaseText: livePhase?.text ?? null,
+                      turnStartMs,
+                      stopState,
+                      onStop: stop,
+                      estimate: activeEstimate,
+                      costMeta,
+                    }
+                  : null
+              }
+              decided={decided}
+              toolsByRequest={toolsByRequest}
+              draftsByQueue={draftsByQueue}
+              onDecideSkill={decideSkill}
+              onGetDraft={getDraft}
+              onDecideTool={decideTool}
+              onResendLocal={resendLocal}
+              onResendCloud={resendCloud}
+              onRetry={retry}
+              onCopyDiagnostic={copyDiagnostic}
+              safeExportViewByTaskId={safeExportViewByTaskId}
+              safeExportChipPhase={safeExportChipPhase}
+              safeExportChipCopied={safeExportChipCopied}
+              onGetSafeExportChip={requestSafeExportChip}
+              onCopySafeExportChip={copySafeExportChip}
+              budgetLine={budgetLine}
+            />
+          );
+        })}
+        {/* §4e: the working state lives INSIDE the running task's card once
+            the card exists; this stream-level block covers only the window
+            before TIER_SELECTED mints the card. */}
+        {busy && !(activeRequestId !== null && streamItems.some((it) => it.kind !== 'loose' && it.group.requestId === activeRequestId)) && (
+          <>
+          <p className="flex items-center gap-3 px-2 py-1 text-faint">
             <span className="inline-block animate-pulse">
               {stopState === 'requested' ? 'stopping…' : 'working…'}
             </span>
-            <Elapsed />
+            <LiveDuration since={turnStartMs} />
             <button
               onClick={stop}
               disabled={stopState === 'requested'}
-              className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] uppercase tracking-widest text-neutral-400 transition-colors hover:border-[#E24B4A]/60 hover:text-[#E24B4A] disabled:opacity-40 disabled:hover:border-neutral-700 disabled:hover:text-neutral-400"
+              className="rounded border border-border-strong px-2 py-0.5 text-[10px] uppercase tracking-widest text-muted transition-colors hover:border-torque/60 hover:text-torque disabled:opacity-40 disabled:hover:border-border-strong disabled:hover:text-muted"
             >
               {stopState === 'requested' ? 'stopping' : 'stop'}
             </button>
             {stopState === 'failed' && (
-              <span className="text-[10px] text-amber-400">
+              <span className="text-[10px] text-torque">
                 couldn’t send stop — connection may be reconnecting; try again
               </span>
             )}
           </p>
+          <PresenceCard
+            tier={chipDiag ? (tierLabel(chipDiag.tier)?.text ?? null) : null}
+            lock={chipDiag ? (formatLockState(chipDiag)?.value ?? null) : null}
+            turnStartMs={turnStartMs}
+            budgetRemaining={budgetRemaining}
+          />
+          <LiveCostPanel estimate={activeEstimate} costMeta={costMeta} />
+          </>
         )}
         {/* TCLAW-2C: live current-task route chip.
             Gated on activeRequestId (NOT busy): busy excludes PENDING_APPROVAL, but a
@@ -507,18 +1002,19 @@ export default function TorqTerminal() {
             during the approval pause intentionally, and swaps to the re-minted task's
             route (new requestId) on APPROVE. */}
         {chipDiag && (
-          <p className="flex items-center gap-2 px-2 pb-1 text-[11px] text-neutral-600"
+          <p className="flex items-center gap-2 px-2 pb-1 text-[11px] text-faint/75"
              title={formatRouteExplanation(chipDiag)[0]?.value}>
-            <span className="text-neutral-500">↳</span>
+            <span className="text-faint">↳</span>
             {tierLabel(chipDiag.tier) && <span>{tierLabel(chipDiag.tier)!.text}</span>}
             {formatLockState(chipDiag) && (
               <>
-                <span className="text-neutral-700">·</span>
+                <span className="text-faint/50">·</span>
                 <span>{formatLockState(chipDiag)!.value}</span>
               </>
             )}
           </p>
         )}
+      </div>
       </div>
       {receiptsOpen && (
         <ReceiptsPanel
@@ -530,7 +1026,7 @@ export default function TorqTerminal() {
       {costOpen && (
         <CostPanel events={events} sendCommand={sendCommand} onClose={() => setCostOpen(false)} />
       )}
-      {approvalsOpen && (
+      {approvalsOpen && view !== 'approvals' && (
         <ApprovalHistoryPanel
           events={events}
           sendCommand={sendCommand}
@@ -538,38 +1034,200 @@ export default function TorqTerminal() {
           decidedCount={Object.keys(decided).length}
         />
       )}
+        </div>
       </div>
 
       {hint && !hintDismissed && (
-        <div className="mt-3 flex items-center gap-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">
+        <div className="mt-3 flex items-center gap-3 rounded border border-torque/40 bg-torque/10 px-3 py-2 text-[11px] text-torque">
           <span>This looks like it may contain {hint} — keep it on this machine?</span>
           <button
             onClick={() => set('privateMode', true)}
-            className="rounded border border-amber-400/50 px-2 py-0.5 text-amber-200 hover:bg-amber-400/15"
+            className="rounded border border-torque/50 px-2 py-0.5 text-torque hover:bg-torque/15"
           >
             keep private
           </button>
           <button
             onClick={() => setHintDismissed(true)}
-            className="text-amber-400/60 hover:text-amber-300"
+            className="text-torque/60 hover:text-torque"
           >
             dismiss
           </button>
         </div>
       )}
 
-      <form onSubmit={submit} className="mt-4 border-t border-neutral-800 pt-4">
-        <div className="flex items-center gap-3">
-          <span className="text-[#E24B4A]" aria-hidden>{'>'}</span>
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="What do you need done?"
-            aria-label="Describe your task"
-            className="flex-1 bg-transparent py-1 text-neutral-100 placeholder:text-neutral-600 focus:outline-none"
-            autoFocus
-          />
+      <form onSubmit={submit} className="border-t border-edge bg-panel px-4 pb-4 pt-3.5">
+        <div className="mx-auto max-w-[860px]">
+        {/* §6 composer box: panel-2 body, strong hairline, 10px radius, torque
+            focus glow; drag-over flips to a dashed torque border. */}
+        <div
+          className={`rounded-[10px] border bg-panel-2 transition-[border-color,box-shadow] duration-200 focus-within:border-torque/50 focus-within:shadow-[0_0_0_3px_rgba(255,158,64,0.08),0_-1px_24px_rgba(255,158,64,0.06)] ${
+            dragging ? 'border-dashed border-torque shadow-[0_0_0_3px_rgba(255,158,64,0.1)]' : 'border-border-strong'
+          }`}
+          onDragOver={(e) => { if (ATTACHMENTS_ENABLED) { e.preventDefault(); setDragging(true); } }}
+          onDragEnter={(e) => { if (ATTACHMENTS_ENABLED) { e.preventDefault(); setDragging(true); } }}
+          onDragLeave={(e) => { if (ATTACHMENTS_ENABLED) { e.preventDefault(); setDragging(false); } }}
+          onDrop={(e) => {
+            if (!ATTACHMENTS_ENABLED) return;
+            e.preventDefault();
+            setDragging(false);
+            addFiles(e.dataTransfer?.files ?? null);
+          }}
+        >
+          <div className="flex items-center gap-2.5 py-1 pl-2.5 pr-2">
+            {/* §6 paperclip: 16px SVG (flag-gated), hover torque tile. */}
+            {ATTACHMENTS_ENABLED && (
+              <label
+                className="grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-[7px] border border-transparent text-faint transition-colors hover:border-torque/30 hover:bg-torque/[.14] hover:text-torque"
+                title="attach files — preview only: the kernel has no upload pipeline yet"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                </svg>
+                <input
+                  type="file"
+                  multiple
+                  className="hidden"
+                  aria-label="attach files"
+                  onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }}
+                />
+              </label>
+            )}
+            <span className="shrink-0 font-bold text-torque" aria-hidden>❯</span>
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={onComposerKeyDown}
+              placeholder="What do you need done?"
+              aria-label="Describe your task"
+              className="min-w-0 flex-1 bg-transparent py-[11px] text-[13px] text-ink caret-torque placeholder:text-[#4A505A] focus:outline-none"
+              autoFocus
+            />
+            <button
+              type="submit"
+              disabled={!input.trim()}
+              className="shrink-0 rounded-[7px] bg-torque px-4 py-[9px] text-[11px] font-bold tracking-[0.1em] text-[#0A0B0D] transition-[filter,transform] hover:brightness-110 active:scale-[0.97] disabled:opacity-40"
+            >
+              RUN ⏎
+            </button>
+          </div>
+
+          {/* §6 attachment chips: 24x24 type tile (PDF bad / IMG cloud with a
+              real thumbnail / DOC torque), name + size column, ✕ hover bad. */}
+          {ATTACHMENTS_ENABLED && attachments.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 px-3 pb-2.5">
+              {attachments.map((a) => (
+                <span
+                  key={a.id}
+                  className="flex max-w-[240px] animate-task-enter items-center gap-2 rounded-md border border-border-strong bg-panel py-[5px] pl-1.5 pr-2"
+                >
+                  <span
+                    className={`grid h-6 w-6 shrink-0 place-items-center overflow-hidden rounded-[5px] border text-[8px] font-bold tracking-[0.05em] ${
+                      a.kind === 'pdf' ? 'border-bad/30 bg-bad/10 text-bad'
+                      : a.kind === 'image' ? 'border-cloud/30 bg-cloud/10 text-cloud'
+                      : 'border-torque/30 bg-torque/10 text-torque'
+                    }`}
+                    aria-hidden
+                  >
+                    {a.previewUrl ? (
+                      <img src={a.previewUrl} alt="" className="h-full w-full object-cover" />
+                    ) : a.kind === 'pdf' ? 'PDF' : a.kind === 'image' ? 'IMG' : 'DOC'}
+                  </span>
+                  <span className="flex min-w-0 flex-col leading-[1.3]">
+                    <span className="max-w-[150px] truncate text-[10.5px] font-medium text-ink" title={a.file.name}>
+                      {a.file.name}
+                    </span>
+                    <span className="text-[9px] tracking-[0.04em] text-faint">{formatFileSize(a.file.size)}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(a.id)}
+                    aria-label={`remove ${a.file.name}`}
+                    className="grid h-4 w-4 shrink-0 place-items-center rounded text-faint transition-colors hover:bg-bad/10 hover:text-bad"
+                  >
+                    ✕
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          {/* Cloud-route privacy warning: real estimate route only — never a
+              guess. Disappears on the local route (or with no attachments). */}
+          {ATTACHMENTS_ENABLED && attachments.length > 0 && estimate?.route === 'cloud' && (
+            <p className="flex items-center gap-[7px] px-4 pb-2.5 text-[9.5px] tracking-[0.06em] text-torque">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0" aria-hidden>
+                <path d="M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+              </svg>
+              {attachments.length} attachment{attachments.length === 1 ? '' : 's'} will be uploaded
+              with this task — route is cloud
+            </p>
+          )}
+          {/* Submit gate: the kernel exposes no upload pipeline, so attached
+              files cannot ride the task yet — say so instead of faking it. */}
+          {ATTACHMENTS_ENABLED && attachmentGateNote && attachments.length > 0 && (
+            <p className="px-4 pb-2.5 text-[10px] text-torque">
+              attachments can&apos;t ride this task yet — the kernel exposes no upload
+              pipeline; remove them or submit without
+            </p>
+          )}
+
+          {/* §6 chips row: route / memory / budget-state cchips, est chip +
+              a REAL ↑-history hint on the right. Model chip omitted — no
+              model name rides the WS wire (named gap, checklist row 10). */}
+          <div className="flex flex-wrap items-center gap-[7px] px-3 pb-2.5">
+            <button
+              type="button"
+              onClick={cycleMode}
+              disabled={controls.budget === 'free'}
+              title="where this task may run — click to cycle auto → local → cloud"
+              className={`${CCHIP} hover:border-border-strong hover:text-ink disabled:opacity-60`}
+            >
+              <span
+                className={`h-[5px] w-[5px] rounded-full ${
+                  effectiveMode === 'LOCAL_ONLY' ? 'bg-good' : effectiveMode === 'CLOUD_OK' ? 'bg-cloud' : 'bg-faint'
+                }`}
+                aria-hidden
+              />
+              route: {controls.budget === 'free' ? 'local (free)' : effectiveMode === 'LOCAL_ONLY' ? 'local' : effectiveMode === 'CLOUD_OK' ? 'cloud' : 'auto'} ▾
+            </button>
+            <button
+              type="button"
+              onClick={() => set('useMemory', !controls.useMemory)}
+              title="use past-task memory as context for this task"
+              className={`${CCHIP} hover:border-border-strong`}
+            >
+              <span className="normal-case text-faint">memory:</span>
+              <span className={controls.useMemory ? 'text-mem' : 'text-faint'}>{controls.useMemory ? 'on' : 'off'}</span>
+            </button>
+            {sessionTotal !== null && sessionCap !== null && (
+              <span className={`${CCHIP} ${sessionTotal < sessionCap ? 'text-good' : 'text-torque'}`}>
+                <span
+                  className={`h-[5px] w-[5px] rounded-full ${sessionTotal < sessionCap ? 'bg-good' : 'bg-torque'}`}
+                  aria-hidden
+                />
+                {sessionTotal < sessionCap ? 'under budget' : 'over budget'}
+              </span>
+            )}
+            <span className="ml-auto flex items-center gap-[7px]">
+              {/* Pre-flight estimate (redesign 4/7 honesty core unchanged):
+                  the kernel's real sizing pass; dollars only where true by
+                  construction (local = free), token figures for cloud. */}
+              {estimate && !previewState && (
+                <span
+                  className={`inline-flex animate-task-enter items-center gap-1.5 rounded border px-2 py-[3px] text-[9.5px] font-semibold uppercase tracking-[0.1em] tabular-nums ${
+                    estimate.route === 'local'
+                      ? 'border-good/30 bg-good/[.12] text-good'
+                      : 'border-torque/30 bg-torque/[.14] text-torque'
+                  }`}
+                >
+                  <span className="text-faint">est</span> {estimate.label}
+                </span>
+              )}
+              <span className="text-[9.5px] tracking-[0.08em] text-[#4A505A]">
+                <kbd className="rounded-[3px] border border-edge bg-panel px-1.5 py-px font-chrome text-faint">↑</kbd> history
+              </span>
+            </span>
+          </div>
         </div>
 
         {/* TCLAW-2D-2: route preview panel. Renders per previewState — ZERO
@@ -578,7 +1236,7 @@ export default function TorqTerminal() {
             executed-task path. The caveat line is EXACT and appears in every
             state that shows any preview content. */}
         {previewState && (
-          <div className="mt-3 rounded border border-neutral-800 bg-neutral-900/40 px-3 py-2 text-[11px] text-neutral-500">
+          <div className="mt-3 rounded border border-edge bg-panel-2/40 px-3 py-2 text-[11px] text-faint">
             {previewState.kind === 'pending' && <p>previewing…</p>}
             {previewState.kind === 'result' && (() => {
               const diag = previewState.meta.diagnostics as RouterDiagnostics | null | undefined;
@@ -595,7 +1253,7 @@ export default function TorqTerminal() {
                 : null; // never fabricate doubt for LOCAL_LLM or any other value (G1R S2)
               return (
                 <>
-                  <p className="text-neutral-300">
+                  <p className="text-muted">
                     Would route: {tier ? tier.text : 'unknown'}
                   </p>
                   {explanation.map((row, i) => (
@@ -617,7 +1275,7 @@ export default function TorqTerminal() {
                   {typeof previewState.meta.contextSize === 'number' && (
                     <p>context size: {previewState.meta.contextSize}</p>
                   )}
-                  {fidelityNote && <p className="text-amber-400">{fidelityNote}</p>}
+                  {fidelityNote && <p className="text-torque">{fidelityNote}</p>}
                 </>
               );
             })()}
@@ -628,20 +1286,20 @@ export default function TorqTerminal() {
             {previewState.kind === 'sendFailed' && (
               <p>couldn’t send preview — connection may be reconnecting; try again</p>
             )}
-            <p className="mt-1 text-neutral-600">
+            <p className="mt-1 text-faint/75">
               Preview only. Enrichment and route may change when you submit.
             </p>
           </div>
         )}
 
         {/* Run controls: budget, where it runs, speed, privacy. */}
-        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[10px] uppercase tracking-widest text-neutral-500">
+        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[10px] uppercase tracking-widest text-faint">
           <label className="flex items-center gap-1.5" title="Cap what a cloud task may spend">
             budget
             <select
               value={controls.budget}
               onChange={(e) => set('budget', e.target.value as BudgetChoice)}
-              className="rounded border border-neutral-700 bg-neutral-900 px-1.5 py-0.5 text-neutral-300"
+              className="rounded border border-border-strong bg-panel-2 px-1.5 py-0.5 text-muted"
             >
               <option value="">default</option>
               <option value="free">Free (local only)</option>
@@ -658,77 +1316,383 @@ export default function TorqTerminal() {
               onChange={(e) => set('customBudget', e.target.value)}
               placeholder="USD"
               aria-label="Custom budget in USD"
-              className="w-16 rounded border border-neutral-700 bg-neutral-900 px-1.5 py-0.5 text-neutral-300"
+              className="w-16 rounded border border-border-strong bg-panel-2 px-1.5 py-0.5 text-muted"
             />
           )}
-          <label className="flex items-center gap-1.5" title="Where this task may run">
-            mode
-            <select
-              value={controls.budget === 'free' ? 'LOCAL_ONLY' : controls.mode}
-              disabled={controls.budget === 'free'}
-              onChange={(e) => set('mode', e.target.value as ExecutionMode)}
-              className="rounded border border-neutral-700 bg-neutral-900 px-1.5 py-0.5 text-neutral-300 disabled:opacity-50"
-            >
-              <option value="AUTO">Auto</option>
-              <option value="LOCAL_ONLY">This machine only</option>
-              <option value="CLOUD_OK">Cloud allowed</option>
-            </select>
-          </label>
+          {/* §6: mode select + memory checkbox replaced by the in-box route
+              and memory chips — one control surface each. */}
           <label className="flex cursor-pointer items-center gap-1.5" title="Prefer a fast answer">
-            <input type="checkbox" checked={controls.fast} onChange={(e) => set('fast', e.target.checked)} className="accent-[#E24B4A]" />
+            <input type="checkbox" checked={controls.fast} onChange={(e) => set('fast', e.target.checked)} className="accent-torque" />
             fast
           </label>
           <label className="flex cursor-pointer items-center gap-1.5" title="Private tasks never leave this machine — no cloud APIs, no exceptions">
-            <input type="checkbox" checked={controls.privateMode} onChange={(e) => set('privateMode', e.target.checked)} className="accent-[#E24B4A]" />
+            <input type="checkbox" checked={controls.privateMode} onChange={(e) => set('privateMode', e.target.checked)} className="accent-torque" />
             private
           </label>
-          <label className="flex cursor-pointer items-center gap-1.5" title="Use past-task memory as context for this task">
-            <input type="checkbox" checked={controls.useMemory} onChange={(e) => set('useMemory', e.target.checked)} className="accent-[#E24B4A]" />
-            memory
-          </label>
-          <span className="text-neutral-700">·</span>
-          <button type="button" onClick={() => sendCommand({ action: 'MEMORY', op: 'SHOW' })} className="text-neutral-500 hover:text-neutral-300">
+          <span className="text-faint/50">·</span>
+          <button type="button" onClick={() => sendCommand({ action: 'MEMORY', op: 'SHOW' })} className="text-faint hover:text-muted">
             show memory
           </button>
-          <button type="button" onClick={() => sendCommand({ action: 'MEMORY', op: 'FORGET_SESSION' })} className="text-neutral-500 hover:text-[#E24B4A]">
+          <button type="button" onClick={() => sendCommand({ action: 'MEMORY', op: 'FORGET_SESSION' })} className="text-faint hover:text-torque">
             forget session
           </button>
-          <span className="text-neutral-700">·</span>
-          <button type="button" onClick={() => setReceiptsOpen((v) => !v)} className="text-neutral-500 hover:text-neutral-300">
+          <span className="text-faint/50">·</span>
+          <button type="button" onClick={() => setReceiptsOpen((v) => !v)} className="text-faint hover:text-muted">
             {receiptsOpen ? 'hide receipts' : 'receipts'}
           </button>
-          <span className="text-neutral-700">·</span>
-          <button type="button" onClick={() => setCostOpen((v) => !v)} className="text-neutral-500 hover:text-neutral-300">
+          <span className="text-faint/50">·</span>
+          <button type="button" onClick={() => setCostOpen((v) => !v)} className="text-faint hover:text-muted">
             {costOpen ? 'hide cost' : 'cost'}
           </button>
-          <span className="text-neutral-700">·</span>
-          <button type="button" onClick={() => setApprovalsOpen((v) => !v)} className="text-neutral-500 hover:text-neutral-300">
+          <span className="text-faint/50">·</span>
+          <button type="button" onClick={() => setApprovalsOpen((v) => !v)} className="text-faint hover:text-muted">
             {approvalsOpen ? 'hide approvals' : 'approvals'}
           </button>
-          <span className="text-neutral-700">·</span>
-          <button type="button" onClick={simulateRoute} disabled={!input.trim()} className="text-neutral-500 hover:text-neutral-300 disabled:opacity-40">
+          <span className="text-faint/50">·</span>
+          <button type="button" onClick={simulateRoute} disabled={!input.trim()} className="text-faint hover:text-muted disabled:opacity-40">
             simulate route
           </button>
+        </div>
         </div>
       </form>
     </section>
   );
 }
 
-/** Elapsed-time ticker on the working indicator (lifecycle clarity). */
-function Elapsed() {
-  const [s, setS] = useState(0);
+/** Ticking wall-clock — drives staleness/last-synced without wiring a timer
+ *  into render. Re-renders on an interval; the interval itself polls nothing
+ *  (the console is push-based), it only re-reads `Date.now()`. */
+function useNow(intervalMs: number) {
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const t = setInterval(() => setS((n) => n + 1), 1000);
+    const t = setInterval(() => setNow(Date.now()), intervalMs);
     return () => clearInterval(t);
-  }, []);
-  return <span className="tabular-nums text-neutral-600">{s}s</span>;
+  }, [intervalMs]);
+  return now;
+}
+
+/** Redesign 4/7: the working card's live cost panel.
+ *
+ *  HONESTY (load-bearing): the gateway wire carries NO per-turn usage stream
+ *  — provider-reported cost is recorded once, at completion (receipt), and
+ *  spend.ts forbids estimated dollars. So there is no live per-task tick to
+ *  render, and this panel says exactly that instead of animating a fake
+ *  counter. What it DOES show, all from one frame source (costSummary):
+ *   - est cap: the SAME pre-flight number the composer chip showed,
+ *     snapshotted for this request — never recomputed into a different
+ *     figure that could exceed its own cap;
+ *   - session spend: real recorded spend, climbing on each 5s poll;
+ *   - a cap bar only when a real session cap exists (fill = total/cap). */
+function LiveCostPanel({
+  estimate,
+  costMeta,
+}: {
+  estimate: PreflightEstimate | null;
+  costMeta: Record<string, any> | null;
+}) {
+  const total = typeof costMeta?.sessionTotal === 'number' ? costMeta.sessionTotal : null;
+  const cap = typeof costMeta?.sessionCap === 'number' ? costMeta.sessionCap : null;
+  const breach = costMeta?.breach ?? null;
+  return (
+    /* §4e live panel: panel-2 box with micro-label cells. TOKENS column is
+       deliberately absent — no mid-task usage rides the wire (honesty rule). */
+    <div className="mt-[11px] flex flex-wrap items-center gap-x-5 gap-y-1 rounded-md border border-edge bg-panel-2 px-3 py-2">
+      {estimate && (
+        <span className="flex flex-col gap-px">
+          <span className="text-[8px] font-bold uppercase tracking-[0.18em] text-faint">est cap</span>
+          <span
+            className={`text-[12.5px] font-semibold tabular-nums ${
+              estimate.route === 'local' ? 'text-good' : 'text-cloud'
+            }`}
+          >
+            {estimate.label}
+          </span>
+        </span>
+      )}
+      {total !== null && (
+        <span className="flex flex-col gap-px">
+          <span className="text-[8px] font-bold uppercase tracking-[0.18em] text-faint">session spend</span>
+          <span className="text-[12.5px] font-semibold tabular-nums text-torque">${total.toFixed(2)}</span>
+        </span>
+      )}
+      {total !== null && cap !== null && (
+        <span className="flex items-center gap-2" title="session spend vs session cap">
+          <span className="text-[8px] font-bold uppercase tracking-[0.18em] text-faint">cap</span>
+          <span className="h-1 w-[90px] overflow-hidden rounded-sm bg-panel-3">
+            <span
+              className={`block h-full rounded-sm transition-[width] ${breach ? 'bg-bad' : 'bg-torque'}`}
+              style={{ width: `${Math.min(100, (total / cap) * 100)}%` }}
+            />
+          </span>
+          <span className="text-[11px] tabular-nums text-muted">${cap.toFixed(2)}</span>
+        </span>
+      )}
+      {estimate?.route === 'cloud' && (
+        <span className="ml-auto text-[10px] text-faint/75">
+          task cost records on completion — no mid-task usage stream
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** Redesign 3/7: the answer is the visual hero of a task card — Inter for
+ *  long reading, a 72ch measure, the amber accent edge, and a mono ANSWER
+ *  eyebrow. Same friendlyMessage text the raw row always rendered; only the
+ *  presentation is elevated. */
+function AnswerHero({ event }: { event: GatewayEvent }) {
+  return (
+    <div className="relative border-t border-edge px-5 pb-4 pt-[18px]">
+      {/* §4d: 2px left edge, torque fading to transparent at 85%. */}
+      <span
+        className="absolute bottom-0 left-0 top-0 w-[2px]"
+        style={{ background: 'linear-gradient(180deg, var(--torque), transparent 85%)' }}
+        aria-hidden
+      />
+      <p className="font-chrome text-[9px] font-bold uppercase tracking-[0.22em] text-torque">Answer</p>
+      <div className="mt-2 max-w-[72ch] font-reading text-[14.5px] leading-[1.72] text-[#E8EAED]">
+        {renderAnswerInline(friendlyMessage(event))}
+      </div>
+    </div>
+  );
+}
+
+/** §4d presentation-only inline treatments over the SAME answer string the
+ *  raw row always rendered: money tokens in JetBrains --cloud, `backtick`
+ *  spans as panel-3 code chips. Pure re-presentation — nothing is added,
+ *  removed, or reordered. */
+function renderAnswerInline(text: string): React.ReactNode {
+  const parts = text.split(/(`[^`\n]+`|\$\d[\d,]*(?:\.\d+)?)/g);
+  if (parts.length === 1) return text;
+  return parts.map((p, i) => {
+    if (/^`[^`\n]+`$/.test(p)) {
+      return (
+        <code key={i} className="rounded bg-panel-3 px-1.5 py-px font-chrome text-[12px] text-muted">
+          {p.slice(1, -1)}
+        </code>
+      );
+    }
+    if (/^\$\d/.test(p)) {
+      return (
+        <span key={i} className="font-chrome text-[13px] text-cloud">
+          {p}
+        </span>
+      );
+    }
+    return p;
+  });
+}
+
+/** Redesign 3/7: one task = one card. Header carries the user prompt (600
+ *  weight), the token-colored route chip (cloud=cyan / local=green), and the
+ *  ONE timestamp for the whole task. ROUTING/TIER_SELECTED/TOOL_CALL/SYSTEM
+ *  plumbing collapses into a "N STEPS" row (default collapsed). Approvals,
+ *  errors, the answer, and the receipt stay visible — action surfaces are
+ *  never hidden inside a collapse. Every row keeps its exact pre-redesign
+ *  behavior and dispatch surface; only the grouping/presentation changed. */
+/** §4e: live working context for the card whose task is in flight — all
+ *  values are the same real anchors/frames the stream-level block used. */
+interface CardWorking {
+  phaseText: string | null;
+  turnStartMs: number | null;
+  stopState: 'idle' | 'requested' | 'failed';
+  onStop: () => void;
+  estimate: PreflightEstimate | null;
+  costMeta: Record<string, any> | null;
+}
+
+function TaskCard({
+  group, working = null, decided, toolsByRequest, draftsByQueue, onDecideSkill, onGetDraft,
+  onDecideTool, onResendLocal, onResendCloud, onRetry, onCopyDiagnostic,
+  safeExportViewByTaskId, safeExportChipPhase, safeExportChipCopied,
+  onGetSafeExportChip, onCopySafeExportChip, budgetLine,
+}: {
+  group: TaskGroup;
+  working?: CardWorking | null;
+  decided: Record<string, 'APPROVE' | 'REJECT'>;
+  toolsByRequest: Record<string, string[]>;
+  draftsByQueue: Record<string, string>;
+  onDecideSkill: (queueId: string, decision: 'APPROVE' | 'REJECT', editedMarkdown?: string) => void;
+  onGetDraft: (queueId: string) => void;
+  onDecideTool: (approvalId: string, decision: 'APPROVE' | 'REJECT') => void;
+  onResendLocal: (prompt: string) => void;
+  onResendCloud: (prompt: string) => void;
+  onRetry: (prompt: string, suggestedBudget?: number) => void;
+  onCopyDiagnostic: (errEvent: GatewayEvent) => void;
+  safeExportViewByTaskId: Record<string, SafeExportFrameLike>;
+  safeExportChipPhase: Record<string, 'initial' | 'pending' | 'ready' | 'sendFailed' | 'timeout'>;
+  safeExportChipCopied: Record<string, boolean>;
+  onGetSafeExportChip: (taskId: string) => void;
+  onCopySafeExportChip: (taskId: string) => void;
+  budgetLine: string | null;
+}) {
+  const [stepsOpen, setStepsOpen] = useState(false);
+  const tier = group.tier ? tierLabel(group.tier) : null;
+  const isCloud = group.tier === 'API_EXTERNAL';
+
+  const rowProps = (ev: GatewayEvent) => ({
+    event: ev,
+    hideTimestamp: true,
+    decided,
+    toolsByRequest,
+    draftsByQueue,
+    onDecideSkill,
+    onGetDraft,
+    onDecideTool,
+    onResendLocal,
+    onResendCloud,
+    onRetry,
+    onCopyDiagnostic,
+    safeExportFrame: ev.requestId ? (safeExportViewByTaskId[ev.requestId] ?? null) : null,
+    safeExportChipPhase: ev.requestId ? (safeExportChipPhase[ev.requestId] ?? 'initial') : 'initial',
+    safeExportChipCopied: ev.requestId ? !!safeExportChipCopied[ev.requestId] : false,
+    onGetSafeExportChip,
+    onCopySafeExportChip,
+    budgetLine,
+  });
+
+  // §4c: honest summary segments derived from the real plumbing rows.
+  const hasMemoryStep = group.plumbing.some((ev) => /memor|recall/i.test(ev.message));
+
+  return (
+    <article className="mb-[18px] animate-task-enter overflow-hidden rounded-[10px] border border-edge bg-panel">
+      {/* §4b card head: avatar tile · prompt · route chip · ONE timestamp. */}
+      <header className="flex flex-wrap items-start gap-x-3 gap-y-1 px-[18px] pb-[13px] pt-[15px]">
+        <div
+          className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-md border border-torque/30 bg-torque/[.14] text-[10px] font-bold tracking-[0.05em] text-torque"
+          aria-hidden
+        >
+          YOU
+        </div>
+        {group.prompt && (
+          <span className="min-w-0 flex-1 font-chrome text-[13.5px] font-semibold leading-[1.5] text-ink">
+            {group.prompt}
+          </span>
+        )}
+        {tier && (
+          <span
+            title={tier.hint}
+            className={`mt-0.5 inline-flex shrink-0 items-center gap-1.5 rounded border px-[9px] py-[3px] text-[9.5px] font-bold uppercase tracking-[0.14em] ${
+              isCloud
+                ? 'border-cloud/[.28] bg-cloud/[.12] text-cloud'
+                : 'border-good/[.28] bg-good/[.12] text-good'
+            }`}
+          >
+            <span className="h-[5px] w-[5px] rounded-full bg-current" aria-hidden />
+            {isCloud ? 'cloud' : 'local'}
+          </span>
+        )}
+        {group.startMs !== null && (
+          <time
+            className="mt-1 shrink-0 text-[10px] tabular-nums tracking-[0.08em] text-faint"
+            title={new Date(group.startMs).toISOString()}
+          >
+            {new Date(group.startMs).toLocaleTimeString([], { hour12: false })}
+          </time>
+        )}
+      </header>
+
+      {/* §4c collapsed plumbing: one full-width row, chevron rotates, body
+          expands 320ms; per-line timestamps visible ONLY inside here. */}
+      {group.plumbing.length > 0 && (
+        <div className="border-t border-edge">
+          <button
+            type="button"
+            onClick={() => setStepsOpen((v) => !v)}
+            aria-expanded={stepsOpen}
+            className="flex w-full items-center gap-2 px-[18px] py-2 text-left text-[10.5px] uppercase tracking-[0.1em] text-faint transition-colors hover:bg-panel-2 hover:text-muted"
+          >
+            <span
+              className={`text-[9px] transition-transform duration-200 ${stepsOpen ? 'rotate-90' : ''}`}
+              aria-hidden
+            >
+              ▶
+            </span>
+            {group.plumbing.length} {group.plumbing.length === 1 ? 'step' : 'steps'} · hermes kernel
+            {hasMemoryStep ? ' · memory recall' : ''}
+          </button>
+          <div
+            className={`overflow-hidden transition-[max-height] duration-300 ease-out ${
+              stepsOpen ? 'max-h-[400px] overflow-y-auto' : 'max-h-0'
+            }`}
+          >
+            <div className="pb-2 pl-[30px] pr-[18px] text-[11px]">
+              {group.plumbing.map((ev) => (
+                <EventRow key={ev.id} {...rowProps(ev)} hideTimestamp={false} />
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {group.visible.length > 0 && (
+        <div className="space-y-1">
+          {group.visible.map((ev) => {
+            const meta = (ev.metadata ?? {}) as Record<string, any>;
+            if (ev.type === 'SYSTEM' && meta.receipt) {
+              return (
+                <ReceiptCard
+                  key={ev.id}
+                  receipt={meta.receipt}
+                  tools={ev.requestId ? (toolsByRequest[ev.requestId] ?? []) : []}
+                />
+              );
+            }
+            if (ev.type === 'RESULT') return <AnswerHero key={ev.id} event={ev} />;
+            return (
+              <div key={ev.id} className="px-[18px]">
+                <EventRow {...rowProps(ev)} />
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* §4e working state: phase row + shimmer + honest live panel, inside
+          THIS card while its task runs. */}
+      {working && (
+        <div className="border-t border-edge px-5 pb-4 pt-3.5">
+          <div className="flex items-center gap-3 text-[11px] text-muted">
+            <GlyphSpinner className="text-torque" />
+            <span>
+              {working.stopState === 'requested'
+                ? 'stopping…'
+                : `working…${working.phaseText ? ` ${working.phaseText}` : ''}`}
+            </span>
+            <LiveDuration since={working.turnStartMs} className="text-[10px] tabular-nums text-faint" />
+            <button
+              onClick={working.onStop}
+              disabled={working.stopState === 'requested'}
+              className="rounded-md border border-border-strong px-2 py-0.5 text-[10px] uppercase tracking-widest text-muted transition-colors hover:border-torque/60 hover:text-torque disabled:opacity-40"
+            >
+              {working.stopState === 'requested' ? 'stopping' : 'stop'}
+            </button>
+            {working.stopState === 'failed' && (
+              <span className="text-[10px] text-torque">
+                couldn’t send stop — connection may be reconnecting; try again
+              </span>
+            )}
+          </div>
+          <div className="relative mt-[11px] h-[3px] overflow-hidden rounded-sm bg-panel-3">
+            <span
+              className="absolute bottom-0 top-0 w-[38%] animate-shimmer rounded-sm"
+              style={{ background: 'linear-gradient(90deg, transparent, var(--torque), transparent)' }}
+              aria-hidden
+            />
+          </div>
+          <LiveCostPanel estimate={working.estimate} costMeta={working.costMeta} />
+        </div>
+      )}
+    </article>
+  );
 }
 
 function EventRow({
   event, decided, toolsByRequest, draftsByQueue, onDecideSkill, onGetDraft,
   onDecideTool, onResendLocal, onResendCloud, onRetry, onCopyDiagnostic,
   safeExportFrame, safeExportChipPhase, safeExportChipCopied, onGetSafeExportChip, onCopySafeExportChip,
+  hideTimestamp = false,
+  budgetLine = null,
 }: {
   event: GatewayEvent;
   decided: Record<string, 'APPROVE' | 'REJECT'>;
@@ -748,6 +1712,11 @@ function EventRow({
   safeExportChipCopied: boolean;
   onGetSafeExportChip: (taskId: string) => void;
   onCopySafeExportChip: (taskId: string) => void;
+  /** Redesign 3/7: rows inside a task card hide their per-row clock — the
+   *  card header carries the ONE timestamp for the whole task. */
+  hideTimestamp?: boolean;
+  /** Redesign 6/7: recorded session-budget context for the spend tier. */
+  budgetLine?: string | null;
 }) {
   const tier = tierLabel(event.tier);
   const meta = (event.metadata ?? {}) as Record<string, any>;
@@ -782,42 +1751,51 @@ function EventRow({
 
   return (
     <article
-      className={`group flex gap-4 rounded px-2 py-1 transition-colors hover:bg-neutral-900/60 ${
-        event.type === 'PENDING_APPROVAL' && !decision ? 'bg-[#E24B4A]/5' : ''
+      className={`group flex gap-4 rounded px-2 py-1 transition-colors hover:bg-panel-2/60 ${
+        event.type === 'PENDING_APPROVAL' && !decision ? 'bg-torque/10' : ''
       }`}
       title={`${event.type}${meta.reason ? ` — ${meta.reason}` : ''}`}
     >
-      <time className="shrink-0 tabular-nums text-neutral-600">
-        {new Date(event.timestamp).toLocaleTimeString([], { hour12: false })}
-      </time>
+      {!hideTimestamp && (
+        <time className="shrink-0 tabular-nums text-faint/75">
+          {new Date(event.timestamp).toLocaleTimeString([], { hour12: false })}
+        </time>
+      )}
       <div className="min-w-0 flex-1">
         {tier && (
           <span
             title={tier.hint}
             className={`mr-2 rounded border px-1.5 py-0.5 text-[10px] tracking-wide ${
               event.tier === 'OLLAMA_LOCAL'
-                ? 'border-neutral-700 bg-neutral-900 text-neutral-400'
-                : 'border-[#E24B4A]/40 bg-[#E24B4A]/10 text-[#E24B4A]'
+                ? 'border-border-strong bg-panel-2 text-muted'
+                : 'border-torque/40 bg-torque/10 text-torque'
             }`}
           >
             {tier.text}
           </span>
         )}
-        <span
-          className={`mr-2 text-[10px] font-bold ${
-            event.type === 'TOOL_CALL' ? 'text-amber-400'
-            : event.type === 'PENDING_APPROVAL' && !decision ? 'animate-pulse text-[#E24B4A]'
-            : event.type === 'ERROR' ? 'text-[#E24B4A]'
-            : isUser ? 'text-neutral-300'
-            : 'text-neutral-600'
-          }`}
-        >
-          [{TYPE_LABELS[event.type] ?? event.type.toLowerCase()}]
-        </span>
+        {event.type === 'PENDING_APPROVAL' && !decision ? (
+          /* §7 pending pill: torque pill with a pulsing 5px dot. */
+          <span className="mr-2 inline-flex items-center gap-1.5 rounded-full bg-torque/[.14] px-[9px] py-[2px] text-[9px] font-bold uppercase tracking-[0.16em] text-torque">
+            <span className="h-[5px] w-[5px] animate-pulse rounded-full bg-torque" aria-hidden />
+            pending
+          </span>
+        ) : (
+          <span
+            className={`mr-2 text-[10px] font-bold ${
+              event.type === 'TOOL_CALL' ? 'text-torque'
+              : event.type === 'ERROR' ? 'text-bad'
+              : isUser ? 'text-muted'
+              : 'text-faint/75'
+            }`}
+          >
+            [{TYPE_LABELS[event.type] ?? event.type.toLowerCase()}]
+          </span>
+        )}
         <span className={
-          event.type === 'RESULT' ? 'font-semibold text-neutral-100'
-          : isUser ? 'text-neutral-200'
-          : 'text-neutral-400'
+          event.type === 'RESULT' ? 'font-semibold text-ink'
+          : isUser ? 'text-ink'
+          : 'text-muted'
         }>
           {friendlyMessage(event)}
         </span>
@@ -846,14 +1824,20 @@ function EventRow({
             argsTruncated={meta.argsTruncated === true}
             redactionNote={typeof meta.redactionNote === 'string' ? meta.redactionNote : undefined}
             gate={meta.gate}
+            budgetLine={budgetLine}
             onAllow={() => onDecideTool(approvalId, 'APPROVE')}
             onDeny={() => onDecideTool(approvalId, 'REJECT')}
           />
         )}
 
         {decision && (
-          <span className="ml-3 text-[10px] text-neutral-500">
-            {decision === 'APPROVE' ? '✓ allowed once' : '✕ denied'}
+          /* §7: the decision flip carries its outcome color. */
+          <span
+            className={`ml-3 inline-flex items-center rounded-full px-2 py-[2px] text-[9px] font-bold uppercase tracking-[0.16em] ${
+              decision === 'APPROVE' ? 'bg-good/[.12] text-good' : 'bg-bad/[.12] text-bad'
+            }`}
+          >
+            {decision === 'APPROVE' ? '✓ approved' : '✕ denied'}
           </span>
         )}
 
@@ -863,7 +1847,7 @@ function EventRow({
             {recovery.includes('RETRY') && meta.prompt && (
               <button
                 onClick={() => onRetry(String(meta.prompt), typeof meta.suggestedBudget === 'number' ? meta.suggestedBudget : undefined)}
-                className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-[#E24B4A]/60 hover:text-[#E24B4A]"
+                className="rounded border border-border-strong px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-torque/60 hover:text-torque"
               >
                 {typeof meta.suggestedBudget === 'number' ? `retry at $${meta.suggestedBudget}` : 'retry'}
               </button>
@@ -871,7 +1855,7 @@ function EventRow({
             {recovery.includes('RETRY_LOCAL') && meta.prompt && (
               <button
                 onClick={() => onResendLocal(String(meta.prompt))}
-                className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-[#E24B4A]/60 hover:text-[#E24B4A]"
+                className="rounded border border-border-strong px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-torque/60 hover:text-torque"
               >
                 run on this machine
               </button>
@@ -879,7 +1863,7 @@ function EventRow({
             {recovery.includes('RETRY_CLOUD') && meta.prompt && (
               <button
                 onClick={() => onResendCloud(String(meta.prompt))}
-                className="rounded border border-[#E24B4A]/50 px-2 py-0.5 text-[10px] text-[#E24B4A] transition-colors hover:bg-[#E24B4A]/15"
+                className="rounded border border-torque/50 px-2 py-0.5 text-[10px] text-torque transition-colors hover:bg-torque/10"
               >
                 run on cloud (faster)
               </button>
@@ -905,13 +1889,13 @@ function EventRow({
               <button
                 onClick={() => onCopyDiagnostic(event)}
                 title="copies requestId, reason, and the last 10 event messages exactly as shown in this terminal — no redaction"
-                className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-neutral-500"
+                className="rounded border border-border-strong px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-faint"
               >
                 copy raw diagnostic (local, unredacted)
               </button>
             )}
             {typeof meta.sideEffectNote === 'string' && (
-              <span className="text-[10px] text-neutral-600">{meta.sideEffectNote}</span>
+              <span className="text-[10px] text-faint/75">{meta.sideEffectNote}</span>
             )}
           </div>
         )}
@@ -950,13 +1934,13 @@ function SafeExportChip({
   // shared effect, and the FRAME's own shape decides which of the five
   // ready-adjacent renders below applies.
   if (frame && !frame.error && frame.exportOmitted) {
-    return <span className="text-[10px] text-neutral-600">export exceeds the frame size limit — not available</span>;
+    return <span className="text-[10px] text-faint/75">export exceeds the frame size limit — not available</span>;
   }
   if (frame && frame.error) {
-    return <span className="text-[10px] text-neutral-600">safe export failed (nothing copied)</span>;
+    return <span className="text-[10px] text-faint/75">safe export failed (nothing copied)</span>;
   }
   if (frame && !frame.error && !frame.exportOmitted && !frame.safeExport) {
-    return <span className="text-[10px] text-neutral-600">no receipt for this task</span>;
+    return <span className="text-[10px] text-faint/75">no receipt for this task</span>;
   }
   if (frame && frame.safeExport) {
     const report = frame.safeExport.redactionReport;
@@ -970,17 +1954,17 @@ function SafeExportChip({
         <button
           onClick={() => onCopySafeExportChip(taskId)}
           title="copies the redacted export as Markdown, including its redaction report"
-          className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-neutral-500"
+          className="rounded border border-border-strong px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-faint"
         >
           {copied ? 'copied' : 'copy safe export (ready)'}
         </button>
-        <span className="text-[10px] text-neutral-600">{summary}</span>
+        <span className="text-[10px] text-faint/75">{summary}</span>
       </span>
     );
   }
   if (phase === 'pending') {
     return (
-      <button disabled className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-500 opacity-60">
+      <button disabled className="rounded border border-border-strong px-2 py-0.5 text-[10px] text-faint opacity-60">
         preparing…
       </button>
     );
@@ -989,7 +1973,7 @@ function SafeExportChip({
     return (
       <button
         onClick={() => onGetSafeExportChip(taskId)}
-        className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-neutral-500"
+        className="rounded border border-border-strong px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-faint"
       >
         couldn&apos;t request — try again
       </button>
@@ -999,7 +1983,7 @@ function SafeExportChip({
     return (
       <button
         onClick={() => onGetSafeExportChip(taskId)}
-        className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-neutral-500"
+        className="rounded border border-border-strong px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-faint"
       >
         no response — try again
       </button>
@@ -1008,15 +1992,22 @@ function SafeExportChip({
   return (
     <button
       onClick={() => onGetSafeExportChip(taskId)}
-      className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 transition-colors hover:border-neutral-500"
+      className="rounded border border-border-strong px-2 py-0.5 text-[10px] text-muted transition-colors hover:border-faint"
     >
       copy safe export
     </button>
   );
 }
 
-/** P2.5 receipt footer: a compact "what happened" line from REAL telemetry
- *  only. Renders whichever fields are present; never invents (invariant 6). */
+/** P2.5 receipt footer, restyled as a chip row (redesign 3/7): a compact
+ *  "what happened" line from REAL telemetry only. Renders whichever fields
+ *  are present; never invents (invariant 6).
+ *
+ *  KERNEL GAP (redesign 3/7): the snapshot chip + UNDO button belong on this
+ *  row for tasks that touched files — but the gateway exposes NO
+ *  checkpoint/rollback command (packages/contracts has none; STATE.md F-1
+ *  confirms governed rollback has no operator surface). Deliberately absent
+ *  here until the kernel ships the API — never faked. */
 function ReceiptCard({ receipt, tools }: { receipt: any; tools: string[] }) {
   const [showCtx, setShowCtx] = useState(false);
   const where = receipt.tier === 'OLLAMA_LOCAL' ? 'local' : 'cloud';
@@ -1035,23 +2026,40 @@ function ReceiptCard({ receipt, tools }: { receipt: any; tools: string[] }) {
   const ctx: string | undefined = typeof receipt.assembledContext === 'string' ? receipt.assembledContext : undefined;
 
   return (
-    <article className="ml-14 mt-1 max-w-3xl rounded border border-neutral-800 bg-neutral-900/40 px-3 py-1 text-[11px] text-neutral-500">
-      <div className="flex flex-wrap items-center gap-x-2">
-        <span className="text-neutral-400">Done</span>
-        <span className="text-neutral-700">·</span>
-        <span>{parts.join(' · ')}</span>
+    /* §4f: full-width receipt strip — panel-2 over a top hairline. */
+    <div className="border-t border-edge bg-panel-2 px-[18px] py-[9px]">
+      <div className="flex flex-wrap items-center gap-[7px] text-[10px]">
+        <span className="inline-flex items-center gap-1.5 rounded border border-good/30 bg-panel px-2 py-[2.5px] font-semibold tracking-[0.06em] text-good">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden>
+            <path d="M4 12l6 6L20 6" />
+          </svg>
+          done
+        </span>
+        {parts.map((p, i) => (
+          <span
+            key={i}
+            className="rounded border border-edge bg-panel px-2 py-[2.5px] tabular-nums tracking-[0.06em] text-muted"
+          >
+            {p}
+          </span>
+        ))}
+        {/* KERNEL GAP (§4f): snapshot chip + UNDO render only if the kernel
+            exposes checkpoint/rollback — it exposes neither; omitted. */}
         {ctx && (
-          <button onClick={() => setShowCtx((v) => !v)} className="ml-2 text-neutral-500 underline hover:text-neutral-300">
-            {showCtx ? 'hide context' : 'view context used'}
+          <button
+            onClick={() => setShowCtx((v) => !v)}
+            className="ml-auto rounded border border-transparent px-2 py-[2.5px] tracking-[0.1em] text-faint transition-colors hover:border-torque/30 hover:bg-torque/[.14] hover:text-torque"
+          >
+            {showCtx ? 'hide context' : 'view context used ↗'}
           </button>
         )}
       </div>
       {showCtx && ctx && (
-        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-black/40 p-2 text-[11px] text-neutral-400">
+        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-black/40 p-2 text-[11px] text-muted">
           {ctx}
         </pre>
       )}
-    </article>
+    </div>
   );
 }
 
@@ -1125,9 +2133,9 @@ function SkillApprovalCard({
   const diff = editing && original !== undefined ? lineDiff(original, text) : [];
 
   return (
-    <div className="ml-2 mt-2 max-w-3xl rounded border border-[#E24B4A]/40 bg-[#E24B4A]/5 p-3">
-      <p className="text-neutral-200">
-        Learned a new skill: <span className="font-semibold text-neutral-100">{skillName}</span> — review before it can be used.
+    <div className="ml-2 mt-2 max-w-3xl rounded-lg border border-torque/40 bg-torque/5 p-3">
+      <p className="text-ink">
+        Learned a new skill: <span className="font-semibold text-ink">{skillName}</span> — review before it can be used.
       </p>
 
       {isRemote && (
@@ -1147,7 +2155,7 @@ function SkillApprovalCard({
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
             spellCheck={false}
-            className="mt-2 h-48 w-full resize-y rounded bg-black/50 p-2 font-mono text-[11px] text-neutral-200 focus:outline-none"
+            className="mt-2 h-48 w-full resize-y rounded bg-black/50 p-2 font-mono text-[11px] text-ink focus:outline-none"
           />
           {diff.some((d) => d.t !== ' ') && (
             <pre className="mt-2 max-h-40 overflow-auto rounded bg-black/40 p-2 font-mono text-[11px]">
@@ -1155,9 +2163,9 @@ function SkillApprovalCard({
                 <div
                   key={k}
                   className={
-                    d.t === '+' ? 'bg-green-500/10 text-green-400'
-                    : d.t === '-' ? 'bg-[#E24B4A]/15 text-[#E24B4A]'
-                    : 'text-neutral-500'
+                    d.t === '+' ? 'bg-good/10 text-good'
+                    : d.t === '-' ? 'bg-faint/15 text-faint'
+                    : 'text-faint'
                   }
                 >
                   {d.t} {d.line}
@@ -1171,7 +2179,7 @@ function SkillApprovalCard({
       <div className="mt-3 flex flex-wrap gap-2">
         <button
           onClick={() => onDecide(queueId, 'APPROVE', editing ? text : undefined)}
-          className="rounded border border-[#E24B4A]/50 px-3 py-1 text-[11px] text-[#E24B4A] hover:bg-[#E24B4A]/15"
+          className="rounded border border-torque/50 px-3 py-1 text-[11px] text-torque hover:bg-torque/10"
         >
           {editing ? 'Approve with edits' : 'Allow'}
         </button>
@@ -1182,14 +2190,14 @@ function SkillApprovalCard({
         {!editing && !isRemote && (
           <button
             onClick={startEdit}
-            className="rounded border border-neutral-700 px-3 py-1 text-[11px] text-neutral-300 hover:border-neutral-500"
+            className="rounded border border-border-strong px-3 py-1 text-[11px] text-muted hover:border-faint"
           >
             {original === undefined ? 'load draft to edit' : 'Edit'}
           </button>
         )}
         <button
           onClick={() => onDecide(queueId, 'REJECT')}
-          className="rounded border border-neutral-700 px-3 py-1 text-[11px] text-neutral-400 hover:bg-neutral-800"
+          className="rounded border border-border-strong px-3 py-1 text-[11px] text-muted hover:bg-panel-3"
         >
           Deny
         </button>
@@ -1208,7 +2216,7 @@ interface ArgSummary {
 }
 
 function ToolPermissionCard({
-  toolName, argSummaries, argsTruncated, redactionNote, gate, onAllow, onDeny,
+  toolName, argSummaries, argsTruncated, redactionNote, gate, onAllow, onDeny, budgetLine = null,
 }: {
   toolName: string;
   /** C2-6 / property 8: raw proposed args are NEVER sent to a client any
@@ -1221,9 +2229,15 @@ function ToolPermissionCard({
   gate?: unknown;
   onAllow: () => void;
   onDeny: () => void;
+  /** Redesign 6/7: recorded session-budget context (remaining vs cap) for
+   *  the spend tier — real costSummary facts only, null when no frame has
+   *  landed (never fabricated). */
+  budgetLine?: string | null;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [targetsExpanded, setTargetsExpanded] = useState(false);
+  // Redesign 6/7: destructive tier arms only when the operator types DELETE.
+  const [confirmText, setConfirmText] = useState('');
 
   // TCLAW-5A-2 HONESTY FORK 1 (absent gate !== registry miss): the caller
   // passes meta.gate straight through, so `gate === undefined` means the
@@ -1236,6 +2250,21 @@ function ToolPermissionCard({
   // routing every non-undefined value through formatGateFacts is what makes
   // gate:null safe.
   const gateFacts = gate === undefined ? null : formatGateFacts(gate);
+
+  // Redesign 6/7: severity tier from the gate facts (pure selector, friendly.ts).
+  // unknown = gate absent/null/malformed — the registry was never consulted,
+  // so the card keeps its exact pre-redesign look (honesty forks 1+2).
+  const tier = approvalTierFromGate(gate);
+  // §7: 3px tier-colored LEFT EDGE is the primary tier signal.
+  const tierChrome =
+    tier === 'read' ? 'border-good/40 border-l-[3px] border-l-good bg-good/5'
+    : tier === 'spend' ? 'border-torque/40 border-l-[3px] border-l-torque bg-torque/5'
+    : tier === 'destructive' ? 'border-bad/40 border-l-[3px] border-l-bad bg-bad/5'
+    : 'border-torque/40 bg-torque/5';
+  const armed = confirmText === 'DELETE';
+  const rawGate = gate !== undefined && gate !== null && typeof gate === 'object'
+    ? (gate as Record<string, unknown>)
+    : null;
 
   // Friendly verb: take the segment after the last "__", underscores -> spaces.
   // Use lastIndexOf (not a \w+ regex) so hyphenated/dotted MCP names survive.
@@ -1257,18 +2286,31 @@ function ToolPermissionCard({
   const shownSummaries = expanded || !isLong ? summaries : summaries.slice(0, SHOW);
 
   return (
-    <div className="ml-2 mt-2 max-w-2xl rounded border border-[#E24B4A]/40 bg-[#E24B4A]/5 p-3">
-      <p className="text-neutral-200">
-        This task wants to <span className="font-semibold text-neutral-100">{friendly}</span> to finish.
+    <div className={`ml-2 mt-2 max-w-2xl rounded-lg border p-3 ${tierChrome}`}>
+      {/* §7 tier tag pill — rendered only when the gate actually classified
+          the action (tier 'unknown' = gate absent/malformed, no pill). */}
+      {tier !== 'unknown' && (
+        <span
+          className={`mb-2 inline-flex items-center rounded-[3px] px-2 py-[2px] text-[8.5px] font-bold uppercase tracking-[0.18em] ${
+            tier === 'read' ? 'bg-good/[.12] text-good'
+            : tier === 'spend' ? 'bg-torque/[.14] text-torque'
+            : 'bg-bad/[.12] text-bad'
+          }`}
+        >
+          {tier === 'read' ? 'read-only' : tier}
+        </span>
+      )}
+      <p className="text-ink">
+        This task wants to <span className="font-semibold text-ink">{friendly}</span> to finish.
       </p>
       <dl className="mt-2 space-y-1 text-[11px]">
         <div className="flex gap-2">
-          <dt className="w-16 shrink-0 uppercase tracking-widest text-neutral-500">tool</dt>
-          <dd className="font-mono text-neutral-300">{toolName || '(unknown)'}</dd>
+          <dt className="w-16 shrink-0 uppercase tracking-widest text-faint">tool</dt>
+          <dd className="font-mono text-muted">{toolName || '(unknown)'}</dd>
         </div>
         <div className="flex gap-2">
-          <dt className="w-16 shrink-0 uppercase tracking-widest text-neutral-500">scope</dt>
-          <dd className="text-neutral-400">One-time — applies to a single re-run</dd>
+          <dt className="w-16 shrink-0 uppercase tracking-widest text-faint">scope</dt>
+          <dd className="text-muted">One-time — applies to a single re-run</dd>
         </div>
       </dl>
       {/* TCLAW-5A-2 Card v2 gate block — additional dt/dd rows in a SECOND dl
@@ -1280,25 +2322,25 @@ function ToolPermissionCard({
         <dl className="mt-2 space-y-1 text-[11px]">
           {gateFacts.classRow && (
             <div className="flex gap-2">
-              <dt className="w-24 shrink-0 uppercase tracking-widest text-neutral-500">class</dt>
-              <dd className="text-neutral-400" title={gateFacts.classRow.title}>{gateFacts.classRow.text}</dd>
+              <dt className="w-24 shrink-0 uppercase tracking-widest text-faint">class</dt>
+              <dd className="text-muted" title={gateFacts.classRow.title}>{gateFacts.classRow.text}</dd>
             </div>
           )}
           {gateFacts.whyGated && (
             <div className="flex gap-2">
-              <dt className="w-24 shrink-0 uppercase tracking-widest text-neutral-500">why gated</dt>
-              <dd className="text-neutral-400" title={gateFacts.whyGated.title}>{gateFacts.whyGated.text}</dd>
+              <dt className="w-24 shrink-0 uppercase tracking-widest text-faint">why gated</dt>
+              <dd className="text-muted" title={gateFacts.whyGated.title}>{gateFacts.whyGated.text}</dd>
             </div>
           )}
           {gateFacts.server && (
             <div className="flex gap-2">
-              <dt className="w-24 shrink-0 uppercase tracking-widest text-neutral-500">server</dt>
-              <dd className="font-mono text-neutral-400">{gateFacts.server}</dd>
+              <dt className="w-24 shrink-0 uppercase tracking-widest text-faint">server</dt>
+              <dd className="font-mono text-muted">{gateFacts.server}</dd>
             </div>
           )}
           <div className="flex gap-2">
-            <dt className="w-24 shrink-0 uppercase tracking-widest text-neutral-500">may touch</dt>
-            <dd className="min-w-0 text-neutral-400">
+            <dt className="w-24 shrink-0 uppercase tracking-widest text-faint">may touch</dt>
+            <dd className="min-w-0 text-muted">
               {gateFacts.targets.items.length === 0 ? (
                 <span>none detected</span>
               ) : (
@@ -1312,7 +2354,7 @@ function ToolPermissionCard({
                     <button
                       type="button"
                       onClick={() => setTargetsExpanded((v) => !v)}
-                      className="ml-1 text-[10px] text-neutral-500 hover:text-neutral-300"
+                      className="ml-1 text-[10px] text-faint hover:text-muted"
                     >
                       {targetsExpanded ? 'show less' : `show all (${gateFacts.targets.items.length})`}
                     </button>
@@ -1328,18 +2370,20 @@ function ToolPermissionCard({
               )}
             </dd>
           </div>
-          <p className="text-[10px] text-neutral-600">{gateFacts.targetsCaption}</p>
+          <p className="text-[10px] text-faint/75">{gateFacts.targetsCaption}</p>
         </dl>
       )}
+      {/* C2-6 / property 8 (master): bounded, redacted per-key summaries —
+          raw args never reach the client. Token classes per PRD-UI-1 §0. */}
       {summaries.length > 0 && (
         <dl className="mt-2 space-y-1 rounded bg-black/40 p-2 text-[11px]">
           {shownSummaries.map((s) => (
             <div key={s.key} className="flex gap-2">
-              <dt className="w-28 shrink-0 break-all font-mono text-neutral-500">{s.key}</dt>
-              <dd className="min-w-0 break-all font-mono text-neutral-400">
+              <dt className="w-28 shrink-0 break-all font-mono text-faint">{s.key}</dt>
+              <dd className="min-w-0 break-all font-mono text-muted">
                 {s.value !== undefined
                   ? s.value
-                  : <span className="text-neutral-600">
+                  : <span className="text-faint/75">
                       {`<${s.type}${s.size !== undefined ? `, ${s.size}` : ''} — withheld>`}
                     </span>}
               </dd>
@@ -1348,26 +2392,79 @@ function ToolPermissionCard({
         </dl>
       )}
       {isLong && (
-        <button onClick={() => setExpanded((v) => !v)} className="mt-1 text-[10px] text-neutral-500 hover:text-neutral-300">
+        <button onClick={() => setExpanded((v) => !v)} className="mt-1 text-[10px] text-faint hover:text-muted">
           {expanded ? 'show less' : `show all (${summaries.length} arguments)`}
         </button>
       )}
       {argsTruncated && (
-        <p className="mt-1 text-[10px] text-neutral-600">
+        <p className="mt-1 text-[10px] text-faint/75">
           Some arguments were omitted from this summary.
         </p>
       )}
       {redactionNote && (
-        <p className="mt-1 text-[10px] text-neutral-600">{redactionNote}</p>
+        <p className="mt-1 text-[10px] text-faint/75">{redactionNote}</p>
       )}
+      {/* Redesign 6/7 — spend tier: recorded budget context inline. Real
+          costSummary facts only (null -> renders nothing, never a guess). */}
+      {tier === 'spend' && budgetLine && (
+        <p className="mt-2 text-[10px] text-faint">budget: {budgetLine}</p>
+      )}
+
+      {/* Redesign 6/7 — destructive tier: risk list, checkpoint truth, and
+          type-to-confirm. Every line is derived from gate facts or kernel
+          reality — no invented risk scores. */}
+      {tier === 'destructive' && (
+        <div className="mt-2 space-y-1.5 text-[10px]">
+          <ul className="space-y-0.5 text-[10.5px] tracking-[0.03em] text-faint">
+            {rawGate?.capability === 'exec' && (
+              <li><span className="mr-1.5 text-bad" aria-hidden>▸</span>runs code with this machine&apos;s privileges — effects are not bounded by the gateway</li>
+            )}
+            {rawGate?.capability === 'send' && (
+              <li><span className="mr-1.5 text-bad" aria-hidden>▸</span>sends data off this machine — outbound transfers cannot be recalled</li>
+            )}
+            {rawGate?.capability === undefined && (
+              <li><span className="mr-1.5 text-bad" aria-hidden>▸</span>the kernel could not classify this action — treat it as irreversible</li>
+            )}
+          </ul>
+          <p className="text-bad">
+            not covered by any checkpoint — the kernel exposes no checkpoint/rollback surface
+          </p>
+          <label className="block text-faint">
+            type DELETE to arm approve
+            <input
+              value={confirmText}
+              onChange={(e) => setConfirmText(e.target.value)}
+              placeholder="DELETE"
+              aria-label="type DELETE to arm approve"
+              spellCheck={false}
+              className="mt-1 block w-[130px] rounded-md border border-bad/40 bg-panel-2 px-3 py-[7px] font-mono text-[11px] tracking-[0.05em] text-ink caret-bad focus:border-bad focus:shadow-[0_0_0_3px_rgba(248,113,113,0.08)] focus:outline-none"
+            />
+          </label>
+        </div>
+      )}
+
       <div className="mt-3 flex gap-2">
-        <button onClick={onAllow} className="rounded border border-[#E24B4A]/50 px-3 py-1 text-[11px] text-[#E24B4A] hover:bg-[#E24B4A]/15">
-          Allow once
+        <button
+          onClick={onAllow}
+          disabled={tier === 'destructive' && !armed}
+          title={tier === 'destructive' && !armed ? 'type DELETE to arm' : undefined}
+          className={`rounded-md border px-3 py-1 text-[11px] disabled:opacity-[.35] ${
+            tier === 'read' ? 'border-good/50 text-good hover:bg-good/10'
+            : tier === 'spend' ? 'border-torque/50 text-torque hover:bg-torque/10'
+            : tier === 'destructive'
+              ? armed
+                ? 'border-bad bg-bad font-bold text-bg hover:brightness-110'
+                : 'border-bad/50 text-bad'
+            : 'border-torque/50 text-torque hover:bg-torque/10'
+          }`}
+        >
+          {tier === 'destructive' ? 'Execute' : 'Allow once'}
         </button>
-        <button onClick={onDeny} className="rounded border border-neutral-700 px-3 py-1 text-[11px] text-neutral-400 hover:bg-neutral-800">
+        <button onClick={onDeny} className="rounded border border-border-strong px-3 py-1 text-[11px] text-muted hover:bg-panel-3">
           Deny
         </button>
       </div>
     </div>
   );
 }
+

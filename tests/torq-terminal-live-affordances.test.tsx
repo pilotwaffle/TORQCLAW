@@ -19,10 +19,11 @@ if (typeof Element !== 'undefined' && !Element.prototype.scrollTo) {
 
 // MODULE-SCOPE mock object (vi.mock is hoisted; the factory must reference a
 // hoisted-safe holder). Use a mutable object the tests reassign .events on.
-const stream: { events: GatewayEvent[]; isConnected: boolean; sendCommand: ReturnType<typeof vi.fn> } = {
+const stream: { events: GatewayEvent[]; isConnected: boolean; sendCommand: ReturnType<typeof vi.fn>; reconnect: ReturnType<typeof vi.fn> } = {
   events: [],
   isConnected: true,
   sendCommand: vi.fn(() => true),
+  reconnect: vi.fn(),
 };
 vi.mock('../apps/console/src/components/useGatewayStream.js', () => ({
   useGatewayStream: () => stream,
@@ -85,7 +86,9 @@ describe('TorqTerminal live affordances (TCLAW-QA-2 — mounts the REAL TorqTerm
       // DEDUP (render-driven, approvals only — see honesty comment below).
       expect(stream.sendCommand).toHaveBeenCalledTimes(1);
       expect(screen.queryByText('Allow once')).not.toBeInTheDocument();
-      expect(screen.getByText('✓ allowed once')).toBeInTheDocument();
+      // §7: the decision flip pill reads '✓ approved' (colored good), not the
+      // old '✓ allowed once' copy — same decision-state gating, new label.
+      expect(screen.getByText('✓ approved')).toBeInTheDocument();
       // The no-double-dispatch guarantee is RENDER-DRIVEN: the decided map (:72)
       // gates the card off (!decision, :530/:542), unmounting the buttons.
       // decideTool/decideSkill themselves call sendCommand UNCONDITIONALLY
@@ -135,7 +138,9 @@ describe('TorqTerminal live affordances (TCLAW-QA-2 — mounts the REAL TorqTerm
       // DEDUP.
       expect(stream.sendCommand).toHaveBeenCalledTimes(1);
       expect(screen.queryByText('Allow')).not.toBeInTheDocument();
-      expect(screen.getByText('✓ allowed once')).toBeInTheDocument();
+      // §7: the decision flip pill reads '✓ approved' (colored good), not the
+      // old '✓ allowed once' copy — same decision-state gating, new label.
+      expect(screen.getByText('✓ approved')).toBeInTheDocument();
       // The no-double-dispatch guarantee is RENDER-DRIVEN: the decided map (:72)
       // gates the card off (!decision, :530/:542), unmounting the buttons.
       // decideTool/decideSkill themselves call sendCommand UNCONDITIONALLY
@@ -619,7 +624,14 @@ describe('TorqTerminal live affordances (TCLAW-QA-2 — mounts the REAL TorqTerm
       stream.events = [toolApproval({ targets: ['/tmp/x'], targetsSource: 'path-heuristic' })];
       render(<TorqTerminal />);
 
-      expect(screen.getByText('Allow once')).toBeInTheDocument();
+      // approvalTierFromGate fails closed: a gate present with no capability
+      // and no engine-approval-hook rule ('miss') is UNKNOWN to the
+      // registry, and unknown never means read — it escalates to the
+      // destructive tier (§7), whose primary action button is 'Execute'
+      // (armed only by typing DELETE), not 'Allow once'. 'Allow once' stays
+      // the label only for the read/spend tiers and the pre-registry
+      // (gate-absent/null) card — see F1/F1b/F2/F3.
+      expect(screen.getByText('Execute')).toBeInTheDocument();
       expect(screen.getByText('write-class (unclassified)')).toBeInTheDocument();
       expect(screen.queryByText('read')).not.toBeInTheDocument();
       expect(screen.queryByText('matched an approval pattern')).not.toBeInTheDocument();
@@ -633,7 +645,10 @@ describe('TorqTerminal live affordances (TCLAW-QA-2 — mounts the REAL TorqTerm
       })];
       render(<TorqTerminal />);
 
-      expect(screen.getByText('Allow once')).toBeInTheDocument();
+      // Same fail-closed escalation as F4: a frontier (engine-approval-hook)
+      // gate carries no capability either, so it is ALSO destructive tier —
+      // 'Execute', not 'Allow once'.
+      expect(screen.getByText('Execute')).toBeInTheDocument();
       expect(screen.getByText('engine approval hook (frontier tier)')).toBeInTheDocument();
       expect(screen.queryByText(/unclassified/)).not.toBeInTheDocument();
       expect(screen.queryByText('write')).not.toBeInTheDocument();
@@ -643,9 +658,11 @@ describe('TorqTerminal live affordances (TCLAW-QA-2 — mounts the REAL TorqTerm
     });
 
     it('F6. targets heuristic caption pin; [] -> "none detected"; targets:"nope" -> "none detected" no crash (RC-2); targetsSource:"other" -> raw caption, heuristic sentence absent (RC-6)', () => {
+      // No capability on any of these three gate fixtures -> 'miss' variant
+      // -> destructive tier -> 'Execute' is the primary button (see F4).
       stream.events = [toolApproval({ targets: [], targetsSource: 'path-heuristic' })];
       const { unmount } = render(<TorqTerminal />);
-      expect(screen.getByText('Allow once')).toBeInTheDocument();
+      expect(screen.getByText('Execute')).toBeInTheDocument();
       expect(screen.getByText('none detected')).toBeInTheDocument();
       unmount();
       cleanup();
@@ -670,7 +687,9 @@ describe('TorqTerminal live affordances (TCLAW-QA-2 — mounts the REAL TorqTerm
       })];
       render(<TorqTerminal />);
 
-      const card = screen.getByText('Allow once').closest('div.rounded')!;
+      // Card radius token is rounded-lg (§7 8px-radius approval cards), not
+      // the bare `rounded` class the pre-redesign card used.
+      const card = screen.getByText('Allow once').closest('div.rounded-lg')!;
       const buttons = within(card).getAllByRole('button');
       expect(buttons).toHaveLength(2);
       expect(screen.queryByText(/show all/)).not.toBeInTheDocument();
@@ -683,7 +702,7 @@ describe('TorqTerminal live affordances (TCLAW-QA-2 — mounts the REAL TorqTerm
       })];
       render(<TorqTerminal />);
 
-      const card = screen.getByText('Allow once').closest('div.rounded')!;
+      const card = screen.getByText('Allow once').closest('div.rounded-lg')!;
       const buttons = within(card).getAllByRole('button');
       expect(buttons).toHaveLength(3);
 
@@ -711,7 +730,9 @@ describe('TorqTerminal live affordances (TCLAW-QA-2 — mounts the REAL TorqTerm
       expect(arg).not.toHaveProperty('gate');
       expect(arg).not.toHaveProperty('targets');
       expect(stream.sendCommand).toHaveBeenCalledTimes(1);
-      expect(screen.getByText('✓ allowed once')).toBeInTheDocument();
+      // §7: the decision flip pill reads '✓ approved' (colored good), not the
+      // old '✓ allowed once' copy — same decision-state gating, new label.
+      expect(screen.getByText('✓ approved')).toBeInTheDocument();
     });
 
     it('F10. post-decision remnant shows no "may touch"/"write-class"/capability words', () => {
@@ -723,7 +744,9 @@ describe('TorqTerminal live affordances (TCLAW-QA-2 — mounts the REAL TorqTerm
 
       fireEvent.click(screen.getByText('Allow once'));
 
-      expect(screen.getByText('✓ allowed once')).toBeInTheDocument();
+      // §7: the decision flip pill reads '✓ approved' (colored good), not the
+      // old '✓ allowed once' copy — same decision-state gating, new label.
+      expect(screen.getByText('✓ approved')).toBeInTheDocument();
       expect(screen.queryByText('may touch')).not.toBeInTheDocument();
       expect(screen.queryByText(/write-class/)).not.toBeInTheDocument();
       expect(screen.queryByText('write')).not.toBeInTheDocument();

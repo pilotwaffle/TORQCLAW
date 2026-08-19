@@ -10,6 +10,14 @@
         "node"
       ]
     },
+    "expectedRole": {
+      "type": "string",
+      "enum": [
+        "operator",
+        "channel",
+        "node"
+      ]
+    },
     "token": {
       "type": "string"
     },
@@ -35,26 +43,45 @@
       "additionalProperties": false
     },
     "auth": {
-      "type": "object",
-      "properties": {
-        "kind": {
-          "type": "string",
-          "const": "surface"
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "surface"
+            },
+            "credential": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "credential"
+          ],
+          "additionalProperties": false
         },
-        "credential": {
-          "type": "string"
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "channel_service"
+            },
+            "credential": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "credential"
+          ],
+          "additionalProperties": false
         }
-      },
-      "required": [
-        "kind",
-        "credential"
-      ],
-      "additionalProperties": false
+      ]
     }
   },
   "required": [
-    "role",
-    "token",
     "clientInfo"
   ],
   "additionalProperties": false

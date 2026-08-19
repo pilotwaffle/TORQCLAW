@@ -21,10 +21,11 @@ if (typeof Element !== 'undefined' && !Element.prototype.scrollTo) {
 
 // MODULE-SCOPE mock object (vi.mock is hoisted; the factory must reference a
 // hoisted-safe holder). Use a mutable object the tests reassign .events on.
-const stream: { events: GatewayEvent[]; isConnected: boolean; sendCommand: ReturnType<typeof vi.fn> } = {
+const stream: { events: GatewayEvent[]; isConnected: boolean; sendCommand: ReturnType<typeof vi.fn>; reconnect: ReturnType<typeof vi.fn> } = {
   events: [],
   isConnected: true,
   sendCommand: vi.fn(() => true),
+  reconnect: vi.fn(),
 };
 vi.mock('../apps/console/src/components/useGatewayStream.js', () => ({
   useGatewayStream: () => stream,
@@ -208,7 +209,11 @@ describe('TorqTerminal busy/suppression (TCLAW-UIFIX-1)', () => {
     stream.events = [tierSelected('A'), toolCall('A'), arbitrarySystem()];
     render(<TorqTerminal />);
 
-    expect(screen.getByText('working…')).toBeInTheDocument();
+    // Redesign 3/7+4/7: once TIER_SELECTED mints the TaskCard, the working
+    // row lives INSIDE it and concatenates the live phase text onto the same
+    // "working…" span (`working…${phaseText ? ' '+phaseText : ''}`) rather
+    // than rendering it as a bare "working…" node — assert the live text.
+    expect(screen.getByText('working… Using read file (filesystem)')).toBeInTheDocument();
     expect(screen.getByText('stop')).toBeInTheDocument();
   });
 
@@ -246,7 +251,15 @@ describe('TorqTerminal busy/suppression (TCLAW-UIFIX-1)', () => {
     stream.events = [tierSelected('A'), toolCall('A'), resultFrame('A'), doneReceipt('A')];
     render(<TorqTerminal />);
 
-    expect(screen.getByText('Done')).toBeInTheDocument();
+    // §4f: the receipt strip's good chip now reads "done" (lowercase, with a
+    // ✓ SVG glyph) instead of the raw SYSTEM message text "Done" — the
+    // ReceiptCard renders receipt facts, not the frame's message string.
+    // This fixture's RESULT event also happens to carry message: 'done'
+    // (resultFrame's literal), which renders as the answer body text and
+    // collides on a plain text query — scope to the <span> chip specifically
+    // (the answer body is a <div>, the receipt chip is a <span>).
+    const doneMatches = screen.getAllByText('done');
+    expect(doneMatches.some((el) => el.tagName === 'SPAN')).toBe(true);
   });
 
   it('8c. memory renders its message row', () => {
@@ -292,20 +305,22 @@ describe('TorqTerminal busy/suppression (TCLAW-UIFIX-1)', () => {
     stream.events = [tierSelected('A'), toolCall('A'), memoryShow()];
     render(<TorqTerminal />);
 
-    expect(screen.getByText('working…')).toBeInTheDocument();
+    // See test 7: the working row lives inside the TaskCard once
+    // TIER_SELECTED mints it, and concatenates the live phase text.
+    expect(screen.getByText('working… Using read file (filesystem)')).toBeInTheDocument();
   });
 
   it('mid-task approvalList case: [tierSelected, toolCall, approvalListFrame] -> busy TRUE (the scan lands on TOOL_CALL)', () => {
     stream.events = [tierSelected('A'), toolCall('A'), approvalListFrame()];
     render(<TorqTerminal />);
 
-    expect(screen.getByText('working…')).toBeInTheDocument();
+    expect(screen.getByText('working… Using read file (filesystem)')).toBeInTheDocument();
   });
 
   it('mid-task safeExportView case: [tierSelected, toolCall, safeExportFrame] -> busy TRUE (the scan lands on TOOL_CALL)', () => {
     stream.events = [tierSelected('A'), toolCall('A'), safeExportFrame()];
     render(<TorqTerminal />);
 
-    expect(screen.getByText('working…')).toBeInTheDocument();
+    expect(screen.getByText('working… Using read file (filesystem)')).toBeInTheDocument();
   });
 });

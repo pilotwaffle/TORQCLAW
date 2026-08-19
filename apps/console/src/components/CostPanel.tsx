@@ -104,18 +104,40 @@ export default function CostPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Redesign 5/7: manual refresh + an honest "as of" footer, matching the
+  // ApprovalHistoryPanel pattern. Strictly read-only still: the ONLY action
+  // this dispatches is GET_COST_SUMMARY (same as the mount fetch). The panel
+  // is a pull surface — figures are as fresh as the last frame received, so
+  // the operator must be able to re-pull and must always see that bound.
+  const refresh = () => {
+    sendCommand({ action: 'GET_COST_SUMMARY', recentLimit: 20 });
+  };
+
   return (
-    <div className="absolute inset-0 z-20 flex flex-col bg-[#0a0a0a]/98 text-sm text-neutral-300">
-      <div className="flex items-center justify-between border-b border-neutral-800 p-3">
-        <h2 className="text-[10px] font-bold uppercase tracking-widest text-neutral-400">Cost Control Center</h2>
-        <button onClick={onClose} className="text-neutral-500 hover:text-neutral-200" aria-label="Close cost panel">
-          close
-        </button>
+    <div className="absolute inset-0 z-20 flex flex-col bg-bg/98 text-[13px] leading-[1.6] text-muted">
+      <div className="flex items-center justify-between border-b border-edge p-3">
+        <h2 className="text-[10px] font-bold uppercase tracking-widest text-muted">Cost Control Center</h2>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={refresh}
+            className="text-faint hover:text-ink"
+          >
+            refresh
+          </button>
+          <button onClick={onClose} className="text-faint hover:text-ink" aria-label="Close cost panel">
+            close
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-4">
-        {!summary && <p className="text-neutral-600">Loading…</p>}
+        {!summary && <p className="text-faint/75">Loading…</p>}
         {summary && <CostSummaryView summary={summary} />}
+      </div>
+
+      <div className="border-t border-edge p-2 text-[10px] text-faint/75">
+        <p>Figures are as of the last refresh — this is a pull surface, not a live feed.</p>
       </div>
     </div>
   );
@@ -134,7 +156,7 @@ function CostSummaryView({ summary }: { summary: CostSummary }) {
           <Row label="session cap env var" value={summary.sessionCapEnvVar} />
           <Row label="daily cap" value={formatCap(summary.dailyCap)} />
           <Row label="daily cap env var" value={summary.dailyCapEnvVar} />
-          <p className="pt-1 text-[10px] text-neutral-600">Daily cap resets 00:00 UTC.</p>
+          <p className="pt-1 text-[10px] text-faint/75">Daily cap resets 00:00 UTC.</p>
         </dl>
       </Section>
 
@@ -153,9 +175,9 @@ function CostSummaryView({ summary }: { summary: CostSummary }) {
       </Section>
 
       <Section title="Cap state">
-        <p className={breach ? 'text-[#E24B4A]' : 'text-neutral-300'}>{formatCapState(breach)}</p>
+        <p className={breach ? 'text-bad' : 'text-muted'}>{formatCapState(breach)}</p>
         {breach && (
-          <p className="mt-1 text-[10px] text-neutral-500">
+          <p className="mt-1 text-[10px] text-faint">
             Raise the cap by setting {breach.envVar} — operator action outside this app.
             {breach.cap === 'daily' && ' Daily caps reset 00:00 UTC.'}
           </p>
@@ -173,22 +195,22 @@ function CostSummaryView({ summary }: { summary: CostSummary }) {
       </Section>
 
       <Section title="Cloud tasks (this session)">
-        <p className="text-neutral-300">{summary.cloudTaskCount}</p>
+        <p className="text-muted">{summary.cloudTaskCount}</p>
       </Section>
 
       <Section title="Provider summary">
         {summary.providerSummary.length === 0 ? (
-          <p className="text-neutral-600">none</p>
+          <p className="text-faint/75">none</p>
         ) : (
           <dl className="space-y-1 text-[12px]">
             {summary.providerSummary.map((row, i) => {
               const fmt = formatProviderSummaryRow(row);
               return (
                 <div key={i} className="flex gap-2">
-                  <dt className="w-32 shrink-0 text-neutral-500">{fmt.provider}</dt>
-                  <dd className="text-neutral-300">
+                  <dt className="w-32 shrink-0 text-faint">{fmt.provider}</dt>
+                  <dd className="text-muted">
                     {fmt.recorded}
-                    {fmt.caveat && <span className="ml-2 text-[10px] text-amber-400">{fmt.caveat}</span>}
+                    {fmt.caveat && <span className="ml-2 text-[10px] text-torque">{fmt.caveat}</span>}
                   </dd>
                 </div>
               );
@@ -199,7 +221,7 @@ function CostSummaryView({ summary }: { summary: CostSummary }) {
 
       <Section title="Recent ledger">
         {summary.recentLedger.length === 0 ? (
-          <p className="text-neutral-600">none</p>
+          <p className="text-faint/75">none</p>
         ) : (
           <ul className="space-y-1">
             {summary.recentLedger.map((row) => (
@@ -217,15 +239,15 @@ function LedgerRow({ row }: { row: RecentLedgerRow }) {
   const attr = formatAttribution(row.attribution);
   const cost = formatLedgerCost(row.costUsd, row.attribution);
   return (
-    <li className="rounded border border-neutral-800 px-2 py-1 text-[11px]">
+    <li className="rounded border border-edge px-2 py-1 text-[11px]">
       <div className="flex flex-wrap items-center gap-x-2">
-        <span className="font-mono text-neutral-500">{row.taskId}</span>
-        <span className="text-neutral-300">{cost}</span>
-        <span className={attr.estimated ? 'text-amber-400' : 'text-neutral-500'} title={attr.tooltip}>
+        <span className="font-mono text-faint">{row.taskId}</span>
+        <span className="text-muted">{cost}</span>
+        <span className={attr.estimated ? 'text-torque' : 'text-faint'} title={attr.tooltip}>
           {attr.label}
         </span>
-        <span className="text-neutral-600">{row.provider ?? 'unknown/local'}</span>
-        <span className="text-neutral-700">{row.createdAt}</span>
+        <span className="text-faint/75">{row.provider ?? 'unknown/local'}</span>
+        <span className="text-faint/50">{row.createdAt}</span>
       </div>
     </li>
   );
@@ -234,7 +256,7 @@ function LedgerRow({ row }: { row: RecentLedgerRow }) {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section>
-      <h3 className="mb-1.5 text-[10px] font-bold uppercase tracking-widest text-neutral-500">{title}</h3>
+      <h3 className="mb-1.5 text-[10px] font-bold uppercase tracking-widest text-faint">{title}</h3>
       {children}
     </section>
   );
@@ -243,8 +265,9 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function Row({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
     <div className="flex gap-2" title={title}>
-      <dt className="w-40 shrink-0 text-neutral-500">{label}</dt>
-      <dd className="text-neutral-300">{value}</dd>
+      <dt className="w-40 shrink-0 text-faint">{label}</dt>
+      <dd className="text-muted">{value}</dd>
     </div>
   );
 }
+

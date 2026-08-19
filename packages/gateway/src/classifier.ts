@@ -39,6 +39,11 @@ export interface Classification {
 /** Never throws. The enrichment step must never be what blocks a request. */
 export async function classifyTaskType(prompt: string): Promise<Classification> {
   const start = performance.now();
+  const cls = await classifyTaskTypeRaw(prompt, start);
+  return overrideReadTypeForFileWrite(prompt, cls);
+}
+
+async function classifyTaskTypeRaw(prompt: string, start: number): Promise<Classification> {
   try {
     const res = await fetch(`${OLLAMA_HOST}/api/chat`, {
       method: 'POST',
@@ -71,6 +76,36 @@ export async function classifyTaskType(prompt: string): Promise<Classification> 
   } catch { /* cold model, timeout, Ollama down — fall through */ }
   return { ...keywordFallback(prompt), latencyMs: performance.now() - start };
 }
+
+// File-write intent override. A task that must produce or modify a file on disk
+// needs the workspace_write profile (the `files` toolset). If the classifier
+// landed it on a read/research type, promote it to ROUTINE_AUTOMATION so the
+// engine actually receives the (approval-gated) files toolset — otherwise
+// "create a mockup of X.png" runs web-only and can NEVER write the file (the
+// failure the operator surfaced). COMPLEX_CODING is deliberately left alone:
+// terminal_power is already broader than workspace_write. Writes remain human-
+// approved via the P6 pre_tool_call hook, so granting the toolset is safe.
+const FILE_WRITE_INTENT = new RegExp(
+  '\\b(create|write|save|generate|make|build|produce|add|append|edit|update|modify|delete|remove|mock\\s*up|render|export|draft|scaffold|draw|design)\\b' +
+    '[\\s\\S]{0,80}?' +
+    // A path-like token with an alpha-leading extension (avoids "v3.14"), or an
+    // explicit file-ish noun.
+    '(\\S+\\.[A-Za-z][A-Za-z0-9]{1,5}\\b' +
+    '|\\b(files?|documents?|screenshots?|mock\\s*ups?|images?|pictures?|photos?|icons?|logos?|png|jpe?g|svg|gif|webp|pdf|html?|spreadsheets?|slides?)\\b)',
+  'i',
+);
+const READ_RESEARCH_TYPES: ReadonlySet<TaskType> = new Set([
+  'DATA_EXTRACTION',
+  'SUMMARIZATION',
+  'AUTONOMOUS_RESEARCH',
+]);
+
+function overrideReadTypeForFileWrite(prompt: string, cls: Classification): Classification {
+  if (!READ_RESEARCH_TYPES.has(cls.taskType)) return cls;
+  if (!FILE_WRITE_INTENT.test(prompt)) return cls;
+  return { ...cls, taskType: 'ROUTINE_AUTOMATION', confidence: Math.max(cls.confidence, 0.6) };
+}
+export { overrideReadTypeForFileWrite };
 
 // Crude-but-safe degradation rung: checked most-specific-first; misfires land
 // at low confidence, which Rule 1.5 routes to FRONTIER anyway.

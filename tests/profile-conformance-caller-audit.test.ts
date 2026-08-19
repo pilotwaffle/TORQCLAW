@@ -20,7 +20,15 @@ describe('AC-10A TypeScript compiler-API production caller audit', () => {
       'executeTool:packages/inference/src/ollama.ts',
     ]);
     expect(calls.every((call) => call.resolved)).toBe(true);
-    expect(calls[0]!.argumentTexts).toEqual(['realName', 'toolArgs', 'req.effectiveProfile']);
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S2: executeTool gained a 4th,
+    // OPTIONAL parameter (callerCollabPrincipalId) so the in-process collab
+    // tool handler can learn which agent principal a task is bound to,
+    // without it ever being a tool ARGUMENT (model output). The 3rd
+    // position (req.effectiveProfile) is unchanged and still forwarded —
+    // this assertion's core guarantee (effectiveProfile forwarding) holds.
+    expect(calls[0]!.argumentTexts).toEqual([
+      'realName', 'toolArgs', 'req.effectiveProfile', 'req.payload.callerCollabPrincipalId',
+    ]);
   });
 
   it('inventories the two assertResolvedProfile ingress calls', () => {

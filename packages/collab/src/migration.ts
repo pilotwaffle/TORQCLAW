@@ -220,4 +220,259 @@ CREATE TABLE collab_schema_migrations (
     db.exec('ROLLBACK');
     throw error;
   }
+
+  // PRD-TCLAW-AGENT-PARTICIPATION-007 S3: deliberately NOT cascaded here.
+  // An earlier version of this function called runAgentAutoreplyMigration
+  // unconditionally at the end of every runCollaborationMigration call --
+  // that broke tests/auth-v2-phase2a.test.ts's own fail-closed foundation
+  // check (authIdentityMigration.ts's assertShippedCollabLedger), which
+  // deliberately THROWS if collab_schema_migrations carries an "unexpected"
+  // extra row beyond its own known two-row ledger -- that is the exact
+  // security property that test's "extra ledger row" case pins. Cascading
+  // here made every fresh collab.db carry a third row before the AUTH-005
+  // lane ever ran, permanently tripping its ambiguous-foundation refusal.
+  // The fix is the SAME pattern packages/gateway/src/collabIdentity.ts's
+  // migrateCollabDb already uses for C1 (runSurfaceIdentityMigration,
+  // runSurfaceAuditMigration are separate, explicitly-invoked calls, never
+  // cascaded inside this function): callers that want S3's tables call
+  // runAgentAutoreplyMigration(db) themselves, alongside their own call to
+  // runCollaborationMigration, exactly as migrateCollabDb now does.
+}
+
+/**
+ * PRD-TCLAW-AGENT-PARTICIPATION-007 S3 — additive migration for the
+ * auto-reply turn watermark and the STOP control.
+ *
+ * Migration ID: 20260818_001_agent_autoreply_v1
+ *
+ * Strictly additive (same discipline as approvalSchema.ts's C2 migration):
+ * two new tables, `CREATE TABLE IF NOT EXISTS`, no change to any existing
+ * table or column. Idempotent: re-running when the id is already recorded
+ * is a complete no-op.
+ *
+ * WHY THESE LIVE IN collab.db, NOT state.db
+ * ------------------------------------------
+ * Both tables are keyed on collab substrate identifiers (channel_id,
+ * channel_seq, agent principal_id) that only collab.db can enforce FKs
+ * against; cross-database FKs are forbidden (see approvalSchema.ts's own
+ * note). The gateway-side dispatcher (autoReplyDispatcher.ts) reads/writes
+ * these through the same store DB handle collabSurface.ts's getStore()
+ * already resolves -- no second connection.
+ *
+ * collab_agent_turns — THE WATERMARK (G1R B-3 part b)
+ * -----------------------------------------------------
+ * "highest seq dispatched" and "highest seq completed" are DIFFERENT
+ * watermarks, and conflating them either strands a branch silently (write
+ * on dispatch, crash before completion => never re-dispatched, looks like
+ * legitimate A3-f silence) or replays a completed turn (write on
+ * completion, crash after dispatch => re-dispatched on restart). This table
+ * makes both watermarks the SAME durable row, tracked through an explicit
+ * state machine: 'dispatched' -> ('completed' | 'no_post' | 'terminated').
+ * A boot-time sweep (recoverStrandedAgentTurns, autoReplyDispatcher.ts)
+ * finds every row still 'dispatched' past a grace window and re-dispatches
+ * it -- the exact recovery discipline grantAdmission.ts's
+ * revokeInertGrants uses for the crash-between-decision-and-effect class,
+ * reused rather than reinvented (G1R's explicit instruction).
+ *
+ * PRIMARY KEY (channel_id, agent_principal_id, channel_seq) is itself the
+ * idempotency mechanism (anti-storm requirement 2): a second attempt to
+ * dispatch the same triple is a duplicate INSERT and fails the uniqueness
+ * constraint, so "already dispatched or completed" is enforced by SQLite,
+ * not by an application-level read-then-write race.
+ *
+ * collab_autoreply_stop — THE STOP CONTROL (R-3a)
+ * -------------------------------------------------
+ * A gateway-side, persisted halt. scope='global' (channel_id NULL) OR
+ * scope='channel' (channel_id set) -- checked by the dispatcher BEFORE
+ * every new dispatch, never inside a turn (in-flight turns complete; their
+ * posts do not re-trigger, per G1R N-2's ruling on N>2 fan-out semantics).
+ * Persisted (not in-memory) so STOP survives a gateway restart (OQ-3,
+ * ruled: survive, don't just state non-persistence honestly -- persisting
+ * is strictly safer and no harder to build).
+ */
+export const AGENT_AUTOREPLY_MIGRATION_ID = '20260818_001_agent_autoreply_v1';
+
+export function runAgentAutoreplyMigration(db: Database.Database): void {
+  const transaction = db.transaction(() => {
+    const existing = db
+      .prepare('SELECT 1 FROM collab_schema_migrations WHERE id = ?')
+      .get(AGENT_AUTOREPLY_MIGRATION_ID);
+    if (existing) return;
+
+    db.exec(`
+CREATE TABLE IF NOT EXISTS collab_agent_turns (
+  channel_id TEXT NOT NULL REFERENCES collab_channels(id),
+  agent_principal_id TEXT NOT NULL REFERENCES principals(id),
+  channel_seq INTEGER NOT NULL CHECK(channel_seq > 0),
+  trigger_event_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('dispatched','completed','no_post','terminated')),
+  dispatch_request_id TEXT,
+  dispatched_at TEXT NOT NULL,
+  resolved_at TEXT,
+  PRIMARY KEY(channel_id, agent_principal_id, channel_seq)
+);
+
+CREATE INDEX IF NOT EXISTS collab_agent_turns_state_dispatched
+  ON collab_agent_turns(state, dispatched_at);
+
+CREATE TABLE IF NOT EXISTS collab_autoreply_stop (
+  scope TEXT NOT NULL CHECK(scope IN ('global','channel')),
+  channel_id TEXT REFERENCES collab_channels(id),
+  stopped_by_principal_id TEXT NOT NULL REFERENCES principals(id),
+  stopped_at TEXT NOT NULL,
+  CHECK ((scope='global' AND channel_id IS NULL) OR (scope='channel' AND channel_id IS NOT NULL))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS collab_autoreply_stop_global_singleton
+  ON collab_autoreply_stop(scope) WHERE scope='global';
+
+CREATE UNIQUE INDEX IF NOT EXISTS collab_autoreply_stop_channel_singleton
+  ON collab_autoreply_stop(channel_id) WHERE scope='channel';
+    `);
+
+    db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
+      AGENT_AUTOREPLY_MIGRATION_ID,
+      new Date().toISOString(),
+    );
+  });
+
+  try {
+    db.exec('BEGIN EXCLUSIVE');
+    transaction();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/**
+ * CRON — additive migration for scheduled autonomous agent turns.
+ * G1R Gate-1 §2A ruling: cron is the SAME threat shape as auto-reply, and
+ * strictly worse (no human proximity, no natural terminator, durable state
+ * that outlives the regime it was created under). Prerequisite order per
+ * that ruling: S0 (argument-scoped grants, shipped) FIRST, then auto-reply
+ * and cron in either order. S0 and auto-reply (S3) are both shipped as of
+ * this migration; this is the cron slice.
+ *
+ * Migration ID: 20260818_002_agent_cron_v1
+ *
+ * Strictly additive: two new tables, `CREATE TABLE IF NOT EXISTS`, no
+ * change to any existing table or column. Idempotent.
+ *
+ * collab_agent_schedules — THE SCHEDULE (a TRIGGER, never a stored
+ * authorization; G1R §2A.5(d))
+ * -----------------------------------------------------------------------
+ * A schedule names WHEN to wake an agent in a channel it is ALREADY a
+ * member of. It does NOT store, cache, or widen any authority: every wake
+ * re-reads live membership, principal status, and profile delegation from
+ * the SAME tables resolveEligibleAgents/admitToolCall already trust
+ * (cron.ts's assertScheduleStillAuthorized, called at fire time, never at
+ * creation time). Deleting or deactivating a schedule never needs to
+ * "revoke" anything beyond itself, because the schedule never held
+ * authority to begin with -- only the channel membership row does, and that
+ * is unaffected by this table.
+ *
+ * `interval_seconds` (not a cron expression) is a deliberate scope choice:
+ * the brief requires "the smallest honest thing", and a cron-expression
+ * parser is a new correctness surface with its own bug class (timezone,
+ * DST, month-length edge cases) unrelated to the authority question this
+ * slice exists to answer. A fixed-interval scheduler is the smallest
+ * mechanism that has a wake time with no natural terminator (G1R's
+ * defining cron property) and therefore fully exercises every ruling this
+ * slice is scoped to prove.
+ *
+ * `state` follows the same operator-visible STOP discipline as
+ * collab_autoreply_stop: 'active' | 'stopped'. A channel-level or
+ * global autoreply STOP (collab_autoreply_stop, already shipped) is ALSO
+ * consulted at fire time (cron.ts) -- an operator stopping a channel must
+ * stop scheduled turns into it too, without requiring a second STOP
+ * command per schedule.
+ *
+ * collab_agent_schedule_runs — THE WAKE RECORD, and the THIRD STATE
+ * -----------------------------------------------------------------------
+ * One row per fire attempt. `state` extends the collab_agent_turns state
+ * machine with exactly one new terminal: 'blocked_awaiting_approval' --
+ * G1R B-8's required THIRD, EXPLICITLY DISTINGUISHABLE state for an
+ * unattended run whose approval went unanswered. Never bare 'completed',
+ * never bare 'failed' (there is no bare 'failed' in this state machine at
+ * all, matching collab_agent_turns' own choice of 'terminated' over a
+ * generic failure state), and never silently absent. PRIMARY KEY
+ * (schedule_id, fire_seq) is the idempotency mechanism, exactly mirroring
+ * collab_agent_turns' (channel_id, agent_principal_id, channel_seq).
+ */
+export const AGENT_CRON_MIGRATION_ID = '20260818_002_agent_cron_v1';
+
+export function runAgentCronMigration(db: Database.Database): void {
+  const transaction = db.transaction(() => {
+    const existing = db
+      .prepare('SELECT 1 FROM collab_schema_migrations WHERE id = ?')
+      .get(AGENT_CRON_MIGRATION_ID);
+    if (existing) return;
+
+    db.exec(`
+CREATE TABLE IF NOT EXISTS collab_agent_schedules (
+  id TEXT PRIMARY KEY,
+  channel_id TEXT NOT NULL REFERENCES collab_channels(id),
+  agent_principal_id TEXT NOT NULL REFERENCES principals(id),
+  created_by_principal_id TEXT NOT NULL REFERENCES principals(id),
+  interval_seconds INTEGER NOT NULL CHECK(interval_seconds >= 60),
+  prompt_hint TEXT,
+  state TEXT NOT NULL CHECK(state IN ('active','stopped')),
+  next_fire_seq INTEGER NOT NULL DEFAULT 0,
+  next_fire_at TEXT NOT NULL,
+  last_fired_at TEXT,
+  -- G2A C-1: CREATE_SCHEDULE.idempotencyKey was validated by the contract,
+  -- threaded to the handler, and NEVER USED. A client applying this repo's own
+  -- retry-with-the-same-key discipline -- the pattern S3 built for exactly this
+  -- purpose -- silently created a SECOND schedule: double fires, double model
+  -- calls, possibly double posts, indefinitely, on the one entity whose
+  -- mistakes persist and re-fire unattended.
+  --
+  -- Enforced in the SCHEMA rather than only in handler logic, so a retry cannot
+  -- duplicate even if the handler is later refactored. The unique index is
+  -- scoped per creating principal, matching runKeyedCommand's
+  -- (principal, command, key) shape rather than inventing a new one.
+  idempotency_key TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS collab_agent_schedules_idem
+  ON collab_agent_schedules(created_by_principal_id, idempotency_key);
+
+CREATE INDEX IF NOT EXISTS collab_agent_schedules_due
+  ON collab_agent_schedules(state, next_fire_at);
+
+CREATE TABLE IF NOT EXISTS collab_agent_schedule_runs (
+  schedule_id TEXT NOT NULL REFERENCES collab_agent_schedules(id),
+  fire_seq INTEGER NOT NULL CHECK(fire_seq > 0),
+  channel_id TEXT NOT NULL,
+  agent_principal_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('dispatched','completed','no_post','terminated','blocked_awaiting_approval')),
+  dispatch_request_id TEXT,
+  refusal_reason TEXT,
+  fired_at TEXT NOT NULL,
+  resolved_at TEXT,
+  PRIMARY KEY(schedule_id, fire_seq)
+);
+
+CREATE INDEX IF NOT EXISTS collab_agent_schedule_runs_state_fired
+  ON collab_agent_schedule_runs(state, fired_at);
+    `);
+
+    db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
+      AGENT_CRON_MIGRATION_ID,
+      new Date().toISOString(),
+    );
+  });
+
+  try {
+    db.exec('BEGIN EXCLUSIVE');
+    transaction();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
 }

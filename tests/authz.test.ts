@@ -3,7 +3,8 @@ import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ClientCommand } from '@torqclaw/contracts';
-import { authorize, checkResumeRole, type Role, type AuthzContext } from '../packages/gateway/src/authz.js';
+import { authorize, type Role, type AuthzContext } from '../packages/gateway/src/authz.js';
+import type { AuthenticatedCaller } from '../packages/gateway/src/connectionAuth.js';
 
 const OWNER_SID = 'session-owner';
 const OTHER_SID = 'session-other';
@@ -176,42 +177,15 @@ describe('authorize() — role-based command authorization', () => {
   });
 });
 
-describe('checkResumeRole() — resume-role escalation guard (production path)', () => {
-  const ROLES: Role[] = ['operator', 'channel', 'node'];
-
-  describe('resume + matching role -> ok', () => {
-    it.each(ROLES)('resume as %s with stored %s -> ok', (r) => {
-      expect(checkResumeRole(true, r, r)).toEqual({ ok: true });
-    });
+describe('sessions.resolve() server-derived resume-role enforcement (TCLAW-0B)', () => {
+  const caller = (role: Role): AuthenticatedCaller => ({
+    authClass: role === 'operator' ? 'operator_surface' : role === 'channel' ? 'channel_service' : 'agent_surface',
+    role,
+    // Keep one server-owned principal stable so this suite isolates the
+    // persisted-role check rather than failing earlier on ownership.
+    binding: { principalId: 'principal-1', surfaceId: `${role}-surface` },
   });
 
-  describe('resume + mismatched role -> reject (every ordered pair)', () => {
-    const mismatches = ROLES.flatMap((stored) =>
-      ROLES.filter((frame) => frame !== stored).map((frame) => [stored, frame] as const),
-    );
-    it.each(mismatches)('stored=%s, frame=%s -> reject', (stored, frame) => {
-      const d = checkResumeRole(true, stored, frame);
-      expect(d.ok).toBe(false);
-      if (!d.ok) {
-        expect(d.reason).toBeTruthy();
-        // Reason must not leak internals.
-        expect(d.reason).not.toMatch(/sql|select|table|db\.|stack/i);
-      }
-    });
-  });
-
-  describe('fresh session (resumed=false) -> guard does not apply', () => {
-    it.each(ROLES)('fresh session as %s -> ok even against a differing stored value', (r) => {
-      // On the create path the frame role IS the persisted role, but the guard
-      // must be inert for ANY input when resumed=false — it only polices RESUME.
-      const other = ROLES.find((x) => x !== r)!;
-      expect(checkResumeRole(false, other, r)).toEqual({ ok: true });
-      expect(checkResumeRole(false, r, r)).toEqual({ ok: true });
-    });
-  });
-});
-
-describe('sessions.resolve() + checkResumeRole — connect-path integration (TCLAW-0B)', () => {
   it('resume with the same session id returns the persisted role', async () => {
     process.env.TORQCLAW_DATA_DIR = mkdtempSync(join(tmpdir(), 'torq-authz-'));
     const { sessions } = await import('../packages/gateway/src/sessions.js');
@@ -220,7 +194,7 @@ describe('sessions.resolve() + checkResumeRole — connect-path integration (TCL
       role: 'operator',
       token: 't',
       clientInfo: { name: 'x', version: '0' },
-    } as any);
+    } as any, caller('operator'));
     expect(created.resumed).toBe(false);
     expect(created.role).toBe('operator');
 
@@ -229,40 +203,30 @@ describe('sessions.resolve() + checkResumeRole — connect-path integration (TCL
       token: 't',
       sessionId: created.sessionId,
       clientInfo: { name: 'x', version: '0' },
-    } as any);
+    } as any, caller('operator'));
     expect(resumed.resumed).toBe(true);
     expect(resumed.role).toBe('operator');
   });
 
   it('operator session resumed as channel is rejected by the guard (and vice versa)', async () => {
-    // Same two calls the production connect path makes, in order:
-    // resolve() against the real sqlite sessions table, then checkResumeRole()
-    // with the resolved (persisted) role vs the incoming frame role.
     process.env.TORQCLAW_DATA_DIR = mkdtempSync(join(tmpdir(), 'torq-authz-guard-'));
     const { sessions } = await import('../packages/gateway/src/sessions.js');
 
-    const connect = (role: string, sessionId?: string) =>
+    const connect = (role: Role, sessionId?: string) =>
       sessions.resolve({
         role, token: 't', sessionId, clientInfo: { name: 'x', version: '0' },
-      } as any);
+      } as any, caller(role));
 
     // (1) operator session hijacked by a channel client -> reject.
     const op = connect('operator');
-    const hijackAsChannel = connect('channel', op.sessionId);
-    expect(hijackAsChannel.resumed).toBe(true); // row matched — resolve alone does NOT protect
-    const d1 = checkResumeRole(hijackAsChannel.resumed, hijackAsChannel.role, 'channel');
-    expect(d1.ok).toBe(false);
+    expect(() => connect('channel', op.sessionId)).toThrow(/derived role/i);
 
     // (2) inverse: channel session escalated to operator -> reject.
     const ch = connect('channel');
-    const escalateAsOperator = connect('operator', ch.sessionId);
-    expect(escalateAsOperator.resumed).toBe(true);
-    const d2 = checkResumeRole(escalateAsOperator.resumed, escalateAsOperator.role, 'operator');
-    expect(d2.ok).toBe(false);
+    expect(() => connect('operator', ch.sessionId)).toThrow(/derived role/i);
 
     // (3) legitimate resume with the matching role -> ok.
     const legit = connect('operator', op.sessionId);
-    const d3 = checkResumeRole(legit.resumed, legit.role, 'operator');
-    expect(d3).toEqual({ ok: true });
+    expect(legit).toMatchObject({ resumed: true, role: 'operator', sessionId: op.sessionId });
   });
 });

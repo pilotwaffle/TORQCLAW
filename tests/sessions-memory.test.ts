@@ -9,7 +9,10 @@ process.env.TORQCLAW_DATA_DIR = mkdtempSync(join(tmpdir(), 'torq-mem-'));
 const { sessions } = await import('../packages/gateway/src/sessions.js');
 
 const newSession = () =>
-  sessions.resolve({ role: 'operator', token: 't', clientInfo: { name: 'x', version: '0' } } as any).sessionId;
+  sessions.resolve(
+    { role: 'operator', token: 't', clientInfo: { name: 'x', version: '0' } } as any,
+    { authClass: 'legacy_gateway', role: 'operator', binding: null },
+  ).sessionId;
 
 describe('P4.5 memory controls (sessions)', () => {
   it('SHOW lists stored episodes; FORGET_SESSION removes them', () => {

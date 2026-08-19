@@ -109,6 +109,24 @@ export class RecoveryKitError extends Error {
   }
 }
 
+/**
+ * Thrown by `bootstrapOperator` when the DB transaction committed but
+ * persisting a pepper to the SecretStore afterward failed (e.g. a second
+ * bootstrap attempt hit `SecretAlreadyExistsError`, or the store's
+ * underlying filesystem write failed). See the long comment at the
+ * `env.secretStore.set(...)` call sites below for why this can happen and
+ * what this class's compensating rollback does about it.
+ */
+export class BootstrapSecretPersistError extends Error {
+  readonly code = 'BOOTSTRAP_SECRET_PERSIST_FAILED' as const;
+  readonly cause: unknown;
+  constructor(message: string, cause: unknown) {
+    super(message);
+    this.name = 'BootstrapSecretPersistError';
+    this.cause = cause;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // (a-condition): bootstrap refuses to report healthy over a non-persistent
 // SecretStore.
@@ -680,8 +698,82 @@ export function bootstrapOperator(
   // needed.
   credentialSecretBytes.fill(0);
 
-  env.secretStore.set('TORQCLAW/principal-pepper', principalPepper);
-  env.secretStore.set('TORQCLAW/recovery-pepper', recoveryPepper);
+  // These two set() calls run AFTER the DB transaction above already
+  // committed the principal/credential/installation/audit rows. Before this
+  // fix, either call throwing (most realistically: a second bootstrap
+  // attempt hitting FileSecretStore's SecretAlreadyExistsError, since
+  // production now has a working, non-throwing SecretStore) would propagate
+  // past already-inserted rows with NO rollback -- leaving a
+  // half-bootstrapped installation whose DB looks fully set up
+  // (principals/collab_installation rows exist) but whose principal pepper
+  // was never persisted, so `principalPepperCheck` in the DB row can never
+  // be matched again and every future connect fails closed with no
+  // recovery path other than wiping the DB and starting over.
+  //
+  // FIX: on either set() failing, run a compensating DELETE transaction
+  // that removes exactly the four rows this function's own tx() just
+  // inserted (matched by the same operatorId/credentialId/installationId
+  // this call generated -- never a broader delete), zero every secret
+  // buffer, and throw BootstrapSecretPersistError. This restores the
+  // pre-bootstrap DB state so a retried bootstrapOperator call starts clean
+  // instead of colliding with orphaned rows.
+  //
+  // RESIDUAL RISK (documented, not silently papered over): if the FIRST
+  // set() (principal-pepper) succeeds but the SECOND (recovery-pepper)
+  // throws, the compensating DELETE below still removes the DB rows, but
+  // the principal-pepper FILE persisted by FileSecretStore is not deleted
+  // (SecretStore has no delete() method -- adding one would change the
+  // interface, which this slice must not do). That leaves an orphaned
+  // pepper FILE on disk with no DB row referencing it -- harmless (it
+  // authenticates nothing, since the principal row that would have used it
+  // is gone) but not cleaned up. A retried bootstrap after this failure
+  // will mint a NEW random pepper and a NEW credential id, so it does not
+  // collide with the orphaned file's name.
+  const rollbackDbOnSecretFailure = (cause: unknown): never => {
+    try {
+      const cleanup = env.db.transaction(() => {
+        env.db.prepare('DELETE FROM collab_audit WHERE actor_principal_id = ? AND subject_principal_id = ?').run(operatorId, operatorId);
+        env.db.prepare('DELETE FROM collab_installation WHERE installation_id = ?').run(params.installationId);
+        env.db.prepare('DELETE FROM principal_credentials WHERE id = ?').run(credentialId);
+        env.db.prepare('DELETE FROM principals WHERE id = ?').run(operatorId);
+      });
+      cleanup();
+    } catch (cleanupErr) {
+      // The compensating rollback itself failed -- surface BOTH errors
+      // rather than swallowing the cleanup failure, since the caller now
+      // has an inconsistent DB it needs to know about.
+      principalPepper.fill(0);
+      recoveryPepper.fill(0);
+      recoverySecret.fill(0);
+      throw new BootstrapSecretPersistError(
+        `bootstrapOperator: secretStore.set failed AND compensating DB rollback also failed -- ` +
+          `the installation is now in an inconsistent state and requires manual inspection. ` +
+          `original cause: ${String(cause)}; rollback cause: ${String(cleanupErr)}`,
+        cause,
+      );
+    }
+    principalPepper.fill(0);
+    recoveryPepper.fill(0);
+    recoverySecret.fill(0);
+    throw new BootstrapSecretPersistError(
+      `bootstrapOperator: secretStore.set failed after the DB transaction committed; ` +
+        `the committed principal/credential/installation rows have been rolled back via a ` +
+        `compensating delete so a retried bootstrap starts clean. cause: ${String(cause)}`,
+      cause,
+    );
+  };
+
+  try {
+    env.secretStore.set('TORQCLAW/principal-pepper', principalPepper);
+  } catch (err) {
+    rollbackDbOnSecretFailure(err);
+  }
+
+  try {
+    env.secretStore.set('TORQCLAW/recovery-pepper', recoveryPepper);
+  } catch (err) {
+    rollbackDbOnSecretFailure(err);
+  }
 
   return {
     operatorPrincipalId: operatorId,

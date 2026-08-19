@@ -2,7 +2,25 @@
 import os
 from pathlib import Path
 
+import pytest
+
 from mcp_wrapper import skill_queue
+
+
+@pytest.fixture(autouse=True)
+def _force_legacy_skills_branch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests PIN the legacy (governance-off) decide() branch byte-for-byte:
+    bare write to SKILLS_DIR, path segments resolving under it, exact statuses.
+
+    Every governed branch is tested in its own file, which explicitly pins
+    ``TORQCLAW_GOVERNED_SKILLS=1`` (see test_governed_skills.py etc.). This
+    file relies on the default-off, so it MUST force the flag off here — an
+    ambient operator env with ``TORQCLAW_GOVERNED_SKILLS=1`` would otherwise
+    flip decide() into the governed branch and break these legacy assertions.
+    ``enabled()`` reads the env at call time (governed_skills.enabled), so
+    clearing it per-test is sufficient regardless of import order.
+    """
+    monkeypatch.delenv("TORQCLAW_GOVERNED_SKILLS", raising=False)
 
 
 def test_queue_skill_returns_uuid():

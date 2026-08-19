@@ -182,7 +182,7 @@ def test_frontier_toolsets_respects_effective_profile_before_task_heuristics(mon
         "AUTONOMOUS_RESEARCH",
         "research only",
         {"profileId": "workspace_write"},
-    ) == ["file"]
+    ) == ["web", "file"]
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,19 @@ export async function enrichCommand(
   cmd: Extract<ClientCommand, { action: 'SUBMIT_PROMPT' }>,
   sessionId: string,
   sourceChannel: string,
+  // PRD-TCLAW-AGENT-PARTICIPATION-007 S2: gateway-derived ONLY, passed by
+  // the caller (server.ts) — NEVER read from `cmd`. SUBMIT_PROMPT carries no
+  // agent-identity field (contracts/commands.ts) and none may be added for a
+  // client to set: the binding is established by the gateway from its own
+  // state (S1's agentCollabPrincipalId, or whatever S3's dispatch-time
+  // binding eventually supplies), never from task input. Nothing in this
+  // repo passes this argument yet — role 'node' (the only seat an agent's
+  // own connection can hold) is denied SUBMIT_PROMPT entirely (authz.ts), so
+  // an agent-bound task dispatch does not exist until S3. Threaded through
+  // now so the tool surface this slice builds is provably correct against
+  // its stated precondition ("a task bound to agent principal P") without
+  // requiring S3's trigger mechanism to exist first.
+  callerCollabPrincipalId?: string,
 ): Promise<GatewayRequest> {
   // P4.5: useMemory=false skips recall entirely — no past context assembled.
   const useMemory = cmd.useMemory ?? true;
@@ -32,11 +45,14 @@ export async function enrichCommand(
       prompt: cmd.prompt,
       assembledContext: history || undefined,
       contextSize,
-      requiredTools: predictTools(cls.taskType, effectiveProfile),
+      requiredTools: predictTools(cls.taskType, effectiveProfile, callerCollabPrincipalId),
       taskType: cls.taskType,
       // Fresh request: no grants. Built explicitly (never spread from cmd) so a
       // client-injected grantedTools can never reach a GatewayRequest.
       grantedTools: [],
+      // Built explicitly from this function's OWN parameter — never spread
+      // from `cmd` — for the same reason grantedTools above is never spread.
+      callerCollabPrincipalId,
     },
     constraints: {
       latencySensitivity: cmd.urgent ? 'HIGH' : 'LOW',

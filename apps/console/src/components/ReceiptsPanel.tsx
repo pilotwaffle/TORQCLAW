@@ -216,17 +216,29 @@ export default function ReceiptsPanel({
   };
 
   return (
-    <div className="absolute inset-0 z-20 flex bg-[#0a0a0a]/98 text-sm text-neutral-300">
+    <div className="absolute inset-0 z-20 flex bg-bg/98 text-[13px] leading-[1.6] text-muted">
       {/* LIST */}
-      <div className="w-72 shrink-0 overflow-y-auto border-r border-neutral-800 p-3">
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-[10px] font-bold uppercase tracking-widest text-neutral-400">Receipts</h2>
-          <button onClick={onClose} className="text-neutral-500 hover:text-neutral-200" aria-label="Close receipts panel">
-            close
-          </button>
+      <div className="w-72 shrink-0 overflow-y-auto border-r border-edge p-3">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <h2 className="text-[10px] font-bold uppercase tracking-widest text-muted">Receipts</h2>
+          <div className="flex items-center gap-3">
+            {/* Redesign 5/7: manual re-pull + "as of" footer below, matching
+                the ApprovalHistoryPanel pattern. Label stays distinct from
+                the detail view's safe-export refresh on purpose. */}
+            <button
+              type="button"
+              onClick={() => sendCommand({ action: 'LIST_RECEIPTS', limit: 20 })}
+              className="text-[10px] text-faint hover:text-ink"
+            >
+              refresh list
+            </button>
+            <button onClick={onClose} className="text-faint hover:text-ink" aria-label="Close receipts panel">
+              close
+            </button>
+          </div>
         </div>
         {receiptList.length === 0 && (
-          <p className="text-[11px] text-neutral-600">No receipts yet.</p>
+          <p className="text-[11px] text-faint/75">No receipts yet.</p>
         )}
         <ul className="space-y-1">
           {receiptList.map((r) => (
@@ -235,12 +247,12 @@ export default function ReceiptsPanel({
                 onClick={() => selectRow(r.taskId)}
                 className={`w-full rounded border px-2 py-1 text-left text-[11px] transition-colors ${
                   selectedTaskId === r.taskId
-                    ? 'border-[#E24B4A]/50 bg-[#E24B4A]/10 text-neutral-100'
-                    : 'border-neutral-800 text-neutral-400 hover:border-neutral-600'
+                    ? 'border-torque/50 bg-torque/10 text-ink'
+                    : 'border-edge text-muted hover:border-border-strong'
                 }`}
               >
-                <div className="truncate font-mono text-[10px] text-neutral-500">{r.taskId}</div>
-                <div className="flex flex-wrap gap-x-2 text-neutral-400">
+                <div className="truncate font-mono text-[10px] text-faint">{r.taskId}</div>
+                <div className="flex flex-wrap gap-x-2 text-muted">
                   <span>{r.resultState ?? 'unknown'}</span>
                   <span>{typeof r.costUsd === 'number' ? `$${r.costUsd.toFixed(2)}` : 'cost n/a'}</span>
                 </div>
@@ -248,31 +260,33 @@ export default function ReceiptsPanel({
             </li>
           ))}
         </ul>
+        {/* Redesign 5/7: the list is a pull surface — always show the bound. */}
+        <p className="mt-3 text-[10px] text-faint/75">List is as of the last refresh.</p>
       </div>
 
       {/* DETAIL / REPLAY */}
       <div className="flex-1 overflow-y-auto p-4">
         {!selectedTaskId && (
-          <p className="text-neutral-600">Select a receipt from the list.</p>
+          <p className="text-faint/75">Select a receipt from the list.</p>
         )}
         {selectedTaskId && !openReceipt && (
-          <p className="text-neutral-600">Loading…</p>
+          <p className="text-faint/75">Loading…</p>
         )}
         {selectedTaskId && openReceipt && openReceipt.receipt === null && (
-          <p className="text-neutral-500">No receipt for this task</p>
+          <p className="text-faint">No receipt for this task</p>
         )}
         {selectedTaskId && openReceipt && openReceipt.receipt && (
           <>
-            <div className="mb-3 flex gap-4 border-b border-neutral-800 text-[11px] uppercase tracking-widest">
+            <div className="mb-3 flex gap-4 border-b border-edge text-[11px] uppercase tracking-widest">
               <button
                 onClick={() => setTab('detail')}
-                className={tab === 'detail' ? 'border-b-2 border-[#E24B4A] pb-2 text-neutral-100' : 'pb-2 text-neutral-500'}
+                className={tab === 'detail' ? 'border-b-2 border-torque pb-2 text-ink' : 'pb-2 text-faint'}
               >
                 Detail
               </button>
               <button
                 onClick={() => setTab('replay')}
-                className={tab === 'replay' ? 'border-b-2 border-[#E24B4A] pb-2 text-neutral-100' : 'pb-2 text-neutral-500'}
+                className={tab === 'replay' ? 'border-b-2 border-torque pb-2 text-ink' : 'pb-2 text-faint'}
               >
                 Replay
               </button>
@@ -354,13 +368,13 @@ function ReceiptDetail({
       </Section>
 
       <Section title="State">
-        <p className="text-neutral-200">
+        <p className="text-ink">
           {state.label}
-          {state.cancelled && <span className="ml-2 text-[10px] text-amber-400">cancelled</span>}
-          {state.blockedOn && <span className="ml-2 text-[10px] text-amber-400">paused for {state.blockedOn}</span>}
+          {state.cancelled && <span className="ml-2 text-[10px] text-torque">cancelled</span>}
+          {state.blockedOn && <span className="ml-2 text-[10px] text-torque">paused for {state.blockedOn}</span>}
         </p>
         {field('error', receipt.error) && (
-          <p className="mt-1 text-[#E24B4A]">{receipt.error}</p>
+          <p className="mt-1 text-bad">{receipt.error}</p>
         )}
       </Section>
 
@@ -374,17 +388,17 @@ function ReceiptDetail({
 
       <Section title="Tools called">
         {receipt.toolsCalled && receipt.toolsCalled.length > 0 ? (
-          <ul className="list-inside list-disc text-neutral-400">
+          <ul className="list-inside list-disc text-muted">
             {receipt.toolsCalled.map((t, i) => <li key={i}>{t}</li>)}
           </ul>
         ) : (
-          <p className="text-neutral-600">none</p>
+          <p className="text-faint/75">none</p>
         )}
       </Section>
 
       <Section title="Approvals">
         {receipt.approvals && receipt.approvals.length > 0 ? (
-          <ul className="space-y-1 text-neutral-400">
+          <ul className="space-y-1 text-muted">
             {receipt.approvals.map((a, i) => (
               <li key={i}>
                 {a.toolName} — {a.status}
@@ -393,7 +407,7 @@ function ReceiptDetail({
             ))}
           </ul>
         ) : (
-          <p className="text-neutral-600">none</p>
+          <p className="text-faint/75">none</p>
         )}
       </Section>
 
@@ -482,7 +496,7 @@ function SafeExportSection({
 
   return (
     <Section title="Safe export">
-      <p className="mb-2 text-[10px] text-neutral-600">
+      <p className="mb-2 text-[10px] text-faint/75">
         built on the gateway from the receipt only — prompt, context, event replay, and tool arguments are never included
       </p>
 
@@ -496,7 +510,7 @@ function SafeExportSection({
       {phase === 'idle' && !frame && (
         <button
           onClick={onGetSafeExport}
-          className="rounded border border-neutral-700 px-2 py-0.5 text-[11px] text-neutral-300 transition-colors hover:border-neutral-500"
+          className="rounded border border-border-strong px-2 py-0.5 text-[11px] text-muted transition-colors hover:border-faint"
         >
           prepare safe export
         </button>
@@ -505,24 +519,24 @@ function SafeExportSection({
       {phase === 'pending' && !frame && (
         <button
           disabled
-          className="rounded border border-neutral-700 px-2 py-0.5 text-[11px] text-neutral-500 opacity-60"
+          className="rounded border border-border-strong px-2 py-0.5 text-[11px] text-faint opacity-60"
         >
           preparing…
         </button>
       )}
 
       {phase === 'sendFailed' && !frame && (
-        <p className="text-neutral-500">
+        <p className="text-faint">
           couldn&apos;t request the safe export — connection may be reconnecting;{' '}
-          <button type="button" onClick={onGetSafeExport} className="underline hover:text-neutral-300">
+          <button type="button" onClick={onGetSafeExport} className="underline hover:text-muted">
             try again
           </button>
         </p>
       )}
 
       {phase === 'timeout' && !frame && (
-        <p className="text-neutral-500">
-          No response — <button type="button" onClick={onGetSafeExport} className="underline hover:text-neutral-300">try again.</button>
+        <p className="text-faint">
+          No response — <button type="button" onClick={onGetSafeExport} className="underline hover:text-muted">try again.</button>
         </p>
       )}
 
@@ -531,9 +545,9 @@ function SafeExportSection({
           {/* export_failed frame (error present) — NO raw fallback, no receipt
               fields, no copy affordance anywhere in this section. */}
           {frame.error && (
-            <p className="text-[#E24B4A]">
+            <p className="text-bad">
               safe export failed on the gateway — nothing to copy. This panel never falls back to raw data.{' '}
-              <button type="button" onClick={onGetSafeExport} className="underline hover:text-neutral-300">
+              <button type="button" onClick={onGetSafeExport} className="underline hover:text-muted">
                 try again
               </button>
             </p>
@@ -542,14 +556,14 @@ function SafeExportSection({
           {/* too_large frame (exportOmitted present, no error) — amber, no
               truncation offer: a truncated export would be a data lie. */}
           {!frame.error && frame.exportOmitted && (
-            <p className="text-amber-400">export exceeds the frame size limit — not available</p>
+            <p className="text-torque">export exceeds the frame size limit — not available</p>
           )}
 
           {/* not-found frame — bare safeExport:null, neither error nor
               exportOmitted present. Oracle-free: says nothing about whether
               the task exists. */}
           {!frame.error && !frame.exportOmitted && !frame.safeExport && (
-            <p className="text-neutral-500">No receipt for this task — nothing to export.</p>
+            <p className="text-faint">No receipt for this task — nothing to export.</p>
           )}
 
           {/* Ready frame — the redaction report renders ABOVE the copy
@@ -558,26 +572,26 @@ function SafeExportSection({
           {!frame.error && !frame.exportOmitted && frame.safeExport && (
             <>
               {refreshing && (
-                <p className="mb-1 text-[10px] text-neutral-600">refreshing…</p>
+                <p className="mb-1 text-[10px] text-faint/75">refreshing…</p>
               )}
               <RedactionReportBlock safeExport={frame.safeExport} />
               <div className="mt-2 flex gap-2">
                 <button
                   onClick={copyJson}
-                  className="rounded border border-neutral-700 px-2 py-0.5 text-[11px] text-neutral-300 transition-colors hover:border-neutral-500"
+                  className="rounded border border-border-strong px-2 py-0.5 text-[11px] text-muted transition-colors hover:border-faint"
                 >
                   {copied === 'json' ? 'copied' : 'copy JSON'}
                 </button>
                 <button
                   onClick={copyMarkdown}
-                  className="rounded border border-neutral-700 px-2 py-0.5 text-[11px] text-neutral-300 transition-colors hover:border-neutral-500"
+                  className="rounded border border-border-strong px-2 py-0.5 text-[11px] text-muted transition-colors hover:border-faint"
                 >
                   {copied === 'markdown' ? 'copied' : 'copy Markdown'}
                 </button>
                 <button
                   type="button"
                   onClick={onGetSafeExport}
-                  className="text-[11px] text-neutral-500 underline hover:text-neutral-300"
+                  className="text-[11px] text-faint underline hover:text-muted"
                   title="re-request the safe export — a live approval may have changed since this was prepared"
                 >
                   refresh
@@ -603,9 +617,9 @@ function RedactionReportBlock({ safeExport }: { safeExport: NonNullable<SafeExpo
   const fieldsOmitted = report?.fieldsOmitted ?? [];
 
   return (
-    <div className="rounded border border-neutral-800 px-3 py-2">
-      <h4 className="mb-1.5 text-[10px] uppercase text-neutral-500">Redaction report</h4>
-      <p className="mb-1.5 text-[10px] text-neutral-600">
+    <div className="rounded border border-edge px-3 py-2">
+      <h4 className="mb-1.5 text-[10px] uppercase text-faint">Redaction report</h4>
+      <p className="mb-1.5 text-[10px] text-faint/75">
         export v{safeExport.exportVersion ?? 'not recorded'} · redactor v{safeExport.redactorVersion ?? 'not recorded'} · projection v
         {safeExport.projectionVersion ?? 'not recorded'}
       </p>
@@ -613,19 +627,19 @@ function RedactionReportBlock({ safeExport }: { safeExport: NonNullable<SafeExpo
         <dl className="space-y-1 text-[12px]">
           {hitEntries.map(([label, count]) => (
             <div key={label} className="flex gap-2">
-              <dt className="w-40 shrink-0 text-neutral-500">{label}</dt>
-              <dd className="text-neutral-300">{count} removed</dd>
+              <dt className="w-40 shrink-0 text-faint">{label}</dt>
+              <dd className="text-muted">{count} removed</dd>
             </div>
           ))}
         </dl>
       ) : (
-        <p className="text-neutral-500">no known secret shapes found — known shapes only; this is not a guarantee</p>
+        <p className="text-faint">no known secret shapes found — known shapes only; this is not a guarantee</p>
       )}
       <div className="mt-1.5 flex gap-2 text-[12px]">
-        <span className="w-40 shrink-0 text-neutral-500">never included</span>
-        <span className="text-neutral-300">{fieldsOmitted.join(', ')}</span>
+        <span className="w-40 shrink-0 text-faint">never included</span>
+        <span className="text-muted">{fieldsOmitted.join(', ')}</span>
       </div>
-      <p className="mt-1.5 text-[10px] text-neutral-500">{report?.notice ?? ''}</p>
+      <p className="mt-1.5 text-[10px] text-faint">{report?.notice ?? ''}</p>
     </div>
   );
 }
@@ -638,12 +652,12 @@ function ReceiptReplay({ openReceipt }: { openReceipt: OpenReceipt }) {
     if (openReceipt.eventsOmitted) {
       const o = openReceipt.eventsOmitted;
       return (
-        <p className="text-amber-400">
+        <p className="text-torque">
           Replay too large to load (seq {o.evidenceStartSeq}–{o.evidenceEndSeq}, {o.eventCount} events)
         </p>
       );
     }
-    return <p className="text-neutral-600">no replay available</p>;
+    return <p className="text-faint/75">no replay available</p>;
   }
 
   const rows = toReplayEventRows(openReceipt.events);
@@ -690,27 +704,27 @@ function ReplayEventRow({
 
   return (
     <article className="flex gap-4 rounded px-2 py-1 opacity-90">
-      <time className="shrink-0 tabular-nums text-neutral-600">
+      <time className="shrink-0 tabular-nums text-faint/75">
         {new Date(row.timestamp).toLocaleTimeString([], { hour12: false })}
       </time>
       <div className="min-w-0 flex-1">
         {row.tier && (
           <span
             title={row.tier.hint}
-            className="mr-2 rounded border border-neutral-700 bg-neutral-900 px-1.5 py-0.5 text-[10px] tracking-wide text-neutral-400"
+            className="mr-2 rounded border border-border-strong bg-panel-2 px-1.5 py-0.5 text-[10px] tracking-wide text-muted"
           >
             {row.tier.text}
           </span>
         )}
-        <span className="mr-2 text-[10px] font-bold text-neutral-600">[{row.type.toLowerCase()}]</span>
-        <span className="text-neutral-500">{row.message}</span>
+        <span className="mr-2 text-[10px] font-bold text-faint/75">[{row.type.toLowerCase()}]</span>
+        <span className="text-faint">{row.message}</span>
         {row.type === 'PENDING_APPROVAL' && (
-          <span className="ml-3 text-[10px] text-neutral-600">
+          <span className="ml-3 text-[10px] text-faint/75">
             (historical{decidedApproval ? ` — ${decidedApproval.status}` : ''})
           </span>
         )}
         {row.type === 'ERROR' && (
-          <span className="ml-3 text-[10px] text-neutral-600">(historical — replay only, no retry)</span>
+          <span className="ml-3 text-[10px] text-faint/75">(historical — replay only, no retry)</span>
         )}
       </div>
     </article>
@@ -720,22 +734,23 @@ function ReplayEventRow({
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section>
-      <h3 className="mb-1.5 text-[10px] font-bold uppercase tracking-widest text-neutral-500">{title}</h3>
+      <h3 className="mb-1.5 text-[10px] font-bold uppercase tracking-widest text-faint">{title}</h3>
       {children}
     </section>
   );
 }
 
 function Rows({ rows }: { rows: Array<{ label: string; value: string }> }) {
-  if (rows.length === 0) return <p className="text-neutral-600">not recorded</p>;
+  if (rows.length === 0) return <p className="text-faint/75">not recorded</p>;
   return (
     <dl className="space-y-1 text-[12px]">
       {rows.map((r, i) => (
         <div key={i} className="flex gap-2">
-          <dt className="w-32 shrink-0 text-neutral-500">{r.label}</dt>
-          <dd className="text-neutral-300">{r.value}</dd>
+          <dt className="w-32 shrink-0 text-faint">{r.label}</dt>
+          <dd className="text-muted">{r.value}</dd>
         </div>
       ))}
     </dl>
   );
 }
+

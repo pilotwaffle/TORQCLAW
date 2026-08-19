@@ -54,6 +54,9 @@
           "items": {
             "type": "string"
           }
+        },
+        "callerCollabPrincipalId": {
+          "type": "string"
         }
       },
       "required": [
@@ -147,7 +150,8 @@
             "read_only",
             "workspace_write",
             "browser_research",
-            "terminal_power"
+            "terminal_power",
+            "agent_conversation"
           ]
         },
         "profileVersion": {
@@ -185,7 +189,8 @@
               "filesystem_write",
               "browser_mutation",
               "process",
-              "network_send"
+              "network_send",
+              "collab_write"
             ]
           }
         },
@@ -226,7 +231,8 @@
               "filesystem_write",
               "browser_mutation",
               "process",
-              "network_send"
+              "network_send",
+              "collab_write"
             ]
           }
         },

@@ -486,14 +486,24 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
  * left `admitToolCall`'s FRONTIER refusal unreachable; round 2 found
  * `dispatchFailover` bypassing the executor fence entirely.
  *
- * True when a FRONTIER run carries a gateway-issued grant under the flag.
- * Such a run cannot satisfy the exact-action invariant -- the engine's
- * pre-tool hook grants by tool NAME and never inspects args -- so nothing
- * downstream can prove the args about to execute are the args approved.
+ * True when a FRONTIER run carries a gateway-issued grant. Such a run cannot
+ * satisfy the exact-action invariant -- the engine's pre-tool hook grants by
+ * tool NAME and never inspects args -- so nothing downstream can prove the args
+ * about to execute are the args approved.
+ *
+ * N-1 (2026-08-17): this was `&& collabEnabled()` -- a THIRD instance of the
+ * very mistake the comment above describes. The refusal was reachable only with
+ * TORQCLAW_COLLAB_ENABLED on, and that flag defaults OFF
+ * (principalBridge.ts:71-72 reads it with no default), so by default the legacy
+ * APPROVE_TOOL path minted a granted request and dispatched a FRONTIER run
+ * under a name-only grant. The property being fenced -- a name grant cannot
+ * prove argv identity -- has nothing to do with whether collab is enabled, so
+ * the gate was never load-bearing for correctness, only for reachability.
+ * Deliberately flag-INDEPENDENT: this is a security refusal, and a security
+ * refusal that a feature flag can switch off is not a refusal.
  */
 function frontierGrantFenced(req: GatewayRequest, diag: RouterDiagnostics): boolean {
   return diag.tier === ComputeTier.FRONTIER
-    && collabEnabled()
     && (req.payload.grantedTools?.length ?? 0) > 0;
 }
 

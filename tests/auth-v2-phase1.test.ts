@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
   AUTH_FOUNDATION_MIGRATION_CHECKSUM,
@@ -744,13 +745,65 @@ describe('Phase 4 protected semantic manifest', () => {
     expect(phase4Tests).toContain('a single grant authorizes BOTH APPROVE_TOOL and APPROVE_SKILL');
     expect(guidance).toContain('describeSkillDecision');
 
-    const protectedPaths = [
-      'packages/gateway/src/authz.ts',
+    // OPERATOR RULING 2026-08-16 ("Re-pin phase1, leave 2a red"): the phase1
+    // server-owned-authority migration (landed 985f8b9 on operator
+    // instruction) deliberately moved resume-role enforcement out of
+    // authz.ts into sessions.resolve(), and PRD-TCLAW-COLLAB-PRESENCE-UI-005
+    // S1 added explicit channel-seat deny arms for the two collab read
+    // commands. authz.ts therefore no longer matches the c2850f5 bytes.
+    // The seam-freeze survives as an EXPLICIT baseline pin: any change to
+    // authz.ts still fails this test until the pin is re-authorized with a
+    // dated note — incidental drift stays caught, authorized migration
+    // does not. The semantic containment assertions above (approve
+    // predicate, holdsAuthority) are unchanged and still enforced.
+    const frozenPaths = [
       'packages/gateway/src/skillDecision.ts',
       'tests/collab-h1-operator-subordination.test.ts',
     ];
-    const changed = execFileSync('git', ['diff', '--name-only', 'c2850f5', '--', ...protectedPaths], { cwd: root, encoding: 'utf8' });
+    const changed = execFileSync('git', ['diff', '--name-only', 'c2850f5', '--', ...frozenPaths], { cwd: root, encoding: 'utf8' });
     expect(changed.trim()).toBe('');
+    // Post-phase1 authz baseline (authorizations: phase1 landing 985f8b9 +
+    // PRD-005 S1 deny arms (2026-08-16) + PRD-005 S3 POST_CHANNEL_MESSAGE
+    // deny arm, 2026-08-17 -- same seat-lattice ruling as the S1 read
+    // commands, adding one explicit `case 'POST_CHANNEL_MESSAGE':` deny arm
+    // to the channel-seat switch plus its doc-comment entry +
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S1 (2026-08-17): added
+    // AuthzContext.agentCollabWrite, the ONE seat-lattice widening this
+    // slice makes -- role 'node' now admits POST_CHANNEL_MESSAGE when the
+    // caller (server.ts) has already verified the connection is a real
+    // agent-kind collab principal AND TORQCLAW_AGENT_PARTICIPATION is on;
+    // every other action on 'node' is unchanged (still DENY_NOT_PERMITTED)
+    // and the flag-off/absent-field case is byte-identical to before this
+    // slice) +
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S3 (2026-08-18): added an explicit
+    // `case 'SET_AUTOREPLY_STOP': return DENY_NOT_PERMITTED;` arm to the
+    // 'channel'-seat switch (grouped with the existing POST_CHANNEL_MESSAGE
+    // deny, same seat-lattice reasoning) plus its doc-comment entry. The
+    // 'node'-seat branch is UNCHANGED -- STOP falls through its existing
+    // `return DENY_NOT_PERMITTED;` default with no new allow-arm, so an
+    // agent connection has no path to this command regardless of
+    // TORQCLAW_AGENT_PARTICIPATION/TORQCLAW_AGENT_AUTOREPLY. The operator
+    // branch (authorizeOperator) is untouched; STOP falls through its
+    // existing blanket ALLOW for any non-APPROVE_TOOL/APPROVE_SKILL action,
+    // exactly like every other pre-existing operator-only command.
+    // CRON slice (G1R Gate-1 §2A, 2026-08-18): added three explicit
+    // `case 'CREATE_SCHEDULE':` / `case 'SET_SCHEDULE_STATE':` /
+    // `case 'LIST_SCHEDULES':` arms to the 'channel'-seat switch, grouped
+    // with the existing SET_AUTOREPLY_STOP deny (identical seat-lattice
+    // reasoning: schedule management is a control-plane action, no
+    // agent-reachable path exists to any of the three). The 'node'-seat
+    // branch is UNCHANGED -- all three fall through the existing
+    // `return DENY_NOT_PERMITTED;` default, so an agent connection has no
+    // path to any of them regardless of TORQCLAW_AGENT_CRON. The operator
+    // branch (authorizeOperator) is untouched.
+    // Recompute and re-authorize deliberately on any future approved
+    // change; never delete this pin.
+    const authzSha = createHash('sha256').update(authz).digest('hex');
+    expect(authzSha).toBe('f0d6446978a795de9981bb12887a344fc94be61622cfbaedebba39421feedeb6');
+    // The migration's own markers: the moved guard must not silently return,
+    // and the relocation note must remain declared where it happened.
+    expect(authz).not.toContain('export function checkResumeRole');
+    expect(authz).toContain('sessions.resolve()');
   });
 });
 

@@ -1,8 +1,15 @@
-// FRONTIER per-tool approval e2e (P6). Proves the cloud tier now gates tools:
+// FRONTIER per-tool approval e2e. Proves the cloud tier's approval path is
+// EXPLICIT and FAIL-CLOSED:
 //   1. A FRONTIER task hits a gated tool (forced via the engine seam).
 //   2. The engine blocks it; the bridge throws ToolApprovalRequired; dispatch
 //      emits the ONE terminal PENDING_APPROVAL with a gateway approvalId.
-//   3. APPROVE_TOOL re-mints with grantedTools=[tool]; the re-run executes it.
+//   3. APPROVE_TOOL is REFUSED with refusedCode 'frontier-structured-grant-unavailable':
+//      on FRONTIER the Hermes hook grants by tool NAME and never inspects args,
+//      so the exact-action invariant cannot be fenced (server.ts's D-2/N-1
+//      refusal). A granted FRONTIER re-run must NEVER execute.
+// This e2e used to expect step 3 to re-mint and execute (P6, pre-fence). That
+// contract was deliberately closed by 72b4d36; this script now proves the
+// refusal instead of timing out waiting for an execution that must not happen.
 // Stub mode, no provider key — the engine seam stands in for a live block.
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -54,7 +61,6 @@ const deadline = setTimeout(() => { console.log('E2E TIMEOUT'); cleanup(1); }, 4
 
 let approvalId = null;
 let sawBlock = false;
-let approved = false;
 
 ws.on('open', () => {
   ws.send(JSON.stringify({
@@ -83,16 +89,26 @@ ws.on('message', (raw) => {
     setTimeout(() => ws.send(JSON.stringify({ action: 'APPROVE_TOOL', approvalId, decision: 'APPROVE' })), 300);
     return;
   }
-  if (sawBlock && ev.type === 'TOOL_CALL' && meta.granted) approved = true;
-  if (ev.type === 'RESULT') {
+  // THE FENCE (D-2/N-1): a granted re-run on FRONTIER must NEVER execute.
+  if (sawBlock && ev.type === 'TOOL_CALL' && meta.granted) {
     clearTimeout(deadline);
-    if (sawBlock && approved && /executed write_file under grant/.test(ev.message)) {
-      console.log('=== E2E PASS (FRONTIER block -> approve -> re-run executed) ===');
+    console.log('=== E2E FAIL (a granted FRONTIER re-run escaped the fence) ===');
+    cleanup(1);
+  }
+  if (sawBlock && ev.type === 'SYSTEM' && meta.refusedCode === 'frontier-structured-grant-unavailable') {
+    clearTimeout(deadline);
+    if (/Approval refused: FRONTIER has no args-aware structured grant protocol/.test(String(ev.message))) {
+      console.log('=== E2E PASS (FRONTIER block -> approve -> refused fail-closed, no args-aware grant protocol) ===');
       cleanup(0);
-    } else {
-      console.log(`=== E2E FAIL (RESULT without gated re-run: block=${sawBlock} approved=${approved}) ===`);
-      cleanup(1);
     }
+    console.log(`=== E2E FAIL (refusedCode without the expected refusal reason: ${ev.message}) ===`);
+    cleanup(1);
+  }
+  // Any RESULT after the block means the fenced task executed anyway.
+  if (sawBlock && ev.type === 'RESULT') {
+    clearTimeout(deadline);
+    console.log(`=== E2E FAIL (RESULT after a fenced FRONTIER block — fence bypassed: ${String(ev.message).slice(0, 80)}) ===`);
+    cleanup(1);
   }
   if (ev.type === 'ERROR') { clearTimeout(deadline); console.log('=== E2E FAIL (unexpected ERROR) ==='); cleanup(1); }
 });

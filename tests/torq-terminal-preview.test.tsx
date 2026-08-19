@@ -14,10 +14,11 @@ if (typeof Element !== 'undefined' && !Element.prototype.scrollTo) {
 
 // MODULE-SCOPE mock object (vi.mock is hoisted; the factory must reference a
 // hoisted-safe holder). Use a mutable object the tests reassign .events on.
-const stream: { events: GatewayEvent[]; isConnected: boolean; sendCommand: ReturnType<typeof vi.fn> } = {
+const stream: { events: GatewayEvent[]; isConnected: boolean; sendCommand: ReturnType<typeof vi.fn>; reconnect: ReturnType<typeof vi.fn> } = {
   events: [],
   isConnected: true,
   sendCommand: vi.fn(() => true),
+  reconnect: vi.fn(),
 };
 vi.mock('../apps/console/src/components/useGatewayStream.js', () => ({
   useGatewayStream: () => stream,
@@ -258,10 +259,13 @@ describe('TorqTerminal route preview composer (TCLAW-2D-2)', () => {
     unmountA();
     cleanup();
 
-    // (b) mid-task: last non-preview event is TOOL_CALL -> busy.
+    // (b) mid-task: last non-preview event is TOOL_CALL -> busy. PRD-UI-1 §4e:
+    // once TIER_SELECTED mints the task card, the working state lives INSIDE
+    // that card (phase text appended: "working… <phase>"), not in the
+    // stream-level pre-card block — so match the prefix, not the bare word.
     stream.events = [tierSelected('A', diagA), toolCall('A'), previewResultFrame('n1')];
     const { unmount: unmountB } = render(<TorqTerminal />);
-    expect(screen.getByText('working…')).toBeInTheDocument();
+    expect(screen.getByText(/^working…/)).toBeInTheDocument();
     unmountB();
     cleanup();
 

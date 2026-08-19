@@ -18,30 +18,36 @@
  * (decision) route through it. One decision point, not two, because two
  * would drift.
  *
- * FLAG-OFF IS UNTOUCHED LEGACY (SI-4)
- * ------------------------------------
- * Every entry point below returns `null` immediately when
- * `collabEnabled()` is false, and the caller then runs exactly the code it
- * ran before C2 existed. No new table is read or written, no new column is
- * populated, and the wire transcript is byte-identical.
+ * S0 UPDATE (PRD-TCLAW-AGENT-PARTICIPATION-007 G1R Gate-1, B-1, 2026-08-17)
+ * ------------------------------------------------------------------------
+ * `registerApprovalC2` and `decideApprovalC2` used to both open with
+ * `if (!collabEnabled()) return ...`. That made the LOCAL_EDGE
+ * exact-action admission fence (server.ts's `setToolAdmissionCheck`)
+ * permanently vacuous by default: `collabEnabled()` defaults FALSE
+ * (`.env.example` sets no collab flag), so no grant row was ever minted and
+ * a once-approved tool could be re-invoked with different arguments
+ * indefinitely -- the same defect class `72b4d36` fixed on FRONTIER's
+ * `frontierGrantFenced` the same day: "a security refusal that a feature
+ * flag can switch off is not a refusal." Both flag checks are REMOVED.
  *
- * FAIL-CLOSED, BUT NOT FAIL-BROKEN
- * ---------------------------------
+ * FAIL-CLOSED, BUT NOT FAIL-BROKEN (evidence gating still applies)
+ * ------------------------------------------------------------------
  * C2 registration needs evidence the legacy path never had: an immutable
  * task origin, a live profile delegation, a resolved effective profile.
- * When that evidence is absent -- a flag-on connection that never
- * presented a C1 surface, say -- registration CANNOT produce a valid
- * binding. It returns null and the caller falls back to the legacy
- * registration, which yields an approval with no binding and no expiry.
- * The writer already treats exactly that row as inert and
- * reissue-required (§3.9), so the fallback denies rather than opens: such
- * an approval can be created but never decided under the flag.
+ * When that evidence is absent -- a connection that never presented a C1
+ * surface, say -- registration CANNOT produce a valid binding. It returns
+ * null and the caller falls back to the legacy registration, which yields
+ * an approval with no binding and no expiry. The writer already treats
+ * exactly that row as inert and reissue-required (§3.9), so the fallback
+ * denies rather than opens: such an approval can be created but never
+ * decided through the C2 writer. This evidence-based gate is UNCHANGED and
+ * is not the same thing as the removed feature flag -- missing evidence is
+ * a structural fact about the connection, not a switch anyone can flip.
  */
 
 import { randomUUID } from 'node:crypto';
 import type { GatewayRequest, RouterDiagnostics } from '@torqclaw/contracts';
 import { db } from './storage.js';
-import { collabEnabled } from './principalBridge.js';
 import { taskOrigin, liveProfileDelegation } from './surfaceSecurity.js';
 import {
   registerC2Approval, decideC2Approval, ApprovalDecisionError,
@@ -120,8 +126,22 @@ function resolveContext(
 }
 
 /**
- * Flag-on registration (C2-2 + C2-5). Returns the approvalId when C2 owned
- * the registration, or null to tell the caller to use the legacy path.
+ * C2 registration (C2-2 + C2-5). Returns the approvalId when C2 owned the
+ * registration, or null to tell the caller to use the legacy path.
+ *
+ * S0 (PRD-TCLAW-AGENT-PARTICIPATION-007 G1R Gate-1, B-1): this used to open
+ * with `if (!collabEnabled()) return null`. That is the PRODUCER half of the
+ * LOCAL_EDGE exact-action seam whose CONSUMER lives at server.ts's
+ * `setToolAdmissionCheck` closure -- with this gated, no grant row was ever
+ * minted while the flag was off, which meant the consumer's `carriesGrant`
+ * lookup was permanently empty and the whole fence was vacuous by default
+ * (`collabEnabled()` defaults FALSE; `.env.example` sets no collab flag).
+ * Same reasoning as `72b4d36` on `frontierGrantFenced`: a security control a
+ * feature flag can switch off is not a control. Flag-independent now; every
+ * other branch in this function already fails safely on missing evidence
+ * (§3.1's "missing evidence REFUSES rather than substituting a placeholder"
+ * doc comment above), so removing the flag only widens WHEN registration is
+ * attempted, never what it accepts.
  */
 export function registerApprovalC2(
   req: GatewayRequest,
@@ -129,7 +149,6 @@ export function registerApprovalC2(
   toolName: string,
   args: unknown,
 ): string | null {
-  if (!collabEnabled()) return null;
   try {
     // §3.1: a flag-on C2 registration requires a present, acyclic plain
     // object. Invalid args are refused BEFORE any pending row exists,
@@ -180,12 +199,28 @@ export type DecideC2Outcome =
   | { kind: 'noop' };                                   // unknown or already decided
 
 /**
- * Flag-on decision (C2-2/C2-3/C2-4/C2-5/C2-8).
+ * C2 decision (C2-2/C2-3/C2-4/C2-5/C2-8).
  *
  * Returns `legacy` when this approval has no C2 binding, so the caller runs
  * the untouched legacy decide. Otherwise the C2 writer owns the transition,
  * and on APPROVE it mints the re-minted dispatch task plus exactly one
  * grant inside the same transaction.
+ *
+ * S0 (PRD-TCLAW-AGENT-PARTICIPATION-007 G1R Gate-1, B-1): this used to open
+ * with `if (!collabEnabled()) return { kind: 'legacy' }`. This is where the
+ * one and only INSERT into `gateway_action_grants` happens
+ * (approvalWriter.ts's `decideC2Approval`), so gating it -- even after
+ * `registerApprovalC2`'s flag was removed above -- would leave the LOCAL_EDGE
+ * admission fence permanently vacuous: `registerApprovalC2` would write a
+ * real binding, but no grant row would ever exist for `setToolAdmissionCheck`
+ * to find, so its `carriesGrant` lookup in server.ts would stay false
+ * forever and the fence would never actually run. Removing only the
+ * registration-side flag without this one reproduces exactly the
+ * double-fenced-open defect this slice exists to close (G1R: "a partial fix
+ * removing only condition 1 would not close it"). The binding lookup two
+ * lines below is the real, narrower gate: an approval with no C2 binding
+ * (pre-C2, or a registration that itself declined for missing evidence)
+ * still correctly falls to `legacy`.
  */
 export function decideApprovalC2(
   approvalId: string,
@@ -194,8 +229,6 @@ export function decideApprovalC2(
   decidingSurfaceId: string | null,
   mintDispatchTask: (dispatchRequestId: string) => void,
 ): DecideC2Outcome {
-  if (!collabEnabled()) return { kind: 'legacy' };
-
   const binding = db.prepare(
     'SELECT approval_id FROM gateway_approval_bindings WHERE approval_id = ?',
   ).get(approvalId);

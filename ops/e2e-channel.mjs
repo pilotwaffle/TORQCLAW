@@ -9,6 +9,12 @@ import WebSocket from 'ws';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const VENV_PY = process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python';
+// The gateway's channel_service arm (connectionAuth.ts) returns null when its
+// TORQCLAW_CHANNEL_SERVICE_TOKEN is unset -- the adapter's empty credential is
+// then AUTH_FAILED and every /task 502s with an empty sessionId. The production
+// contract (ops/launcher-config.mjs) is that an enabled HTTP channel requires a
+// NON-PLACEHOLDER service token on BOTH sides; wire the same pair here.
+const CHANNEL_TOKEN = 'e2e-channel-service-token-2026';
 
 const children = [];
 const launch = (cmd, args, cwd, logPrefix, extraEnv = {}) => {
@@ -53,11 +59,13 @@ launch(`${ROOT}engines/hermes_kernel/${VENV_PY}`, ['-m', 'mcp_wrapper.server'],
 await waitForHttp('http://127.0.0.1:8000/mcp');
 console.log('=== engine up ===');
 
-launch('node', ['dist/server.js'], `${ROOT}packages/gateway`, 'gw');
+launch('node', ['dist/server.js'], `${ROOT}packages/gateway`, 'gw',
+  { TORQCLAW_CHANNEL_SERVICE_TOKEN: CHANNEL_TOKEN });
 await waitForWs('ws://127.0.0.1:18790/ws');
 console.log('=== gateway up ===');
 
-launch('node', ['dist/server.js'], `${ROOT}packages/channel-http`, 'http-channel');
+launch('node', ['dist/server.js'], `${ROOT}packages/channel-http`, 'http-channel',
+  { TORQCLAW_CHANNEL_SERVICE_TOKEN: CHANNEL_TOKEN });
 await waitForHealth('http://127.0.0.1:18792/health');
 console.log('=== http channel up, POSTing a task ===');
 

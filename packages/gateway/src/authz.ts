@@ -22,6 +22,31 @@ export interface AuthzContext {
    * identically (§2.7.1 flag semantics).
    */
   surface?: SurfaceAuthzContext;
+  /**
+   * PRD-TCLAW-AGENT-PARTICIPATION-007 S1: true when — and ONLY when — ALL of
+   * the following hold, all computed by the caller (server.ts) from live
+   * server-derived state, never from a client frame:
+   *   1. TORQCLAW_AGENT_PARTICIPATION is truthy (this slice's own flag);
+   *   2. collabSurfaceCommandsEnabled() is true (inherits 005's narrowing,
+   *      so this can never re-enable a surface 005's flags turned off);
+   *   3. this connection's resolved collab principal is REAL (a non-null
+   *      binding from a verified tq1_ credential) AND that principal's
+   *      `kind` — read from the collab DB, never asserted by the caller —
+   *      is 'agent'.
+   *
+   * This is the ONE seat-lattice widening this slice adds (§2 of the PRD):
+   * a `node`-seat connection backed by a verified agent collab principal may
+   * reach POST_CHANNEL_MESSAGE. It grants NOTHING else — every other action
+   * on the `node` role is still DENY_NOT_PERMITTED below, unchanged. The
+   * gateway SEAT decision here is deliberately kept separate from the
+   * substrate SUBJECT check: this field only says "this seat may attempt
+   * the command class"; assertChannelVisible (store.ts) still independently
+   * decides whether THIS principal may write to THIS channel.
+   *
+   * Absent (undefined/false) is today's behaviour byte-identically: role
+   * 'node' denies every action, exactly as before this slice.
+   */
+  agentCollabWrite?: boolean;
 }
 
 /**
@@ -54,30 +79,16 @@ const DENY_AUTHORITY: AuthzDecision = {
 
 const DENY_NOT_PERMITTED: AuthzDecision = { ok: false, reason: 'action not permitted for this role' };
 const DENY_NOT_OWNED: AuthzDecision = { ok: false, reason: 'task not owned by this session' };
-const DENY_ROLE_MISMATCH: AuthzDecision = { ok: false, reason: 'session role mismatch' };
 const ALLOW: AuthzDecision = { ok: true };
 
 /**
- * Resume-role guard: a RESUME whose ConnectFrame role disagrees with the role
- * persisted on the session is a role-escalation attempt (e.g. a channel client
- * replaying an operator sessionId, or vice versa) and MUST be rejected — the
- * caller closes the socket (4003) and never mints a fresh session as fallback.
+ * Resume-role enforcement now belongs to sessions.resolve(): it compares the
+ * persisted server-derived role with the newly authenticated caller role and
+ * refuses a mismatch without minting a replacement session.
  *
- * Fresh sessions (resumed === false) always pass: the frame role IS the role
- * just persisted, so there is nothing to disagree with.
- *
- * Pure function — server.ts calls this verbatim on the connect path, so the
- * unit tests exercise the actual production guard, not a parallel copy.
+ * Client frame.role/expectedRole fields are assertions checked separately;
+ * neither field participates in persisted authority.
  */
-export function checkResumeRole(
-  resumed: boolean,
-  storedRole: string,
-  frameRole: string,
-): AuthzDecision {
-  if (resumed && storedRole !== frameRole) return DENY_ROLE_MISMATCH;
-  return ALLOW;
-}
-
 /**
  * Allow-list authorization, default DENY for anything not explicitly granted
  * to a non-operator role. Pure function, no I/O — ctx.lookupTaskSession is the
@@ -132,11 +143,37 @@ export function checkResumeRole(
  *              unrelated to the authz posture above (which governs who may
  *              TRIGGER the export, not what a triggered export contains).
  *              Explicit deny so the decision is legible and pinned by a test.)
- *   node     — every action denied.
+ *              (PRD-TCLAW-COLLAB-PRESENCE-UI-005 S3: POST_CHANNEL_MESSAGE is
+ *              operator-seat-only for the same reason as LIST_CHANNELS/
+ *              GET_CHANNEL_TIMELINE above -- the seat lattice and the
+ *              substrate principal lattice are never conflated; explicit
+ *              deny so the decision is legible and pinned by a test.)
+ *   node     — every action denied, EXCEPT: PRD-TCLAW-AGENT-PARTICIPATION-007
+ *              S1 admits POST_CHANNEL_MESSAGE when ctx.agentCollabWrite is
+ *              true (see AuthzContext's doc comment for the full, narrow
+ *              precondition the caller must have already verified). This is
+ *              the ONE widening this slice makes to the node seat; every
+ *              other action on 'node' is unaffected and still denies.
  */
 export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): AuthzDecision {
   if (role === 'operator') return authorizeOperator(cmd, ctx);
-  if (role === 'node') return DENY_NOT_PERMITTED;
+  if (role === 'node') {
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S1: the gateway SEAT lattice and the
+    // substrate PRINCIPAL lattice are never conflated (§2a, inherited from
+    // 005). This is a SEAT-class decision only -- "may a node-seat
+    // connection attempt POST_CHANNEL_MESSAGE at all" -- never a membership
+    // or visibility decision, which remains entirely the substrate's
+    // (assertChannelVisible, store.ts) regardless of this branch's outcome.
+    // ctx.agentCollabWrite is computed by the caller (server.ts) from live,
+    // server-derived state -- the flag, collabSurfaceCommandsEnabled(), and
+    // a real DB read of the connected principal's kind -- never from
+    // anything a client frame carries. Absent/false is byte-identical to
+    // pre-S1 behaviour: DENY_NOT_PERMITTED for every action.
+    if (cmd.action === 'POST_CHANNEL_MESSAGE' && ctx.agentCollabWrite === true) {
+      return ALLOW;
+    }
+    return DENY_NOT_PERMITTED;
+  }
 
   // role === 'channel'
   switch (cmd.action) {
@@ -158,6 +195,43 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     case 'PREVIEW_ROUTE':
     case 'LIST_APPROVALS':
     case 'GET_SAFE_EXPORT':
+      return DENY_NOT_PERMITTED;
+    // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S1: the gateway SEAT lattice and the
+    // substrate PRINCIPAL lattice are never conflated (§2a). A channel seat
+    // is a transport identity (channel-http), not a collab surface
+    // credential holder, and gets no read entitlement to the collab wire
+    // surface regardless of what a bare `default:` below would otherwise
+    // resolve to -- explicit named deny so the decision is legible and
+    // pinned by a test (house pattern, matching every other arm here).
+    case 'LIST_CHANNELS':
+    case 'GET_CHANNEL_TIMELINE':
+    // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S3: POST_CHANNEL_MESSAGE is the only
+    // new mutation this PRD's surface adds (§5), and it inherits the exact
+    // same seat-lattice ruling as the S1 reads above -- a channel seat is a
+    // transport identity (channel-http), not a collab surface credential
+    // holder, and gets no write entitlement to the collab wire surface
+    // regardless of what the default: arm below would otherwise resolve to.
+    // Explicit named deny so the decision is legible and pinned by a test
+    // (T-3), matching every other arm in this switch.
+    case 'POST_CHANNEL_MESSAGE':
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S3 (R-3a): SET_AUTOREPLY_STOP is
+    // operator-seat-only, explicit deny for a channel seat, matching every
+    // other collab-surface command above. STOP is a control-plane action,
+    // not a conversational one -- there is no product reason for a
+    // channel-transport seat (channel-http) to hold it, and an explicit
+    // named deny keeps the decision legible and test-pinned rather than
+    // falling through to the default: arm below.
+    case 'SET_AUTOREPLY_STOP':
+    // CRON slice (G1R Gate-1 §2A): schedule management is operator-seat-only,
+    // matching SET_AUTOREPLY_STOP's exact reasoning above -- a schedule is a
+    // control-plane action (it creates a TRIGGER, never an authority grant;
+    // see cron.ts's module doc), not a conversational one. No agent-reachable
+    // path exists to any of the three actions below: they are not collab
+    // tools, so no message content or model output can ever reach them
+    // (mirrors INV-T1 Corollary C's sibling for STOP).
+    case 'CREATE_SCHEDULE':
+    case 'SET_SCHEDULE_STATE':
+    case 'LIST_SCHEDULES':
       return DENY_NOT_PERMITTED;
     default:
       // Default deny for any future/unmapped action on a non-operator role.

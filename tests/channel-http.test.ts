@@ -27,8 +27,9 @@ describe('channel-http terminal-event detection', () => {
 });
 
 describe('resolveGatewayToken — upstream token hygiene (TCLAW-0F)', () => {
-  it('uses a configured TORQCLAW_GATEWAY_TOKEN verbatim', () => {
-    expect(resolveGatewayToken({ TORQCLAW_GATEWAY_TOKEN: 's3cret-token' })).toBe('s3cret-token');
+  it('uses only the dedicated channel service token', () => {
+    expect(resolveGatewayToken({ TORQCLAW_CHANNEL_SERVICE_TOKEN: 'channel-token' })).toBe('channel-token');
+    expect(resolveGatewayToken({ TORQCLAW_GATEWAY_TOKEN: 'legacy-token' })).toBe('');
   });
 
   it('unset token resolves to empty string, NOT the literal "dev"', () => {
@@ -39,11 +40,11 @@ describe('resolveGatewayToken — upstream token hygiene (TCLAW-0F)', () => {
   });
 
   it('an empty-string env value stays empty (not coerced to a literal)', () => {
-    expect(resolveGatewayToken({ TORQCLAW_GATEWAY_TOKEN: '' })).toBe('');
+    expect(resolveGatewayToken({ TORQCLAW_CHANNEL_SERVICE_TOKEN: '' })).toBe('');
   });
 
   it('never emits a hardcoded guessable token by default across unset/empty inputs', () => {
-    for (const env of [{}, { TORQCLAW_GATEWAY_TOKEN: '' }, { TORQCLAW_GATEWAY_TOKEN: undefined }]) {
+    for (const env of [{}, { TORQCLAW_CHANNEL_SERVICE_TOKEN: '' }, { TORQCLAW_CHANNEL_SERVICE_TOKEN: undefined }]) {
       const t = resolveGatewayToken(env as NodeJS.ProcessEnv);
       expect(t).toBe('');
       expect(['dev', 'default', 'token', 'changeme']).not.toContain(t);

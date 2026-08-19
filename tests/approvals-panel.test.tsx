@@ -156,13 +156,13 @@ describe('ApprovalHistoryPanel', () => {
   it('P8. loading(null) !== empty([]): no frame -> Loading present, empty-copy absent; [] frame -> empty-copy exact, loading absent', () => {
     const { unmount } = renderPanel([]);
     expect(screen.getByText('Loading…')).toBeInTheDocument();
-    expect(screen.queryByText('No tool approval requests in this session yet.')).not.toBeInTheDocument();
+    expect(screen.queryByText('No approval history yet')).not.toBeInTheDocument();
     unmount();
     cleanup();
 
     const frame = approvalListFrame([]);
     renderPanel([frame]);
-    expect(screen.getByText('No tool approval requests in this session yet.')).toBeInTheDocument();
+    expect(screen.getByText('No approval history yet')).toBeInTheDocument();
     expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
   });
 
@@ -264,7 +264,7 @@ describe('ApprovalHistoryPanel', () => {
   it('P15. skill PENDING_APPROVAL (queueId) in events -> zero derived rows', () => {
     const frame = approvalListFrame([]);
     renderPanel([frame, skillApprovalEvent()]);
-    expect(screen.getByText('No tool approval requests in this session yet.')).toBeInTheDocument();
+    expect(screen.getByText('No approval history yet')).toBeInTheDocument();
     expect(screen.queryByText('do-thing')).not.toBeInTheDocument();
   });
 

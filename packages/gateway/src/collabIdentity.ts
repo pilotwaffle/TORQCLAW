@@ -32,37 +32,43 @@
  *
  * PEPPER / DB PROVISIONING
  * -------------------------
- * The principal pepper lives outside SQLite in a SecretStore (Windows
- * Credential Manager in production; PRD Section 6.1/6.3). The real adapter
- * is a stub that throws NOT_IMPLEMENTED (packages/collab/src/secrets.ts) --
- * a known, separately-tracked gap, not something this transport slice can
- * or should paper over. Both the pepper source and the credential DB handle
- * are injectable (mirrors the `db` singleton pattern in storage.ts) so
- * tests and the built-artifact harness can wire a real, working pepper +
- * database without touching production wiring, and so production fails
- * CLOSED (AUTH_FAILED, never a crash or a silent bypass) until a real
- * SecretStore adapter lands.
+ * The principal pepper lives outside SQLite in a SecretStore (PRD Section
+ * 6.1/6.3). Production now uses `FileSecretStore` (packages/collab/src/
+ * secrets.ts), a file-backed persistent store under `TORQCLAW_DATA_DIR`; a
+ * native OS-keyring adapter (`WindowsCredentialManagerStore`) remains a
+ * deferred stub behind the same interface. Both the pepper source and the
+ * credential DB handle are injectable (mirrors the `db` singleton pattern
+ * in storage.ts) so tests and the built-artifact harness can wire a real,
+ * working pepper + database without touching production wiring, and so
+ * production fails CLOSED (AUTH_FAILED, never a crash or a silent bypass)
+ * whenever no pepper has been provisioned yet.
  */
 
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import {
   verifyCredential,
   credentialLookupFromDb,
-  WindowsCredentialManagerStore,
+  FileSecretStore,
   runCollaborationMigration,
   runSurfaceIdentityMigration,
   runSurfaceAuditMigration,
+  runAgentAutoreplyMigration,
+  runAgentCronMigration,
+  writeSurfaceAudit,
   type SecretStore,
   type BootstrapDb,
 } from '@torqclaw/collab';
 import type { PrincipalBinding } from './principalBridge.js';
+import type { AuthenticatedCaller } from './connectionAuth.js';
 import { DATA_DIR, db as stateDb } from './storage.js';
 import {
   validatePresentingSurface,
   bindingFor,
   type ConnectionAuthContext,
 } from './surfaceGate.js';
+import { activateSurfaceProjection, liveSurfaceSecurity } from './surfaceSecurity.js';
 
 const PRINCIPAL_PEPPER_SECRET_NAME = 'TORQCLAW/principal-pepper';
 
@@ -81,10 +87,35 @@ export function setCollabDbForTest(db: BootstrapDb | null): void {
   collabDbOverride = db;
 }
 
+/**
+ * Production SecretStore. `FileSecretStore` is scoped to the SAME
+ * `TORQCLAW_DATA_DIR` resolution `storage.ts`/`getCollabDb` already use
+ * (the `DATA_DIR` import above), not a re-derived path. It reads
+ * `process.env.TORQCLAW_DATA_DIR` live (via `DATA_DIR`'s own module-load
+ * resolution, mirrored here) rather than caching, matching this module's
+ * existing lazy-open pattern for `getCollabDb()`.
+ *
+ * Replaces the throwing `WindowsCredentialManagerStore` stub that
+ * previously made the collab feature entirely inert in production (every
+ * `.get()` call threw, every credential failed AUTH_FAILED). A native
+ * keyring-backed store remains DEFERRED (see secrets.ts) and can drop in
+ * here later with zero call-site changes elsewhere in this module.
+ */
 function getSecretStore(): SecretStore {
   if (secretStoreOverride) return secretStoreOverride;
-  if (!defaultSecretStore) defaultSecretStore = new WindowsCredentialManagerStore();
+  if (!defaultSecretStore) defaultSecretStore = new FileSecretStore(DATA_DIR);
   return defaultSecretStore;
+}
+
+/**
+ * S1: exported so collabSurface.ts can fetch the same principal pepper this
+ * module already uses to construct its production CollaborationStore --
+ * without duplicating the SecretStore selection/override logic. Returns
+ * null exactly when connect-path verification would also fail closed (no
+ * pepper provisioned), which callers must treat as a hard read refusal.
+ */
+export function getPrincipalPepper(): Buffer | undefined {
+  return getSecretStore().get(PRINCIPAL_PEPPER_SECRET_NAME);
 }
 
 /**
@@ -118,12 +149,35 @@ function migrateCollabDb(db: BootstrapDb): void {
     runCollaborationMigration(handle);
     runSurfaceIdentityMigration(handle);
     runSurfaceAuditMigration(handle);
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S3: the auto-reply watermark + STOP
+    // tables. A separate, explicitly-invoked call here (NOT cascaded inside
+    // runCollaborationMigration itself) for the same reason C1's two calls
+    // above are separate: tests/auth-v2-phase2a.test.ts's
+    // assertShippedCollabLedger deliberately fails closed on any
+    // "unexpected" extra row in collab_schema_migrations beyond its own
+    // known two-row ledger, so this table's migration id must not appear
+    // until AFTER whatever inspects that ledger has already run -- exactly
+    // how C1's own migrations already coexist with that check today.
+    runAgentAutoreplyMigration(handle);
+    // CRON: additive, same "runs last" discipline as S3's own migration
+    // immediately above and for the identical reason -- it must not appear
+    // in collab_schema_migrations until AFTER assertShippedCollabLedger's
+    // exactly-two-row check (inside runSurfaceIdentityMigration, earlier in
+    // this sequence) has already run.
+    runAgentCronMigration(handle);
   } catch {
     /* fail closed: an unmigrated DB authenticates nobody */
   }
 }
 
-function getCollabDb(): BootstrapDb {
+/**
+ * S1 (PRD-TCLAW-COLLAB-PRESENCE-UI-005): exported so the read-surface module
+ * (collabSurface.ts) can share this exact migrated collab.db handle rather
+ * than opening a second connection to the same file. Test overrides
+ * (setCollabDbForTest) apply here identically -- there is only ever one
+ * handle for this module's lifetime.
+ */
+export function getCollabDb(): BootstrapDb {
   if (collabDbOverride) return collabDbOverride;
   if (!defaultCollabDb) {
     const path = process.env.TORQCLAW_COLLAB_DB_PATH || join(DATA_DIR, 'collab.db');
@@ -141,11 +195,72 @@ function getCollabDb(): BootstrapDb {
  *  {secretHmac, state} by design -- credentials.ts:120-123) -- widening
  *  that shared type would ripple into every CredentialLookup consumer for a
  *  need that is specific to this one connect-path derivation. */
-function principalIdForCredential(db: BootstrapDb, credentialId: string): string | null {
+type PrincipalAuthority = {
+  principalId: string;
+  principalKind: 'operator' | 'agent';
+  principalStatus: string;
+};
+
+function principalAuthorityForCredential(
+  db: BootstrapDb,
+  credentialId: string,
+): PrincipalAuthority | null {
   const row = db
-    .prepare('SELECT principal_id FROM principal_credentials WHERE id = ?')
-    .get(credentialId) as { principal_id: string } | undefined;
-  return row ? row.principal_id : null;
+    .prepare(
+      `SELECT pc.principal_id AS principalId,
+              p.kind AS principalKind,
+              p.status AS principalStatus
+         FROM principal_credentials pc
+         JOIN principals p ON p.id = pc.principal_id
+        WHERE pc.id = ?`,
+    )
+    .get(credentialId) as PrincipalAuthority | undefined;
+  return row ?? null;
+}
+
+function principalAuthorityForPrincipal(
+  db: BootstrapDb,
+  principalId: string,
+): PrincipalAuthority | null {
+  const row = db
+    .prepare(
+      `SELECT id AS principalId, kind AS principalKind, status AS principalStatus
+         FROM principals
+        WHERE id = ?`,
+    )
+    .get(principalId) as PrincipalAuthority | undefined;
+  return row ?? null;
+}
+
+/**
+ * S3 (CO-1): exported so collabSurface.ts's `callerFor` never hardcodes a
+ * `CallerContext.kind` literal for a write path. Per the PRD's frozen
+ * "CallerContext.kind source" ruling (Cycle-3 NB-3): the substrate reads
+ * `principals.kind` from its OWN DB for every security-relevant check
+ * (assertOperatorCaller/assertChannelOwner -- store.ts:1966-2023) and never
+ * trusts `caller.kind` (grep-verified: `caller.kind` is read nowhere in
+ * store.ts) -- so `kind` on the CallerContext handed to the store is
+ * advisory plumbing, never an authorization input. Hardcoding it wrong is
+ * therefore not a live privilege-escalation bug for POST_CHANNEL_MESSAGE
+ * (assertChannelVisible ignores it entirely), but a CallerContext that
+ * *claims* `kind: 'operator'` for an agent principal is still a dishonest
+ * value living exactly where a future security-relevant read of it would
+ * silently inherit the lie -- the same "looks right, isn't" shape as D-1.
+ * Reuses the SAME query `resolveConnectIdentity` already runs
+ * (principalAuthorityForPrincipal, this module) rather than adding a
+ * second lookup path.
+ *
+ * Returns null on any lookup failure (unknown principal, closed/errored
+ * handle) -- callers MUST treat null as "kind unknown" and fail closed
+ * (never default to 'operator'), matching this module's house posture of
+ * never throwing across a connect-adjacent seam.
+ */
+export function getPrincipalKind(db: BootstrapDb, principalId: string): 'operator' | 'agent' | null {
+  try {
+    return principalAuthorityForPrincipal(db, principalId)?.principalKind ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -159,6 +274,12 @@ function principalIdForCredential(db: BootstrapDb, credentialId: string): string
  * function itself never throws and never reveals which sub-check failed).
  */
 export function verifySurfaceCredential(credential: string): PrincipalBinding | null {
+  return verifyLegacySurfaceAuthority(credential)?.binding ?? null;
+}
+
+function verifyLegacySurfaceAuthority(
+  credential: string,
+): { binding: PrincipalBinding; principalKind: 'operator' | 'agent' } | null {
   try {
     const pepper = getSecretStore().get(PRINCIPAL_PEPPER_SECRET_NAME);
     if (!pepper) return null;
@@ -168,15 +289,202 @@ export function verifySurfaceCredential(credential: string): PrincipalBinding | 
     const result = verifyCredential(credential, pepper, lookup);
     if (!result.ok) return null;
 
-    const principalId = principalIdForCredential(db, result.credentialId);
-    if (!principalId) return null;
+    const authority = principalAuthorityForCredential(db, result.credentialId);
+    if (!authority || authority.principalStatus !== 'active') return null;
 
     // surfaceId=credentialId stand-in -- see module doc comment.
-    return { principalId, surfaceId: result.credentialId };
+    return {
+      binding: { principalId: authority.principalId, surfaceId: result.credentialId },
+      principalKind: authority.principalKind,
+    };
   } catch {
     // No exception may ever escape to the connect seam -- same posture as
     // verifyCredential itself (credentials.ts:237-240).
     return null;
+  }
+}
+
+/**
+ * S1 (PRD-TCLAW-AGENT-PARTICIPATION-007 follow-on) — self-heal the missing
+ * C1 `surfaces` row for an OPERATOR-kind principal authenticated through
+ * the C0.1 legacy path.
+ *
+ * ROOT CAUSE THIS FIXES: no shipped path (`bootstrapOperator`,
+ * packages/collab/src/bootstrap.ts) has ever called `createSurface`, so an
+ * operator's `principal_credentials` row has never had a matching C1
+ * `surfaces` row. `resolveConnectIdentity` therefore always missed the C1
+ * branch for the operator and returned `auth: null`, which left
+ * `connectionAuth` permanently null for the ONLY credential any shipped
+ * path mints for an operator -- POST_CHANNEL_MESSAGE read
+ * `connectionAuth?.principalId` and always saw null, and (separately,
+ * reported not fixed here) C2 approval registration's `taskOrigin`/
+ * `liveProfileDelegation` evidence chain (c2Broker.ts:69-75) was
+ * unreachable for the operator for the same reason.
+ *
+ * WHY THIS PROJECTS THE EXISTING CREDENTIAL RATHER THAN MINTING A NEW ONE:
+ * `issueSurfaceCredential` (surfaceStore.ts) always mints a brand-new
+ * `tq1_...` token -- there is no API to bind an already-distributed token
+ * to a surface. Minting a second, different credential the operator does
+ * not hold and has no way to receive would fix nothing (the operator would
+ * keep presenting their ORIGINAL token, which would still miss). Instead
+ * this inserts a `surfaces` row and a `surface_credentials` row keyed by
+ * the operator's EXISTING `principal_credentials.id` and its EXISTING
+ * `secret_hmac` -- not a re-derivation, the identical stored bytes. Because
+ * `verifyCredential` (credentials.ts) recomputes the presented token's HMAC
+ * from the token bytes themselves and compares against whatever `secretHmac`
+ * the lookup returns, the operator's one physical token now verifies
+ * successfully against EITHER table under the identical pepper -- this is
+ * not principal synthesis (§2a): the subject is the same already-verified
+ * principal, projected into the table C1 checks, not a new or substituted
+ * identity.
+ *
+ * NEVER RUNS FOR AN AGENT. `createAgent`-minted credentials are S1's
+ * concern (agentCollabPrincipalId in server.ts) and are deliberately left
+ * on the C0.1 legacy path unchanged -- widening surface auto-provisioning
+ * to agents was never scoped or reviewed here.
+ *
+ * Idempotent and fail-open-to-legacy: a duplicate surface/credential (this
+ * function already ran for this principal on an earlier connect) is caught
+ * and treated as already-provisioned, not an error. ANY failure here
+ * (missing schema, closed handle, constraint violation from concurrent
+ * connects) is swallowed and the caller falls back to the untouched C0.1
+ * legacy path -- this function may only ever WIDEN what the operator can
+ * reach relative to today's shipped (broken) behaviour, never narrow or
+ * crash the connect seam.
+ */
+function ensureOperatorSurfaceProvisioned(
+  collabDb: Database.Database,
+  legacyCredentialId: string,
+  operatorPrincipalId: string,
+): void {
+  try {
+    // G1R B-SH-1: "already provisioned" means ALL THREE writes across BOTH
+    // databases -- the surfaces row, its surface_credentials link (atomic
+    // together inside tx() below), and the state.db enforcement projection
+    // (activateSurfaceProjection, which necessarily runs OUTSIDE that
+    // transaction because it targets a different database).
+    //
+    // The original guard read only the first. A crash, throw, or closed
+    // handle between the tx() commit and the projection left collab.db
+    // provisioned and state.db empty -- and on every later connect
+    // validatePresentingSurface returned null (no projection), control fell
+    // to the legacy branch, and THIS GUARD saw the orphan row and returned
+    // without re-attempting the projection. The operator was bricked
+    // PERMANENTLY by the very routine that exists to un-brick them. G1R
+    // reproduced it twice on the real booted gateway: COLLAB_IDENTITY_REQUIRED,
+    // zero committed messages, surfacesRows=1, stateProjections=0.
+    //
+    // So: resolve the EXISTING surface only when its credential link is also
+    // active, and treat a missing projection as work still to do rather than
+    // as done. Re-running activateSurfaceProjection for an existing surface_id
+    // is idempotent by construction (INSERT ... ON CONFLICT(surface_id) DO
+    // UPDATE), and carrying the same surface_role means the role-change epoch
+    // bump is not triggered.
+    const already = collabDb
+      .prepare(
+        `SELECT s.surface_id AS surfaceId
+           FROM surfaces s
+           JOIN surface_credentials sc ON sc.surface_id = s.surface_id
+          WHERE s.principal_id = ? AND s.surface_role = ?
+            AND s.state = 'active' AND sc.state = 'active'`,
+      )
+      .get(operatorPrincipalId, 'operator') as { surfaceId: string } | undefined;
+
+    if (already) {
+      if (liveSurfaceSecurity(stateDb, already.surfaceId) !== null) return; // fully provisioned
+      // Collab side is intact but the state.db projection is missing -- the
+      // partial-write state. Repair it rather than returning.
+      activateSurfaceProjection(stateDb, {
+        surfaceId: already.surfaceId,
+        principalId: operatorPrincipalId,
+        surfaceKind: 'desktop',
+        surfaceRole: 'operator',
+        // G1R ruling: [] is the schema's own declared default and the
+        // fail-closed value. See the note at the fresh-provision call below.
+        allowedCapabilityClasses: [],
+        authEpoch: 1,
+        capabilityRevision: 1,
+        sourceIdentityRevision: already.surfaceId,
+      });
+      return;
+    }
+
+    const credRow = collabDb
+      .prepare('SELECT secret_hmac AS secretHmac FROM principal_credentials WHERE id = ? AND principal_id = ?')
+      .get(legacyCredentialId, operatorPrincipalId) as { secretHmac: Buffer } | undefined;
+    if (!credRow) return; // nothing to project
+
+    const surfaceId = randomUUID();
+    const now = new Date();
+
+    const tx = collabDb.transaction(() => {
+      collabDb
+        .prepare('SELECT 1 FROM surfaces WHERE surface_id = ?')
+        .get(surfaceId); // uniqueness is enforced by the INSERTs below; this read is a no-op guard
+      collabDb
+        .prepare(
+          `INSERT INTO surfaces
+             (surface_id, principal_id, surface_kind, surface_role, display_name,
+              capability_json, state, created_at)
+           VALUES (?,?,?,?,?,?,'active',?)`,
+        )
+        .run(surfaceId, operatorPrincipalId, 'desktop', 'operator', 'Legacy operator surface', '[]', now.toISOString());
+      collabDb
+        .prepare(
+          `INSERT INTO surface_credentials
+             (credential_id, surface_id, secret_hmac, state, issued_at, expires_at)
+           VALUES (?,?,?,'active',?,NULL)`,
+        )
+        .run(legacyCredentialId, surfaceId, credRow.secretHmac, now.toISOString());
+      writeSurfaceAudit(
+        collabDb,
+        'surface_created',
+        { principalId: operatorPrincipalId, surfaceId, credentialId: legacyCredentialId },
+        { surfaceKind: 'desktop', surfaceRole: 'operator', selfHealed: true, reason: 'legacy-operator-c1-backfill' },
+        now,
+      );
+    });
+    tx();
+
+    // Grant-last (§1.4): activate the state.db enforcement projection only
+    // after the collab-side identity row committed. authEpoch/
+    // capabilityRevision start at 1 -- this is a fresh surface, not a
+    // re-activation, so there is no prior epoch to respect.
+    activateSurfaceProjection(stateDb, {
+      surfaceId,
+      principalId: operatorPrincipalId,
+      surfaceKind: 'desktop',
+      surfaceRole: 'operator',
+      // G1R ruling on the builder's flagged judgment call. The original value
+      // was ['read','write','exec','send'], justified as "preserving the
+      // operator's prior unconditional legacy authority" -- but that rationale
+      // is wrong on the facts: the operator had NO surface row at all, which
+      // IS the defect being fixed. There is nothing to preserve. Choosing the
+      // MAXIMUM for a field that never had a value is a decision, not a
+      // continuation.
+      //
+      // The field is currently stored and projected but consulted by NO
+      // authorization gate anywhere in packages/gateway/src, so this changes
+      // no live behavior today. It is a LATENT WIDENING: the moment any slice
+      // adds an allowedCapabilityClasses check, every self-healed operator
+      // surface would silently arrive pre-authorized for 'exec' -- the
+      // highest-consequence class -- via a connect-path auto-provisioner no
+      // human reviewed for that install.
+      //
+      // [] is the schema's own declared default (allowed_capability_classes_json
+      // TEXT NOT NULL DEFAULT '[]') and the fail-closed value, matching this
+      // repo's stated posture ("UNKNOWN NEVER MEANS READ", capability.ts).
+      // Widening later is trivial and safe (ON CONFLICT DO UPDATE); narrowing
+      // later, after installs have accumulated exec-bearing rows, is not.
+      // Take the reversible direction.
+      allowedCapabilityClasses: [],
+      authEpoch: 1,
+      capabilityRevision: 1,
+      sourceIdentityRevision: surfaceId,
+    });
+  } catch {
+    // Fail closed to the pre-existing legacy path -- never let a
+    // provisioning race or schema hiccup escape the connect seam.
   }
 }
 
@@ -209,7 +517,7 @@ export function verifySurfaceCredential(credential: string): PrincipalBinding | 
  */
 export function resolveConnectIdentity(
   credential: string,
-): { binding: PrincipalBinding; auth: ConnectionAuthContext | null } | null {
+): { caller: AuthenticatedCaller; auth: ConnectionAuthContext | null } | null {
   try {
     const pepper = getSecretStore().get(PRINCIPAL_PEPPER_SECRET_NAME);
     if (!pepper) return null;
@@ -221,11 +529,58 @@ export function resolveConnectIdentity(
       { collabDb, stateDb, principalPepper: pepper },
       credential,
     );
-    if (ctx !== null) return { binding: bindingFor(ctx), auth: ctx };
+    if (ctx !== null) {
+      const authority = principalAuthorityForPrincipal(collabDb as unknown as BootstrapDb, ctx.principalId);
+      if (!authority || authority.principalStatus !== 'active') return null;
+      const operator = authority.principalKind === 'operator' && ctx.surfaceRole === 'operator';
+      const role = operator ? 'operator' : 'node';
+      const authClass = operator
+        ? 'operator_surface'
+        : ctx.surfaceRole === 'automation'
+          ? 'automation_surface'
+          : 'agent_surface';
+      return { caller: { binding: bindingFor(ctx), role, authClass }, auth: ctx };
+    }
 
     // C0.1 legacy fallback (see above).
-    const legacy = verifySurfaceCredential(credential);
-    if (legacy !== null) return { binding: legacy, auth: null };
+    const legacy = verifyLegacySurfaceAuthority(credential);
+    if (legacy !== null) {
+      // Self-heal (see ensureOperatorSurfaceProvisioned doc comment): the
+      // ONLY shipped path that mints an operator credential
+      // (bootstrapOperator) never provisions a matching C1 `surfaces` row,
+      // so every operator permanently missed the C1 branch above and
+      // connectionAuth stayed null for the operator's one real credential.
+      // Runs ONLY for principalKind === 'operator' -- agent credentials are
+      // untouched and keep taking the unchanged legacy branch below.
+      if (legacy.principalKind === 'operator') {
+        ensureOperatorSurfaceProvisioned(collabDb, legacy.binding.surfaceId, legacy.binding.principalId);
+        // Re-run the C1 gate ONCE on this same connection now that
+        // provisioning (if it happened) has committed. A provisioning
+        // failure (schema hiccup, race) leaves this a no-op and ctx2 stays
+        // null, which falls through to the untouched legacy return below --
+        // fail-closed, never worse than pre-fix behaviour.
+        const ctx2 = validatePresentingSurface(
+          { collabDb, stateDb, principalPepper: pepper },
+          credential,
+        );
+        if (ctx2 !== null) {
+          const authority2 = principalAuthorityForPrincipal(collabDb as unknown as BootstrapDb, ctx2.principalId);
+          if (authority2 && authority2.principalStatus === 'active') {
+            const operator2 = authority2.principalKind === 'operator' && ctx2.surfaceRole === 'operator';
+            const role2 = operator2 ? 'operator' : 'node';
+            const authClass2 = operator2
+              ? 'operator_surface'
+              : ctx2.surfaceRole === 'automation'
+                ? 'automation_surface'
+                : 'agent_surface';
+            return { caller: { binding: bindingFor(ctx2), role: role2, authClass: authClass2 }, auth: ctx2 };
+          }
+        }
+      }
+      const role = legacy.principalKind === 'operator' ? 'operator' : 'node';
+      const authClass = legacy.principalKind === 'operator' ? 'operator_surface' : 'agent_surface';
+      return { caller: { binding: legacy.binding, role, authClass }, auth: null };
+    }
 
     return null;
   } catch {

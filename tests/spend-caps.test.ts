@@ -79,18 +79,31 @@ function seedSpend(opts: {
 let savedSession: string | undefined;
 let savedDaily: string | undefined;
 let savedDefault: string | undefined;
+// These tests specifically exercise the LEGACY dispatch path (the synchronous
+// cap gate + CircuitBreaker breach ledger handling in dispatchLegacy). dispatch()
+// routes FRONTIER tasks to dispatchFailover whenever the ambient env sets
+// TORQCLAW_PROVIDER_FAILOVER_ENABLED=true, which has NO cap gate and different
+// error handling — that would silently change what every dispatch test here
+// asserts. Pin the flag OFF (save/restore like the cap env vars below) so this
+// file is hermetic regardless of the ambient operator env; the failover path
+// is covered by tests/failover/*.
+const FAILOVER_FLAG = 'TORQCLAW_PROVIDER_FAILOVER_ENABLED';
+let savedFailover: string | undefined;
 beforeEach(() => {
   savedSession = process.env[SESSION_CAP];
   savedDaily = process.env[DAILY_CAP];
   savedDefault = process.env.TORQCLAW_DEFAULT_MAX_COST;
+  savedFailover = process.env[FAILOVER_FLAG];
   delete process.env[SESSION_CAP];
   delete process.env[DAILY_CAP];
   delete process.env.TORQCLAW_DEFAULT_MAX_COST;
+  delete process.env[FAILOVER_FLAG];
 });
 afterEach(() => {
   if (savedSession === undefined) delete process.env[SESSION_CAP]; else process.env[SESSION_CAP] = savedSession;
   if (savedDaily === undefined) delete process.env[DAILY_CAP]; else process.env[DAILY_CAP] = savedDaily;
   if (savedDefault === undefined) delete process.env.TORQCLAW_DEFAULT_MAX_COST; else process.env.TORQCLAW_DEFAULT_MAX_COST = savedDefault;
+  if (savedFailover === undefined) delete process.env[FAILOVER_FLAG]; else process.env[FAILOVER_FLAG] = savedFailover;
 });
 
 describe('TCLAW-1A-core: env var names', () => {

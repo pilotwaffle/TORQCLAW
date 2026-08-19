@@ -138,6 +138,9 @@ importers:
       '@fastify/websocket':
         specifier: ^11.0.0
         version: 11.2.0
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.0.0
+        version: 1.29.0(zod@4.4.3)
       '@torqclaw/bridge':
         specifier: workspace:*
         version: link:../bridge

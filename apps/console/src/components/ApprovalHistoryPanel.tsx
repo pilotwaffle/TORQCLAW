@@ -132,19 +132,19 @@ export default function ApprovalHistoryPanel({
   const isRefreshing = phase === 'pending' && approvals !== null;
 
   return (
-    <div className="absolute inset-0 z-20 flex flex-col bg-[#0a0a0a]/98 text-sm text-neutral-300">
-      <div className="flex items-center justify-between border-b border-neutral-800 p-3">
-        <h2 className="text-[10px] font-bold uppercase tracking-widest text-neutral-400">Approval History</h2>
+    <div className="absolute inset-0 z-20 flex flex-col bg-bg/98 text-[13px] leading-[1.6] text-muted">
+      <div className="flex items-center justify-between border-b border-edge p-3">
+        <h2 className="text-[10px] font-bold uppercase tracking-widest text-muted">Approval History</h2>
         <div className="flex items-center gap-3">
           <button
             type="button"
             onClick={refresh}
             disabled={isRefreshing}
-            className="text-neutral-500 hover:text-neutral-200 disabled:opacity-50"
+            className="text-faint hover:text-ink disabled:opacity-50"
           >
             {isRefreshing ? 'refreshing…' : 'refresh'}
           </button>
-          <button onClick={onClose} className="text-neutral-500 hover:text-neutral-200" aria-label="Close approvals panel">
+          <button onClick={onClose} className="text-faint hover:text-ink" aria-label="Close approvals panel">
             close
           </button>
         </div>
@@ -152,13 +152,13 @@ export default function ApprovalHistoryPanel({
 
       <div className="flex-1 overflow-y-auto p-4">
         {/* S1: loading — no snapshot ever received yet. */}
-        {approvals === null && phase === 'pending' && <p className="text-neutral-600">Loading…</p>}
+        {approvals === null && phase === 'pending' && <p className="text-faint/75">Loading…</p>}
 
         {/* S2: send-failed. */}
         {approvals === null && phase === 'sendFailed' && (
-          <p className="text-neutral-500">
+          <p className="text-faint">
             couldn&apos;t request the approval list — connection may be reconnecting; try again{' '}
-            <button type="button" onClick={refresh} className="underline hover:text-neutral-300">
+            <button type="button" onClick={refresh} className="underline hover:text-muted">
               try again
             </button>
           </p>
@@ -166,17 +166,25 @@ export default function ApprovalHistoryPanel({
 
         {/* S3: timeout, no data ever received. */}
         {approvals === null && phase === 'timeout' && (
-          <p className="text-neutral-500">No response — refresh to try again.</p>
+          <p className="text-faint">No response — refresh to try again.</p>
         )}
 
         {/* S4-S7: a snapshot exists. */}
         {rows && (
           <>
             {phase === 'timeout' && (
-              <p className="mb-2 text-amber-400">Refresh didn&apos;t return — showing the last list received.</p>
+              <p className="mb-2 text-torque">Refresh didn&apos;t return — showing the last list received.</p>
             )}
             {rows.length === 0 ? (
-              <p className="text-neutral-600">No tool approval requests in this session yet.</p>
+              /* §7 empty state: dashed box, icon, title, one-line explainer. */
+              <div className="rounded-[10px] border border-dashed border-border-strong px-6 py-8 text-center">
+                <p className="text-[20px] opacity-60" aria-hidden>◌</p>
+                <p className="mt-2 text-[12px] text-muted">No approval history yet</p>
+                <p className="mx-auto mt-1 max-w-[44ch] text-[10.5px] leading-[1.7] tracking-[0.04em] text-faint">
+                  When the kernel asks for file access, spend-cap overrides, or external
+                  calls, your decisions will be logged here.
+                </p>
+              </div>
             ) : (
               <ul className="space-y-1">
                 {rows.map((row) => (
@@ -185,9 +193,9 @@ export default function ApprovalHistoryPanel({
               </ul>
             )}
             {rows.length === 20 && (
-              <p className="mt-2 text-[10px] text-neutral-600">Showing the 20 most recent.</p>
+              <p className="mt-2 text-[10px] text-faint/75">Showing the 20 most recent.</p>
             )}
-            <div className="mt-4 space-y-0.5 text-[10px] text-neutral-600">
+            <div className="mt-4 space-y-0.5 text-[10px] text-faint/75">
               <p>Tool approvals only — skill approvals are not shown in this history.</p>
               <p>Read-only. Pending requests are decided from their card in the terminal, not from this list.</p>
               <p>Statuses are as of the last refresh.</p>
@@ -216,26 +224,27 @@ export default function ApprovalHistoryPanel({
  */
 function ApprovalHistoryRow({ row }: { row: ApprovalHistoryRowData }) {
   const toneClass =
-    row.status.tone === 'pending' ? 'text-amber-400'
-    : row.status.tone === 'denied' ? 'text-[#E24B4A]'
-    : row.status.tone === 'approved' ? 'text-neutral-300'
-    : 'text-neutral-500';
+    row.status.tone === 'pending' ? 'text-torque'
+    : row.status.tone === 'denied' ? 'text-faint'
+    : row.status.tone === 'approved' ? 'text-muted'
+    : 'text-faint';
 
   return (
-    <li className="rounded border border-neutral-800 px-2 py-1 text-[11px]">
+    <li className="rounded border border-edge px-2 py-1 text-[11px]">
       <div className="flex flex-wrap items-center justify-between gap-x-2">
-        <span className="min-w-0 truncate font-mono text-neutral-300" title={row.toolName}>
+        <span className="min-w-0 truncate font-mono text-muted" title={row.toolName}>
           {row.toolName}
         </span>
         <span className={toneClass} title={row.status.raw}>{row.status.text}</span>
       </div>
-      <div className="text-[10px] text-neutral-600">
+      <div className="text-[10px] text-faint/75">
         requested {row.requestedAt}
         {row.decidedAt !== null && <> · decided {row.decidedAt}</>}
       </div>
-      <div className="truncate font-mono text-[10px] text-neutral-700" title={row.requestId}>
+      <div className="truncate font-mono text-[10px] text-faint/50" title={row.requestId}>
         request {row.requestId}
       </div>
     </li>
   );
 }
+

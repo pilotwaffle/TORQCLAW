@@ -7,19 +7,20 @@ import {
   ComputeTier,
   type GatewayRequest,
 } from '@torqclaw/contracts';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { sessions } from './sessions.js';
 import { enrichCommand } from './enrich.js';
 import { dispatch, mintGrantedRequest, emitToolDenied } from './dispatch.js';
 import { decideApproval, handleListApprovals } from './approvals.js';
 import { makeEmitter, sessionBus, persistAndPublish, taskStore } from './events.js';
 import { router } from '@torqclaw/router';
-import { connectBridge, approveSkill, getSkillDraft, cancelHermesTask } from '@torqclaw/bridge';
+import { connectBridge, connectInProcessServer, approveSkill, getSkillDraft, cancelHermesTask } from '@torqclaw/bridge';
+import { buildCollabAgentMcpServer, COLLAB_AGENT_SERVER_ID, COLLAB_AGENT_TOOL_CAPABILITIES } from './collabAgentTools.js';
 import { describeSkillDecision } from './skillDecision.js';
 import { assertResolvedProfile, constrainTier } from './profileResolver.js';
 import { setCancelCheck, setToolAdmissionCheck } from '@torqclaw/inference';
 import { cancellations } from './cancellations.js';
-import { authorize, checkResumeRole, type Role } from './authz.js';
+import { authorize, type Role } from './authz.js';
 import { db } from './storage.js';
 import { handleListReceipts, handleGetReceipt } from './receipts.js';
 import { handleGetCostSummary } from './spend.js';
@@ -28,11 +29,23 @@ import { handleGetSafeExport } from './export.js';
 import { collabEnabled, PrincipalBindingError } from './principalBridge.js';
 import { resolveConnectIdentity, type ConnectionAuthContext } from './collabIdentity.js';
 import { ensureSurfaceSecuritySchema, captureTaskOrigin, holdsAuthority, liveSurfaceSecurity } from './surfaceSecurity.js';
+import {
+  assertProductionLegacyTokenDisabled,
+  assertedRoleMatches,
+  authenticateConnection,
+  isProductionRuntime,
+} from './connectionAuth.js';
 import { ensureApprovalBrokerSchema } from './approvalSchema.js';
 import { sweepExpiredApprovals, sweepExpiredGrants } from './approvalWriter.js';
 import { rebuildDeliveryProjection } from './approvalDelivery.js';
 import { revokeInertGrants, admitToolCall } from './grantAdmission.js';
 import { decideApprovalC2 } from './c2Broker.js';
+import { collabSurfaceCommandsEnabled, agentParticipationEnabled, isAgentSurfaceCaller, handleListChannels, handleGetChannelTimeline, handlePostChannelMessage, setAutoReplyTrigger } from './collabSurface.js';
+import { onChannelMessageCommitted, recoverStrandedAgentTurns } from './autoReplyDispatcher.js';
+import { getCollabDbForAutoReply } from './collabSurface.js';
+import { handleSetAutoreplyStop } from './autoReplyStopHandler.js';
+import { recoverStrandedScheduleRuns, tickSchedules } from './cronDispatcher.js';
+import { handleCreateSchedule, handleSetScheduleState, handleListSchedules } from './cronScheduleHandler.js';
 
 /**
  * Re-minted requests built inside the C2 decision transaction, handed to
@@ -114,28 +127,50 @@ setCancelCheck((requestId) => cancellations.isCancelled(requestId));
 // LOCAL_EDGE loop calls this immediately before any gated side effect,
 // with the ACTUAL model-generated arguments.
 //
-// TWO conditions gate the fence, and the second is load-bearing:
+// S0 (PRD-TCLAW-AGENT-PARTICIPATION-007 G1R Gate-1, B-1): this used to be
+// gated `if (!collabEnabled()) return { ok: true }`. That mirrors the exact
+// mistake `72b4d36` fixed on FRONTIER's `frontierGrantFenced` the same day:
+// "a security refusal that a feature flag can switch off is not a
+// refusal." `collabEnabled()` defaults FALSE (principalBridge.ts:71-72;
+// `.env.example` sets no collab flag), so the LOCAL_EDGE exact-action seam
+// was inert in every default install. Under human pacing a permissive
+// `grantedTools.includes(name)` allowlist (ollama.ts:356) is weak but a
+// human is standing next to it; the reasoning that makes that tolerable
+// does not survive unattended execution (cron / agent auto-reply), where a
+// once-approved tool name can be re-invoked with ANY arguments while nobody
+// is watching. The flag is now REMOVED from this fence -- it runs on every
+// LOCAL_EDGE dispatch, flag on or off.
 //
-//   1. the flag is on -- flag-off is byte-identical legacy (SI-4), no
-//      grant table read, `grantedTools` alone still authorizes; and
-//   2. this dispatch request actually CARRIES a C2 grant.
+// The remaining condition is load-bearing and is NOT the same defect:
 //
-// Condition 2 exists because "flag on" is not the same as "this request
-// went through C2". A legacy connection (no surface credential presented)
-// still registers and decides through the legacy path even with the
-// subsystem enabled, so its re-run has no grant by design. Fencing it on
-// `collabEnabled()` alone refused those runs `grant-missing` -- a real
-// SI-4 break that the APPROVE leg of the flag-on identity transcript
-// caught (G2A D-3).
+//   this dispatch request actually CARRIES a C2 grant (`carriesGrant`).
 //
-// This does NOT weaken the control. A request that went through C2 always
-// has its grant row minted inside the deciding transaction, so for those
-// requests the lookup finds it and the full check runs. What condition 2
-// skips is only requests for which C2 never issued a licence in the first
-// place -- and those are exactly the requests whose approval row is
-// unbound and therefore inert/reissue-required at the decision seam.
+// This exists because a request can reach this seam without ever having
+// gone through C2 registration at all -- a legacy connection (no surface
+// credential presented) still registers and decides through the legacy
+// register/decide path even with C2 available, so its re-run has no grant
+// by design (D-3/SI-4: a legacy human-paced connection must stay
+// byte-identical to pre-C2 behaviour). Refusing those runs `grant-missing`
+// would be a real regression the APPROVE leg of the flag-on identity
+// transcript already caught (G2A D-3), and it is preserved here unchanged.
+//
+// A request that went through C2 always has its grant row minted inside
+// the deciding transaction, so for those requests the lookup finds it and
+// the full check runs regardless of the flag. What `!carriesGrant` skips is
+// only requests for which C2 never issued a licence in the first place.
+//
+// KNOWN GAP (not closed by this change, and not silently claimed to be):
+// there is not yet an unattended-run caller in this codebase (no cron, no
+// agent auto-reply loop exists yet), so there is no signal at this seam
+// today to distinguish "legacy human-paced connection, no grant by design"
+// from "an unattended run whose grantedTools should never have been
+// re-minted without an args-bound grant". G1R's B-1 fix (ii) -- refusing an
+// unattended dispatch that carries `grantedTools` with no matching grant
+// row -- requires that signal to exist first. TODO(S3/cron prerequisite):
+// once an unattended-run marker is threaded onto GatewayRequest, add
+// `!carriesGrant && isUnattendedRun(requestId) => refuse` here, preserving
+// this exact arm for every other (human-paced legacy) caller.
 setToolAdmissionCheck((requestId, toolName, args) => {
-  if (!collabEnabled()) return { ok: true };
   const carriesGrant = db.prepare(
     'SELECT 1 FROM gateway_action_grants WHERE dispatch_request_id = ?',
   ).get(requestId) !== undefined;
@@ -151,17 +186,11 @@ setToolAdmissionCheck((requestId, toolName, args) => {
 const PORT = Number(process.env.TORQCLAW_PORT || 18790);
 const HOST = process.env.TORQCLAW_HOST || '127.0.0.1';
 const GATEWAY_TOKEN = process.env.TORQCLAW_GATEWAY_TOKEN || '';
+const CHANNEL_SERVICE_TOKEN = process.env.TORQCLAW_CHANNEL_SERVICE_TOKEN || '';
+const PRODUCTION = isProductionRuntime();
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
-function verifyToken(token: string): boolean {
-  if (!GATEWAY_TOKEN) {
-    console.warn('[gateway] TORQCLAW_GATEWAY_TOKEN unset — accepting all loopback clients (dev only)');
-    return true;
-  }
-  // Constant-time compare: plain === leaks match length/position via timing.
-  const received = Buffer.from(token);
-  const expected = Buffer.from(GATEWAY_TOKEN);
-  return received.length === expected.length && timingSafeEqual(received, expected);
-}
+assertProductionLegacyTokenDisabled();
 
 const app = Fastify({ logger: true });
 await app.register(websocket);
@@ -178,6 +207,20 @@ app.get('/ws', { websocket: true }, (socket) => {
   // several concurrent connections presenting different valid
   // same-principal surfaces -- §2.13.
   let connectionAuth: ConnectionAuthContext | null = null;
+  // PRD-TCLAW-AGENT-PARTICIPATION-007 S1: server-derived, CONNECTION-scoped
+  // collab principal id for a VERIFIED agent-kind principal, set ONLY when
+  // TORQCLAW_AGENT_PARTICIPATION is on (agentParticipationEnabled()) and the
+  // connection's own resolved principal (from caller.binding, never a client
+  // frame) reads back kind==='agent' from the collab DB. Deliberately kept
+  // SEPARATE from connectionAuth: connectionAuth is populated only for a C1
+  // surface, and a createAgent()-minted credential (the only agent-minting
+  // path that exists -- store.ts:426) has no C1 surface row, so it always
+  // falls to the C0.1 legacy branch of resolveConnectIdentity, which returns
+  // auth: null. Gating S1's new posting path on connectionAuth alone would
+  // make it permanently unreachable for every agent this program can mint.
+  // NULL here means "no verified agent identity for this connection" and
+  // must never be widened or substituted (§2a).
+  let agentCollabPrincipalId: string | null = null;
 
   const sendErr = (code: string, detail?: unknown) =>
     socket.send(JSON.stringify({ type: 'ERROR', code, detail }));
@@ -211,22 +254,66 @@ app.get('/ws', { websocket: true }, (socket) => {
       // happens inside sessions.resolve() below, in that order and
       // unchanged. A valid C1 surface also yields a connection-scoped
       // ConnectionAuthContext used for immutable per-task origin capture.
-      let callerBinding: import('./principalBridge.js').PrincipalBinding | null = null;
-      let ok: boolean;
-      if (collabEnabled() && conn.data.auth?.kind === 'surface') {
-        const identity = resolveConnectIdentity(conn.data.auth.credential);
-        callerBinding = identity?.binding ?? null;
-        connectionAuth = identity?.auth ?? null;
-        ok = identity !== null;
-      } else {
-        ok = verifyToken(conn.data.token);
-      }
-      if (!ok) {
+      const caller = authenticateConnection(conn.data, {
+        legacyGatewayToken: GATEWAY_TOKEN,
+        channelServiceToken: CHANNEL_SERVICE_TOKEN,
+        production: PRODUCTION,
+        allowTokenlessLegacy: !PRODUCTION && LOOPBACK_HOSTS.has(HOST),
+        resolveSurface: (credential) => {
+          if (!collabEnabled()) return null;
+          const identity = resolveConnectIdentity(credential);
+          connectionAuth = identity?.auth ?? null;
+          return identity?.caller ?? null;
+        },
+      });
+      if (!caller) {
         // Indistinguishable from a bad root token at the client-visible
         // level (M-1): same code, same close. Which verifier failed is
         // never surfaced here.
         sendErr('AUTH_FAILED');
         return socket.close(4001, 'auth failed');
+      }
+
+      // PRD-TCLAW-AGENT-PARTICIPATION-007 S1: resolve (never assert) this
+      // connection's verified agent collab principal. Every input here is
+      // server-derived: caller.binding and caller.authClass both came from a
+      // cryptographically verified tq1_ credential
+      // (connectionAuth.ts/collabIdentity.ts), never a client frame field.
+      //
+      // WHY authClass === 'agent_surface' AND NOT A SECOND DB READ:
+      // collabIdentity.ts computes authClass from the SAME verified-
+      // principal lookup that already produced caller.role -- 'agent_surface'
+      // is set (both the C1 and C0.1-legacy branches) if-and-only-if the
+      // resolved principal's kind is 'agent' AND (for a C1 surface) its
+      // surfaceRole is specifically 'agent', not 'automation' or 'operator'.
+      // A second, independent principals.kind lookup here would read the
+      // SAME collab.db handle collabIdentity.ts already read microseconds
+      // earlier in this same synchronous connect path -- it cannot
+      // observe a different answer, so it would be untestable dead
+      // redundancy (verified by mutation: removing such a check left every
+      // test green, because no reachable input can make the two reads
+      // disagree). authClass is therefore the correct, non-redundant,
+      // already-verified signal to gate on. It also correctly EXCLUDES a C1
+      // 'automation_surface' principal, which role-collapses to the same
+      // 'node' seat but is a distinct authClass -- automation is not agent
+      // participation and this slice grants it nothing.
+      //
+      // Flag-gated: with TORQCLAW_AGENT_PARTICIPATION off (its default),
+      // agentParticipationEnabled() short-circuits this to false
+      // immediately, so agentCollabPrincipalId stays null and every path
+      // this slice adds is byte-identical to pre-S1 behaviour (A1-d, the
+      // absent-deny discipline).
+      if (agentParticipationEnabled() && isAgentSurfaceCaller(caller.authClass, caller.binding)) {
+        agentCollabPrincipalId = caller.binding!.principalId;
+      }
+
+      const knownResume = Boolean(conn.data.sessionId && sessions.has(conn.data.sessionId));
+      // Fresh and unknown-id frames can be checked before resolve, preventing
+      // mismatch attempts from inserting an orphan session. Known resumes run
+      // ownership first below so ROLE_MISMATCH cannot become an identity oracle.
+      if (!knownResume && !assertedRoleMatches(conn.data, caller.role)) {
+        sendErr('ROLE_MISMATCH');
+        return socket.close(4003, 'role mismatch');
       }
       // sessions.resolve() throws PrincipalBindingError (via
       // assertResumeAllowed) on a cross-principal resume attempt -- this is
@@ -239,7 +326,7 @@ app.get('/ws', { websocket: true }, (socket) => {
       // failed (M-1).
       let resolved: ReturnType<typeof sessions.resolve>;
       try {
-        resolved = sessions.resolve(conn.data, callerBinding);
+        resolved = sessions.resolve(conn.data, caller);
       } catch (err) {
         if (err instanceof PrincipalBindingError) {
           sendErr('AUTH_FAILED');
@@ -248,13 +335,7 @@ app.get('/ws', { websocket: true }, (socket) => {
         throw err;
       }
 
-      // A RESUME (sessionId matched an existing row) whose frame.role disagrees
-      // with the stored role is rejected outright — never mint a fresh session
-      // as a fallback, since that would let a client re-cast its own role.
-      // The guard itself lives in authz.ts (checkResumeRole) so the unit tests
-      // cover the actual production path.
-      const roleCheck = checkResumeRole(resolved.resumed, resolved.role, conn.data.role);
-      if (!roleCheck.ok) {
+      if (knownResume && !assertedRoleMatches(conn.data, caller.role)) {
         sendErr('ROLE_MISMATCH', { sessionId: resolved.sessionId });
         return socket.close(4003, 'role mismatch');
       }
@@ -306,8 +387,17 @@ app.get('/ws', { websocket: true }, (socket) => {
       holdsAuthority: (authority: 'approve' | 'cancel' | 'delegate') =>
         holdsAuthority(db, connectionAuth!.surfaceId, authority),
     };
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S1: the ONE seat-lattice widening
+    // this slice adds (authz.ts's AuthzContext.agentCollabWrite doc comment
+    // has the full precondition). Re-read the flag live per-call (never
+    // cached from connect time) so a mid-connection flag flip takes effect
+    // on the very next command, matching this file's existing discipline
+    // for surfaceAuthz above. agentCollabPrincipalId itself was resolved
+    // ONCE at connect from a verified credential and never changes for the
+    // life of the socket -- only the flag gate is re-read live.
+    const agentCollabWrite = agentCollabPrincipalId !== null && agentParticipationEnabled();
     const decision = authorize(role!, cmd.data, {
-      sessionId: sid, lookupTaskSession, surface: surfaceAuthz,
+      sessionId: sid, lookupTaskSession, surface: surfaceAuthz, agentCollabWrite,
     });
     if (!decision.ok) {
       app.log.warn({ role, action: cmd.data.action }, 'authz denied');
@@ -320,7 +410,15 @@ app.get('/ws', { websocket: true }, (socket) => {
         const emit = makeEmitter(sid, null, null);
         emit('USER_PROMPT', cmd.data.prompt); // feeds getContextWindow Tier 1
 
-         const request = await enrichCommand(cmd.data, sid, 'torq-console');
+         // S2: authz denies SUBMIT_PROMPT outright for role 'node' (the only
+         // seat an agent's own connection can hold — authz.ts), so
+         // agentCollabPrincipalId is always null on every connection that
+         // can reach this arm today. Passed through anyway so this call site
+         // stays correct if a future slice (S3's dispatch-time binding)
+         // changes that, rather than needing to be found and rewired later.
+         const request = await enrichCommand(
+           cmd.data, sid, 'torq-console', agentCollabPrincipalId ?? undefined,
+         );
          GatewayRequestSchema.parse(request); // throws = our bug; fail loud
          assertResolvedProfile(request);
 
@@ -470,9 +568,26 @@ app.get('/ws', { websocket: true }, (socket) => {
           // Mint a NEW task: original constraints verbatim + grant + notice.
           const reqB = mintGrantedRequest(decided.requestJson, decided.toolName);
           GatewayRequestSchema.parse(reqB); // assert our re-mint obeys contracts
+          const diag = router.evaluateRequest(reqB);
+          // N-1 (2026-08-17): the SAME refusal the C2 branch performs above.
+          // It was present only there, so with TORQCLAW_COLLAB_ENABLED off --
+          // its default -- this legacy path dispatched a FRONTIER run under a
+          // name-only grant that nothing downstream could fence. FRONTIER's
+          // Hermes hook grants by tool NAME and never inspects args, so the
+          // exact-action invariant (§1.4) cannot be satisfied here. Refuse
+          // BEFORE dispatch: `dispatch` carries an independent fence
+          // (frontierGrantFenced), and this is the defence-in-depth half so a
+          // future caller reaching dispatch by another route still cannot
+          // execute a name-only FRONTIER grant.
+          if (diag.tier === ComputeTier.FRONTIER) {
+            makeEmitter(sid, null, null)('SYSTEM',
+              'Approval refused: FRONTIER has no args-aware structured grant protocol, '
+              + 'so this approval cannot be fenced and is refused (fail-closed).',
+              { approvalId: cmd.data.approvalId, refusedCode: 'frontier-structured-grant-unavailable' });
+            break;
+          }
           const reqEmit = makeEmitter(reqB.sessionId, reqB.id, null);
           reqEmit('ROUTING', `Re-running with permission for ${decided.toolName}`, reqB.enrichment);
-          const diag = router.evaluateRequest(reqB);
           makeEmitter(reqB.sessionId, reqB.id, diag.tier)('TIER_SELECTED', diag.reason, diag);
           dispatch(reqB, diag);
         } else {
@@ -591,6 +706,127 @@ app.get('/ws', { websocket: true }, (socket) => {
         handleGetSafeExport(sid, cmd.data.taskId);
         break;
       }
+      case 'LIST_CHANNELS': {
+        // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S1: narrowing flag, independent
+        // of authz's seat-level allow -- turning this OFF must remove the
+        // command entirely (absent-deny) without touching authz.ts or the
+        // C0/C1 identity hardening it protects (§9). Same terminal ERROR
+        // shape as any other absent/denied action on this socket.
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        // §2a: the subject is the CONNECTION's resolved collab principal --
+        // never the gateway seat/role, never a client-supplied id. No
+        // resolved principal => the handler itself returns the terminal
+        // COLLAB_IDENTITY_REQUIRED refusal (refuse, never substitute or
+        // synthesize).
+        const listErr = await handleListChannels(sid, connectionAuth?.principalId ?? null, cmd.data.limit);
+        if (listErr) sendErr(listErr.code, listErr.detail);
+        break;
+      }
+      case 'GET_CHANNEL_TIMELINE': {
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        const timelineErr = await handleGetChannelTimeline(
+          sid,
+          connectionAuth?.principalId ?? null,
+          cmd.data.channelId,
+          cmd.data.cursor,
+          cmd.data.limit,
+        );
+        if (timelineErr) sendErr(timelineErr.code, timelineErr.detail);
+        break;
+      }
+      case 'POST_CHANNEL_MESSAGE': {
+        // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S3: same absent-deny narrowing
+        // flag as S1 -- turning the surface off removes posting too, without
+        // touching authz.ts or the C0/C1 identity hardening it protects.
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        // §2a / A3: the subject and the STAMPED AUTHOR are both the
+        // CONNECTION's resolved collab principal -- never a client-supplied
+        // value (the command carries no author field to spoof). No resolved
+        // principal => the handler returns the terminal
+        // COLLAB_IDENTITY_REQUIRED refusal and posts nothing (CO-1).
+        //
+        // PRD-TCLAW-AGENT-PARTICIPATION-007 S1: agentCollabPrincipalId takes
+        // precedence when set. By construction it is non-null here ONLY for
+        // a node-seat connection that just cleared authz's agentCollabWrite
+        // gate (a verified agent principal); for every other seat it is
+        // always null (never set for an operator-kind principal, per A1-e),
+        // so this falls through to connectionAuth?.principalId -- the exact,
+        // unchanged 005 S3 behaviour for the operator seat.
+        const postErr = await handlePostChannelMessage(
+          sid,
+          agentCollabPrincipalId ?? connectionAuth?.principalId ?? null,
+          cmd.data.channelId,
+          cmd.data.text,
+          cmd.data.idempotencyKey,
+        );
+        if (postErr) sendErr(postErr.code, postErr.detail);
+        break;
+      }
+      case 'SET_AUTOREPLY_STOP': {
+        // PRD-TCLAW-AGENT-PARTICIPATION-007 S3: no absent-deny narrowing
+        // flag gate here, deliberately -- unlike LIST_CHANNELS/
+        // GET_CHANNEL_TIMELINE/POST_CHANNEL_MESSAGE (which surface
+        // conversational data behind collabSurfaceCommandsEnabled()), STOP
+        // is a pure control-plane halt with no data to leak. It is reached
+        // only via authz's operator-seat-only gate above (authz.ts denies
+        // it for role 'channel'/'node' unconditionally), so gating it a
+        // second time on a data-surface flag would only make STOP
+        // unavailable exactly when an operator might need it (e.g. to
+        // confirm auto-reply is off before flipping the flag back on).
+        // Read-vs-write of the underlying table is itself still gated: with
+        // no collab.db resolved (getCollabDbForAutoReply() returns null
+        // when getStore() has never succeeded -- e.g. no pepper), the
+        // handler returns COLLAB_UNAVAILABLE, never a throw.
+        const stopErr = await handleSetAutoreplyStop(
+          sid,
+          connectionAuth?.principalId ?? null,
+          getCollabDbForAutoReply(),
+          { stop: cmd.data.stop, scope: cmd.data.scope, channelId: cmd.data.channelId },
+        );
+        if (stopErr) sendErr(stopErr.code, stopErr.detail);
+        break;
+      }
+      case 'CREATE_SCHEDULE': {
+        // Operator-seat-only (authz.ts). Same no-absent-deny-flag-gate
+        // reasoning as SET_AUTOREPLY_STOP: this is control-plane, not a
+        // data surface, so it is reached only via authz's operator gate,
+        // never a second time behind collabSurfaceCommandsEnabled().
+        const createErr = await handleCreateSchedule(
+          sid,
+          connectionAuth?.principalId ?? null,
+          getCollabDbForAutoReply(),
+          {
+            channelId: cmd.data.channelId,
+            agentPrincipalId: cmd.data.agentPrincipalId,
+            intervalSeconds: cmd.data.intervalSeconds,
+            promptHint: cmd.data.promptHint,
+            idempotencyKey: cmd.data.idempotencyKey,
+          },
+        );
+        if (createErr) sendErr(createErr.code, createErr.detail);
+        break;
+      }
+      case 'SET_SCHEDULE_STATE': {
+        const stateErr = await handleSetScheduleState(
+          sid, getCollabDbForAutoReply(), { scheduleId: cmd.data.scheduleId, state: cmd.data.state },
+        );
+        if (stateErr) sendErr(stateErr.code, stateErr.detail);
+        break;
+      }
+      case 'LIST_SCHEDULES': {
+        const listErr = await handleListSchedules(sid, getCollabDbForAutoReply(), cmd.data.channelId);
+        if (listErr) sendErr(listErr.code, listErr.detail);
+        break;
+      }
     }
   });
 
@@ -599,47 +835,203 @@ app.get('/ws', { websocket: true }, (socket) => {
 
 await connectBridge(); // discover + namespace MCP servers before traffic
 
+// PRD-TCLAW-AGENT-PARTICIPATION-007 S2: register the in-process collab
+// tool server AFTER connectBridge() returns — never inside it, and never
+// reachable from loadServerConfigs()/servers.json (G1R B-2; see
+// registry.ts's connectInProcessServer doc comment for why that boundary
+// holds by construction). Gated on agentParticipationEnabled() (S2 inherits
+// S1's flag, which itself requires collabSurfaceCommandsEnabled() ->
+// collabEnabled() -- so this can never register a surface those flags left
+// off). Read once at boot (not per-call) because tool REGISTRATION, unlike
+// the wire-command flag checks elsewhere in this file, is not something a
+// live connection can race against: no traffic has been accepted yet
+// (connectBridge() runs before the listener opens, and this runs
+// immediately after). A boot-time flag flip requires a restart to take
+// effect, matching how every other bridge server registers (connectServer
+// above is equally boot-time-only).
+if (agentParticipationEnabled()) {
+  try {
+    await connectInProcessServer(
+      COLLAB_AGENT_SERVER_ID,
+      buildCollabAgentMcpServer(),
+      { capabilities: COLLAB_AGENT_TOOL_CAPABILITIES },
+    );
+  } catch (err: any) {
+    // Same degrade-one-server posture as the user roster loop below: a
+    // failure here must never take the gateway down (CLAUDE.md §4: "a
+    // malformed or unreachable server must degrade only that server").
+    console.warn(`[gateway] collab agent tools failed to register (${err?.message ?? err}) — agent participation tools unavailable this session`);
+  }
+}
+
 // C2 startup recovery + projection rebuild (§1.4, §3.13, §6.6, A10).
 //
-// Gated on the flag: with collab off, no C2 table is read or written, which
-// is the SI-4 requirement. With it on, this runs BEFORE the listener opens
-// so no client can observe a half-recovered state:
+// S0 (PRD-TCLAW-AGENT-PARTICIPATION-007 G1R Gate-1, B-7): the three sweep
+// calls below used to sit INSIDE the `if (collabEnabled())` block below,
+// which defaults false. Same defect class as B-1, in the recovery path: a
+// gateway that crashes between an admission decision and tool execution
+// leaves an inert grant unrevoked, and a gateway that crashes with a
+// pending approval past its deadline leaves it actionable indefinitely --
+// in the DEFAULT configuration. This matters materially more than for a
+// human-paced run, because nobody is watching a crashed-and-restarted
+// gateway's boot log for a stale grant. Run unconditionally, still BEFORE
+// the listener opens so no client can observe a half-recovered state:
 //
 //   1. Revoke grants left inert by a crash between decision and admission.
 //      Recovery only ever REDUCES authority -- it never completes,
 //      dispatches, or reissues a grant (§6.6).
-//   2. Sweep approvals past their deadline through the one centralized
-//      writer, so a restart cannot leave a stale row indefinitely
-//      actionable.
-//   3. Rebuild the delivery projection against CURRENTLY eligible operator
-//      surfaces, so a surface that lost authority while the gateway was
-//      down is not re-targeted (A10).
+//   2. Sweep approvals and grants past their deadline through the one
+//      centralized writer, so a restart cannot leave a stale row
+//      indefinitely actionable.
+//
+// This is safe unconditionally: with collab off, these three sweeps read
+// and write ONLY the C2 tables (`gateway_action_grants`, `tool_approvals`'
+// C2 columns), which `ensureApprovalBrokerSchema(db)` above already creates
+// unconditionally at boot (C2-1, additive migration) and which no flag-off
+// path writes to in the first place -- so with the flag off these sweeps
+// simply find nothing to revoke or expire and are a no-op in practice, not
+// merely in principle.
+try {
+  const revokedInert = revokeInertGrants(db);
+  const expired = sweepExpiredApprovals(db);
+  sweepExpiredGrants(db);
+  console.log(
+    `[torqclaw] C2 recovery: ${revokedInert} inert grant(s) revoked, `
+    + `${expired} approval(s) expired`,
+  );
+} catch (error) {
+  // Recovery must never prevent the gateway from starting: every C2
+  // consumer already fails closed without its evidence, so a failed sweep
+  // denies rather than opens.
+  console.error('[torqclaw] C2 grant/approval sweep failed (continuing fail-closed):', error);
+}
+
+// PRD-TCLAW-AGENT-PARTICIPATION-007 S3 (G1R B-3b): wire the trigger BEFORE
+// running the recovery sweep below, so a stranded turn the sweep
+// re-dispatches has somewhere to go. Injected (never a direct import from
+// collabSurface.ts) to avoid a circular import -- see collabSurface.ts's
+// setAutoReplyTrigger doc comment. Unconditional wiring is safe: with
+// either flag off, onChannelMessageCommitted's own first line returns
+// immediately (absent-deny), matching every other flag-gated seam in this
+// file.
+setAutoReplyTrigger(onChannelMessageCommitted);
+
+// Boot-time recovery for the auto-reply watermark (G1R B-3b's required
+// recovery, same discipline as revokeInertGrants above): find every
+// collab_agent_turns row left 'dispatched' by a crash between claim and
+// resolution, and RE-DISPATCH it rather than leaving it silently
+// indistinguishable from legitimate A3-f silence. Runs unconditionally,
+// before the listener opens, for the identical reason the C2 sweep above
+// does. Safe with the flag off: with no auto-reply ever having run, there
+// are no rows to find.
+try {
+  const recovered = await recoverStrandedAgentTurns();
+  if (recovered > 0) {
+    console.log(`[torqclaw] agent auto-reply recovery: ${recovered} stranded turn(s) re-dispatched`);
+  }
+} catch (error) {
+  console.error('[torqclaw] agent auto-reply recovery sweep failed (continuing):', error);
+}
+
+// CRON slice (G1R Gate-1 §2A): boot-time recovery for stranded schedule
+// runs, same discipline as recoverStrandedAgentTurns immediately above --
+// a crash between claim and resolution is RE-DISPATCHED, never left
+// silently indistinguishable from a legitimate outcome. Runs
+// unconditionally, before the listener opens, for the identical reason.
+try {
+  const recoveredSchedules = await recoverStrandedScheduleRuns();
+  if (recoveredSchedules > 0) {
+    console.log(`[torqclaw] scheduled-turn recovery: ${recoveredSchedules} stranded run(s) re-dispatched`);
+  }
+} catch (error) {
+  console.error('[torqclaw] scheduled-turn recovery sweep failed (continuing):', error);
+}
+
+// CRON slice: the scheduler ticker. A schedule "fires" only when this
+// interval calls tickSchedules() -- there is no other path to a scheduled
+// dispatch. tickSchedules() itself is the absent-deny gate (its own first
+// line: `if (!agentCronEnabled()) return 0`), so this timer is harmless to
+// start unconditionally, matching every other unconditional-wiring/
+// internal-gate pattern in this file (setAutoReplyTrigger above, C2's
+// admission check). The interval is intentionally SHORT (polling
+// granularity, not the schedule's own interval, which is >=60s by
+// migration CHECK) so a due schedule fires close to its due time rather
+// than drifting by however long between ticks. unref() so this timer alone
+// never keeps the process alive past a deliberate shutdown.
+const cronTickTimer = setInterval(() => {
+  tickSchedules().catch((err) => {
+    console.error(`[torqclaw] scheduler tick failed (continuing):`, err);
+  });
+}, 15_000);
+cronTickTimer.unref();
+
+// Delivery-projection rebuild stays flag-gated: it is UI-delivery routing
+// for the collab approval surface, not part of the exact-action admission
+// fence, and it is out of this slice's scope (task names only the three
+// sweep calls above).
 if (collabEnabled()) {
   try {
-    const revokedInert = revokeInertGrants(db);
-    const expired = sweepExpiredApprovals(db);
-    sweepExpiredGrants(db);
     const projection = rebuildDeliveryProjection(db);
     console.log(
-      `[torqclaw] C2 recovery: ${revokedInert} inert grant(s) revoked, `
-      + `${expired} approval(s) expired, ${projection.created} delivery row(s) projected`
+      `[torqclaw] C2 recovery: ${projection.created} delivery row(s) projected`
       + (projection.reason ? ` (${projection.reason})` : ''),
     );
   } catch (error) {
-    // Recovery must never prevent the gateway from starting: every C2
-    // consumer already fails closed without its evidence, so a failed
-    // rebuild denies rather than opens.
-    console.error('[torqclaw] C2 recovery failed (continuing fail-closed):', error);
+    console.error('[torqclaw] C2 delivery projection rebuild failed (continuing fail-closed):', error);
   }
 }
 
 if (process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED?.toLowerCase() === 'true') {
   const { ensureResilienceProjection, reconcileGatewayProjection } = await import('./storage.js');
-  const { pageOutbox } = await import('@torqclaw/bridge');
+  const { pageOutbox, isHermesAvailable, onHermesReady } = await import('@torqclaw/bridge');
   ensureResilienceProjection();
-  await reconcileGatewayProjection(async (afterCursor, limit) => pageOutbox(afterCursor, limit));
-  const { recoverFailoverTasks } = await import('./failover.js');
-  await recoverFailoverTasks();
+  // Boot must not hard-crash because the engine's outbox is unreachable
+  // (engine down or still starting). Both reconcileGatewayProjection and
+  // recoverFailoverTasks call pageOutbox -> the ENGINE's resilience_page_outbox
+  // over MCP; with no engine there is no outbox to read and the call rejects
+  // with 'invalid outbox page', which used to take the whole gateway down at
+  // boot. (ensureResilienceProjection above is local-DDL only and stays
+  // unconditional.)
+  //
+  // HONEST LIMITATION (security audit B-1): skipping here does NOT weaken the
+  // per-task fail-closed guarantee -- every FRONTIER admission lazily
+  // reconciles via ensureInitialResilienceProjection and fails closed if it
+  // cannot, and spend caps read the local spend_ledger, never this projection.
+  // recoverFailoverTasks has no per-task equivalent, so if the engine is down
+  // at boot we DEFER it via onHermesReady: the bridge retries the hermes
+  // connection in the background and runs the recovery as soon as the engine
+  // connects (hermes-agent reconnect-watcher pattern). A boot with the engine
+  // down therefore no longer strands in-flight tasks until the next restart.
+  if (isHermesAvailable()) {
+    try {
+      await reconcileGatewayProjection(async (afterCursor, limit) => pageOutbox(afterCursor, limit));
+      const { recoverFailoverTasks } = await import('./failover.js');
+      await recoverFailoverTasks();
+    } catch (error) {
+      // Engine IS up yet reconciliation/recovery failed — a real integrity
+      // error (outbox gap, cursor regression, ...). Loud on purpose: the
+      // projection may be corrupt and monitoring must see it. Per-task
+      // fail-closed still holds for subsequent FRONTIER dispatches.
+      console.error('[torqclaw] failover boot reconciliation/recovery FAILED: ' + ((error as Error)?.message ?? String(error)));
+    }
+  } else {
+    // Engine down at boot: don't log-and-forget. When the bridge's background
+    // reconnect lands, run the recovery we skipped. Recovery is idempotent
+    // (only acts on still-pending candidates); a failure here is a REAL
+    // integrity error (the engine IS up by then), so it is logged loudly
+    // rather than silently retried.
+    console.warn('[torqclaw] failover boot recovery deferred: hermes engine unavailable — will run when the engine connects');
+    onHermesReady(async () => {
+      try {
+        await reconcileGatewayProjection(async (afterCursor, limit) => pageOutbox(afterCursor, limit));
+        const { recoverFailoverTasks } = await import('./failover.js');
+        const summary = await recoverFailoverTasks();
+        console.log(`[torqclaw] deferred failover recovery completed (engine connected after boot): ${summary.candidates} candidate(s)`);
+      } catch (error) {
+        console.error('[torqclaw] deferred failover recovery FAILED: ' + ((error as Error)?.message ?? String(error)));
+      }
+    });
+  }
 }
 await app.listen({ port: PORT, host: HOST });
 console.log(`[torqclaw] gateway listening on ws://${HOST}:${PORT}/ws`);

@@ -1,5 +1,8 @@
 // Core modules
-export { runCollaborationMigration } from './migration.js';
+export {
+  runCollaborationMigration, runAgentAutoreplyMigration, AGENT_AUTOREPLY_MIGRATION_ID,
+  runAgentCronMigration, AGENT_CRON_MIGRATION_ID,
+} from './migration.js';
 export { DeterministicClock, DeterministicUuids } from './harness.js';
 
 // Validators
@@ -17,7 +20,9 @@ export {
   type SecretStore,
   InMemorySecretStore,
   WindowsCredentialManagerStore,
+  FileSecretStore,
   NotImplementedError,
+  SecretAlreadyExistsError,
 } from './secrets.js';
 
 // Bootstrap and recovery
@@ -275,3 +280,40 @@ export {
   type RevokeSurfaceResult,
   type SurfaceAuditKind,
 } from './surfaceStore.js';
+
+// PRD-TCLAW-AGENT-PARTICIPATION-007 S3 — auto-reply trigger resolver
+// (INV-T1), turn watermark, and the STOP control.
+export {
+  resolveEligibleAgents,
+  claimAgentTurn,
+  attachDispatchRequestId,
+  resolveAgentTurn,
+  findStrandedAgentTurns,
+  reclaimStrandedAgentTurn,
+  isAutoreplyStopped,
+  setAutoreplyStop,
+  clearAutoreplyStop,
+  type AutoreplyDb,
+  type AgentTurnState,
+  type StrandedTurn,
+} from './autoReply.js';
+
+// CRON — scheduled autonomous agent turns (G1R Gate-1 §2A).
+export {
+  createSchedule,
+  setScheduleState,
+  getSchedule,
+  listSchedulesForChannel,
+  findDueSchedules,
+  claimScheduleFire,
+  recordScheduleRunDispatched,
+  attachScheduleRunDispatchRequestId,
+  resolveScheduleRun,
+  findStrandedScheduleRuns,
+  assertScheduleStillAuthorized,
+  type CronDb,
+  type ScheduleState,
+  type ScheduleRunState,
+  type AgentSchedule,
+  type StrandedScheduleRun,
+} from './cron.js';

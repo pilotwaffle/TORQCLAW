@@ -69,7 +69,7 @@ describe('collabIdentity.verifySurfaceCredential - server-derived binding', () =
     const vanishedRowDb: BootstrapDb = {
       prepare(sql: string) {
         const statement = db.prepare(sql);
-        if (sql.includes('SELECT principal_id FROM principal_credentials')) return { get: () => undefined } as ReturnType<BootstrapDb['prepare']>;
+        if (sql.includes('FROM principal_credentials pc')) return { get: () => undefined } as ReturnType<BootstrapDb['prepare']>;
         return statement as ReturnType<BootstrapDb['prepare']>;
       },
     };
