@@ -513,6 +513,46 @@ export interface ProfileDelegation {
  * never mutated in place -- a binding or grant that points at a
  * `delegation_id` must be able to trust that what it points at never
  * changed underneath it.
+ *
+ * RESERVED-BY-DEFECT: THIS FUNCTION HAS ZERO PRODUCTION CALLERS, BY DECISION.
+ *
+ * It is the ONLY writer of `gateway_profile_delegations`. Three production
+ * readers exist (c2Broker.ts resolveContext/decideApprovalC2, and
+ * grantAdmission.ts delegationById), and with no writer they take their empty
+ * branch unconditionally. The consequence chain, traced end to end:
+ * resolveContext returns null -> registerApprovalC2 returns null ->
+ * dispatch.ts falls back to legacy registration -> no `gateway_approval_bindings`
+ * row -> decideApprovalC2 returns `{kind:'legacy'}` -> approvalWriter's INSERT
+ * into `gateway_action_grants` never runs -> server.ts's `carriesGrant` is
+ * always false -> the LOCAL_EDGE exact-action admission fence returns
+ * `{ok:true}` WITHOUT ever calling admitToolCall.
+ *
+ * So the C2 exact-action fence has never executed in production. That is
+ * DELIBERATE STAGING, not a broken shipped control: the fence is the last gate
+ * of a lane whose earlier slices landed first, and wiring this writer would
+ * make ordinary operator traffic mint real grants and traverse that fence FOR
+ * THE FIRST TIME -- arriving as a side effect of two unrelated slices
+ * composing, with no gate review of its own. Do not wire it to make a
+ * reachability check green.
+ *
+ * DO NOT REMOVE IT EITHER. Unlike skillTrust.ts (deleted), this has a
+ * specified design (§2.13), a live schema, four guarded columns on
+ * `gateway_task_origins`, two FOREIGN KEY references from approvalSchema.ts,
+ * and three production readers. Deleting the writer while keeping the readers
+ * and the schema is strictly worse than leaving it declared dormant.
+ *
+ * WHY THIS COMMENT EXISTS AT ALL: there is ZERO observable difference between
+ * "this feature works correctly and no delegations are granted" and "this
+ * feature is completely broken" -- no log, no counter, no event distinguishes
+ * them, and registerApprovalC2's bare `catch { return null; }` means even a
+ * throwing writer would look identical. The S0 slice removed C2's
+ * `collabEnabled()` checks on the grounds that "a security refusal a feature
+ * flag can switch off is not a refusal"; the missing writer then silently took
+ * that flag's place. A switch that could be seen was removed and a switch that
+ * could not be seen was left. This declares the invisible one.
+ *
+ * Tracked by tests/profile-conformance-dormant-exports.test.ts, which FAILS if
+ * a production caller appears without this declaration being removed.
  */
 export function grantProfileDelegation(
   db: Database.Database,
