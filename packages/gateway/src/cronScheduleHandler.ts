@@ -40,11 +40,28 @@ export async function handleCreateSchedule(
   // now -- an operator cannot schedule a principal that isn't in the room.
   // This is a create-time sanity check, not the authority check itself
   // (that happens independently at every wake).
-  const authz = assertScheduleStillAuthorized(db, { channelId: params.channelId, agentPrincipalId: params.agentPrincipalId });
-  if (!authz.ok) {
-    return { code: 'COLLAB_NOT_FOUND', detail: authz.reason };
-  }
+  // G1R B-C1: this call USED TO SIT OUTSIDE the try below, and it is the only
+  // one of the three cron handlers that did. Its first statement selects from
+  // collab_autoreply_stop, so a partially-applied or lock-interrupted migration
+  // makes it THROW -- and migrateCollabDb (collabIdentity.ts) swallows every
+  // migration error in a bare catch{} while still returning a usable handle, so
+  // that state is reachable in production, not hypothetical.
+  //
+  // From there the SqliteError escapes into server.ts's async
+  // socket.on('message') handler, whose only try wraps JSON.parse -- the
+  // switch containing the cron arms is unguarded -- and THIS GATEWAY HAS NO
+  // unhandledRejection NET. The process dies. An operator trying to CREATE a
+  // schedule takes down the gateway.
+  //
+  // G1R proved the asymmetry by execution: against an unmigrated handle this
+  // handler THREW while handleSetScheduleState and handleListSchedules both
+  // returned COLLAB_UNAVAILABLE, because their store calls sit inside their
+  // try. Moved inside so all three are total.
   try {
+    const authz = assertScheduleStillAuthorized(db, { channelId: params.channelId, agentPrincipalId: params.agentPrincipalId });
+    if (!authz.ok) {
+      return { code: 'COLLAB_NOT_FOUND', detail: authz.reason };
+    }
     createSchedule(db, {
       id: randomUUID(),
       channelId: params.channelId,

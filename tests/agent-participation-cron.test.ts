@@ -294,6 +294,7 @@ describe('CRON — end-to-end (real dispatcher, real profile, committed rows)', 
   let collabSurface: typeof import('../packages/gateway/dist/collabSurface.js');
   let collabAgentTools: typeof import('../packages/gateway/dist/collabAgentTools.js');
   let cronDispatcher: typeof import('../packages/gateway/dist/cronDispatcher.js');
+  let cronScheduleHandler: typeof import('../packages/gateway/dist/cronScheduleHandler.js');
   let events: typeof import('../packages/gateway/dist/events.js');
   let storage: typeof import('../packages/gateway/dist/storage.js');
 
@@ -325,6 +326,7 @@ describe('CRON — end-to-end (real dispatcher, real profile, committed rows)', 
     collabSurface = await import(pathToFileURL(join(GATEWAY_DIST_DIR, 'collabSurface.js')).href) as any;
     collabAgentTools = await import(pathToFileURL(join(GATEWAY_DIST_DIR, 'collabAgentTools.js')).href) as any;
     cronDispatcher = await import(pathToFileURL(join(GATEWAY_DIST_DIR, 'cronDispatcher.js')).href) as any;
+    cronScheduleHandler = await import(pathToFileURL(join(GATEWAY_DIST_DIR, 'cronScheduleHandler.js')).href) as any;
     events = await import(pathToFileURL(join(GATEWAY_DIST_DIR, 'events.js')).href) as any;
     storage = await import(pathToFileURL(join(GATEWAY_DIST_DIR, 'storage.js')).href) as any;
 
@@ -504,6 +506,90 @@ describe('CRON — end-to-end (real dispatcher, real profile, committed rows)', 
     const terminal2 = await waitForRunTerminal(scheduleId, 2);
     expect(terminal2.state, 'positive control: restored membership fires and completes').toBe('completed');
   }, 20000);
+
+  it('G1R B-C2: an ARCHIVED channel is refused AT WAKE with a reason -- never the silent no_post that is byte-identical to choosing silence', async () => {
+    const baseline = messagePostedRows(seeded.collabDbPath, seeded.channelId).length;
+    script = 'should never post';
+    const db = collabSurface.getCollabDbForAutoReply()!;
+    const scheduleId = randomUUID();
+    collab.createSchedule(db, {
+      id: scheduleId, channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
+      createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null,
+      nowIso: new Date(Date.now() - 120_000).toISOString(),
+    });
+    // Archived AFTER creation, BEFORE the wake.
+    db.prepare("UPDATE collab_channels SET state='archived' WHERE id=?").run(seeded.channelId);
+
+    const claimed = await cronDispatcher.tickSchedules();
+    expect(claimed, 'the fire is still claimed -- the watermark advances even on refusal').toBe(1);
+    const terminal = await waitForRunTerminal(scheduleId, 1);
+
+    // THE ASSERTION. Before the fix this recorded state='no_post',
+    // refusalReason=null -- indistinguishable from the agent legitimately
+    // choosing silence (A3-f) -- while the substrate had already refused the
+    // write with COLLAB_CHANNEL_ARCHIVED. The gateway knew the reason and
+    // recorded none of it, and nothing deactivates a schedule, so it re-fired
+    // against a dead channel forever, burning a real model call each time.
+    expect(
+      terminal.state,
+      'B-C2 REGRESSION: an archived channel resolved to the SILENT residual instead of a '
+      + 'refusal. A structural inability to act must never resolve to the same state as a '
+      + 'deliberate choice not to act.',
+    ).toBe('terminated');
+    expect(terminal.refusalReason).toBe('channel-archived');
+    expect(messagePostedRows(seeded.collabDbPath, seeded.channelId).length, 'zero NEW posts').toBe(baseline);
+
+    // POSITIVE CONTROL -- without it, every assertion above passes against a
+    // build that refuses every wake for any reason.
+    db.prepare("UPDATE collab_channels SET state='active' WHERE id=?").run(seeded.channelId);
+    db.prepare(`UPDATE collab_agent_schedules SET next_fire_at = ? WHERE id = ?`)
+      .run(new Date(Date.now() - 1000).toISOString(), scheduleId);
+    script = 'posting again now the channel is active';
+    await cronDispatcher.tickSchedules();
+    const revived = await waitForRunTerminal(scheduleId, 2);
+    expect(revived.state, 'the unarchived channel must fire normally -- the refusal is specific').toBe('completed');
+  }, 30000);
+
+  it('G1R B-C1: handleCreateSchedule is TOTAL -- a store-layer failure returns a typed error, never a throw that would kill the process', async () => {
+    // This gateway has NO unhandledRejection net (verified: only comments note
+    // its absence), and server.ts's socket.on('message') wraps only JSON.parse
+    // -- the switch carrying the cron arms is unguarded. So a throw here does
+    // not fail the command, it kills the GATEWAY.
+    //
+    // handleCreateSchedule called assertScheduleStillAuthorized OUTSIDE its own
+    // try, and was the only one of the three cron handlers that did. G1R proved
+    // the asymmetry: against an unmigrated handle this threw while both
+    // siblings returned COLLAB_UNAVAILABLE.
+    const unmigrated = new Database(':memory:');
+    runCollaborationMigration(unmigrated); // core tables ONLY -- no autoreply/cron migration
+    const handle = {
+      prepare: (sql: string) => unmigrated.prepare(sql),
+      exec: (sql: string) => unmigrated.exec(sql),
+      transaction: (fn: never) => unmigrated.transaction(fn) as never,
+    } as never;
+
+    // AWAITED deliberately: the handler is async, so a synchronous call would
+    // return a pending Promise and the assertions below would inspect the
+    // wrong object -- passing whether or not it rejects. Awaiting inside the
+    // try is what makes a rejection observable as a throw.
+    let threw: unknown = null;
+    let returned: unknown = null;
+    try {
+      returned = await cronScheduleHandler.handleCreateSchedule(handle, seeded.operatorId, {
+        channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
+        intervalSeconds: 60, promptHint: null, idempotencyKey: randomUUID(),
+      });
+    } catch (e) { threw = e; }
+
+    expect(
+      threw,
+      'B-C1 REGRESSION: handleCreateSchedule THREW. With no unhandledRejection net this '
+      + 'escapes into the async socket handler and kills the gateway process -- an operator '
+      + 'creating a schedule takes down the server.',
+    ).toBeNull();
+    expect((returned as { code?: string } | null)?.code).toBe('COLLAB_UNAVAILABLE');
+    unmigrated.close();
+  });
 
   it('THE THIRD STATE: a scheduled turn whose tool call is gated resolves to blocked_awaiting_approval -- never completed, never terminated, never silent', async () => {
     const baseline = messagePostedRows(seeded.collabDbPath, seeded.channelId).length;

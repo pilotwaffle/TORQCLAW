@@ -271,16 +271,36 @@ export function assertScheduleStillAuthorized(
     .get(params.channelId);
   if (channelStop) return { ok: false, reason: 'stop-channel' };
 
+  // G1R B-C2: channel state joined in. Without it an ARCHIVED channel was not
+  // an authority failure at all -- the fire was claimed, the model ran, the
+  // substrate correctly refused the post (CHANNEL_ARCHIVED), and the run
+  // recorded state='no_post' with refusal_reason=NULL. Byte-identical to the
+  // agent legitimately choosing silence (A3-f), which is exactly the
+  // "failure indistinguishable from a legitimate outcome" this program keeps
+  // producing. G1R reproduced it: refusals=['COLLAB_CHANNEL_ARCHIVED'] while
+  // the run said no_post/NULL -- the gateway KNEW the reason and recorded none
+  // of it.
+  //
+  // Worse, nothing here ever deactivates a schedule, so it re-fired against a
+  // dead channel forever at 60-second granularity, burning a real model call
+  // each time, while an operator reading the run table saw a healthy schedule
+  // quietly declining to speak.
+  //
+  // Checking it HERE routes an archived channel through the terminated path
+  // that already exists, with a reason, instead of the silent residual.
   const row = db
     .prepare(
-      `SELECT m.state AS memberState, p.status AS principalStatus, p.kind AS principalKind
+      `SELECT m.state AS memberState, p.status AS principalStatus, p.kind AS principalKind,
+              c.state AS channelState
          FROM collab_members m
          JOIN principals p ON p.id = m.principal_id
+         JOIN collab_channels c ON c.id = m.channel_id
         WHERE m.channel_id = ? AND m.principal_id = ?`,
     )
     .get(params.channelId, params.agentPrincipalId) as
-    { memberState: string; principalStatus: string; principalKind: string } | undefined;
+    { memberState: string; principalStatus: string; principalKind: string; channelState: string } | undefined;
   if (!row) return { ok: false, reason: 'membership-not-found' };
+  if (row.channelState !== 'active') return { ok: false, reason: 'channel-archived' };
   if (row.memberState !== 'active') return { ok: false, reason: 'membership-inactive' };
   if (row.principalKind !== 'agent') return { ok: false, reason: 'principal-not-agent' };
   if (row.principalStatus !== 'active') return { ok: false, reason: 'principal-inactive' };
