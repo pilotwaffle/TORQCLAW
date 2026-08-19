@@ -857,10 +857,35 @@ if (agentParticipationEnabled()) {
       { capabilities: COLLAB_AGENT_TOOL_CAPABILITIES },
     );
   } catch (err: any) {
-    // Same degrade-one-server posture as the user roster loop below: a
-    // failure here must never take the gateway down (CLAUDE.md §4: "a
-    // malformed or unreachable server must degrade only that server").
-    console.warn(`[gateway] collab agent tools failed to register (${err?.message ?? err}) — agent participation tools unavailable this session`);
+    // FAIL CLOSED. This used to console.warn and continue, citing CLAUDE.md
+    // §4's "a malformed or unreachable server must degrade only that server".
+    // That rule is about EXTERNAL MCP servers from servers.json, which the
+    // operator did not write and cannot be expected to have working. This is
+    // an IN-PROCESS server built from this repo's own code, reached only
+    // because agentParticipationEnabled() is true -- i.e. only because the
+    // operator explicitly set TORQCLAW_AGENT_PARTICIPATION on top of the
+    // whole COLLAB_ENABLED -> SURFACE_COMMANDS chain. Degrading it is not
+    // resilience; it is silently not delivering a feature that was asked for.
+    //
+    // WHY THIS IS WORSE THAN A CRASH. resolveEffectiveProfile materializes
+    // allowedOperationIds FROM THE TOOL REGISTRY (profilePolicy.ts), so with
+    // collab tools absent every profile resolves with an empty operation set.
+    // Every auto-reply turn then fails the §5A pre-dispatch assertion and
+    // throws -- deterministically, forever, for the life of the process --
+    // while the gateway reports healthy and this warn line scrolls away in
+    // startup output. The operator sees agents that never speak and no error
+    // to explain it.
+    //
+    // A structural inability to act must never resolve to the same state as
+    // a deliberate choice not to act. If the operator asked for agent
+    // participation and it cannot be provided, that is a startup failure.
+    throw new Error(
+      `agent participation is enabled (TORQCLAW_AGENT_PARTICIPATION) but its collab tools failed to register: ${err?.message ?? err}. ` +
+      'Refusing to start: without these tools every agent turn would fail its profile-admission assertion, ' +
+      'so the gateway would report healthy while agents stayed permanently silent. ' +
+      'Unset TORQCLAW_AGENT_PARTICIPATION to start without agent participation.',
+      { cause: err },
+    );
   }
 }
 
