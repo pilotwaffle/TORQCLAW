@@ -721,10 +721,69 @@ export class CollaborationStore {
 
               this.closeSessionsForPrincipal(tx, target.id, 'principal_revoked', now);
 
+              // ZOMBIE-SCHEDULE LIFECYCLE (revoke must reach cron).
+              //
+              // Revoking an agent bumped auth_epoch, revoked credentials and
+              // closed sessions -- and touched NO schedule row. The FK on
+              // collab_agent_schedules.agent_principal_id has no ON DELETE,
+              // and this is an UPDATE anyway, so the FK is inert; there is no
+              // reaper and no sweep, and setScheduleState (cron.ts) is
+              // operator-manual only.
+              //
+              // The AUTHORITY check was never the gap: assertScheduleStillAuthorized
+              // re-reads principals.status live at every wake and correctly
+              // refuses (`principal-inactive`). But refusing is not stopping --
+              // the schedule stayed state='active', so findDueSchedules kept
+              // returning it, claimScheduleFire kept advancing next_fire_at,
+              // and every interval burned a claim + a run row that could only
+              // ever resolve 'terminated'. Forever. That is the same
+              // "correct refusal, absent lifecycle" residual G1R B-C2 found for
+              // archived channels, on the entity whose mistakes re-fire unattended.
+              //
+              // Scoped to agent_principal_id ONLY -- deliberately NOT
+              // created_by_principal_id. A schedule's authority derives from the
+              // AGENT's live membership and status (that is exactly what
+              // assertScheduleStillAuthorized reads), never from whoever created
+              // it, so a revoked creator's schedules legitimately continue.
+              // Additionally the creator here can only be the operator, and the
+              // schema permits exactly one (principals_single_operator), which
+              // getAgentTargetOrThrow refuses to revoke.
+              //
+              // Reuses the EXISTING 'stopped' state and the same
+              // (state, updated_at) column pair setScheduleState writes -- no new
+              // state, no new column, so every existing reader (findDueSchedules'
+              // state='active' predicate, claimScheduleFire's WHERE, the operator
+              // listing) already interprets it correctly.
+              //
+              // The sqlite_master probe covers a collab DB opened before
+              // AGENT_CRON_MIGRATION_ID was applied (migration.ts runs the cron
+              // migration as a separate, later step, and CollaborationStore is
+              // constructible against a DB that has only run
+              // runCollaborationMigration). An existence check rather than a
+              // swallowed try/catch, so a real SQL fault still fails the
+              // transaction instead of silently leaving zombies behind.
+              let stoppedScheduleCount = 0;
+              const cronTable = tx
+                .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'collab_agent_schedules'")
+                .get();
+              if (cronTable) {
+                const info = tx
+                  .prepare(
+                    "UPDATE collab_agent_schedules SET state = 'stopped', updated_at = ? WHERE agent_principal_id = ? AND state = 'active'"
+                  )
+                  .run(now, target.id) as { changes: number | bigint };
+                stoppedScheduleCount = Number(info.changes);
+              }
+
+              // Same audit row, one more field -- NOT a new audit kind.
+              // collab_audit.kind is a closed CHECK enum (migration.ts), so a new
+              // kind would need a migration; and the effect belongs to this
+              // revoke, exactly as revokedCredentialCount does.
               this.insertAudit(tx, 'agent_revoked', caller.principalId, target.id, {
                 principalId: target.id,
                 authEpoch: newEpoch,
                 revokedCredentialCount: activeCreds.length,
+                stoppedScheduleCount,
               });
 
               effective = true;
