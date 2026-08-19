@@ -30,8 +30,31 @@
  *      channel_seq (store.ts); the dispatch-layer half (one in-flight turn
  *      per (agent, channel), dirty-flag coalescing) is `inFlight`/`dirty`
  *      below.
- *   4. A turn that fails does not silently retry: resolveAgentTurn marks a
- *      dispatch failure 'terminated', never re-queued automatically.
+ *   4. A turn that fails does not silently retry, and does not re-enter the
+ *      cascade. resolveAgentTurn marks a dispatch failure 'terminated', and
+ *      the failure is LOUD (console.error, once). The earlier wording here
+ *      claimed such a turn was "never re-queued automatically", which was
+ *      FALSE: a throw was caught in dispatchOneTurn and the `finally` block
+ *      then re-dispatched the coalesced follow-up anyway, so a deterministic
+ *      failure (the §5A profile assertion in runAgentTurn) threw again at the
+ *      next channel_seq. dispatchOneTurn now sets a local `failed` flag in its
+ *      catch and skips the coalesced re-dispatch, so the cascade ends at the
+ *      first failure.
+ *
+ *      That cascade was ALREADY BOUNDED even before this guard, and the guard
+ *      does not change the bound -- it only stops the pointless laps:
+ *      collab_agent_turns' PRIMARY KEY is
+ *      (channel_id, agent_principal_id, channel_seq) and does NOT include
+ *      trigger_event_id, so the `coalesced:${randomUUID()}` trigger id mints
+ *      no new claim for an already-claimed triple; and a turn that dies
+ *      before dispatch commits no collab_events row, so it cannot advance
+ *      the seq that would let it claim a fresh one.
+ *
+ *      The guard does NOT distinguish deterministic from transient failures:
+ *      a transient throw also loses its coalesced follow-up (that agent then
+ *      skips a turn until the next inbound message re-triggers it). See the
+ *      guard site in dispatchOneTurn for why that exposure is small and what
+ *      widening it would require.
  *
  * S-5 (G1R B-3b) -- the watermark's write point and crash semantics:
  *   claimAgentTurn INSERTs a 'dispatched' row BEFORE the GatewayRequest is
@@ -178,6 +201,11 @@ async function dispatchOneTurn(
 
   const key = turnKey(channelId, agentPrincipalId);
   inFlight.add(key);
+  // Set by the catch below and read by the coalescing block in `finally`.
+  // Declared HERE (not inside try) so `finally` can see it: a turn that died
+  // must not re-enter the cascade at the next seq. See the guard at the
+  // coalescing site for the full rationale and the accepted trade-off.
+  let failed = false;
   try {
     // runAgentTurn can throw deliberately (the §5A structural-defect
     // assertion above): this repo's gateway has NO unhandledRejection net
@@ -190,6 +218,7 @@ async function dispatchOneTurn(
     // catch-and-console.warn discipline for this exact trigger path.
     await runAgentTurn(store, db, channelId, agentPrincipalId, channelSeq);
   } catch (err: any) {
+    failed = true;
     console.error(`[gateway] agent turn failed unexpectedly (${err?.message ?? err})`);
   } finally {
     inFlight.delete(key);
@@ -202,11 +231,33 @@ async function dispatchOneTurn(
     // therefore applied HERE, explicitly, rather than being inherited from a
     // resolver this path never calls.
     if (dirty.has(key)) {
+      // NOTE the ORDER: `dirty` is cleared BEFORE the `failed` guard below,
+      // so a follow-up skipped because the turn failed is DROPPED, not
+      // deferred -- there is no queue it falls back into. That is the
+      // intended semantics (a structural failure must not leave a latent
+      // re-dispatch armed), and it is asserted by test, not assumed.
       dirty.delete(key);
-      // STOP re-checked here (per this file's header): an in-flight turn
-      // completes, but its own coalesced follow-up must not fire if STOP
-      // landed while it was running.
-      if (!isAutoreplyStopped(db, channelId)) {
+      // A turn that THREW must not re-enter the cascade. Without this guard a
+      // DETERMINISTIC failure (the §5A pre-dispatch profile assertion in
+      // runAgentTurn) re-dispatches at the next channel_seq and throws again,
+      // once per lap. That cascade is bounded -- collab_agent_turns' PRIMARY
+      // KEY is (channel_id, agent_principal_id, channel_seq) and does NOT
+      // include trigger_event_id, so the `coalesced:${randomUUID()}` trigger
+      // id mints no new claim; and a turn that dies before dispatch commits
+      // no collab_events row, so it cannot advance the seq itself -- and it
+      // is loud rather than silent (console.error per lap). It is still
+      // pointless work in a known-broken configuration, so it ends here.
+      //
+      // ACCEPTED TRADE-OFF: this conflates deterministic with transient. A
+      // genuinely transient throw also loses its coalesced follow-up, so that
+      // agent skips a turn until the next inbound message re-triggers it.
+      // The exposure is small because runAgentTurn resolves its transient
+      // paths to 'terminated' by RETURNING, not throwing (the COLLAB_NOT_FOUND
+      // and context-build failures, and the removed-mid-turn check), leaving
+      // the §5A structural assertion as the dominant throw. Widening this to
+      // retry transient failures needs a real classification of which errors
+      // are retryable -- not a bare `failed` flag.
+      if (!failed && !isAutoreplyStopped(db, channelId)) {
         const latest = latestChannelSeqAuthor(db, channelId);
         // NO SELF-REPLY. If the newest event is this agent's own commit, the
         // follow-up would dispatch the agent to answer itself -- the exact

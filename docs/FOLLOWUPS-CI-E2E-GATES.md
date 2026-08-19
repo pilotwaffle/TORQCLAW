@@ -51,6 +51,12 @@ or accept a `--credential` arg) or mark it dev-only in its banner.
   pre-collab state. A consolidation should be rewritten against current
   master, not rebased.
 
+## 5. Rulings owed (not buildable by agents — operator decisions, recorded so they survive session restarts)
+
+- **suspendAgent zombie schedules** — same shape as the revoke fix (`f2397fb`) but deliberately NOT fixed: suspend is reversible, revoke is not. Orchestrator's lean: leave as-is. Needs an operator confirm or override.
+- **OQ-2 (PRD-007 S4)** — is "working now" an explicit entitlement? Blocks the S4 presence overlay. G1R's disclosure analysis (self-only `principalId` on CONNECTED as S5b) is the designed-enough answer; awaiting operator ruling.
+- **OQ-4 (PRD-006 sandbox)** — editing vendored `approval.py` at two live guard sites (`check_all_command_guards` `:1283-1284`, `check_execute_code_guard` `:1597-1598`; `check_dangerous_command` is dead code). Wrapper-only workaround is proven dead (one `env_type` drives both guard and backend). **G2A's standing recommendation: option (a) with (d)'s discipline — edit the two sites, pin them with SA-8 as a permanent RED-on-revert gate.** SB2b is BLOCKED until ruled.
+
 ## 4. Carried obligations already on record (pointers, not new work)
 
 - `docs/prd-reviews/G2A-OPUS48-COLLAB-PRESENCE-UI-005-S3-S4-PASS3.md` — CO-S3-1

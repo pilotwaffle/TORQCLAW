@@ -26,6 +26,8 @@ graphify-vendor/
 
 # scratch and local run artifacts
 scratchpad/
+# build-receipt freshness marker written by the test harness (regenerated)
+.torqclaw-build-receipt.json
 # local demo/launcher scratch + isolated demo data dir (alt-gateway.mjs, alt-data/)
 .torq/
 packages/gateway/.playwright-mcp/
