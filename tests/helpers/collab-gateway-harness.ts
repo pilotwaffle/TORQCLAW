@@ -1,7 +1,7 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -233,62 +233,242 @@ async function runGatewayBuild(options: GatewayBuildOptions, deadlineMs: number,
   }
 }
 
+// Every workspace package whose `src` feeds the gateway artifact, and whose
+// `dist` the gateway loads at boot. `distIsFresh()` must speak for ALL of
+// them: the mtime rule it replaced looked at exactly one file
+// (packages/gateway/dist/server.js) and therefore could not see a stale or
+// half-written packages/contracts/dist -- the artifact that actually killed
+// the gateway child in master CI run 32215095260.
+export const WATCHED_PACKAGES = ['gateway', 'collab', 'contracts', 'router', 'inference', 'bridge'] as const;
+export const BUILD_RECEIPT_VERSION = 1;
+export const DEFAULT_BUILD_RECEIPT_PATH = join(ROOT, '.torqclaw-build-receipt.json');
+
+export type BuildReceipt = {
+  version: number;
+  sourceHash: string;
+  distHash: string;
+  writtenAt: string;
+};
+
 /**
- * True when `dist` is already at least as new as every source file that
- * feeds it, i.e. a rebuild would be a no-op.
+ * `__reachability_probe.ts` is written INTO a watched source tree by
+ * tests/reachability.test.ts and deleted moments later. Counting it as source
+ * made an unrelated test's scratch file trigger a real
+ * `turbo run build --force` -- which truncates and rewrites
+ * packages/contracts/dist/*.js WHILE sibling vitest workers are booting the
+ * gateway from those exact files. That is a write/read race on shared `dist`,
+ * and it produced a red master CI run (32215095260, the gateway child dying on
+ * `does not provide an export named EffectiveProfileSchema`) that went green on
+ * an unchanged re-run. A test's own scratch file is never a reason to rebuild
+ * the product.
+ *
+ * NOTE: only the reachability probe is skipped. `__freshness_control.ts` is
+ * deliberately NOT skipped -- it is the positive control in
+ * tests/reachability-probe-build-race.test.ts, which proves this check can
+ * still return false. Skipping it would make that control vacuous.
+ */
+const SOURCE_SCRATCH_FILES = new Set(['__reachability_probe.ts']);
+
+// Entries are path-qualified (relative to the package root, forward-slashed so
+// the receipt is stable across platforms) because a bare basename cannot
+// distinguish packages/gateway/src/a/x.ts from .../b/x.ts -- and a rename
+// between the two must invalidate the receipt.
+function hashTree(dir: string, relative: string, match: RegExp, skip: (name: string) => boolean, into: string[]): void {
+  for (const name of readdirSync(dir).sort()) {
+    if (skip(name)) continue;
+    const full = join(dir, name);
+    const st = statSync(full);
+    const rel = relative ? relative + '/' + name : name;
+    if (st.isDirectory()) hashTree(full, rel, match, skip, into);
+    else if (match.test(name)) into.push(rel + ' ' + createHash('sha256').update(readFileSync(full)).digest('hex'));
+  }
+}
+
+/**
+ * Content hash over every watched SOURCE file across all six packages.
+ *
+ * Content, not mtime: mtime ordering answers "was A touched after B", which is
+ * not the question. The question is "was this dist produced from exactly these
+ * sources" -- and only content can answer that.
+ */
+// `root` defaults to the repo and exists so a test can run this EXACT function
+// over a private copy of the package tree instead of mutating shared `dist`.
+// Because `distIsFresh()` now hashes artifact CONTENT, a probe that rewrote a
+// real `dist` file would be visible to every sibling vitest worker process and
+// would surface as THEIR regression -- measured at a 5-in-6 failure rate
+// against tests/reachability-probe-build-race.test.ts before this parameter
+// existed. The proof stays honest: it drives the shipped closure, not a copy
+// of the rule.
+export function computeSourceHash(root: string = ROOT): string {
+  const parts: string[] = [];
+  for (const pkg of WATCHED_PACKAGES) {
+    const dir = join(root, 'packages', pkg, 'src');
+    if (!existsSync(dir)) continue;
+    parts.push('#' + pkg);
+    hashTree(
+      dir,
+      '',
+      /\.(ts|tsx|json)$/,
+      (name) => name === 'node_modules' || name === 'dist' || name === '.turbo' || SOURCE_SCRATCH_FILES.has(name),
+      parts,
+    );
+  }
+  return createHash('sha256').update(parts.join('\n')).digest('hex');
+}
+
+/**
+ * Content hash over every emitted `.js` file in all six packages' `dist`.
+ *
+ * This is the half the old rule never had. Hashing the CONTENT of each emitted
+ * module is what makes a TORN dist visible: a half-written
+ * packages/contracts/dist/profile.js hashes differently from the one the build
+ * produced, even though nobody's mtime looks out of order.
+ */
+export function computeDistHash(root: string = ROOT): string {
+  const parts: string[] = [];
+  for (const pkg of WATCHED_PACKAGES) {
+    const dir = join(root, 'packages', pkg, 'dist');
+    // A missing dist is not "nothing to hash" -- it is a package that cannot
+    // be booted. Record it distinctly so the receipt cannot match.
+    if (!existsSync(dir)) { parts.push('#' + pkg + ' MISSING'); continue; }
+    parts.push('#' + pkg);
+    hashTree(dir, '', /\.js$/, (name) => name === 'node_modules' || name === '.turbo', parts);
+  }
+  return createHash('sha256').update(parts.join('\n')).digest('hex');
+}
+
+function receiptPath(): string {
+  return process.env.TORQCLAW_BUILD_RECEIPT_PATH || DEFAULT_BUILD_RECEIPT_PATH;
+}
+
+/**
+ * Write the receipt ATOMICALLY: a sibling worker calling `distIsFresh()` must
+ * never observe a half-written receipt. `renameSync` within the same directory
+ * is atomic on both NTFS and POSIX, so readers see either the old receipt or
+ * the new one -- never a torn one. (Writing the receipt in place would
+ * reproduce, in the freshness check itself, the exact torn-file failure this
+ * change exists to detect.)
+ */
+export function writeBuildReceipt(path: string = receiptPath()): BuildReceipt {
+  const receipt: BuildReceipt = {
+    version: BUILD_RECEIPT_VERSION,
+    sourceHash: computeSourceHash(),
+    distHash: computeDistHash(),
+    writtenAt: new Date().toISOString(),
+  };
+  mkdirSync(dirname(path), { recursive: true });
+  const staging = path + '.' + process.pid + '.' + randomUUID() + '.tmp';
+  writeFileSync(staging, JSON.stringify(receipt), 'utf8');
+  try {
+    renameSync(staging, path);
+  } catch (error) {
+    try { rmSync(staging, { force: true }); } catch { /* noop */ }
+    throw error;
+  }
+  return receipt;
+}
+
+export function readBuildReceipt(path: string = receiptPath()): BuildReceipt | null {
+  try {
+    const value = JSON.parse(readFileSync(path, 'utf8')) as Partial<BuildReceipt>;
+    if (
+      value.version !== BUILD_RECEIPT_VERSION ||
+      typeof value.sourceHash !== 'string' || value.sourceHash.length !== 64 ||
+      typeof value.distHash !== 'string' || value.distHash.length !== 64
+    ) return null;
+    return {
+      version: value.version,
+      sourceHash: value.sourceHash,
+      distHash: value.distHash,
+      writtenAt: typeof value.writtenAt === 'string' ? value.writtenAt : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when the artifacts on disk are exactly the ones a build produced from
+ * exactly the sources now present -- i.e. a rebuild would be a no-op.
  *
  * WHY THIS EXISTS: the default build command runs turbo with `--force`, and
- * vitest runs each test FILE in its own worker process. With six files
- * calling `ensureGatewayBuild()`, the cross-process lock serialises six
+ * vitest runs each test FILE in its own worker process. With many files
+ * calling `ensureGatewayBuild()`, the cross-process lock serialises many
  * full forced rebuilds; at ~45s each that blows the 180s acquisition
  * deadline and fails files for pure contention rather than for anything
  * about the code under test.
  *
- * Checking freshness BEFORE taking the lock lets the first worker build
- * once and the rest proceed immediately. This does NOT weaken the
- * built-artifact proof: the artifact is still built from current source by
- * whichever worker finds it stale, and every later worker has verified that
- * no source file is newer than what it is about to boot. A stale `dist` is
- * exactly what this check refuses to accept.
+ * WHY IT IS A RECEIPT AND NOT AN MTIME COMPARISON: the previous rule compared
+ * ONE file's mtime (packages/gateway/dist/server.js) against the newest source
+ * mtime. That is this repo's documented "liveness is not readiness" defect
+ * class -- it measured an ordering, not the property that matters:
+ *
+ *   - mtime ordering is not atomicity. A dist that is internally TORN
+ *     (dist/routing.js new, dist/profile.js half-written) has a perfectly
+ *     well-ordered mtime and passed the old check. That exact state killed the
+ *     gateway child at boot in master CI run 32215095260 on commit 272be3a,
+ *     and an unchanged re-run went green -- the signature of a race, not of a
+ *     stale artifact.
+ *   - it never looked at the other five packages' dist AT ALL. The file that
+ *     actually broke (packages/contracts/dist/profile.js) was outside
+ *     everything the check observed.
+ *
+ * The receipt closes both: it pins the CONTENT of every source file and the
+ * CONTENT of every emitted `.js` across all six packages, so "fresh" means
+ * "these artifacts were built from these sources and nothing has touched them
+ * since" -- which is the property the boot actually depends on.
+ *
+ * Checking freshness BEFORE taking the lock lets the first worker build once
+ * and the rest proceed immediately. This does NOT weaken the built-artifact
+ * proof: the artifact is still built from current source by whichever worker
+ * finds it stale.
  */
-// Exported ONLY so tests/reachability-probe-build-race.test.ts can drive this
-// exact function rather than a re-implementation of it. A copy of the rule
-// already contains the fix; the shipped closure is what has to be pinned.
+// Exported ONLY so tests/reachability-probe-build-race.test.ts and
+// tests/build-receipt-freshness.test.ts can drive this exact function rather
+// than a re-implementation of it. A copy of the rule already contains the fix;
+// the shipped closure is what has to be pinned.
 export function distIsFresh(): boolean {
   try {
-    const distStat = statSync(GATEWAY_DIST_ENTRY);
-    const newestSource = (dir: string): number => {
-      let newest = 0;
-      for (const name of readdirSync(dir)) {
-        if (name === 'node_modules' || name === 'dist' || name === '.turbo') continue;
-        // `__reachability_probe.ts` is written INTO a watched source tree by
-        // tests/reachability.test.ts and deleted moments later. Counting it as
-        // source made an unrelated test's scratch file trigger a real
-        // `turbo run build --force` here -- which truncates and rewrites
-        // packages/contracts/dist/*.js WHILE sibling vitest workers are booting
-        // the gateway from those exact files. That is a write/read race on
-        // shared `dist`, and it produced a red master CI run (32215095260, the
-        // gateway child dying on `does not provide an export named
-        // EffectiveProfileSchema`) that went green on an unchanged re-run.
-        // A test's own scratch file is never a reason to rebuild the product.
-        if (name === '__reachability_probe.ts') continue;
-        const full = join(dir, name);
-        const st = statSync(full);
-        if (st.isDirectory()) newest = Math.max(newest, newestSource(full));
-        else if (/\.(ts|tsx|json)$/.test(name)) newest = Math.max(newest, st.mtimeMs);
-      }
-      return newest;
-    };
-    // The gateway's own sources plus every workspace package it imports.
-    let newest = 0;
-    for (const pkg of ['gateway', 'collab', 'contracts', 'router', 'inference', 'bridge']) {
-      const dir = join(ROOT, 'packages', pkg, 'src');
-      if (existsSync(dir)) newest = Math.max(newest, newestSource(dir));
-    }
-    return newest > 0 && distStat.mtimeMs >= newest;
+    // The gateway entry must exist regardless of what any receipt claims:
+    // this is the file launchGateway() spawns.
+    if (!existsSync(GATEWAY_DIST_ENTRY)) return false;
+    const receipt = readBuildReceipt();
+    // Missing or unparseable receipt => not fresh => build. Never guess.
+    if (!receipt) return false;
+    if (receipt.sourceHash !== computeSourceHash()) return false;
+    if (receipt.distHash !== computeDistHash()) return false;
+    return true;
   } catch {
     // Never guess: if freshness cannot be established, build.
     return false;
+  }
+}
+
+/**
+ * "Must I run a rebuild right now?" -- deliberately NARROWER than
+ * `distIsFresh()`.
+ *
+ * `distIsFresh()` answers "are these artifacts exactly what a build produced
+ * from exactly these sources", and its callers depend on that strict contract.
+ * But the only condition that JUSTIFIES rebuilding is that the SOURCES have
+ * moved. A dist-only mismatch is far more likely to be a sibling worker's
+ * mutation probe mid-flight (agent-participation-cron, agent-participation-s3
+ * and collab-c1-built-artifact each rewrite one dist file and restore it in a
+ * `finally`), and rebuilding then is actively destructive: `--force` rewrites
+ * every packages/*\/dist file while other workers are booting the gateway from
+ * them.
+ *
+ * Fail-closed is preserved: a missing receipt, an unreadable one, a missing
+ * gateway entry, or any source change all return true and build.
+ */
+function rebuildRequired(): boolean {
+  try {
+    if (!existsSync(GATEWAY_DIST_ENTRY)) return true;
+    const receipt = readBuildReceipt();
+    if (!receipt) return true;
+    return receipt.sourceHash !== computeSourceHash();
+  } catch {
+    return true;
   }
 }
 
@@ -297,7 +477,7 @@ export async function ensureGatewayBuild(options: GatewayBuildOptions = {}): Pro
   // Fast path for the shared default build only. A test that supplies its
   // own build command/lock/receipt is testing the LOCK ITSELF and must keep
   // running the real acquire/build/release sequence.
-  if (useSharedDefaultBuild && distIsFresh()) return;
+  if (useSharedDefaultBuild && !rebuildRequired()) return;
   if (!useSharedDefaultBuild) {
     const timeoutMs = options.testTimeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS;
     const deadlineMs = Date.now() + timeoutMs;
@@ -331,6 +511,47 @@ export async function ensureGatewayBuild(options: GatewayBuildOptions = {}): Pro
       const deadlineMs = Date.now() + timeoutMs;
       const lockDirectory = options.testLockDirectory ?? DEFAULT_BUILD_LOCK_DIRECTORY;
       const handle = await acquireBuildLock(lockDirectory, deadlineMs);
+      // DOUBLE-CHECK UNDER THE LOCK. The freshness test before the lock is an
+      // optimisation, not a decision: N workers can all observe "stale" in the
+      // same instant, all queue here, and -- without this re-check -- each run
+      // its own `turbo run build --force` in turn. Every one of those rebuilds
+      // truncates and rewrites the shared packages/*/dist WHILE sibling workers
+      // are booting the gateway from those exact files, which is precisely the
+      // write/read race that produced the red CI run this change exists to
+      // prevent. Observed here: a full-suite run rebuilt dist ~2 minutes after
+      // a valid receipt was written, and a gateway child died on
+      // `does not provide an export named 'ClientCommandSchema'`.
+      //
+      // Re-reading the receipt now is cheap (~20ms) and collapses the queue:
+      // the first worker builds, and every worker behind it sees the receipt
+      // the winner just wrote and skips its redundant rebuild.
+      //
+      // What justifies a REBUILD is specifically that the SOURCES no longer
+      // match what produced the artifacts. A dist-only mismatch does not:
+      // several suites here (agent-participation-cron, agent-participation-s3,
+      // collab-c1-built-artifact) deliberately rewrite one file under
+      // packages/*/dist for the duration of a mutation probe and restore it in
+      // a `finally` -- and collab-c1 holds its mutation across an entire
+      // gateway launch. Rebuilding in that window is the WORST possible
+      // response: `turbo run build --force` truncates and rewrites all of
+      // packages/*/dist while sibling workers are booting the gateway from
+      // those files, which is the very write/read race this change exists to
+      // stop. Measured directly: a dist watcher during a full-suite run logged
+      // the three expected probe mutations and then packages/router/dist/
+      // engine.js changing -- a file NO test touches, i.e. a real rebuild
+      // firing because a sibling's probe made dist look stale.
+      //
+      // So: if the receipt's sourceHash still matches the tree and the gateway
+      // entry is present, another worker's transient probe is the only thing
+      // that can be different, and rebuilding would destroy more than it fixes.
+      // A genuine source change still fails this test and still builds, which
+      // is the fail-closed direction. `distIsFresh()` keeps the strict
+      // source-AND-dist contract for its callers; this is deliberately the
+      // narrower question "must I rebuild right now".
+      if (!rebuildRequired()) {
+        releaseBuildLock(handle);
+        return;
+      }
       let buildError: unknown = null;
       let buildStartedAtMs = Date.now();
       let buildFinishedAtMs = buildStartedAtMs;
@@ -351,6 +572,13 @@ export async function ensureGatewayBuild(options: GatewayBuildOptions = {}): Pro
       }
       if (buildError) throw buildError;
       if (options.testReceiptPath) writeReceipt(options.testReceiptPath, handle, buildStartedAtMs, buildFinishedAtMs, releasedAtMs);
+      // Record what this build produced, so sibling workers can verify
+      // freshness by CONTENT instead of by mtime ordering. Written after the
+      // lock is released and after dist is fully on disk, so the hashes
+      // describe a settled tree. A failure to write the receipt must not fail
+      // the build: the only consequence is that the next worker rebuilds --
+      // the fail-closed direction.
+      try { writeBuildReceipt(); } catch { /* fail-closed: next caller rebuilds */ }
     })();
   }
   try {
