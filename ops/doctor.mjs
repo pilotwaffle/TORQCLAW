@@ -24,6 +24,89 @@ export function parseArgs(argv) {
   };
 }
 
+/** Mirrors packages/gateway/src/connectionAuth.ts's isProductionRuntime()
+ *  EXACTLY. Doctor must decide "is the legacy token path still open" by the
+ *  same rule the gateway itself uses, or it will diagnose a contract the
+ *  server is not running. */
+function isProductionRuntime(env = process.env) {
+  return env.TORQCLAW_RUNTIME_MODE === 'production' || env.NODE_ENV === 'production';
+}
+
+/**
+ * Resolve the CONNECT auth carrier for the legacy doctor's live gateway probe.
+ *
+ * WHY THIS IS NOT JUST `token:` ANYMORE
+ * -------------------------------------
+ * The static shared TORQCLAW_GATEWAY_TOKEN root token is FATAL in production:
+ * ops/launcher-config.mjs's requireProductionTokens() throws at config-build
+ * time and packages/gateway/src/connectionAuth.ts's
+ * assertProductionLegacyTokenDisabled() backs it up. Worse,
+ * authenticateConnection() returns null for ANY tokenful legacy frame once
+ * `production` is set (connectionAuth.ts: `if (deps.production) return null;`
+ * precedes the legacy arm entirely), so against a production gateway the old
+ * frame could only ever produce AUTH_FAILED. Same stale-harness class the CI
+ * gates hit in 952e547 / 9152543 / 929e5ed; this is the last instance.
+ *
+ * WHY DOCTOR READS A CREDENTIAL INSTEAD OF BOOTSTRAPPING ONE
+ * ----------------------------------------------------------
+ * ops/e2e-production-launch.mjs RUNS ops/bootstrap-operator.mjs because it
+ * owns a throwaway data dir with no operator in it. Doctor is a standalone
+ * CLI pointed at the operator's REAL install, where an operator principal
+ * already exists -- `principals_single_operator` (packages/collab
+ * migration.ts) makes a second bootstrap a hard refusal that mints nothing.
+ * So doctor must CONSUME the already-issued credential, never mint one.
+ * It looks in two places, in order:
+ *   1. TORQCLAW_OPERATOR_CREDENTIAL -- the operator pasted the token they
+ *      copied to their password manager, the shape .env.example already tells
+ *      them to keep.
+ *   2. <TORQCLAW_DATA_DIR>/operator-credential.token -- the single-use file
+ *      ops/bootstrap-operator.mjs writes and tells the operator to delete
+ *      once copied. Present only on a fresh install; read, never deleted
+ *      (deleting it here would destroy the operator's only copy).
+ *
+ * FAIL LOUD, NEVER DEGRADE-TO-OK
+ * -------------------------------
+ * A structural inability to authenticate must NEVER resolve to the same state
+ * as a healthy gateway. If production mode is on and no credential can be
+ * found, this returns a `problem` and the caller records a hard `fail` naming
+ * the missing input -- it does NOT fall back to the legacy token (which the
+ * gateway would reject anyway) and does NOT connect anonymously.
+ */
+export function resolveDoctorAuth(env = process.env, { readFile = readFileSync } = {}) {
+  const production = isProductionRuntime(env);
+  const credential = String(env.TORQCLAW_OPERATOR_CREDENTIAL ?? '').trim();
+  if (credential) {
+    return { kind: 'surface', credential, source: 'TORQCLAW_OPERATOR_CREDENTIAL' };
+  }
+  const tokenFile = join(env.TORQCLAW_DATA_DIR || join(homedir(), '.torqclaw'), 'operator-credential.token');
+  let fileCredential = '';
+  try {
+    fileCredential = String(readFile(tokenFile, 'utf8')).trim();
+  } catch { /* absent or unreadable: fall through to the production refusal */ }
+  if (fileCredential) {
+    return { kind: 'surface', credential: fileCredential, source: tokenFile };
+  }
+  if (production) {
+    return {
+      kind: 'problem',
+      detail:
+        'no operator credential available and the deprecated TORQCLAW_GATEWAY_TOKEN ' +
+        'is forbidden in production, so this connection could only ever be rejected. ' +
+        `Set TORQCLAW_OPERATOR_CREDENTIAL, or leave ${tokenFile} in place from ` +
+        '`node ops/bootstrap-operator.mjs` (run it once if this install has never been bootstrapped).',
+    };
+  }
+  // Non-production only: the legacy arm is still live in the gateway
+  // (connectionAuth.ts authenticates a matching token, and accepts a tokenless
+  // frame on loopback when no token is configured), so the existing local/dev
+  // path is preserved unchanged -- but announced, never silent.
+  return {
+    kind: 'legacy',
+    token: String(env.TORQCLAW_GATEWAY_TOKEN ?? ''),
+    source: 'TORQCLAW_GATEWAY_TOKEN (deprecated development-only path)',
+  };
+}
+
 async function runLegacyDoctor(argv) {
   const jsonOutput = argv.includes('--json');
   const timeoutMs = Number(process.env.TORQCLAW_DOCTOR_TIMEOUT_MS || 5000);
@@ -46,7 +129,13 @@ async function runLegacyDoctor(argv) {
     record('console', response.ok && body.status === 'ready' ? 'pass' : 'fail',
       response.ok && body.status === 'ready' ? `${consoleUrl} is ready` : `${response.status} ${JSON.stringify(body)}`);
   } catch (error) { record('console', 'fail', error.message); }
-  await new Promise((resolve) => {
+  const auth = resolveDoctorAuth();
+  if (auth.kind === 'problem') {
+    // A structural inability to authenticate is NOT a healthy gateway and is
+    // NOT a warning. Recording 'fail' here makes result.ok false and the exit
+    // code 1, exactly as a rejected or unreachable gateway would.
+    record('gateway', 'fail', `cannot authenticate: ${auth.detail}`);
+  } else await new Promise((resolve) => {
     const socket = new WebSocket(gatewayUrl);
     let settled = false;
     const finish = (status, detail) => {
@@ -58,9 +147,22 @@ async function runLegacyDoctor(argv) {
       resolve();
     };
     const timer = setTimeout(() => finish('fail', `gateway timed out after ${timeoutMs}ms`), timeoutMs);
+    // The legacy fallback is deliberately LOUD: an operator reading doctor
+    // output must be able to see that this run proved the deprecated
+    // development path, not the production credential contract.
+    if (auth.kind === 'legacy') {
+      process.stderr.write(
+        'doctor: authenticating with the DEPRECATED TORQCLAW_GATEWAY_TOKEN legacy path ' +
+        '(non-production runtime only; this token is forbidden in production). ' +
+        'Set TORQCLAW_OPERATOR_CREDENTIAL to exercise the real production contract.\n'
+      );
+    }
     socket.on('open', () => socket.send(JSON.stringify({
-      role: 'operator', token: process.env.TORQCLAW_GATEWAY_TOKEN || '',
+      expectedRole: 'operator',
       clientInfo: { name: 'torqclaw-doctor', version: '0.1.0' },
+      ...(auth.kind === 'surface'
+        ? { auth: { kind: 'surface', credential: auth.credential } }
+        : { token: auth.token }),
     })));
     socket.on('message', (raw) => {
       let event;
