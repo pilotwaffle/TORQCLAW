@@ -69,6 +69,10 @@ export async function handleCreateSchedule(
       createdByPrincipalId: operatorPrincipalId,
       intervalSeconds: params.intervalSeconds,
       promptHint: params.promptHint ?? null,
+      // G2A C-1: previously accepted in this signature and DROPPED here, so a
+      // retry with the same key minted a second schedule that fired forever
+      // alongside the first.
+      idempotencyKey: params.idempotencyKey,
       nowIso: new Date().toISOString(),
     });
     publishOnly(sessionId, {

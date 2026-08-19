@@ -64,23 +64,51 @@ export type AgentSchedule = {
  * schedule's own row is inert data until a wake actually re-validates
  * everything below.
  */
+/**
+ * G2A C-1: `idempotencyKey` is now LOAD-BEARING, not decorative.
+ *
+ * It was validated by the contract (`z.uuid()`), threaded all the way to the
+ * handler, and then never read -- so a client following this repo's own
+ * retry-with-the-same-key discipline created a SECOND schedule. On a schedule
+ * that means double fires, double model calls and possibly double posts,
+ * indefinitely, unattended. That is the worst entity in the system to have a
+ * silent duplicate on, because unlike a duplicated message a duplicated
+ * schedule keeps acting.
+ *
+ * Returns the EXISTING schedule's id on a replay rather than throwing: a retry
+ * after a dropped socket is not an error, it is the client doing the right
+ * thing. The unique index on (created_by_principal_id, idempotency_key) is the
+ * real enforcement -- this lookup only turns the constraint into a graceful
+ * replay instead of a constraint error.
+ */
 export function createSchedule(
   db: CronDb,
   params: {
     id: string; channelId: string; agentPrincipalId: string; createdByPrincipalId: string;
-    intervalSeconds: number; promptHint: string | null; nowIso: string;
+    intervalSeconds: number; promptHint: string | null; idempotencyKey: string; nowIso: string;
   },
-): void {
+): { scheduleId: string; replayed: boolean } {
+  const existing = db
+    .prepare(
+      `SELECT id FROM collab_agent_schedules
+        WHERE created_by_principal_id = ? AND idempotency_key = ?`,
+    )
+    .get(params.createdByPrincipalId, params.idempotencyKey) as { id: string } | undefined;
+  if (existing) return { scheduleId: existing.id, replayed: true };
+
   const nextFireAt = new Date(Date.parse(params.nowIso) + params.intervalSeconds * 1000).toISOString();
   db.prepare(
     `INSERT INTO collab_agent_schedules
        (id, channel_id, agent_principal_id, created_by_principal_id, interval_seconds,
-        prompt_hint, state, next_fire_seq, next_fire_at, last_fired_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'active', 0, ?, NULL, ?, ?)`,
+        prompt_hint, state, next_fire_seq, next_fire_at, last_fired_at, idempotency_key,
+        created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'active', 0, ?, NULL, ?, ?, ?)`,
   ).run(
     params.id, params.channelId, params.agentPrincipalId, params.createdByPrincipalId,
-    params.intervalSeconds, params.promptHint, nextFireAt, params.nowIso, params.nowIso,
+    params.intervalSeconds, params.promptHint, nextFireAt, params.idempotencyKey,
+    params.nowIso, params.nowIso,
   );
+  return { scheduleId: params.id, replayed: false };
 }
 
 /** Operator-visible halt for one schedule. Distinct from collab_autoreply_stop

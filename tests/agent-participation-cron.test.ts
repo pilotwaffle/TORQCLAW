@@ -154,7 +154,7 @@ describe('CRON — collab primitives (dist artifact)', () => {
     try {
       collab.createSchedule(db, {
         id: 'sched-1', channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
-        createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null, nowIso: nowIso(),
+        createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null, idempotencyKey: randomUUID(), nowIso: nowIso(),
       });
       const first = collab.claimScheduleFire(db, { scheduleId: 'sched-1', expectedFireSeq: 0, intervalSeconds: 60, nowIso: nowIso() });
       expect(first, 'first claim at fireSeq 0->1 must succeed').toBe(1);
@@ -182,7 +182,7 @@ describe('CRON — collab primitives (dist artifact)', () => {
     try {
       collab.createSchedule(db, {
         id: 'sched-a', channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
-        createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null, nowIso: nowIso(),
+        createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null, idempotencyKey: randomUUID(), nowIso: nowIso(),
       });
       collab.setScheduleState(db, 'sched-a', 'stopped', nowIso());
       const attack = collab.claimScheduleFire(db, { scheduleId: 'sched-a', expectedFireSeq: 0, intervalSeconds: 60, nowIso: nowIso() });
@@ -420,6 +420,7 @@ describe('CRON — end-to-end (real dispatcher, real profile, committed rows)', 
     collab.createSchedule(db, {
       id: scheduleId, channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
       createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: 'daily check-in',
+      idempotencyKey: randomUUID(),
       nowIso: new Date(Date.now() - 120_000).toISOString(), // already due
     });
 
@@ -447,7 +448,7 @@ describe('CRON — end-to-end (real dispatcher, real profile, committed rows)', 
     const scheduleId = randomUUID();
     collab.createSchedule(db, {
       id: scheduleId, channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
-      createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null,
+      createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null, idempotencyKey: randomUUID(),
       nowIso: new Date(Date.now() - 120_000).toISOString(),
     });
     collab.setAutoreplyStop(db, { scope: 'channel', channelId: seeded.channelId, stoppedByPrincipalId: seeded.operatorId, nowIso: nowIso() });
@@ -481,7 +482,7 @@ describe('CRON — end-to-end (real dispatcher, real profile, committed rows)', 
     // Created while the agent IS an active member.
     collab.createSchedule(db, {
       id: scheduleId, channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
-      createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null,
+      createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null, idempotencyKey: randomUUID(),
       nowIso: new Date(Date.now() - 120_000).toISOString(),
     });
     // Membership revoked AFTER creation, BEFORE the wake.
@@ -514,7 +515,7 @@ describe('CRON — end-to-end (real dispatcher, real profile, committed rows)', 
     const scheduleId = randomUUID();
     collab.createSchedule(db, {
       id: scheduleId, channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
-      createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null,
+      createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null, idempotencyKey: randomUUID(),
       nowIso: new Date(Date.now() - 120_000).toISOString(),
     });
     // Archived AFTER creation, BEFORE the wake.
@@ -550,6 +551,52 @@ describe('CRON — end-to-end (real dispatcher, real profile, committed rows)', 
     expect(revived.state, 'the unarchived channel must fire normally -- the refusal is specific').toBe('completed');
   }, 30000);
 
+  it('G2A C-1: a retry with the SAME idempotencyKey does NOT mint a second schedule -- the field is load-bearing, not decorative', async () => {
+    const db = collabSurface.getCollabDbForAutoReply()!;
+    const key = randomUUID();
+    const countSchedules = () => (db
+      .prepare('SELECT COUNT(*) AS n FROM collab_agent_schedules WHERE created_by_principal_id = ?')
+      .get(seeded.operatorId) as { n: number }).n;
+    const before = countSchedules();
+
+    const first = collab.createSchedule(db, {
+      id: randomUUID(), channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
+      createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null,
+      idempotencyKey: key, nowIso: nowIso(),
+    });
+    expect(first.replayed).toBe(false);
+    expect(countSchedules(), 'the first create must actually create').toBe(before + 1);
+
+    // THE RETRY. A client following this repo's own retry-with-the-same-key
+    // discipline -- the pattern S3 built for exactly this -- previously minted
+    // a SECOND schedule here. On a schedule that means double fires, double
+    // model calls and possibly double posts, INDEFINITELY and UNATTENDED. A
+    // duplicated message is noise; a duplicated schedule keeps acting.
+    const retry = collab.createSchedule(db, {
+      id: randomUUID(), // a NEW row id, exactly as the handler mints per call
+      channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
+      createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null,
+      idempotencyKey: key, nowIso: nowIso(),
+    });
+    expect(
+      countSchedules(),
+      'C-1 REGRESSION: a retry with the same idempotencyKey created a SECOND schedule. '
+      + 'It will fire forever alongside the first, unattended.',
+    ).toBe(before + 1);
+    expect(retry.replayed, 'the retry must be reported as a replay, not a fresh create').toBe(true);
+    expect(retry.scheduleId, 'a replay must return the ORIGINAL schedule id').toBe(first.scheduleId);
+
+    // POSITIVE CONTROL -- a genuinely DIFFERENT key must still create, or the
+    // assertions above are satisfied by a build that refuses every create.
+    const other = collab.createSchedule(db, {
+      id: randomUUID(), channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
+      createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null,
+      idempotencyKey: randomUUID(), nowIso: nowIso(),
+    });
+    expect(other.replayed).toBe(false);
+    expect(countSchedules(), 'a different key must still create').toBe(before + 2);
+  });
+
   it('G1R B-C1: handleCreateSchedule is TOTAL -- a store-layer failure returns a typed error, never a throw that would kill the process', async () => {
     // This gateway has NO unhandledRejection net (verified: only comments note
     // its absence), and server.ts's socket.on('message') wraps only JSON.parse
@@ -577,7 +624,7 @@ describe('CRON — end-to-end (real dispatcher, real profile, committed rows)', 
     try {
       returned = await cronScheduleHandler.handleCreateSchedule(handle, seeded.operatorId, {
         channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
-        intervalSeconds: 60, promptHint: null, idempotencyKey: randomUUID(),
+        intervalSeconds: 60, promptHint: null, idempotencyKey: randomUUID(), idempotencyKey: randomUUID(),
       });
     } catch (e) { threw = e; }
 
@@ -598,7 +645,7 @@ describe('CRON — end-to-end (real dispatcher, real profile, committed rows)', 
     const scheduleId = randomUUID();
     collab.createSchedule(db, {
       id: scheduleId, channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
-      createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null,
+      createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null, idempotencyKey: randomUUID(),
       nowIso: new Date(Date.now() - 120_000).toISOString(),
     });
 
@@ -632,7 +679,7 @@ describe('CRON — end-to-end (real dispatcher, real profile, committed rows)', 
     // enforcement from create-time enforcement).
     collab.createSchedule(db, {
       id: scheduleId, channelId: seeded.channelId, agentPrincipalId: strangerAgent,
-      createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null,
+      createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null, idempotencyKey: randomUUID(),
       nowIso: new Date(Date.now() - 120_000).toISOString(),
     });
     script = 'must never post';

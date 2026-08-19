@@ -422,9 +422,24 @@ CREATE TABLE IF NOT EXISTS collab_agent_schedules (
   next_fire_seq INTEGER NOT NULL DEFAULT 0,
   next_fire_at TEXT NOT NULL,
   last_fired_at TEXT,
+  -- G2A C-1: CREATE_SCHEDULE.idempotencyKey was validated by the contract,
+  -- threaded to the handler, and NEVER USED. A client applying this repo's own
+  -- retry-with-the-same-key discipline -- the pattern S3 built for exactly this
+  -- purpose -- silently created a SECOND schedule: double fires, double model
+  -- calls, possibly double posts, indefinitely, on the one entity whose
+  -- mistakes persist and re-fire unattended.
+  --
+  -- Enforced in the SCHEMA rather than only in handler logic, so a retry cannot
+  -- duplicate even if the handler is later refactored. The unique index is
+  -- scoped per creating principal, matching runKeyedCommand's
+  -- (principal, command, key) shape rather than inventing a new one.
+  idempotency_key TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS collab_agent_schedules_idem
+  ON collab_agent_schedules(created_by_principal_id, idempotency_key);
 
 CREATE INDEX IF NOT EXISTS collab_agent_schedules_due
   ON collab_agent_schedules(state, next_fire_at);
