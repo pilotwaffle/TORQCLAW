@@ -251,13 +251,27 @@ async function runGatewayBuild(options: GatewayBuildOptions, deadlineMs: number,
  * no source file is newer than what it is about to boot. A stale `dist` is
  * exactly what this check refuses to accept.
  */
-function distIsFresh(): boolean {
+// Exported ONLY so tests/reachability-probe-build-race.test.ts can drive this
+// exact function rather than a re-implementation of it. A copy of the rule
+// already contains the fix; the shipped closure is what has to be pinned.
+export function distIsFresh(): boolean {
   try {
     const distStat = statSync(GATEWAY_DIST_ENTRY);
     const newestSource = (dir: string): number => {
       let newest = 0;
       for (const name of readdirSync(dir)) {
         if (name === 'node_modules' || name === 'dist' || name === '.turbo') continue;
+        // `__reachability_probe.ts` is written INTO a watched source tree by
+        // tests/reachability.test.ts and deleted moments later. Counting it as
+        // source made an unrelated test's scratch file trigger a real
+        // `turbo run build --force` here -- which truncates and rewrites
+        // packages/contracts/dist/*.js WHILE sibling vitest workers are booting
+        // the gateway from those exact files. That is a write/read race on
+        // shared `dist`, and it produced a red master CI run (32215095260, the
+        // gateway child dying on `does not provide an export named
+        // EffectiveProfileSchema`) that went green on an unchanged re-run.
+        // A test's own scratch file is never a reason to rebuild the product.
+        if (name === '__reachability_probe.ts') continue;
         const full = join(dir, name);
         const st = statSync(full);
         if (st.isDirectory()) newest = Math.max(newest, newestSource(full));
