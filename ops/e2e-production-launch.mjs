@@ -2,7 +2,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import WebSocket from 'ws';
 import { buildLauncherConfig } from './launcher-config.mjs';
@@ -10,7 +11,6 @@ import { defaultPortProbe, doctorPassed, runDoctor } from './doctor-core.mjs';
 import { stopProcessTree } from './process-tree.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
-const TOKEN = 'g1r-e2e-matching-token-2026';
 export const TEST_LOG_TAIL_LIMIT = 16 * 1024;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -43,7 +43,6 @@ export function createTailBuffer(limit = TEST_LOG_TAIL_LIMIT) {
 
 export function sanitizeInheritedEnv(baseEnv, {
   dataDir,
-  token,
   consolePort,
   enginePort,
   gatewayPort,
@@ -58,8 +57,13 @@ export function sanitizeInheritedEnv(baseEnv, {
     TORQCLAW_ENV_FILE_PRESENT: '1',
     TORQCLAW_NO_BROWSER: '1',
     TORQCLAW_DATA_DIR: dataDir,
-    TORQCLAW_GATEWAY_TOKEN: token,
-    NEXT_PUBLIC_GATEWAY_TOKEN: token,
+    // The surface-credential connect path requires the collab flag; the
+    // e2e bootstraps a real operator credential into `dataDir` (below) and
+    // authenticates with it, matching the production contract
+    // (launcher-config.mjs's requireProductionTokens: the static shared
+    // TORQCLAW_GATEWAY_TOKEN root token is FORBIDDEN in production and is
+    // deliberately NOT injected here anymore).
+    TORQCLAW_COLLAB_ENABLED: '1',
     NEXT_PUBLIC_GATEWAY_URL: `ws://127.0.0.1:${gatewayPort}/ws`,
     TORQCLAW_HOST: '127.0.0.1',
     HERMES_BIND_HOST: '127.0.0.1',
@@ -87,7 +91,7 @@ export async function waitForRuntime(config, env, child, {
   root = ROOT,
   stdoutTail = '',
   stderrTail = '',
-  token = TOKEN,
+  credential = '',
   timeoutMs = 120_000,
   sleepImpl = sleep,
   runDoctorImpl = runDoctor,
@@ -101,7 +105,7 @@ export async function waitForRuntime(config, env, child, {
   const failure = (message) => new Error(`${message}${formatFailureTail(
     typeof stdoutTail === 'function' ? stdoutTail() : stdoutTail,
     typeof stderrTail === 'function' ? stderrTail() : stderrTail,
-    [token],
+    [credential],
   )}`);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -123,7 +127,32 @@ export async function waitForRuntime(config, env, child, {
   throw failure('production runtime did not become ready');
 }
 
-async function exerciseGateway(config, token) {
+/** Mint a REAL operator credential into the throwaway dataDir via the
+ *  production bootstrap script (ops/bootstrap-operator.mjs), then read it
+ *  back from the single-use token file it writes. This is the production
+ *  auth contract exercised for real: per-principal surface credential +
+ *  FileSecretStore pepper, never a static shared root token (forbidden in
+ *  production by launcher-config.mjs's requireProductionTokens). */
+function bootstrapOperatorCredential(root, env, dataDir) {
+  const result = spawnSync(process.execPath, ['ops/bootstrap-operator.mjs', '--display-name', 'E2E Operator'], {
+    cwd: root, env, encoding: 'utf8', shell: false, windowsHide: true,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`operator bootstrap failed (exit ${result.status}): ${String(result.stderr ?? '').slice(-2048)}`);
+  }
+  const tokenFile = path.join(dataDir, 'operator-credential.token');
+  const credential = readFileSync(tokenFile, 'utf8').trim();
+  if (!credential) throw new Error('operator bootstrap produced no credential file');
+  // The bootstrap script tells the operator to delete this single-use file
+  // once the token is copied; the e2e has consumed it into memory, so delete
+  // it now rather than leaving a live credential on disk (the whole dataDir
+  // is removed at the end regardless).
+  rmSync(tokenFile, { force: true });
+  return credential;
+}
+
+async function exerciseGateway(config, credential) {
   const socket = new WebSocket(config.nextPublicGatewayUrl);
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('production websocket timed out')), 30_000);
@@ -138,8 +167,9 @@ async function exerciseGateway(config, token) {
       reject(new Error(message));
     };
     socket.on('open', () => socket.send(JSON.stringify({
-      role: 'operator', token,
+      expectedRole: 'operator',
       clientInfo: { name: 'torqclaw-production-e2e', version: '1.0.0' },
+      auth: { kind: 'surface', credential },
     })));
     socket.on('message', (raw) => {
       let event;
@@ -252,9 +282,10 @@ export async function runProductionE2E({
     portReservation = await reserveLoopbackPorts(3);
     const [consolePort, enginePort, gatewayPort] = portReservation.ports;
     const env = sanitizeInheritedEnv(baseEnv, {
-      dataDir, token: TOKEN, consolePort, enginePort, gatewayPort,
+      dataDir, consolePort, enginePort, gatewayPort,
     });
     config = buildLauncherConfig(env, { production: true });
+    const credential = bootstrapOperatorCredential(root, env, dataDir);
     stdoutTail = createTailBuffer();
     stderrTail = createTailBuffer();
     await portReservation.release();
@@ -266,9 +297,9 @@ export async function runProductionE2E({
     child.stdout?.on('data', (chunk) => stdoutTail.append(chunk));
     child.stderr?.on('data', (chunk) => stderrTail.append(chunk));
     await waitForRuntime(config, env, child, {
-      root, stdoutTail: () => stdoutTail.value(), stderrTail: () => stderrTail.value(), token: TOKEN, sleepImpl,
+      root, stdoutTail: () => stdoutTail.value(), stderrTail: () => stderrTail.value(), credential, sleepImpl,
     });
-    await exerciseGateway(config, TOKEN);
+    await exerciseGateway(config, credential);
   } finally {
     let processStopped = !child?.pid;
     let portsReleased = !config;

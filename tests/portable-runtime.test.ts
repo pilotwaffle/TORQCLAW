@@ -224,12 +224,19 @@ describe('G1R portable install and fresh production build', () => {
     const env = sanitizeInheritedEnv({
       PATH: 'system-path', USERPROFILE: 'C:\\Users\\operator',
       TORQCLAW_DATA_DIR: userDataPath, HERMES_MODEL: 'user-model', NEXT_PUBLIC_GATEWAY_TOKEN: 'user-token',
-    }, { dataDir, token: 'synthetic-token', consolePort: 3001, enginePort: 8001, gatewayPort: 18791 });
+    }, { dataDir, consolePort: 3001, enginePort: 8001, gatewayPort: 18791 });
     expect(env.PATH).toBe('system-path');
     expect(env.USERPROFILE).toBe('C:\\Users\\operator');
     expect(env.TORQCLAW_DATA_DIR).toBe(dataDir);
     expect(env.HERMES_MODEL).toBeUndefined();
-    expect(env.NEXT_PUBLIC_GATEWAY_TOKEN).toBe('synthetic-token');
+    // The static shared root token is FORBIDDEN in production
+    // (launcher-config.mjs's requireProductionTokens) and must NOT be
+    // injected -- the e2e authenticates with a bootstrapped surface
+    // credential instead. The collab flag IS injected so that
+    // credential's connect path is consulted at all.
+    expect(env.TORQCLAW_GATEWAY_TOKEN).toBeUndefined();
+    expect(env.NEXT_PUBLIC_GATEWAY_TOKEN).toBeUndefined();
+    expect(env.TORQCLAW_COLLAB_ENABLED).toBe('1');
     expect(JSON.stringify(env)).not.toContain(userDataPath);
     expect(isVerifiedTempDir(join('C:\\Windows\\Temp', 'torqclaw-g1r-test'), 'C:\\Windows\\Temp')).toBe(true);
     expect(isVerifiedTempDir(userDataPath, 'C:\\Windows\\Temp')).toBe(false);
@@ -299,7 +306,7 @@ describe('G1R portable install and fresh production build', () => {
     child.exitCode = null;
     const pending = waitForRuntime({}, {}, child, {
       root: 'C:\\Portable Repo', timeoutMs: 10_000,
-      stdoutTail: `token=synthetic-token`, stderrTail: 'engine failed', token: 'synthetic-token',
+      stdoutTail: `token=synthetic-token`, stderrTail: 'engine failed', credential: 'synthetic-token',
       runDoctorImpl: async () => [{ id: 'runtime.fake', severity: 'error', status: 'fail', message: 'not ready' }],
     });
     setTimeout(() => { child.exitCode = 17; child.emit('exit', 17, null); }, 0);
@@ -310,10 +317,16 @@ describe('G1R portable install and fresh production build', () => {
     expect(String(error)).not.toContain('synthetic-token');
   });
 
-  it('keeps the production e2e wait call bound to the declared TOKEN constant', () => {
+  it('wires the bootstrapped credential, never a static token, into the e2e wait/exercise calls', () => {
     const source = readFileSync(new URL('../ops/e2e-production-launch.mjs', import.meta.url), 'utf8');
-    expect(source).toContain('token: TOKEN');
-    expect(source).not.toMatch(/stderrTail: \(\) => stderrTail\.value\(\), token, /);
+    // The production contract (launcher-config.mjs requireProductionTokens):
+    // the legacy shared root token is FORBIDDEN in production, so the e2e
+    // must bootstrap a real operator credential and pass THAT as the
+    // redaction secret and the websocket auth -- never an injected env token.
+    expect(source).toContain('bootstrapOperatorCredential(root, env, dataDir)');
+    expect(source).toContain("auth: { kind: 'surface', credential }");
+    expect(source).not.toContain('TORQCLAW_GATEWAY_TOKEN: token');
+    expect(source).not.toContain('NEXT_PUBLIC_GATEWAY_TOKEN: token');
   });
 
   it('reserves distinct OS-assigned loopback ports instead of assuming common app ports are free', async () => {
