@@ -1,11 +1,13 @@
 'use client';
 
-// PRD-TCLAW-COLLAB-PRESENCE-UI-005 S2 + S3 + S4 + S5 — Console Channels view.
+// PRD-TCLAW-COLLAB-PRESENCE-UI-005 S2 + S3 + S4 + S5 + S6 — Console Channels
+// view.
 //
 // Fourth nav view over the S1 wire read surface (LIST_CHANNELS /
 // GET_CHANNEL_TIMELINE, packages/gateway/src/collabSurface.ts) plus S3's
-// composer (POST_CHANNEL_MESSAGE), S4's hint-then-refetch freshness, and
-// S5's agent co-presence roster (read-only, see the S5 doc block below).
+// composer (POST_CHANNEL_MESSAGE), S4's hint-then-refetch freshness, S5's
+// agent co-presence roster (read-only, see the S5 doc block below), and
+// S6's read-state ack (ACK_CHANNEL_CURSOR, see the S6 doc block below).
 // Flag-gated by NEXT_PUBLIC_COLLAB_UI at the TorqTerminal call site; this
 // component itself assumes it is only ever mounted when the flag is on
 // (mirrors ApprovalHistoryPanel/ReceiptsPanel/MemoryPanel, none of which
@@ -14,14 +16,50 @@
 // SAFETY: the ONLY sendCommand actions reachable from anywhere in this file
 // are LIST_CHANNELS (mount, manual refresh), GET_CHANNEL_TIMELINE (channel
 // select, "Load more", hint-triggered re-read, reconnect re-read — the wire
-// pages forward only, see B-2 fix note at the button below), and
-// POST_CHANNEL_MESSAGE (composer Send/retry — the ONLY addition to the
-// allowlist, per §14 T-11). S5's roster adds NO new sendCommand action —
-// it is a pure render-time join over data the component already receives
-// (see the S5 doc block below). ChannelRow,
+// pages forward only, see B-2 fix note at the button below),
+// POST_CHANNEL_MESSAGE (composer Send/retry — the ONLY CONTENT mutation in
+// the allowlist, per §14 T-11), and ACK_CHANNEL_CURSOR (S6 — a per-principal
+// READ-STATE cursor write, not content; idempotent and monotonic by
+// substrate construction, see the S6 doc block below). S5's roster adds NO
+// new sendCommand action — it is a pure render-time join over data the
+// component already receives (see the S5 doc block below). ChannelRow's
 // props are plain data (zero function-typed fields except PendingSendRow's
 // narrow onRetry) — mirrors ApprovalHistoryRow / ReplayEventRow's structural
 // boundary.
+//
+// ── S6: READ STATE (§4 S6 / A7) — read this before touching the ack logic
+// below. ─────────────────────────────────────────────────────────────────
+//
+// NO NUMERIC UNREAD COUNT, EVER: LIST_CHANNELS returns each channel's
+// lastAcknowledgedCursor but NOT the channel's max channel_seq (§11 rows
+// 14-15), so an unread COUNT is not derivable and none is rendered anywhere
+// in this file. The interim honest affordance is a BOOLEAN "new" dot on a
+// ChannelRow: shown only when the newest cursor this session has OBSERVED
+// on the wire for that channel (a GET_CHANNEL_TIMELINE response frame's own
+// cursor — never a guessed max) is strictly greater than the channel's
+// lastAcknowledgedCursor. A channel whose timeline has never been read this
+// session has no observed cursor and renders NO dot.
+//
+// ACK DISCIPLINE: after a genuinely NEW GET_CHANNEL_TIMELINE response frame
+// for the selected channel renders a snapshot, this file acks EXACTLY that
+// snapshot's `cursor` (the newest loaded cursor — the substrate's own
+// nextCursor), never a fabricated/guessed max. Coalescing reuses the S4
+// frame-id ledger (lastTimelineFrameIdRef): an ack is considered only inside
+// the isNewFrame branch, so re-rendering the same already-seen frame never
+// re-acks. On top of that, a per-channel monotonic ledger
+// (lastAckedCursorRef) — seeded from LIST_CHANNELS' lastAcknowledgedCursor
+// and advanced by every ack this file dispatches or sees confirmed — blocks
+// any ack whose cursor is not strictly greater than the highest cursor
+// already known-acked locally. Acking backwards is a substrate no-op anyway
+// (store.ts's upsert computes max(existing,submitted) in SQL), so the local
+// guard is belt-and-braces honesty, never load-bearing correctness.
+//
+// ACK RESPONSE: the gateway's ACK_CHANNEL_CURSOR handler emits a publishOnly
+// frame `metadata: { collabCursorAcked: true, channelId, acknowledgedCursor }`
+// (collabSurface.ts's handleAckChannelCursor). When it lands, the matching
+// channel-list entry's lastAcknowledgedCursor is raised (monotonic max —
+// a stale/backwards ack response can never lower it) so the "new" dot clears
+// WITHOUT requiring a manual LIST_CHANNELS refresh.
 //
 // ── S4: HINT-THEN-REFETCH (§4 S4 / A4 / T-6) — read this before touching
 // the hint effect below. ──────────────────────────────────────────────────
@@ -424,6 +462,30 @@ function selectLatestTimelineFrameId(events: GatewayEvent[], channelId: string):
   return null;
 }
 
+/** S6: scans `events` BACKWARD for the newest ACK_CHANNEL_CURSOR response
+ *  frame (collabSurface.ts's handleAckChannelCursor publishOnly frame:
+ *  `metadata: { collabCursorAcked: true, channelId, acknowledgedCursor }`),
+ *  validating shape — a malformed frame is skipped, never applied. Returns
+ *  the frame's own GatewayEvent.id alongside so the consuming effect can
+ *  dedup on "genuinely new frame" rather than re-applying the same newest
+ *  ack on every render (same discipline as selectLatestTimelineFrameId). */
+function selectLatestCursorAck(
+  events: GatewayEvent[],
+): { channelId: string; acknowledgedCursor: string; frameId: string } | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const meta = (events[i]!.metadata ?? {}) as Record<string, any>;
+    if (
+      meta.collabCursorAcked === true &&
+      typeof meta.channelId === 'string' &&
+      typeof meta.acknowledgedCursor === 'string' &&
+      CURSOR_GRAMMAR.test(meta.acknowledgedCursor)
+    ) {
+      return { channelId: meta.channelId, acknowledgedCursor: meta.acknowledgedCursor, frameId: events[i]!.id };
+    }
+  }
+  return null;
+}
+
 // ── S5: roster selectors (§4 S5 / A5 / A9) ─────────────────────────────────
 // See the S5 module-doc block above for the full source/authority rationale.
 
@@ -604,8 +666,23 @@ export default function ChannelsPanel({
   // ── Channel list ──────────────────────────────────────────────────────
   const latestChannelList = useMemo(() => selectLatestChannelList(events), [events]);
   const [channels, setChannels] = useState<ChannelListEntry[] | null>(null);
+  // S6: per-channel monotonic ledger of the highest cursor known-acked
+  // locally — seeded from LIST_CHANNELS' lastAcknowledgedCursor, advanced by
+  // every ACK_CHANNEL_CURSOR this file dispatches and every ack response it
+  // applies. Never lowered by anything (the substrate's own upsert is
+  // max(existing,submitted); a lower value here would only ever be stale).
+  const lastAckedCursorRef = useRef<Record<string, string>>({});
   useEffect(() => {
-    if (latestChannelList) setChannels(latestChannelList);
+    if (latestChannelList) {
+      setChannels(latestChannelList);
+      for (const c of latestChannelList) {
+        if (!CURSOR_GRAMMAR.test(c.lastAcknowledgedCursor)) continue;
+        const prior = lastAckedCursorRef.current[c.channelId];
+        if (prior === undefined || Number(c.lastAcknowledgedCursor) > Number(prior)) {
+          lastAckedCursorRef.current[c.channelId] = c.lastAcknowledgedCursor;
+        }
+      }
+    }
   }, [latestChannelList]);
 
   const [listPhase, setListPhase] = useState<Phase>('pending');
@@ -776,6 +853,29 @@ export default function ChannelsPanel({
           refetchDirtyRef.current[selectedChannelId] = false;
           requestTimeline(selectedChannelId, found.cursor);
         }
+
+        // S6 (§4 S6): ack EXACTLY this snapshot's cursor -- the substrate's
+        // own nextCursor for the page just rendered, never a guessed max.
+        // This runs only inside the isNewFrame branch, so a re-render of an
+        // already-seen frame never re-acks (frame-id coalescing, same
+        // ledger that guards the refetch above). The monotonic
+        // lastAckedCursorRef ledger additionally refuses any cursor not
+        // strictly newer than the highest already known-acked locally
+        // (which includes LIST_CHANNELS' lastAcknowledgedCursor seed), so
+        // an older page or a stale frame can never dispatch a backwards
+        // ack. A failed send does NOT advance the ledger -- the next fresh
+        // frame (e.g. the reconnect re-read) retries honestly.
+        if (CURSOR_GRAMMAR.test(found.cursor)) {
+          const baseline = lastAckedCursorRef.current[selectedChannelId] ?? '0';
+          if (Number(found.cursor) > Number(baseline)) {
+            const ackSent = sendCommand({
+              action: 'ACK_CHANNEL_CURSOR',
+              channelId: selectedChannelId,
+              cursor: found.cursor,
+            });
+            if (ackSent) lastAckedCursorRef.current[selectedChannelId] = found.cursor;
+          }
+        }
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -849,6 +949,38 @@ export default function ChannelsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [events, selectedChannelId]);
 
+  // ── S6: ack-response application (§4 S6 / A7) ────────────────────────────
+  //
+  // When the gateway's ACK_CHANNEL_CURSOR response frame lands
+  // (`metadata.collabCursorAcked === true`), raise the matching channel-list
+  // entry's lastAcknowledgedCursor (MONOTONIC MAX ONLY — a stale or
+  // backwards ack response can never lower it) so the "new" dot clears
+  // without requiring a manual LIST_CHANNELS refresh. Deduped on the frame's
+  // own GatewayEvent.id so a re-render with the same newest ack frame
+  // applies nothing twice (same discipline as lastTimelineFrameIdRef).
+  const lastCursorAckFrameIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const ack = selectLatestCursorAck(events);
+    if (!ack) return;
+    if (lastCursorAckFrameIdRef.current === ack.frameId) return;
+    lastCursorAckFrameIdRef.current = ack.frameId;
+    const prior = lastAckedCursorRef.current[ack.channelId];
+    if (prior === undefined || Number(ack.acknowledgedCursor) > Number(prior)) {
+      lastAckedCursorRef.current[ack.channelId] = ack.acknowledgedCursor;
+    }
+    setChannels((prev) =>
+      prev === null
+        ? prev
+        : prev.map((c) =>
+            c.channelId === ack.channelId &&
+            CURSOR_GRAMMAR.test(c.lastAcknowledgedCursor) &&
+            Number(ack.acknowledgedCursor) > Number(c.lastAcknowledgedCursor)
+              ? { ...c, lastAcknowledgedCursor: ack.acknowledgedCursor }
+              : c,
+          ),
+    );
+  }, [events]);
+
   const selectChannel = (channelId: string) => {
     setSelectedChannelId(channelId);
     // Fresh load from cursor '0' — clear any prior accumulated snapshot for
@@ -877,6 +1009,35 @@ export default function ChannelsPanel({
   const selectedSnapshot = selectedChannelId ? (timelineSnapshots[selectedChannelId] ?? null) : null;
   const isListRefreshing = listPhase === 'pending' && channels !== null;
   const isTimelineRefreshing = timelinePhase === 'pending' && selectedSnapshot !== null;
+
+  // ── S6: per-channel latest OBSERVED timeline cursor (§4 S6) ──────────────
+  //
+  // The highest cursor this session has actually seen on the wire per
+  // channel — taken only from validated GET_CHANNEL_TIMELINE response frames
+  // (the same shape selectLatestTimeline accepts), never inferred, never a
+  // guessed max. A channel with no timeline frame in `events` has no entry
+  // here at all, which is exactly what "no dot if no timeline has been read
+  // this session" keys off.
+  const observedCursorByChannel = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const e of events) {
+      const meta = (e.metadata ?? {}) as Record<string, any>;
+      if (
+        meta.collabTimeline === true &&
+        typeof meta.channelId === 'string' &&
+        Array.isArray(meta.events) &&
+        typeof meta.cursor === 'string' &&
+        CURSOR_GRAMMAR.test(meta.cursor) &&
+        typeof meta.hasMore === 'boolean'
+      ) {
+        const prior = map[meta.channelId];
+        if (prior === undefined || Number(meta.cursor) > Number(prior)) {
+          map[meta.channelId] = meta.cursor;
+        }
+      }
+    }
+    return map;
+  }, [events]);
 
   // ── S5: roster (§4 S5 / A5 / A9) — see the module-doc block above. Two
   // independent selectors, two independent sources, never merged. Members
@@ -1131,14 +1292,28 @@ export default function ChannelsPanel({
               </div>
             ) : (
               <ul className="space-y-1">
-                {channels.map((c) => (
-                  <ChannelRow
-                    key={c.channelId}
-                    channel={c}
-                    active={selectedChannelId === c.channelId}
-                    onSelect={selectChannel}
-                  />
-                ))}
+                {channels.map((c) => {
+                  // S6: boolean "new" dot — strictly-greater comparison of
+                  // the latest OBSERVED timeline cursor against the channel's
+                  // lastAcknowledgedCursor. No numeric count exists or is
+                  // derivable (LIST_CHANNELS never returns the channel max
+                  // seq), so none is rendered. No observed cursor (channel
+                  // never read this session) -> no dot.
+                  const observed = observedCursorByChannel[c.channelId];
+                  const hasNew =
+                    observed !== undefined &&
+                    CURSOR_GRAMMAR.test(c.lastAcknowledgedCursor) &&
+                    Number(observed) > Number(c.lastAcknowledgedCursor);
+                  return (
+                    <ChannelRow
+                      key={c.channelId}
+                      channel={c}
+                      active={selectedChannelId === c.channelId}
+                      hasNew={hasNew}
+                      onSelect={selectChannel}
+                    />
+                  );
+                })}
               </ul>
             )}
           </>
@@ -1431,14 +1606,23 @@ function RosterSection({
  * timeline" (which is itself only a read, GET_CHANNEL_TIMELINE). No
  * last-message preview, no member count, no activity timestamp is rendered
  * — LIST_CHANNELS does not return them (§11 row 14 / T-12).
+ *
+ * S6: `hasNew` is a precomputed BOOLEAN (the parent compares the latest
+ * observed timeline cursor against lastAcknowledgedCursor). It renders as a
+ * small dot ONLY — never a number, because no unread count is derivable
+ * from the wire (§4 S6 / A7: "No numeric badge until the substrate returns
+ * a max cursor"). The dot is decorative (aria-hidden) with a title tooltip;
+ * it is not a control and carries no click target of its own.
  */
 function ChannelRow({
   channel,
   active,
+  hasNew,
   onSelect,
 }: {
   channel: ChannelListEntry;
   active: boolean;
+  hasNew: boolean;
   onSelect: (channelId: string) => void;
 }) {
   return (
@@ -1454,6 +1638,13 @@ function ChannelRow({
       >
         <div className="flex flex-wrap items-center gap-x-2">
           <span className="min-w-0 truncate text-ink" title={channel.name}>{channel.name}</span>
+          {hasNew && (
+            <span
+              className="h-1.5 w-1.5 shrink-0 rounded-full bg-torque"
+              aria-hidden="true"
+              title="new activity since your last read"
+            />
+          )}
           {channel.state === 'archived' && (
             <span className="rounded border border-border-strong px-1 py-0 text-[9px] uppercase tracking-wide text-faint">
               archived

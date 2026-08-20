@@ -41,7 +41,7 @@ import { sweepExpiredApprovals, sweepExpiredGrants } from './approvalWriter.js';
 import { rebuildDeliveryProjection } from './approvalDelivery.js';
 import { revokeInertGrants, admitToolCall } from './grantAdmission.js';
 import { decideApprovalC2 } from './c2Broker.js';
-import { collabSurfaceCommandsEnabled, agentParticipationEnabled, isAgentSurfaceCaller, handleListChannels, handleGetChannelTimeline, handlePostChannelMessage, setAutoReplyTrigger, getStore } from './collabSurface.js';
+import { collabSurfaceCommandsEnabled, agentParticipationEnabled, isAgentSurfaceCaller, handleListChannels, handleGetChannelTimeline, handlePostChannelMessage, handleAckChannelCursor, setAutoReplyTrigger, getStore } from './collabSurface.js';
 import { onChannelMessageCommitted, recoverStrandedAgentTurns } from './autoReplyDispatcher.js';
 import { getCollabDbForAutoReply } from './collabSurface.js';
 import { handleSetAutoreplyStop } from './autoReplyStopHandler.js';
@@ -886,6 +886,29 @@ app.get('/ws', { websocket: true }, (socket) => {
           cmd.data.idempotencyKey,
         );
         if (postErr) sendErr(postErr.code, postErr.detail);
+        break;
+      }
+      case 'ACK_CHANNEL_CURSOR': {
+        // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S6: same absent-deny narrowing
+        // flag as S1/S3 -- turning the surface off removes acking too,
+        // without touching authz.ts or the C0/C1 identity hardening.
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        // §2a / S6: the subject is the CONNECTION's resolved collab
+        // principal -- the 005 wire surface subject, exactly like LIST/GET.
+        // This is a per-principal READ-STATE row, so agentCollabPrincipalId
+        // (the 007 S1 write-path substitution) is deliberately NOT consulted:
+        // a node-seat agent connection stays default-denied at authz for
+        // this command, and this arm is unreachable for it.
+        const ackErr = await handleAckChannelCursor(
+          sid,
+          connectionAuth?.principalId ?? null,
+          cmd.data.channelId,
+          cmd.data.cursor,
+        );
+        if (ackErr) sendErr(ackErr.code, ackErr.detail);
         break;
       }
       case 'SET_AUTOREPLY_STOP': {
