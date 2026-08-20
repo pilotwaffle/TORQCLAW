@@ -14,7 +14,7 @@
 
 <video src="docs/assets/torq5-demo.mp4" controls muted width="100%"></video>
 
-*Full walkthrough (60s): live tasks across both tiers, the approval gate, and the console in action.*
+*Quick demo: live tasks across both tiers, the approval gate, and the console in action.*
 
 Most agent frameworks optimize for autonomy. TORQCLAW optimizes for **trust**: every agent runs behind a gateway that enforces what the operator decided, not what the model wants.
 
