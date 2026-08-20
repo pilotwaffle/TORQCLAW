@@ -152,6 +152,19 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     limit: z.number().int().min(1).max(100).default(20),
   }),
   z.object({
+    // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S6: persist the connection's own read
+    // position. Same §2a identity rule as LIST_CHANNELS/GET_CHANNEL_TIMELINE —
+    // no principalId field; the subject is the server-derived collab principal.
+    // `cursor` uses the SAME wire grammar as GET_CHANNEL_TIMELINE (unsigned
+    // base-10, no leading zeroes), mirroring store.parseCursor; the
+    // caller-visible bound is enforced server-side by store.ackChannelCursor
+    // (CURSOR_OUT_OF_RANGE), never by this coarse wire grammar. Ack is
+    // idempotent and monotonic -- acking backwards is a substrate no-op (L2).
+    action: z.literal('ACK_CHANNEL_CURSOR'),
+    channelId: z.string().min(1),
+    cursor: z.string().regex(/^(0|[1-9][0-9]*)$/),
+  }),
+  z.object({
     // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S3: human posting. Deliberately NO
     // author/principalId/surfaceId field -- the server ALWAYS stamps the
     // author from the connection's resolved collab principal (§2a), so

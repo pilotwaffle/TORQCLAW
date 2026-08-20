@@ -391,6 +391,29 @@
       "properties": {
         "action": {
           "type": "string",
+          "const": "ACK_CHANNEL_CURSOR"
+        },
+        "channelId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cursor": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        }
+      },
+      "required": [
+        "action",
+        "channelId",
+        "cursor"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
           "const": "POST_CHANNEL_MESSAGE"
         },
         "channelId": {

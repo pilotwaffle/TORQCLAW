@@ -214,6 +214,15 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     // Explicit named deny so the decision is legible and pinned by a test
     // (T-3), matching every other arm in this switch.
     case 'POST_CHANNEL_MESSAGE':
+    // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S6: ACK_CHANNEL_CURSOR inherits the
+    // exact same seat-lattice ruling as the S1 reads and the S3 mutation
+    // above -- a channel seat is a transport identity (channel-http), not a
+    // collab surface credential holder, and gets no entitlement to mutate
+    // per-principal read state either. Explicit named deny so the decision
+    // is legible and pinned by a test, matching every other arm here. The
+    // node seat remains default-deny (no agentCollabWrite widening -- read
+    // state is the 005 operator surface's subject, never an agent's).
+    case 'ACK_CHANNEL_CURSOR':
     // PRD-TCLAW-AGENT-PARTICIPATION-007 S3 (R-3a): SET_AUTOREPLY_STOP is
     // operator-seat-only, explicit deny for a channel seat, matching every
     // other collab-surface command above. STOP is a control-plane action,

@@ -1,0 +1,5 @@
+{
+  "action": "ACK_CHANNEL_CURSOR",
+  "channelId": "chan-1",
+  "cursor": "42"
+}

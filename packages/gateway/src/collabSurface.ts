@@ -563,3 +563,64 @@ export async function handlePostChannelMessage(
     return { code: 'COLLAB_UNAVAILABLE' };
   }
 }
+
+/**
+ * ACK_CHANNEL_CURSOR handler body (PRD-TCLAW-COLLAB-PRESENCE-UI-005 S6).
+ * Write path, but a naturally-idempotent one: store.ackChannelCursor
+ * (store.ts) upserts collab_cursors with max(existing,submitted) computed in
+ * SQL, so a replayed or backwards ack is a substrate no-op, never an error.
+ * The subject is the CONNECTION's resolved collab principal (§2a) -- this is
+ * a per-principal read-state row, so the 005 wire surface subject
+ * (connectionAuth.principalId) is used, never agentCollabPrincipalId.
+ *
+ * A6(b)/T-9 totality: `store.ackChannelCursor`'s full throw taxonomy on this
+ * call path (verified by direct source read, store.ts):
+ *   - CollabError('COLLAB_NOT_FOUND', ...)      <- assertChannelVisible:
+ *     absent, hidden, or non-member channelId. Byte-identical message across
+ *     all three causes (T-2), preserved byte-identically below.
+ *   - CollabError('INVALID_REQUEST', ...)       <- store.parseCursor on a
+ *     malformed cursor (unreachable from a wire-admissible frame -- the
+ *     contract's regex rejects those first -- but covered defensively).
+ *   - CollabError('CURSOR_OUT_OF_RANGE', ...)   <- submitted cursor exceeds
+ *     the caller-visible bound (greatest committed channel_seq, or
+ *     rejoined_seq). Mapped to COLLAB_INVALID_REQUEST like the other
+ *     caller-correctable cursor rejections.
+ *   - Anything else (non-CollabError throw, closed handle, etc.): the
+ *     generic COLLAB_UNAVAILABLE arm, no internal detail leaked.
+ */
+export async function handleAckChannelCursor(
+  sessionId: string,
+  principalId: string | null,
+  channelId: string,
+  cursor: string,
+): Promise<CollabSurfaceError | null> {
+  if (principalId === null) return COLLAB_IDENTITY_REQUIRED;
+  const store = getStore();
+  if (!store) return { code: 'COLLAB_UNAVAILABLE' };
+  try {
+    const result = await store.ackChannelCursor(callerFor(principalId), { channelId, cursor });
+    publishOnly(sessionId, {
+      message: 'Channel cursor acknowledged',
+      metadata: {
+        collabCursorAcked: true,
+        channelId,
+        acknowledgedCursor: result.acknowledgedCursor,
+      },
+    });
+    return null;
+  } catch (err: any) {
+    if (err?.code === 'COLLAB_NOT_FOUND') {
+      // T-2 byte-identity: same code, same detail source, same shape as the
+      // S1/S3 arms -- a hidden or non-member channel must stay
+      // indistinguishable from a nonexistent one on the ack path too.
+      return { code: 'COLLAB_NOT_FOUND', detail: err.message };
+    }
+    if (err?.code === 'INVALID_REQUEST' || err?.code === 'CURSOR_OUT_OF_RANGE') {
+      return { code: 'COLLAB_INVALID_REQUEST', detail: err.message };
+    }
+    // Unexpected/unclassified failure: never leak internal detail, never let
+    // it escape as a rejection (A6/T-9 -- no enclosing try/catch in
+    // server.ts's dispatch switch).
+    return { code: 'COLLAB_UNAVAILABLE' };
+  }
+}

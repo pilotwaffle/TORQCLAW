@@ -64,8 +64,16 @@ function timelineEvent(overrides: Record<string, unknown> = {}) {
 // kept as the base read-only set for the T-10/T-12 read-path tests (which
 // never click the composer's Send button); a SEPARATE allowlist including
 // POST_CHANNEL_MESSAGE is used by the T-11 test that also exercises Send.
+// S6 (§4 S6 / A7): ACK_CHANNEL_CURSOR joins the surface as the read-STATE
+// write -- a per-principal cursor mutation, NOT content (POST_CHANNEL_MESSAGE
+// remains the only content mutation). It is dispatched automatically when a
+// new timeline snapshot renders (never by a click), is idempotent and
+// monotonic, and acking backwards is a substrate no-op. S6_ALLOWLIST is the
+// read path + ack; S6_FULL_ALLOWLIST adds the composer post on top.
 const READ_ONLY_ALLOWLIST = new Set(['LIST_CHANNELS', 'GET_CHANNEL_TIMELINE']);
+const S6_ALLOWLIST = new Set(['LIST_CHANNELS', 'GET_CHANNEL_TIMELINE', 'ACK_CHANNEL_CURSOR']);
 const S3_ALLOWLIST = new Set(['LIST_CHANNELS', 'GET_CHANNEL_TIMELINE', 'POST_CHANNEL_MESSAGE']);
+const S6_FULL_ALLOWLIST = new Set([...S3_ALLOWLIST, 'ACK_CHANNEL_CURSOR']);
 const DANGEROUS_ACTIONS = new Set([
   'SUBMIT_PROMPT',
   'CANCEL_TASK',
@@ -155,7 +163,7 @@ describe('ChannelsPanel', () => {
     expect(screen.getByText('Loading…')).toBeInTheDocument();
   });
 
-  it('T-11: structural inertness (read-only path) — clicking every control with an EMPTY composer dispatches only LIST_CHANNELS/GET_CHANNEL_TIMELINE (Send stays disabled on empty text)', () => {
+  it('T-11: structural inertness (read-only path) — clicking every control with an EMPTY composer dispatches only LIST_CHANNELS/GET_CHANNEL_TIMELINE plus S6\'s automatic ACK_CHANNEL_CURSOR (Send stays disabled on empty text)', () => {
     const sc = vi.fn(() => true);
     const frame = channelListFrame([channelRow()]);
     const timeline = timelineFrame('chan-1', [timelineEvent()], '1', false);
@@ -176,7 +184,13 @@ describe('ChannelsPanel', () => {
 
     const actions = sc.mock.calls.map((c) => (c[0] as any).action);
     expect(actions.length).toBeGreaterThan(0);
-    for (const a of actions) expect(READ_ONLY_ALLOWLIST.has(a)).toBe(true);
+    // S6: ACK_CHANNEL_CURSOR appears here NOT because any click dispatches
+    // it, but because selecting the channel renders the timeline snapshot in
+    // this fixture, and a new snapshot auto-acks its own cursor. It is a
+    // per-principal read-state cursor write (idempotent, monotonic), never
+    // content -- POST_CHANNEL_MESSAGE remains the only content mutation and
+    // stays unreachable with an empty composer.
+    for (const a of actions) expect(S6_ALLOWLIST.has(a)).toBe(true);
     for (const a of actions) expect(DANGEROUS_ACTIONS.has(a)).toBe(false);
   });
 
@@ -745,7 +759,7 @@ describe('ChannelsPanel — S3 composer', () => {
       .toMatch(/border-dashed/);
   });
 
-  it('T-11 (S3 addition): typing + Send dispatches ONLY LIST_CHANNELS / GET_CHANNEL_TIMELINE / POST_CHANNEL_MESSAGE, disjoint from every other dangerous action', () => {
+  it('T-11 (S3 addition): typing + Send dispatches ONLY LIST_CHANNELS / GET_CHANNEL_TIMELINE / POST_CHANNEL_MESSAGE / ACK_CHANNEL_CURSOR, disjoint from every other dangerous action', () => {
     const sc = vi.fn(() => true);
     selectGeneral(sc);
     fireEvent.change(composerTextarea(), { target: { value: 'inertness check' } });
@@ -753,7 +767,11 @@ describe('ChannelsPanel — S3 composer', () => {
 
     const actions = sc.mock.calls.map((c) => (c[0] as any).action);
     expect(actions).toContain('POST_CHANNEL_MESSAGE');
-    for (const a of actions) expect(S3_ALLOWLIST.has(a)).toBe(true);
+    // S6: the full surface allowlist now includes ACK_CHANNEL_CURSOR (the
+    // read-state write). This fixture lands no timeline frame, so no ack
+    // fires here -- the wider allowlist is the honest upper bound, and the
+    // dangerous-action disjointness below is the real guard.
+    for (const a of actions) expect(S6_FULL_ALLOWLIST.has(a)).toBe(true);
     for (const a of actions) expect(DANGEROUS_ACTIONS.has(a)).toBe(false);
   });
 
@@ -1515,5 +1533,129 @@ describe('ChannelsPanel — S5b self-principal', () => {
 
     expect(screen.queryByText(/^you: /)).not.toBeInTheDocument();
     expect(chip.getAttribute('title') ?? '').not.toContain('· you');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S6 — read state (§4 S6 / A7). The "new" dot is a BOOLEAN affordance only:
+// LIST_CHANNELS returns lastAcknowledgedCursor but NOT the channel's max
+// channel_seq, so no unread count is derivable and none may be rendered. The
+// dot keys off the newest cursor OBSERVED on the wire for that channel (a
+// GET_CHANNEL_TIMELINE response frame's own cursor), never a guessed max.
+// ACK_CHANNEL_CURSOR is dispatched automatically when a new timeline snapshot
+// renders, acking exactly that snapshot's cursor; the ack response frame
+// (metadata.collabCursorAcked === true, collabSurface.ts's
+// handleAckChannelCursor) raises the list entry's lastAcknowledgedCursor
+// monotonic-max so the dot clears without a LIST_CHANNELS refresh.
+// ---------------------------------------------------------------------------
+describe('ChannelsPanel — S6 read state', () => {
+  const NEW_DOT_TITLE = 'new activity since your last read';
+
+  function cursorAckFrame(channelId: string, acknowledgedCursor: string): GatewayEvent {
+    return ev({
+      type: 'SYSTEM',
+      metadata: { collabCursorAcked: true, channelId, acknowledgedCursor },
+    });
+  }
+
+  function selectGeneral(sc = vi.fn(() => true), lastAcknowledgedCursor = '0') {
+    const frame = channelListFrame([channelRow({ lastAcknowledgedCursor })]);
+    const result = renderPanel([frame], sc);
+    fireEvent.click(screen.getByText('general'));
+    return { ...result, sc, frame };
+  }
+
+  it('S6: a "new" dot appears when the observed timeline cursor is strictly greater than lastAcknowledgedCursor — and no dot exists before any timeline is read', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc, '0');
+
+    // Anti-vacuity baseline: no timeline frame has ever been seen this
+    // session, so there is NO observed cursor and no dot — even though the
+    // channel is selected.
+    expect(screen.queryByTitle(NEW_DOT_TITLE)).not.toBeInTheDocument();
+
+    const timeline = timelineFrame('chan-1', [timelineEvent({ cursor: '1' })], '1', false);
+    rerender(<ChannelsPanel events={[frame, timeline]} sendCommand={sc} onClose={vi.fn()} />);
+
+    // Observed cursor '1' > acknowledged '0' -> the boolean dot renders.
+    expect(screen.getByTitle(NEW_DOT_TITLE)).toBeInTheDocument();
+  });
+
+  it('S6: after a timeline snapshot renders, ACK_CHANNEL_CURSOR is dispatched exactly once with that snapshot\'s own cursor — re-rendering the same frame never re-acks (no ack storm)', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc, '0');
+
+    const timeline = timelineFrame('chan-1', [timelineEvent({ cursor: '7', id: 'ev-7' })], '7', false);
+    rerender(<ChannelsPanel events={[frame, timeline]} sendCommand={sc} onClose={vi.fn()} />);
+
+    const ackCalls = () => sc.mock.calls.filter((c) => (c[0] as any).action === 'ACK_CHANNEL_CURSOR');
+    // Exactly one ack, for EXACTLY the snapshot's own cursor — not a
+    // guessed max, not lastAcknowledgedCursor, not cursor+1.
+    expect(ackCalls().length).toBe(1);
+    expect(ackCalls()[0]![0]).toEqual({ action: 'ACK_CHANNEL_CURSOR', channelId: 'chan-1', cursor: '7' });
+
+    // Re-render the SAME frame (same GatewayEvent.id) twice more — the
+    // frame-id ledger must prevent any re-ack.
+    rerender(<ChannelsPanel events={[frame, timeline]} sendCommand={sc} onClose={vi.fn()} />);
+    rerender(<ChannelsPanel events={[frame, timeline]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(
+      ackCalls().length,
+      'S6 ACK STORM: re-rendering an already-seen timeline frame re-acked. '
+      + 'The ack must be gated on a genuinely NEW response frame (frame-id ledger) '
+      + 'and on a strictly-greater cursor (monotonic ledger).',
+    ).toBe(1);
+  });
+
+  it('S6: a collabCursorAcked response raises lastAcknowledgedCursor and clears the dot with no LIST_CHANNELS refresh', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc, '0');
+
+    const timeline = timelineFrame('chan-1', [timelineEvent({ cursor: '7', id: 'ev-7' })], '7', false);
+    rerender(<ChannelsPanel events={[frame, timeline]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(screen.getByTitle(NEW_DOT_TITLE)).toBeInTheDocument(); // anti-vacuity
+
+    // The server's ack response lands. No new LIST_CHANNELS frame is ever
+    // rendered below — the dot must clear from the ack frame alone.
+    const acked = cursorAckFrame('chan-1', '7');
+    rerender(<ChannelsPanel events={[frame, timeline, acked]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(screen.queryByTitle(NEW_DOT_TITLE)).not.toBeInTheDocument();
+  });
+
+  it('S6/A7: a BACKWARDS ack response never moves the local acknowledged cursor backwards, and a below-acknowledged timeline cursor dispatches no ack at all', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc, '5'); // server already holds 5
+
+    // A stale/backwards ack response arrives (e.g. an older in-flight ack
+    // resolving late). It must NOT lower the entry from 5 to 3.
+    const backwardsAck = cursorAckFrame('chan-1', '3');
+    rerender(<ChannelsPanel events={[frame, backwardsAck]} sendCommand={sc} onClose={vi.fn()} />);
+
+    // Proof of non-regression: observe a timeline at cursor '4'. Had the
+    // entry regressed to 3, observed 4 > 3 would show the dot; against the
+    // true 5 it must not.
+    const timeline = timelineFrame('chan-1', [timelineEvent({ cursor: '4', id: 'ev-4' })], '4', false);
+    rerender(<ChannelsPanel events={[frame, backwardsAck, timeline]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(screen.queryByTitle(NEW_DOT_TITLE)).not.toBeInTheDocument();
+
+    // And no ACK_CHANNEL_CURSOR was dispatched for cursor 4 — the local
+    // monotonic ledger (seeded at 5 by LIST_CHANNELS) refuses backwards acks
+    // instead of relying on the server to no-op them.
+    const ackCalls = sc.mock.calls.filter((c) => (c[0] as any).action === 'ACK_CHANNEL_CURSOR');
+    expect(ackCalls.length).toBe(0);
+  });
+
+  it('S6/T-12: the dot is boolean-only — no numeric unread count and no "unread" vocabulary anywhere while the dot is shown', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame, container } = selectGeneral(sc, '0');
+
+    const timeline = timelineFrame('chan-1', [timelineEvent({ cursor: '9', id: 'ev-9' })], '9', false);
+    rerender(<ChannelsPanel events={[frame, timeline]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(screen.getByTitle(NEW_DOT_TITLE)).toBeInTheDocument(); // anti-vacuity
+
+    // No bare-number badge text anywhere in the DOM, and no "unread"
+    // vocabulary. The wire never returns a max seq, so any number here
+    // would be fabricated (§2 / §4 S6).
+    expect(screen.queryByText(/^\d+$/)).not.toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/unread/i);
   });
 });
