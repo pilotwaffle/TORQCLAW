@@ -1413,3 +1413,107 @@ describe('ChannelsPanel — S5 roster (render)', () => {
     expect(screen.queryByText("This console's task")).not.toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// S5b self-principal: the CONNECTED frame may carry a SELF-ONLY
+// `metadata.principalId` (the connection's OWN resolved collab principal,
+// self-disclosed by the server; omitted entirely for legacy/flag-off/channel-
+// service connections). The panel surfaces it ONLY as a "you" annotation on
+// an ALREADY-LOADED member row -- never as a fabricated membership claim.
+// These tests drive the panel with frames already present in `events`, the
+// same shape as every other block in this file; they assert nothing about
+// socket delivery semantics.
+// ---------------------------------------------------------------------------
+describe('ChannelsPanel — S5b self-principal', () => {
+  function connectedFrame(principalId?: string): GatewayEvent {
+    return ev({
+      type: 'CONNECTED',
+      metadata: {
+        sessionId: 'sess-s5b-1',
+        resumed: true,
+        ...(principalId !== undefined ? { principalId } : {}),
+      },
+    });
+  }
+
+  function selectGeneral(sc = vi.fn(() => true)) {
+    const frame = channelListFrame([channelRow()]);
+    const result = renderPanel([frame], sc);
+    fireEvent.click(screen.getByText('general'));
+    return { ...result, sc, frame };
+  }
+
+  function memberTimeline(principalId: string): GatewayEvent {
+    return timelineFrame(
+      'chan-1',
+      [timelineEvent({
+        id: 'ev-add', cursor: '1', kind: 'member_added',
+        payload: { channelId: 'chan-1', principalId, membershipEpoch: 1 },
+      })],
+      '1',
+      false,
+    );
+  }
+
+  function rosterSection(): HTMLElement {
+    return screen.getByText('Members').closest('div')!.parentElement!;
+  }
+
+  it('S5b: a CONNECTED self-principalId matching a loaded member renders "you: principa" and marks that member chip\'s tooltip with "· you"', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+    const timeline = memberTimeline('principal-member01');
+    const connected = connectedFrame('principal-member01');
+    rerender(<ChannelsPanel events={[frame, timeline, connected]} sendCommand={sc} onClose={vi.fn()} />);
+
+    // 'principal-member01'.slice(0,8) === 'principa' -- the caption is the
+    // self-annotation; the visible chip text is unchanged (the roster chip
+    // plus the timeline's own member_added system row still render 'principa').
+    expect(screen.getByText('you: principa')).toBeInTheDocument();
+    expect(screen.getAllByText('principa').length).toBe(2);
+
+    const chip = within(rosterSection()).getByText('principa');
+    expect(chip.textContent).toBe('principa'); // visible text NOT annotated inline
+    const title = chip.getAttribute('title') ?? '';
+    expect(title).toContain('principal-member01');
+    expect(title).toContain('· you');
+  });
+
+  it('S5b: a CONNECTED principalId NOT present in the loaded members renders no "you:" caption and marks no chip (no membership fabrication)', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+    const timeline = memberTimeline('principal-member01');
+    const connected = connectedFrame('principal-ghost999'); // not a member of the loaded roster
+    rerender(<ChannelsPanel events={[frame, timeline, connected]} sendCommand={sc} onClose={vi.fn()} />);
+
+    // Anti-vacuity: the member roster really did load and render.
+    expect(screen.getByText('Members')).toBeInTheDocument();
+    expect(within(rosterSection()).getByText('principa')).toBeInTheDocument();
+
+    // The foreign principalId is disclosed, but it matches NO loaded member,
+    // so no self-annotation may appear anywhere.
+    expect(screen.queryByText(/^you: /)).not.toBeInTheDocument();
+    const chip = within(rosterSection()).getByText('principa');
+    expect(chip.getAttribute('title') ?? '').not.toContain('· you');
+    // And no member row was fabricated for the disclosed principal: still
+    // exactly the one real member chip plus the timeline's system row.
+    expect(screen.getAllByText('principa').length).toBe(2);
+    expect(within(rosterSection()).getAllByRole('listitem').length).toBe(1);
+  });
+
+  it('S5b: a CONNECTED frame with no principalId (legacy/flag-off) renders no "you:" caption and marks no chip', () => {
+    const sc = vi.fn(() => true);
+    const { rerender, frame } = selectGeneral(sc);
+    const timeline = memberTimeline('principal-member01');
+    const connected = connectedFrame(); // sessionId/resumed only -- the pre-S5b wire shape
+    rerender(<ChannelsPanel events={[frame, timeline, connected]} sendCommand={sc} onClose={vi.fn()} />);
+
+    // Anti-vacuity: members loaded and rendered as before.
+    expect(screen.getByText('Members')).toBeInTheDocument();
+    const chip = within(rosterSection()).getByText('principa');
+    expect(chip).toBeInTheDocument();
+
+    expect(screen.queryByText(/^you: /)).not.toBeInTheDocument();
+    expect(chip.getAttribute('title') ?? '').not.toContain('· you');
+  });
+});

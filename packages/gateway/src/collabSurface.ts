@@ -47,6 +47,7 @@ import {
   nodeRandomSource,
   type CallerContext,
   type BootstrapDb,
+  type DeliverySink,
 } from '@torqclaw/collab';
 import { publishOnly } from './events.js';
 import { collabEnabled } from './principalBridge.js';
@@ -340,11 +341,31 @@ export async function handleListChannels(
   }
 }
 
+export interface ChannelLiveSubscription {
+  subscriptionId: string;
+  /** Connection-scoped subscription owner key (NOT the durable gateway session id), so one socket's close cannot deregister another live socket sharing that session. */
+  ownerSessionId: string;
+  credentialId: string;
+  sink: DeliverySink;
+  /** server.ts's non-throwing per-socket bookkeeping hook; invoked only after subscribeChannel succeeds. */
+  onRegistered: (subscriptionId: string) => void;
+}
+
 /**
  * GET_CHANNEL_TIMELINE handler body. Read-only: SELECT + publishOnly, zero
  * writes. Membership/visibility scoping is entirely the substrate's
  * (assertChannelVisible) -- this function passes the caller through
  * UNMODIFIED and never inspects or rewrites the resulting COLLAB_NOT_FOUND.
+ *
+ * PRD-TCLAW-AGENT-PARTICIPATION-007 S5: when `live` is supplied by
+ * server.ts's per-socket lifecycle, a successful read ALSO registers the
+ * substrate subscription that makes fanoutToChannel reachable for this
+ * channel. The subscribe afterCursor is the read's own highWaterCursor (not
+ * the page cursor), so a paged read does not replay unread history as hints,
+ * while an event committing between the read and this registration is still
+ * delivered through subscribeChannel's backlog window. The sink is expected
+ * to translate delivery frames into seq-less invalidation hints only; §19's
+ * real backpressure/delivery guarantee remains owed and is not claimed here.
  */
 export async function handleGetChannelTimeline(
   sessionId: string,
@@ -352,6 +373,7 @@ export async function handleGetChannelTimeline(
   channelId: string,
   cursor: string,
   limit: number,
+  live?: ChannelLiveSubscription,
 ): Promise<CollabSurfaceError | null> {
   if (principalId === null) return COLLAB_IDENTITY_REQUIRED;
   const store = getStore();
@@ -362,6 +384,38 @@ export async function handleGetChannelTimeline(
       afterCursor: cursor,
       limit,
     });
+    if (live) {
+      try {
+        await store.subscribeChannel(
+          callerFor(principalId),
+          {
+            channelId,
+            afterCursor: result.highWaterCursor,
+            sessionId: live.ownerSessionId,
+            credentialId: live.credentialId,
+            sink: live.sink,
+          },
+          live.subscriptionId,
+        );
+        live.onRegistered(live.subscriptionId);
+      } catch {
+        // Live delivery is an invalidation hint, never the source of truth
+        // (005 S4 / 007 S5: §19 backpressure remains owed). A read that was
+        // authorized must not fail because the best-effort subscription lost
+        // a race after the read (e.g. membership revoked in the read ->
+        // subscribe gap). Clean up any partially-registered subscription so it
+        // cannot leak, then still return the page below. This cleanup is
+        // owner-scoped, so on this rare failure path it can also close THIS
+        // socket's other hint subscriptions; that only downgrades advisory
+        // hints for this socket, never the durable cursor re-read, and never
+        // a sibling socket sharing the session.
+        try {
+          await store.closeSubscriptionsForSession(live.ownerSessionId, 'unsubscribed');
+        } catch {
+          /* cleanup is best-effort; the read response remains authoritative */
+        }
+      }
+    }
     publishOnly(sessionId, {
       message: 'Channel timeline read',
       metadata: {
