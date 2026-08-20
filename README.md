@@ -12,7 +12,7 @@
 
 *The approval gate in action (4× speed): a cloud-routed task tries `write_file`, the engine blocks it pending approval, the operator allows it once, and the receipt lands with the written file in the workspace.*
 
-<video src="docs/assets/torq5-demo.mp4" controls muted width="100%"></video>
+<video src="docs/assets/torqclaw-demo-2026-08-20.mp4" controls muted width="100%"></video>
 
 *Quick demo: live tasks across both tiers, the approval gate, and the console in action.*
 
