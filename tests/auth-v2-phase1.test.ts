@@ -796,10 +796,19 @@ describe('Phase 4 protected semantic manifest', () => {
     // `return DENY_NOT_PERMITTED;` default, so an agent connection has no
     // path to any of them regardless of TORQCLAW_AGENT_CRON. The operator
     // branch (authorizeOperator) is untouched.
+    // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S6 (2026-08-20): added one explicit
+    // `case 'ACK_CHANNEL_CURSOR':` arm to the 'channel'-seat switch, grouped
+    // with the existing LIST_CHANNELS/GET_CHANNEL_TIMELINE/POST_CHANNEL_MESSAGE
+    // denies (identical seat-lattice reasoning: read state is a per-principal
+    // cursor mutation on the 005 operator surface; a channel-transport seat has
+    // no collab surface credential and gets no entitlement). The 'node'-seat
+    // branch is UNCHANGED -- ACK falls through the existing default deny; the
+    // agentCollabWrite widening remains scoped to POST_CHANNEL_MESSAGE only.
+    // The operator branch (authorizeOperator) is untouched.
     // Recompute and re-authorize deliberately on any future approved
     // change; never delete this pin.
     const authzSha = createHash('sha256').update(authz).digest('hex');
-    expect(authzSha).toBe('f0d6446978a795de9981bb12887a344fc94be61622cfbaedebba39421feedeb6');
+    expect(authzSha).toBe('93df7677e4ebd44e02856e96e4f285681f729845f316f64767621b1f205406b1');
     // The migration's own markers: the moved guard must not silently return,
     // and the relocation note must remain declared where it happened.
     expect(authz).not.toContain('export function checkResumeRole');
