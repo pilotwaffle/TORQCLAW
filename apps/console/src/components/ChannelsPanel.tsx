@@ -70,8 +70,9 @@
 // clears. N hints during one in-flight read collapse to exactly one
 // follow-up, never N (see hintDirtyRef / requestTimeline below).
 //
-// RECONNECT: every CONNECTED frame (packages/gateway/src/server.ts:282-288,
-// emitted on both fresh connect and resume) is watched by its own `id` --
+// RECONNECT: every CONNECTED frame (packages/gateway/src/server.ts's connect
+// path, emitted on both fresh connect and resume; S5b may add a self-only
+// metadata.principalId there) is watched by its own `id` --
 // a NEW CONNECTED event id (never seen before) re-reads the selected
 // channel's timeline from cursor '0', the same store-backed contiguous
 // path S1 already proves.
@@ -154,22 +155,20 @@
 // "as loaded so far" caption) rather than presenting a partial replay as a
 // complete roster.
 //
-// NO IDENTITY JOIN BETWEEN THE TWO SECTIONS (recorded, not silently
-// assumed): GatewayEventSchema (packages/contracts/src/events.ts:19-29)
-// carries no principalId/agentId field, and the CONNECTED frame
-// (server.ts:282-288) sends only {sessionId, resumed} — the connected
-// principal's own identity is resolved server-side (connectionAuth) but is
-// NEVER broadcast to the client on any frame today. "Working now" therefore
-// cannot be identity-matched against "Members" from data on the wire; A9's
-// "presence never implies membership, membership never implies presence"
-// is enforced STRUCTURALLY instead — the two sections are independent
-// renders with independent empty/loading states, one is never filtered or
-// gated by the other, and the "working now" row carries no membership
-// claim of any kind. Wiring a real identity join would require broadcasting
-// connectionAuth.principalId to the client, a wire-shape change to an
-// existing disclosure-sensitive frame — exactly the class of decision this
-// PRD's identity/disclosure rulings (§2a) route through G1R, not a Builder
-// judgment call. Flagged in the S5 build report rather than decided here.
+// S5b SELF-ONLY IDENTITY (updated; recorded, not silently assumed):
+// GatewayEventSchema (packages/contracts/src/events.ts:19-29) still carries
+// no THIRD-PARTY principalId/agentId field. The CONNECTED frame may now carry
+// `metadata.principalId` for the CONNECTION'S OWN resolved collab principal
+// only (server.ts; omitted entirely for legacy/flag-off/channel-service
+// connections). That is self-disclosure, sufficient to mark "you" inside an
+// already-loaded Members roster. It is NOT a cross-participant identity join:
+// "Working now" still cannot be matched against OTHER principals' tasks,
+// because no third-party task telemetry is on the wire. A9's "presence never
+// implies membership, membership never implies presence" therefore remains
+// enforced STRUCTURALLY — the two sections are independent renders with
+// independent empty/loading states; the self marker never filters or gates
+// either section and never fabricates membership when the self principal is
+// absent from the loaded page.
 //
 // NO DISPATCH AFFORDANCE (A5): every roster row below is plain data with
 // zero function-typed props and zero onClick/button/link — presence is
@@ -337,7 +336,7 @@ function selectLatestHintEventId(events: GatewayEvent[], channelId: string): str
 }
 
 /** S4 reconnect signal: scans `events` for the newest CONNECTED frame's id
- *  (packages/gateway/src/server.ts:282-288, emitted on BOTH fresh connect
+ *  (packages/gateway/src/server.ts's connect path, emitted on BOTH fresh connect
  *  and session resume -- `resolved.resumed` distinguishes them but this
  *  file treats both alike, since either one means the socket was re-armed
  *  and any hint that fired while it was down was, by construction, never
@@ -347,6 +346,22 @@ function selectLatestHintEventId(events: GatewayEvent[], channelId: string): str
 function selectLatestConnectedId(events: GatewayEvent[]): string | null {
   for (let i = events.length - 1; i >= 0; i--) {
     if (events[i]!.type === 'CONNECTED') return events[i]!.id;
+  }
+  return null;
+}
+
+/** S5b self-disclosure: scans BACKWARD for the newest CONNECTED frame's
+ *  self-only `metadata.principalId` (server.ts emits it only for the
+ *  connection's OWN resolved collab principal; legacy/flag-off/channel-service
+ *  connections omit the field entirely). Returns null when absent — never a
+ *  synthesized or third-party principal. */
+function selectSelfPrincipalId(events: GatewayEvent[]): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i]!.type !== 'CONNECTED') continue;
+    const meta = (events[i]!.metadata ?? {}) as Record<string, any>;
+    if (typeof meta.principalId === 'string' && meta.principalId.length > 0) {
+      return meta.principalId;
+    }
   }
   return null;
 }
@@ -872,6 +887,10 @@ export default function ChannelsPanel({
     [selectedSnapshot],
   );
   const workingNow = useMemo(() => selectWorkingNow(events), [events]);
+  // S5b: the console's OWN principal, self-disclosed on its own CONNECTED
+  // frame. Used only to mark "you" inside the already-loaded member roster;
+  // never to infer anyone else's presence or membership.
+  const selfPrincipalId = useMemo(() => selectSelfPrincipalId(events), [events]);
 
   // ── S3: composer (human posting) ────────────────────────────────────────
   //
@@ -1137,7 +1156,7 @@ export default function ChannelsPanel({
                   sources (A9). NO dispatch affordance anywhere in this
                   block: RosterSection's props are plain data, zero
                   function-typed fields, zero buttons/links/onClick. */}
-              <RosterSection members={channelMembers} workingNow={workingNow} />
+              <RosterSection members={channelMembers} workingNow={workingNow} selfPrincipalId={selfPrincipalId} />
 
               {/* Timeline honest states, same four-phase shape as the list. */}
               {selectedSnapshot === null && timelinePhase === 'pending' && <p className="text-faint/75">Loading…</p>}
@@ -1323,9 +1342,11 @@ function PendingSendRow({
 function RosterSection({
   members,
   workingNow,
+  selfPrincipalId,
 }: {
   members: ChannelMemberEntry[] | null;
   workingNow: WorkingNowEntry | null;
+  selfPrincipalId: string | null;
 }) {
   if (members === null && workingNow === null) return null;
   return (
@@ -1347,29 +1368,33 @@ function RosterSection({
                   // it -- the tooltip already carries the full principal id and
                   // is the honest place for a detail this dense chip cannot
                   // show inline. formatOccurredAt keeps "Invalid Date" out of
-                  // the DOM for a malformed or absent value (T-10).
-                  title={`${m.principalId} · member since ${formatOccurredAt(m.since)}`}
+                  // the DOM for a malformed or absent value (T-10). S5b adds
+                  // "you" ONLY when the self-disclosed CONNECTED principalId
+                  // exactly matches this already-loaded member row.
+                  title={`${m.principalId} · member since ${formatOccurredAt(m.since)}${m.principalId === selfPrincipalId ? ' · you' : ''}`}
                 >
                   {m.principalId.slice(0, 8)}
                 </li>
               ))}
             </ul>
             <p className="mt-1 text-[9px] text-faint/60">as loaded so far — earlier pages may add more</p>
+            {selfPrincipalId && members.some((m) => m.principalId === selfPrincipalId) && (
+              <p className="mt-1 text-[9px] text-faint/60">you: {selfPrincipalId.slice(0, 8)}</p>
+            )}
           </>
         )}
       </div>
       <div>
         {/* G1R ruling (c) / G2A C-S5-2: the label must not claim more than one
-            session can know. GatewayEventSchema carries no principalId
-            (contracts/src/events.ts:19-29), CONNECTED sends only
-            {sessionId, resumed} (server.ts:282-288), and sessionBus is keyed by
+            session can know. S5b now lets CONNECTED carry the connection's OWN
+            principalId (self-disclosure only; server.ts omits it when no collab
+            principal resolved), but GatewayEventSchema still carries no
+            third-party principal/telemetry field and sessionBus is keyed by
             sessionId with each socket subscribed only to its own
             (events.ts:17-28) -- so this section can ONLY ever render the
             VIEWER'S OWN task, never another principal's. "Working now" read as
-            a roster of everyone; it is a roster of one. The honesty was present
-            throughout this file's comments and never reached the label the
-            operator actually reads. Scoped here; a real cross-participant
-            roster is S5b (pull-only, membership-intersected). */}
+            a roster of everyone; it is a roster of one. A real cross-participant
+            roster remains blocked on the OQ-2 entitlement ruling. */}
         <h3 className="text-[10px] font-bold uppercase tracking-widest text-muted">
           This console&apos;s task
         </h3>

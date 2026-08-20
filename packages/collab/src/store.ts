@@ -63,7 +63,7 @@ import { normalizeName, normalizeMessageText } from './text.js';
 import { nameKey } from './fold.js';
 import type { RandomSource, Clock, UuidSource, BootstrapDb } from './bootstrap.js';
 import { AuthLock } from './authlock.js';
-import { SubscriptionRegistry, type Subscription, type EpochSnapshot } from './subscriptions.js';
+import { SubscriptionRegistry, type Subscription, type EpochSnapshot, type SubscriptionCloseReason } from './subscriptions.js';
 import {
   runAuthorizationMutation,
   affectedByChannel,
@@ -263,6 +263,16 @@ export interface GetChannelTimelineResult {
   events: TimelineEventObject[];
   nextCursor: string;
   hasMore: boolean;
+  /**
+   * PRD-TCLAW-AGENT-PARTICIPATION-007 S5: greatest committed channel_seq
+   * observed by THIS read, captured inside the same read command before the
+   * result is returned. The gateway's live-subscription seam uses this as
+   * the subscribe afterCursor so a paged read (hasMore=true) does not replay
+   * the remaining history as hints, while an event committing between the
+   * read and SUBSCRIBE registration is still inside subscribeChannel's
+   * backlog window (afterCursor < committed seq <= registration highWater).
+   */
+  highWaterCursor: string;
 }
 
 export interface AckChannelCursorResult {
@@ -1760,6 +1770,52 @@ export class CollaborationStore {
   }
 
   /**
+   * PRD-TCLAW-AGENT-PARTICIPATION-007 S5: close and DEREGISTER every
+   * subscription owned by one gateway session (socket lifecycle). Closing
+   * alone leaves the registry row addressable by forSession()/all(); the
+   * departure gap this slice closes is specifically that a dead socket must
+   * not remain registered. Active subscriptions are closed under the
+   * sequencer mutex (same ordering discipline as every other registry state
+   * transition), their terminal close frame is delivered best-effort AFTER
+   * the lock releases, and every subscription for the session is then removed
+   * from the registry whether it was active or already closed. A throwing
+   * sink must never strand the deregistration or escape into the gateway's
+   * socket close handler.
+   */
+  async closeSubscriptionsForSession(
+    sessionId: string,
+    reason: SubscriptionCloseReason = 'socket_closed'
+  ): Promise<number> {
+    let closedNow: Subscription[] = [];
+    const sessionSubs = await this.mutex.withLock(() => {
+      const subs = this.registry.forSession(sessionId);
+      closedNow = [];
+      for (const sub of subs) {
+        if (sub.closed) continue;
+        const wasActive = sub.state !== 'backlog';
+        sub.close(reason);
+        this.observability.markSubscriptionClosed(wasActive);
+        closedNow.push(sub);
+      }
+      return subs;
+    });
+
+    const closedNowIds = new Set(closedNow.map((sub) => sub.subscriptionId));
+    for (const sub of sessionSubs) {
+      try {
+        if (closedNowIds.has(sub.subscriptionId)) {
+          sub.deliverCloseFrame();
+        }
+      } catch {
+        // Best-effort terminal frame only; removal still completes.
+      } finally {
+        this.registry.remove(sub.subscriptionId);
+      }
+    }
+    return closedNow.length;
+  }
+
+  /**
    * LIST_CHANNELS: read-path (C1). No sequencer mutex, no result row; a
    * plain read against the current committed state is sufficient (SQLite's
    * default isolation for a sequence of statements outside an explicit
@@ -1906,8 +1962,9 @@ export class CollaborationStore {
       }
 
       const nextCursor = events.length > 0 ? events[events.length - 1]!.cursor : String(effectiveAfter);
+      const highWaterCursor = String(this.getMaxChannelSeq(db, body.channelId));
 
-      return { events, nextCursor, hasMore };
+      return { events, nextCursor, hasMore, highWaterCursor };
     }));
     this.observability.timelineLatency.record(this.nowMs() - start);
     return out;

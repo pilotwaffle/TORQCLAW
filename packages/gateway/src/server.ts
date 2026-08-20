@@ -12,9 +12,10 @@ import { sessions } from './sessions.js';
 import { enrichCommand } from './enrich.js';
 import { dispatch, mintGrantedRequest, emitToolDenied } from './dispatch.js';
 import { decideApproval, handleListApprovals } from './approvals.js';
-import { makeEmitter, sessionBus, persistAndPublish, taskStore } from './events.js';
+import { makeEmitter, sessionBus, persistAndPublish, taskStore, publishOnly } from './events.js';
 import { router } from '@torqclaw/router';
 import { connectBridge, connectInProcessServer, approveSkill, getSkillDraft, cancelHermesTask } from '@torqclaw/bridge';
+import type { DeliverySink } from '@torqclaw/collab';
 import { buildCollabAgentMcpServer, COLLAB_AGENT_SERVER_ID, COLLAB_AGENT_TOOL_CAPABILITIES } from './collabAgentTools.js';
 import { describeSkillDecision } from './skillDecision.js';
 import { assertResolvedProfile, constrainTier } from './profileResolver.js';
@@ -40,7 +41,7 @@ import { sweepExpiredApprovals, sweepExpiredGrants } from './approvalWriter.js';
 import { rebuildDeliveryProjection } from './approvalDelivery.js';
 import { revokeInertGrants, admitToolCall } from './grantAdmission.js';
 import { decideApprovalC2 } from './c2Broker.js';
-import { collabSurfaceCommandsEnabled, agentParticipationEnabled, isAgentSurfaceCaller, handleListChannels, handleGetChannelTimeline, handlePostChannelMessage, setAutoReplyTrigger } from './collabSurface.js';
+import { collabSurfaceCommandsEnabled, agentParticipationEnabled, isAgentSurfaceCaller, handleListChannels, handleGetChannelTimeline, handlePostChannelMessage, setAutoReplyTrigger, getStore } from './collabSurface.js';
 import { onChannelMessageCommitted, recoverStrandedAgentTurns } from './autoReplyDispatcher.js';
 import { getCollabDbForAutoReply } from './collabSurface.js';
 import { handleSetAutoreplyStop } from './autoReplyStopHandler.js';
@@ -222,6 +223,66 @@ app.get('/ws', { websocket: true }, (socket) => {
   // must never be widened or substituted (§2a).
   let agentCollabPrincipalId: string | null = null;
 
+  // PRD-TCLAW-AGENT-PARTICIPATION-007 S5: per-SOCKET collab live
+  // subscription REGISTRATION. The substrate registry/fan-out already existed
+  // but had no production DeliverySink; this sink is the gateway websocket's
+  // registration for channels this connection has read. It deliberately
+  // translates substrate channel_event frames into the SAME seq-less,
+  // non-persisted collabMessagePosted SYSTEM hint the console's S4
+  // hint-then-refetch path already consumes (ChannelsPanel.tsx
+  // selectLatestHintEventId). NO DELIVERY GUARANTEE: this is an invalidation
+  // hint only; the durable store + channel_seq cursor re-read remains the
+  // source of truth and §19 real backpressure stays owed. The try/catch is
+  // load-bearing: a closed socket or validator throw inside a fan-out sink
+  // must never escape into fanoutToChannel or terminate the gateway process
+  // (A5-c). Delivery itself is publishOnly(sessionId, ...), so a sibling live
+  // socket sharing the same durable session may also receive the hint; that
+  // is same-principal self-delivery (C1-5), never third-party disclosure.
+  const collabLiveSubscriptions = new Map<string, string>(); // channelId -> subscriptionId
+  const collabLiveInFlight = new Set<string>(); // channelId with subscribeChannel awaited
+  // Connection-scoped owner key for the substrate registry. NOT the durable
+  // gateway sessionId: C0/SI-3 allows several live sockets to share one
+  // session, and closing THIS socket must deregister only THIS socket's
+  // subscriptions (S5's departure gap), never a sibling connection's.
+  const collabLiveOwnerId = randomUUID();
+  let socketClosed = false;
+  // Set when THIS socket has attempted at least one live subscription. The
+  // close path keys on this, not on collabLiveSubscriptions.size, because a
+  // socket can close while subscribeChannel is still in flight — registering
+  // after the close handler already ran (review finding: the map-only gate
+  // leaked exactly that subscription).
+  let collabLiveAttempted = false;
+  const closeCollabLiveSubscriptions = (): void => {
+    collabLiveSubscriptions.clear();
+    collabLiveInFlight.clear();
+    if (!collabLiveAttempted) return;
+    try {
+      const store = getStore();
+      if (!store) return;
+      void store.closeSubscriptionsForSession(collabLiveOwnerId, 'socket_closed').catch(() => {});
+    } catch {
+      /* socket teardown must never throw */
+    }
+  };
+  const collabLiveSink: DeliverySink = (frame) => {
+    try {
+      if (frame.type !== 'channel_event' || frame.event.kind !== 'message_posted') return;
+      if (!sessionId || socketClosed) return;
+      publishOnly(sessionId, {
+        message: 'Channel message posted',
+        metadata: {
+          collabMessagePosted: true,
+          channelId: frame.channelId,
+          eventId: frame.event.id,
+          cursor: frame.cursor,
+          occurredAt: frame.event.occurredAt,
+        },
+      });
+    } catch {
+      /* best-effort hint only; deregistration on close is handled separately */
+    }
+  };
+
   const sendErr = (code: string, detail?: unknown) =>
     socket.send(JSON.stringify({ type: 'ERROR', code, detail }));
 
@@ -355,11 +416,24 @@ app.get('/ws', { websocket: true }, (socket) => {
       const backlog = resolved.resumed ? sessions.getEventLogSince(sessionId, lastSeen) : [];
       for (const ev of backlog) socket.send(JSON.stringify(ev));
 
+      // PRD-TCLAW-AGENT-PARTICIPATION-007 S5b (G1R/VERIFY §1.3 self-disclosure
+      // analysis, adopted): the CONNECTED frame may carry THE CONNECTION'S OWN
+      // resolved collab principalId and nothing else. A subject is always
+      // entitled to its own identity, so this is self-disclosure, never a
+      // third-party roster/telemetry join. When no collab principal resolved
+      // (legacy/tokenless path, flag off, channel-service), the field is
+      // OMITTED entirely -- never null, never synthesized, never widened to
+      // caller.binding's non-collab service id.
+      const selfPrincipalId = agentCollabPrincipalId ?? connectionAuth?.principalId ?? null;
       return persistAndPublish({
         id: randomUUID(), requestId: null, sessionId, tier: null,
         type: 'CONNECTED',
         message: resolved.resumed ? 'Session resumed' : 'Session created',
-        metadata: { sessionId, resumed: resolved.resumed },
+        metadata: {
+          sessionId,
+          resumed: resolved.resumed,
+          ...(selfPrincipalId !== null ? { principalId: selfPrincipalId } : {}),
+        },
         timestamp: new Date().toISOString(),
       });
     }
@@ -730,13 +804,56 @@ app.get('/ws', { websocket: true }, (socket) => {
           sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
           break;
         }
-        const timelineErr = await handleGetChannelTimeline(
-          sid,
-          connectionAuth?.principalId ?? null,
-          cmd.data.channelId,
-          cmd.data.cursor,
-          cmd.data.limit,
-        );
+        // PRD-TCLAW-AGENT-PARTICIPATION-007 S5: the read that opens a channel
+        // is also the production subscription point -- no new wire command,
+        // no contracts/authz change. Subject and credential are the
+        // CONNECTION's server-derived C1 context only (never a client frame,
+        // never agentCollabPrincipalId: this wire read path is the 005 S1
+        // surface, unchanged). A repeat read for an already-subscribed OR
+        // subscribe-in-flight channel passes no live param, so it stays a pure
+        // re-read (no duplicate subscription from concurrent reads).
+        const timelinePrincipalId = connectionAuth?.principalId ?? null;
+        // Hoisted because the switch narrowing on cmd.data.action does not
+        // survive into the onRegistered closure below.
+        const timelineChannelId = cmd.data.channelId;
+        const timelineCredentialId = connectionAuth?.credentialId ?? null;
+        const shouldSubscribe = timelinePrincipalId !== null && timelineCredentialId !== null &&
+          !collabLiveSubscriptions.has(timelineChannelId) && !collabLiveInFlight.has(timelineChannelId);
+        if (shouldSubscribe) {
+          collabLiveAttempted = true;
+          collabLiveInFlight.add(timelineChannelId);
+        }
+        const live = shouldSubscribe
+          ? {
+              subscriptionId: randomUUID(),
+              ownerSessionId: collabLiveOwnerId,
+              credentialId: timelineCredentialId,
+              sink: collabLiveSink,
+              onRegistered: (subscriptionId: string) => {
+                // The socket may have closed while subscribeChannel was
+                // awaited. Deregister immediately instead of writing a map
+                // entry no live close handler will ever see.
+                if (socketClosed) {
+                  closeCollabLiveSubscriptions();
+                  return;
+                }
+                collabLiveSubscriptions.set(timelineChannelId, subscriptionId);
+              },
+            }
+          : undefined;
+        let timelineErr: Awaited<ReturnType<typeof handleGetChannelTimeline>>;
+        try {
+          timelineErr = await handleGetChannelTimeline(
+            sid,
+            timelinePrincipalId,
+            timelineChannelId,
+            cmd.data.cursor,
+            cmd.data.limit,
+            live,
+          );
+        } finally {
+          if (shouldSubscribe) collabLiveInFlight.delete(timelineChannelId);
+        }
         if (timelineErr) sendErr(timelineErr.code, timelineErr.detail);
         break;
       }
@@ -830,7 +947,20 @@ app.get('/ws', { websocket: true }, (socket) => {
     }
   });
 
-  socket.on('close', () => unsubscribe?.());
+  socket.on('close', () => {
+    socketClosed = true;
+    unsubscribe?.();
+    // PRD-TCLAW-AGENT-PARTICIPATION-007 S5's highest-value item: a live
+    // subscription registered by THIS socket must be deregistered when THIS
+    // socket closes, or the substrate registry leaks it and fanout keeps a
+    // dead sink addressable. Owner key is connection-scoped (see above), so a
+    // sibling live socket sharing the durable gateway session is not closed.
+    // collabLiveAttempted (not the subscription map) gates this, because the
+    // socket can close while subscribeChannel is still in flight. Best-effort
+    // and never throwing: close is not the place to learn that a socket is
+    // already gone.
+    closeCollabLiveSubscriptions();
+  });
 });
 
 await connectBridge(); // discover + namespace MCP servers before traffic
