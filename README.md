@@ -12,6 +12,10 @@
 
 *The approval gate in action (4× speed): a cloud-routed task tries `write_file`, the engine blocks it pending approval, the operator allows it once, and the receipt lands with the written file in the workspace.*
 
+<video src="docs/assets/torq5-demo.mp4" controls muted width="100%"></video>
+
+*Full walkthrough (60s): live tasks across both tiers, the approval gate, and the console in action.*
+
 Most agent frameworks optimize for autonomy. TORQCLAW optimizes for **trust**: every agent runs behind a gateway that enforces what the operator decided, not what the model wants.
 
 ```text
