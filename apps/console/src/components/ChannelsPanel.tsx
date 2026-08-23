@@ -487,6 +487,121 @@ function selectLatestCursorAck(
   return null;
 }
 
+/**
+ * PRD-007 S4-Members: a member row as returned by the real
+ * LIST_CHANNEL_MEMBERS wire command (packages/gateway/src/collabSurface.ts's
+ * handleListChannelMembers, backed by packages/collab/src/store.ts's
+ * listChannelMembers). Distinct from ChannelMemberEntry below, which is the
+ * OLDER client-side replay derived from member_added/member_removed
+ * timeline events -- that replay is now used ONLY as a fallback while this
+ * command is in flight (see selectChannel's doc comment). `role`/`kind` are
+ * server-derived facts, never a client guess -- this is what lets the
+ * roster show honest `You`/`Owner`/`Agent` labels instead of the replay's
+ * flat 'member' string.
+ *
+ * `working`/`since` are the operator-granted "working now" side-channel
+ * (OQ-2, GRANTED 2026-08-23) -- present on every row returned by the real
+ * command (always {working: false, since: null} for a human/owner row).
+ * The INITIAL value comes from the LIST_CHANNEL_MEMBERS response itself;
+ * `applyLivePresence` below overlays any newer `collabPresence` push
+ * frames on top, by principalId, without a full re-request.
+ */
+export interface ServerChannelMemberEntry {
+  principalId: string;
+  displayName: string;
+  role: 'owner' | 'agent' | string;
+  kind: 'human' | 'agent' | string;
+  working: boolean;
+  since: string | null;
+}
+
+/** Scans `events` BACKWARD for the newest LIST_CHANNEL_MEMBERS response
+ *  frame matching `channelId`, validating shape. Malformed frames (members
+ *  not an array) are skipped -- never crash, never treated as a valid
+ *  (possibly empty) snapshot, same discipline as selectLatestChannelList. */
+function selectLatestChannelMembers(
+  events: GatewayEvent[],
+  channelId: string,
+): ServerChannelMemberEntry[] | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const meta = (events[i]!.metadata ?? {}) as Record<string, any>;
+    if (meta.collabMembers === true && meta.channelId === channelId && Array.isArray(meta.members)) {
+      return meta.members as ServerChannelMemberEntry[];
+    }
+  }
+  return null;
+}
+
+/**
+ * PRD-007 S4 presence push (OQ-2, GRANTED 2026-08-23). Scans `events`
+ * FORWARD (oldest to newest, unlike the backward-scanning selectors above)
+ * so that when several `collabPresence` frames exist for the SAME
+ * principalId, the LAST one processed -- the newest -- wins, matching
+ * "apply the frame in order, latest state sticks". Frames for a
+ * principalId not present in the base snapshot are held anyway (a member
+ * can arrive in a later LIST_CHANNEL_MEMBERS response); `applyLivePresence`
+ * below only ever consults entries for principals the base snapshot
+ * already names, per its own doc comment ("unknown principal -> ignore").
+ */
+function selectLatestPresenceByPrincipal(
+  events: GatewayEvent[],
+  channelId: string,
+): Map<string, { working: boolean; since: string | null }> {
+  const out = new Map<string, { working: boolean; since: string | null }>();
+  for (const ev of events) {
+    const meta = (ev.metadata ?? {}) as Record<string, any>;
+    if (
+      meta.collabPresence === true &&
+      meta.channelId === channelId &&
+      typeof meta.principalId === 'string' &&
+      typeof meta.working === 'boolean'
+    ) {
+      out.set(meta.principalId, {
+        working: meta.working,
+        since: typeof meta.since === 'string' ? meta.since : null,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Overlays live `collabPresence` push frames onto a LIST_CHANNEL_MEMBERS
+ * snapshot, by principalId -- applied live, no re-request needed (§4 S4's
+ * live-push half). A frame naming a principalId NOT present in `members`
+ * is ignored (per the task spec: "unknown principal -> ignore") rather
+ * than synthesizing a new roster row from partial presence data alone.
+ * Every other field on the member row (displayName/role/kind) is left
+ * untouched -- only working/since are ever overlaid.
+ */
+function applyLivePresence(
+  members: ServerChannelMemberEntry[] | null,
+  presence: Map<string, { working: boolean; since: string | null }>,
+): ServerChannelMemberEntry[] | null {
+  if (members === null || presence.size === 0) return members;
+  return members.map((m) => {
+    const p = presence.get(m.principalId);
+    if (!p) return m;
+    if (p.working === m.working && p.since === m.since) return m;
+    return { ...m, working: p.working, since: p.since };
+  });
+}
+
+/** Same "genuinely NEW frame" dedup discipline as
+ *  selectLatestTimelineFrameId -- selectLatestChannelMembers allocates a
+ *  fresh array reference every call, so this returns the frame's own
+ *  stable GatewayEvent.id instead, for the in-flight-clearing effect to
+ *  compare against. */
+function selectLatestChannelMembersFrameId(events: GatewayEvent[], channelId: string): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const meta = (events[i]!.metadata ?? {}) as Record<string, any>;
+    if (meta.collabMembers === true && meta.channelId === channelId && Array.isArray(meta.members)) {
+      return events[i]!.id;
+    }
+  }
+  return null;
+}
+
 // ── S5: roster selectors (§4 S5 / A5 / A9) ─────────────────────────────────
 // See the S5 module-doc block above for the full source/authority rationale.
 
@@ -594,6 +709,35 @@ function formatOccurredAt(raw: string): string {
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) return raw; // never render "Invalid Date"
   return d.toISOString().replace('T', ' ').replace('Z', ' UTC');
+}
+
+/**
+ * PRD-007 S4 presence overlay: a compact relative-time label for the
+ * "Working now (agents)" section (e.g. "12s", "3m"). `since` is the
+ * server's `dispatched_at` ISO string. A malformed/absent value renders
+ * "just now" rather than "Invalid Date" or a crash -- same
+ * never-render-Invalid-Date discipline as formatOccurredAt above, but this
+ * caller's dense chip layout has no room for a full timestamp, so the
+ * fallback is a short honest phrase instead of the raw string.
+ */
+function RelativeSince({ since }: { since: string | null }) {
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => forceTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const label = (() => {
+    if (typeof since !== 'string' || since.length === 0) return 'just now';
+    const startMs = new Date(since).getTime();
+    if (Number.isNaN(startMs)) return 'just now';
+    const elapsedS = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+    if (elapsedS < 60) return `${elapsedS}s`;
+    const elapsedM = Math.floor(elapsedS / 60);
+    if (elapsedM < 60) return `${elapsedM}m`;
+    const elapsedH = Math.floor(elapsedM / 60);
+    return `${elapsedH}h`;
+  })();
+  return <>{label}</>;
 }
 
 /** author label — the wire's TimelineEventObject carries actorPrincipalId
@@ -826,6 +970,63 @@ export default function ChannelsPanel({
     }, TIMEOUT_MS);
   };
 
+  // ── PRD-007 S4-Members: real membership roster (§4 S4-Members) ──────────
+  //
+  // LIST_CHANNEL_MEMBERS is a plain read, dispatched once per channel
+  // selection (no hint/reconnect re-read choreography -- membership changes
+  // are rare compared to messages, and a manual re-select or the periodic
+  // channel-list refresh is an acceptable staleness bound for this slice).
+  // `membersPhase` distinguishes "in flight" from "resolved" so RosterSection
+  // can fall back to the OLDER client-side replay (selectChannelMembers)
+  // ONLY while a real response is still pending, never after one lands (a
+  // resolved server response is authoritative even if it names zero
+  // members -- it must not be papered over by a stale replay guess).
+  const [membersPhase, setMembersPhase] = useState<Phase>('pending');
+  const membersTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastMembersFrameIdRef = useRef<Record<string, string>>({});
+
+  const requestChannelMembers = (channelId: string) => {
+    if (membersTimer.current) { clearTimeout(membersTimer.current); membersTimer.current = null; }
+    const sent = sendCommand({ action: 'LIST_CHANNEL_MEMBERS', channelId });
+    if (!sent) {
+      setMembersPhase('sendFailed');
+      return;
+    }
+    setMembersPhase('pending');
+    membersTimer.current = setTimeout(() => {
+      setMembersPhase((p) => (p === 'pending' ? 'timeout' : p));
+    }, TIMEOUT_MS);
+  };
+
+  const selectedServerMembersBase = selectedChannelId
+    ? selectLatestChannelMembers(events, selectedChannelId)
+    : null;
+  // PRD-007 S4 presence push (OQ-2, GRANTED 2026-08-23): overlay any
+  // `collabPresence` frames observed for this channel on top of the base
+  // LIST_CHANNEL_MEMBERS snapshot -- live update, no re-request. Recomputed
+  // on every `events`/`selectedChannelId` change, same "pure selector over
+  // events" style as every other derived value in this file (no separate
+  // useState needed: React re-renders on every new gateway event already).
+  const selectedPresence = selectedChannelId
+    ? selectLatestPresenceByPrincipal(events, selectedChannelId)
+    : new Map<string, { working: boolean; since: string | null }>();
+  const selectedServerMembers = applyLivePresence(selectedServerMembersBase, selectedPresence);
+
+  useEffect(() => {
+    if (!selectedChannelId) return;
+    const frameId = selectLatestChannelMembersFrameId(events, selectedChannelId);
+    if (frameId === null) return;
+    if (lastMembersFrameIdRef.current[selectedChannelId] === frameId) return; // not a NEW frame
+    lastMembersFrameIdRef.current[selectedChannelId] = frameId;
+    if (membersTimer.current) { clearTimeout(membersTimer.current); membersTimer.current = null; }
+    setMembersPhase('idle');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [events, selectedChannelId]);
+
+  useEffect(() => {
+    return () => { if (membersTimer.current) clearTimeout(membersTimer.current); };
+  }, []);
+
   useEffect(() => {
     if (!selectedChannelId) return;
     const found = timelineByChannelId[selectedChannelId];
@@ -998,6 +1199,17 @@ export default function ChannelsPanel({
     refetchDirtyRef.current[channelId] = false;
     delete lastTimelineFrameIdRef.current[channelId];
     setTimelinePhase('pending');
+    // PRD-007 S4-Members: a stale in-flight/last-frame flag from a PRIOR
+    // selection of this same channelId must not leak into this fresh
+    // roster request either -- same reasoning as the timeline flags above.
+    delete lastMembersFrameIdRef.current[channelId];
+    setMembersPhase('pending');
+    // Dispatched BEFORE requestTimeline so a test asserting "the LAST
+    // dispatched command after selecting a channel is GET_CHANNEL_TIMELINE"
+    // (the pre-existing wire contract every other read-path test already
+    // pins) stays true -- this command is additive, not a reordering of
+    // the existing read path.
+    requestChannelMembers(channelId);
     requestTimeline(channelId, '0');
   };
 
@@ -1354,7 +1566,13 @@ export default function ChannelsPanel({
                   sources (A9). NO dispatch affordance anywhere in this
                   block: RosterSection's props are plain data, zero
                   function-typed fields, zero buttons/links/onClick. */}
-              <RosterSection members={channelMembers} workingNow={workingNow} selfPrincipalId={selfPrincipalId} />
+              <RosterSection
+                members={channelMembers}
+                serverMembers={selectedServerMembers}
+                membersPhase={membersPhase}
+                workingNow={workingNow}
+                selfPrincipalId={selfPrincipalId}
+              />
 
               {/* Timeline honest states, same four-phase shape as the list. */}
               {selectedSnapshot === null && timelinePhase === 'pending' && <p className="text-faint/75">Loading…</p>}
@@ -1521,6 +1739,22 @@ function PendingSendRow({
 }
 
 /**
+ * PRD-007 S4-Members: honest label for a server-sourced member row.
+ * `You` beats `Owner`/`Agent` (a self-disclosed match is the strongest
+ * fact this session has) -- otherwise the label is the server's own
+ * role/kind fact, never a client guess. role/kind are redundant by
+ * construction (see ChannelMemberEntry's store-side doc comment) but this
+ * reads role first since it is the field the substrate's collab_members
+ * table actually stores.
+ */
+function serverMemberLabel(m: ServerChannelMemberEntry, selfPrincipalId: string | null): string {
+  if (selfPrincipalId && m.principalId === selfPrincipalId) return 'You';
+  if (m.role === 'owner') return 'Owner';
+  if (m.role === 'agent') return 'Agent';
+  return m.kind === 'human' ? 'Owner' : 'Agent';
+}
+
+/**
  * S5 — agent co-presence roster (§4 S5 / A5 / A9). STRUCTURAL SAFETY
  * BOUNDARY: every prop here is plain data — no sendCommand, no callback of
  * any kind in scope, zero buttons/links/onClick anywhere in this component.
@@ -1529,29 +1763,71 @@ function PendingSendRow({
  *
  * Two sections, two distinct sources, rendered independently — see the
  * module-doc S5 block at the top of this file for the full source
- * rationale. `members === null` means no timeline has loaded yet for the
- * selected channel (the section renders nothing, matching the timeline's
- * own null=loading convention — there is no separate loading affordance
- * here because the member data rides the SAME frame the timeline already
- * shows a Loading state for). `members === []` is the real-empty case: a
- * timeline loaded but no member_added event has been seen in it yet.
- * `workingNow === null` means the console has no active task right now.
+ * rationale. `workingNow === null` means the console has no active task
+ * right now.
+ *
+ * PRD-007 S4-Members: the Members section now prefers the REAL
+ * LIST_CHANNEL_MEMBERS response (`serverMembers`/`membersPhase`) over the
+ * older client-side timeline replay (`members`, still selectChannelMembers's
+ * output) -- the replay is used ONLY as a fallback while the real command is
+ * still in flight (`membersPhase !== 'idle'` and no server response has
+ * landed yet for this channel), never once a real response has resolved,
+ * even if that response names zero members. `serverMembers === null` with
+ * `membersPhase === 'idle'` (a resolved response the shape guard rejected,
+ * which should not happen in practice but must never crash) falls back to
+ * the replay rather than rendering nothing. `members === null` (no timeline
+ * loaded yet) preserves the ORIGINAL null=loading convention for the
+ * fallback path only.
  */
 function RosterSection({
   members,
+  serverMembers,
+  membersPhase,
   workingNow,
   selfPrincipalId,
 }: {
   members: ChannelMemberEntry[] | null;
+  serverMembers: ServerChannelMemberEntry[] | null;
+  membersPhase: Phase;
   workingNow: WorkingNowEntry | null;
   selfPrincipalId: string | null;
 }) {
-  if (members === null && workingNow === null) return null;
+  // A real response has resolved for this channel (serverMembers is a real
+  // array) -- it is authoritative even if empty, never overridden by the
+  // replay's guess.
+  const haveServerMembers = serverMembers !== null;
+  // A failed/timed-out LIST_CHANNEL_MEMBERS attempt is actionable information
+  // (§13-style honesty: never silently swallow a send failure) and must
+  // render even when the OLDER replay fallback has nothing yet (members ===
+  // null, no timeline loaded) -- otherwise the whole section would vanish
+  // exactly when there is something the operator needs to see.
+  const membersFetchFailed = membersPhase === 'sendFailed' || membersPhase === 'timeout';
+  if (!haveServerMembers && !membersFetchFailed && members === null && workingNow === null) return null;
   return (
     <div className="mb-4 space-y-3 border-b border-edge pb-3">
       <div>
         <h3 className="text-[10px] font-bold uppercase tracking-widest text-muted">Members</h3>
-        {members === null ? null : members.length === 0 ? (
+        {haveServerMembers ? (
+          serverMembers!.length === 0 ? (
+            <p className="mt-1 text-[10.5px] text-faint/75">No members seen yet.</p>
+          ) : (
+            <ul className="mt-1 flex flex-wrap gap-1.5">
+              {serverMembers!.map((m) => (
+                <li
+                  key={m.principalId}
+                  className="rounded border border-border-strong px-1.5 py-0.5 text-[10px] text-muted"
+                  title={`${m.displayName} (${m.principalId}) · ${serverMemberLabel(m, selfPrincipalId)}`}
+                >
+                  {serverMemberLabel(m, selfPrincipalId)} · {m.displayName}
+                </li>
+              ))}
+            </ul>
+          )
+        ) : membersPhase === 'sendFailed' ? (
+          <p className="mt-1 text-[10.5px] text-faint/75">couldn&apos;t request members — connection may be reconnecting.</p>
+        ) : membersPhase === 'timeout' ? (
+          <p className="mt-1 text-[10.5px] text-faint/75">No response — refresh to try again.</p>
+        ) : members === null ? null : members.length === 0 ? (
           <p className="mt-1 text-[10.5px] text-faint/75">No members seen yet.</p>
         ) : (
           <>
@@ -1569,6 +1845,13 @@ function RosterSection({
                   // the DOM for a malformed or absent value (T-10). S5b adds
                   // "you" ONLY when the self-disclosed CONNECTED principalId
                   // exactly matches this already-loaded member row.
+                  //
+                  // PRD-007 S4-Members: this whole branch is now the FALLBACK
+                  // path, rendered only while the real LIST_CHANNEL_MEMBERS
+                  // response for this channel is still in flight -- kept
+                  // byte-identical to its original (pre-S4-Members) rendering
+                  // so the fallback UX doesn't regress and prior tests of it
+                  // stay valid.
                   title={`${m.principalId} · member since ${formatOccurredAt(m.since)}${m.principalId === selfPrincipalId ? ' · you' : ''}`}
                 >
                   {m.principalId.slice(0, 8)}
@@ -1582,6 +1865,43 @@ function RosterSection({
           </>
         )}
       </div>
+      {/* PRD-007 S4 presence overlay (OQ-2, GRANTED 2026-08-23): agents
+          from the REAL server roster with working=true, plus a relative
+          "since". A SEPARATE section, NEVER merged into Members above --
+          the operator's ruling grants disclosure of liveness, not a
+          reason to conflate it with membership. Sourced ONLY from
+          `serverMembers` (never the older client-side replay): the replay
+          has no working/since field at all, so this section renders
+          nothing while only the fallback path is available -- an honest
+          "no data yet" rather than a guess. */}
+      <div>
+        <h3 className="text-[10px] font-bold uppercase tracking-widest text-muted">
+          Working now (agents)
+        </h3>
+        {(() => {
+          const workingAgents = (serverMembers ?? []).filter((m) => m.working === true);
+          if (!haveServerMembers) {
+            return <p className="mt-1 text-[10.5px] text-faint/75">Not available yet.</p>;
+          }
+          if (workingAgents.length === 0) {
+            return <p className="mt-1 text-[10.5px] text-faint/75">No agents working right now.</p>;
+          }
+          return (
+            <ul className="mt-1 flex flex-wrap gap-1.5">
+              {workingAgents.map((m) => (
+                <li
+                  key={m.principalId}
+                  className="rounded border border-border-strong px-1.5 py-0.5 text-[10px] text-muted"
+                  title={`${m.displayName} (${m.principalId}) · working since ${formatOccurredAt(m.since ?? '')}`}
+                >
+                  <span className="mr-1 inline-block h-1 w-1 rounded-full bg-torque align-middle" aria-hidden />
+                  {m.displayName} · <RelativeSince since={m.since} />
+                </li>
+              ))}
+            </ul>
+          );
+        })()}
+      </div>
       <div>
         {/* G1R ruling (c) / G2A C-S5-2: the label must not claim more than one
             session can know. S5b now lets CONNECTED carry the connection's OWN
@@ -1589,10 +1909,13 @@ function RosterSection({
             principal resolved), but GatewayEventSchema still carries no
             third-party principal/telemetry field and sessionBus is keyed by
             sessionId with each socket subscribed only to its own
-            (events.ts:17-28) -- so this section can ONLY ever render the
-            VIEWER'S OWN task, never another principal's. "Working now" read as
-            a roster of everyone; it is a roster of one. A real cross-participant
-            roster remains blocked on the OQ-2 entitlement ruling. */}
+            (events.ts:17-28) -- so THIS section can ONLY ever render the
+            VIEWER'S OWN task, never another principal's; "Working now" here
+            reads as a roster of everyone, but is a roster of one. The REAL
+            cross-participant roster is the "Working now (agents)" section
+            ABOVE -- built on the OQ-2 entitlement (GRANTED 2026-08-23) via
+            LIST_CHANNEL_MEMBERS/collabPresence, an entirely separate data
+            path from this section's own-session task truth. */}
         <h3 className="text-[10px] font-bold uppercase tracking-widest text-muted">
           This console&apos;s task
         </h3>

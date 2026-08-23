@@ -168,6 +168,24 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     limit: z.number().int().min(1).max(100).default(20),
   }),
   z.object({
+    // PRD-007 S4-Members (G1D resolution table, item B-1) + S4 presence
+    // overlay (OQ-2, GRANTED 2026-08-23): read-only channel roster, scoped
+    // to the CALLER'S OWN resolved collab principal exactly like
+    // LIST_CHANNELS/GET_CHANNEL_TIMELINE above -- no principalId/surfaceId
+    // param, identity is always server-derived (§2a). Each returned member
+    // object carries EXACTLY {principalId, displayName, role, kind,
+    // working, since} -- the operator's verbatim OQ-2 ruling grants
+    // co-members the "working now" side-channel: `working`/`since` are
+    // derived at READ TIME from collab_agent_turns
+    // (state='dispatched' AND resolved_at IS NULL), never persisted, never
+    // client-supplied, always false/null for human/owner rows. NEVER
+    // taskId, prompt, tier, tool name, cost, spend, provider, or model --
+    // enforced by key-set equality in tests/agent-participation-s4-
+    // members.test.ts and tests/agent-participation-s4-presence.test.ts.
+    action: z.literal('LIST_CHANNEL_MEMBERS'),
+    channelId: z.string().min(1),
+  }),
+  z.object({
     action: z.literal('SET_CHANNEL_EXTERNAL_EXPORT_POLICY'),
     channelId: z.string().trim().min(1).max(160),
     externalExportPolicy: z.enum(['local_only', 'operator_confirmed_non_sensitive']),

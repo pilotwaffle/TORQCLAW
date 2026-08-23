@@ -71,11 +71,19 @@ function timelineEvent(overrides: Record<string, unknown> = {}) {
 // new timeline snapshot renders (never by a click), is idempotent and
 // monotonic, and acking backwards is a substrate no-op. S6_ALLOWLIST is the
 // read path + ack; S6_FULL_ALLOWLIST adds the composer post on top.
-const READ_ONLY_ALLOWLIST = new Set(['LIST_CHANNELS', 'GET_CHANNEL_TIMELINE']);
-const S6_ALLOWLIST = new Set(['LIST_CHANNELS', 'GET_CHANNEL_TIMELINE', 'ACK_CHANNEL_CURSOR']);
+// PRD-007 S4-Members: LIST_CHANNEL_MEMBERS is dispatched exactly once per
+// channel selection (selectChannel), alongside GET_CHANNEL_TIMELINE -- so
+// every allowlist below that a test exercises ACROSS a channel-select call
+// (without an intervening sc.mockClear()) must admit it too. Tests that
+// mockClear() AFTER selecting a channel but before the assertion (e.g. the
+// hint/reconnect re-read tests) are unaffected -- the select-time
+// LIST_CHANNEL_MEMBERS call is already cleared by the time they inspect
+// sc.mock.calls, so those allowlists stay unchanged.
+const READ_ONLY_ALLOWLIST = new Set(['LIST_CHANNELS', 'GET_CHANNEL_TIMELINE', 'LIST_CHANNEL_MEMBERS']);
+const S6_ALLOWLIST = new Set(['LIST_CHANNELS', 'GET_CHANNEL_TIMELINE', 'LIST_CHANNEL_MEMBERS', 'ACK_CHANNEL_CURSOR']);
 const CHANNEL_OWNER_ALLOWLIST = new Set([...S6_ALLOWLIST, 'SET_CHANNEL_EXTERNAL_EXPORT_POLICY']);
 const S3_ALLOWLIST = new Set(['LIST_CHANNELS', 'GET_CHANNEL_TIMELINE', 'POST_CHANNEL_MESSAGE']);
-const S6_FULL_ALLOWLIST = new Set([...S3_ALLOWLIST, 'ACK_CHANNEL_CURSOR']);
+const S6_FULL_ALLOWLIST = new Set([...S3_ALLOWLIST, 'LIST_CHANNEL_MEMBERS', 'ACK_CHANNEL_CURSOR']);
 const DANGEROUS_ACTIONS = new Set([
   'SUBMIT_PROMPT',
   'CANCEL_TASK',

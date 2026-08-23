@@ -71,7 +71,7 @@ import {
   affectedBySession,
   type AffectedSet,
 } from './coordinator.js';
-import { fanoutToChannel, type CommittedChannelEvent } from './fanout.js';
+import { fanoutToChannel, fanoutPresenceToChannel, type CommittedChannelEvent, type CommittedAgentPresence } from './fanout.js';
 import { CollabObservability } from './observability.js';
 
 // ---------------------------------------------------------------------------
@@ -295,6 +295,42 @@ export interface ListChannelsResult {
   hasMore: boolean;
 }
 
+/**
+ * PRD-007 S4-Members + S4 presence overlay (OQ-2, GRANTED 2026-08-23).
+ * `kind` is derived from `role` -- the migration's principals table already
+ * carries a real `kind` column ('operator'|'agent'), but
+ * `collab_members.role` ('owner'|'agent') is a 1:1 image of it in practice
+ * (a channel owner is always the operator principal, S1's bootstrap
+ * invariant), so this avoids a second SELECT per row: 'owner' => 'human',
+ * 'agent' => 'agent'.
+ *
+ * `working`/`since` are the operator-granted "working now" side-channel
+ * (OQ-2 verbatim ruling, docs/PRD-TCLAW-AGENT-PARTICIPATION-007.md §9):
+ * derived at READ TIME from `collab_agent_turns` -- `working` is true iff a
+ * row exists for (channel_id, this member's principal_id) with
+ * state='dispatched' AND resolved_at IS NULL; `since` is that row's
+ * dispatched_at (ISO), or null when not working. ALWAYS present (never
+ * omitted) on every member row, including human/owner rows, where it is
+ * always {working: false, since: null} -- collab_agent_turns rows are only
+ * ever keyed to agent principals, so a human member can never have one.
+ * This is a read-time derivation only: no new table, no heartbeat, no TTL
+ * (A4-d) -- a crashed dispatcher leaves working=true honestly until S3's
+ * recoverStrandedAgentTurns resolves the row; that is truthful, not a bug.
+ */
+export interface ChannelMemberEntry {
+  principalId: string;
+  displayName: string;
+  role: 'owner' | 'agent';
+  kind: 'human' | 'agent';
+  working: boolean;
+  since: string | null;
+}
+
+export interface ListChannelMembersResult {
+  channelId: string;
+  members: ChannelMemberEntry[];
+}
+
 export interface GetChannelTimelineResult {
   events: TimelineEventObject[];
   nextCursor: string;
@@ -510,6 +546,83 @@ export class Mutex {
 }
 
 export class CollaborationStore {
+  /**
+   * PRD-007 S4 presence push (OQ-2, GRANTED 2026-08-23; G1R B-2). Called
+   * AFTER a collab_agent_turns state transition has already committed --
+   * this method never itself queries collab_agent_turns; it is handed the
+   * exact committed working/since facts by its two callers (claimAgentTurn
+   * on a genuine fresh claim or a legacy-terminated resolve;
+   * commitAgentTurnOutput on a resolve) and simply fans that snapshot out.
+   * Best-effort: a push failure here must never surface to the caller of
+   * claimAgentTurn/commitAgentTurnOutput (S5's rule -- a missed push is
+   * corrected by the next LIST_CHANNEL_MEMBERS read), so this is fired
+   * with its own try/catch and never awaited into the outer command's
+   * result path in a way that could turn a push failure into a claim/
+   * commit failure.
+   */
+  private async pushAgentPresence(ev: CommittedAgentPresence): Promise<void> {
+    try {
+      await fanoutPresenceToChannel(
+        {
+          lock: this.lock,
+          registry: this.registry,
+          db: this.env.db,
+          observability: this.observability,
+          nowMs: this.nowMs,
+        },
+        ev,
+      );
+    } catch {
+      /* best-effort presence push only; never surfaces to the caller */
+    }
+  }
+
+  /**
+   * PRD-007 T-4 / G1R N-3 gap closure: covers the resolve paths claimAgentTurn
+   * and commitAgentTurnOutput do NOT -- every `resolveAgentTurn(db, {...})`
+   * call site in autoReplyDispatcher.ts (no_post / terminated / completed via
+   * the local-fallback and recovery-sweep branches). Those resolutions happen
+   * through the free `resolveAgentTurn` helper (autoReply.ts), entirely
+   * outside this store, so this store has no commit hook to observe them from
+   * inside a transaction the way pushAgentPresence's other two callers do.
+   *
+   * This method is therefore a RE-READ, not a relay: unlike pushAgentPresence
+   * (handed the exact committed working/since facts by a caller that just
+   * performed the transition), this method never trusts caller-supplied
+   * working/since -- it re-reads collab_agent_turns for
+   * (channelId, agentPrincipalId) itself, using the SAME predicate
+   * listChannelMembers uses (state='dispatched' AND resolved_at IS NULL,
+   * most recent dispatched_at wins), and pushes exactly that committed
+   * truth. This makes it correct regardless of which resolveAgentTurn call
+   * site invoked it, and idempotent under a caller that fires it more than
+   * once for the same resolution (a second call re-reads the same
+   * already-resolved state and pushes the same working:false it already
+   * pushed).
+   *
+   * No collab_events write: this is a presence-only read + best-effort fan
+   * out, identical in that respect to pushAgentPresence itself.
+   */
+  async pushPresenceForResolvedTurn(channelId: string, agentPrincipalId: string): Promise<void> {
+    try {
+      const row = this.env.db
+        .prepare(
+          `SELECT MAX(dispatched_at) AS dispatchedAt FROM collab_agent_turns
+            WHERE channel_id = ? AND agent_principal_id = ?
+              AND state = 'dispatched' AND resolved_at IS NULL`,
+        )
+        .get(channelId, agentPrincipalId) as { dispatchedAt: string | null } | undefined;
+      const dispatchedAt = row?.dispatchedAt ?? null;
+      await this.pushAgentPresence({
+        channelId,
+        principalId: agentPrincipalId,
+        working: dispatchedAt !== null,
+        since: dispatchedAt,
+      });
+    } catch {
+      /* best-effort presence push only; never surfaces to the caller */
+    }
+  }
+
   async claimAgentTurn(input: AgentTurnIdentity & { nowIso: string }): Promise<AgentTurnClaimResult> {
     const identity: AgentTurnIdentity = {
       channelId: this.normalizeRuntimeIdentifier(input.channelId, 'channelId'),
@@ -520,7 +633,7 @@ export class CollaborationStore {
     if (!Number.isSafeInteger(identity.channelSeq) || identity.channelSeq <= 0) {
       throw new CollabError('INVALID_REQUEST', 'channelSeq must be a positive safe integer');
     }
-    return this.withReadThenSequencer(() => this.mutex.withLock(() =>
+    const result: AgentTurnClaimResult = await this.withReadThenSequencer(() => this.mutex.withLock(() =>
       this.runNaturallyIdempotentCommand(identity.agentPrincipalId, 'CLAIM_AGENT_TURN', (tx) => {
         const existing = tx.prepare(`
           SELECT trigger_event_id AS triggerEventId, state,
@@ -572,6 +685,30 @@ export class CollaborationStore {
         return { status: 'claimed', identity, personaEnvelope: envelope, runtimeProfile };
       }),
     ));
+
+    // Presence push happens AFTER the transaction commits (read committed
+    // state, never socket delivery -- S5's rule), and only for the two
+    // status outcomes that actually changed collab_agent_turns' liveness
+    // fact: 'claimed' (a fresh row, working flips false -> true) and
+    // 'legacy_terminated' (a stale dispatched row was just resolved,
+    // working flips true -> false). 'duplicate' changed nothing -- the row
+    // already existed exactly as before, so no push is owed.
+    if (result.status === 'claimed') {
+      await this.pushAgentPresence({
+        channelId: identity.channelId,
+        principalId: identity.agentPrincipalId,
+        working: true,
+        since: input.nowIso,
+      });
+    } else if (result.status === 'legacy_terminated') {
+      await this.pushAgentPresence({
+        channelId: identity.channelId,
+        principalId: identity.agentPrincipalId,
+        working: false,
+        since: null,
+      });
+    }
+    return result;
   }
 
   private readonly env: CollaborationStoreEnv;
@@ -2587,6 +2724,18 @@ export class CollaborationStore {
         },
         committed,
       );
+      // PRD-007 S4 presence push (OQ-2, GRANTED 2026-08-23): the turn just
+      // resolved to 'completed' (see the UPDATE above) -- working flips
+      // true -> false. Only fires when `committed` is set, i.e. this was a
+      // GENUINE fresh commit, never a replay (the `turn.outputEventId`
+      // early-return branch above returns before `committed` is assigned,
+      // so a replayed idempotent retry never re-pushes a stale transition).
+      await this.pushAgentPresence({
+        channelId: body.channelId,
+        principalId: agentPrincipalId,
+        working: false,
+        since: null,
+      });
     }
     return result;
   }
@@ -2983,6 +3132,85 @@ export class CollaborationStore {
     }));
     this.observability.timelineLatency.record(this.nowMs() - start);
     return out;
+  }
+
+  /**
+   * LIST_CHANNEL_MEMBERS: read-path (PRD-007 S4-Members, G1D resolution
+   * table item B-1; presence overlay per OQ-2, GRANTED 2026-08-23). No
+   * sequencer mutex, no result row -- same discipline as getChannelTimeline
+   * above.
+   *
+   * assertChannelVisible is the ONLY predicate: a non-member caller and a
+   * caller naming a nonexistent channelId both throw notFound() from
+   * inside that one function, so the two failure causes are byte-identical
+   * (T-3), exactly like every other read on this surface.
+   *
+   * `working`/`since` are computed in the SAME query via a LEFT JOIN
+   * against `collab_agent_turns` on (channel_id, agent_principal_id) with
+   * state='dispatched' AND resolved_at IS NULL -- a single read, no N+1,
+   * no second round trip. A human/owner row never has a matching
+   * collab_agent_turns row (those are keyed to agent principals only), so
+   * `working` is false and `since` is null for every owner by construction,
+   * never by a special-cased branch here. No new table, no heartbeat, no
+   * TTL (A4-d) -- this is a pure read-time derivation from transactional
+   * turn state, per S3's stranded-turn recovery
+   * (autoReplyDispatcher.ts's recoverStrandedAgentTurns) remaining the sole
+   * owner of turn liveness; this method only ever READS collab_agent_turns,
+   * never writes it and never consults it for dispatch.
+   */
+  async listChannelMembers(
+    caller: CallerContext,
+    body: { channelId: string },
+  ): Promise<ListChannelMembersResult> {
+    return this.withReadOnly(() => this.runReadCommand(() => {
+      const db = this.env.db;
+      // (C2) CHANNEL_VISIBLE predicate -- absent, hidden, or non-member
+      // channelId all throw notFound() from inside this one call, so the
+      // two denial causes are byte-identical (T-3).
+      this.assertChannelVisible(db, caller, body.channelId);
+
+      // A correlated MAX() subquery, not a JOIN, deliberately: an agent can
+      // in principle have more than one 'dispatched'+unresolved
+      // collab_agent_turns row at once (distinct channel_seq triggers), and
+      // a plain LEFT JOIN would fan that out into duplicate member rows.
+      // MAX(dispatched_at) collapses any such fan-out to the single most
+      // recent dispatch, which is also the correct "since" the roster
+      // should show; the subquery returns NULL (not working) when no
+      // matching row exists, same as a LEFT JOIN miss would.
+      const rows = db
+        .prepare(
+          `SELECT m.principal_id as principal_id, m.role as role,
+                  p.display_name as display_name,
+                  (SELECT MAX(t.dispatched_at) FROM collab_agent_turns t
+                    WHERE t.channel_id = m.channel_id
+                      AND t.agent_principal_id = m.principal_id
+                      AND t.state = 'dispatched'
+                      AND t.resolved_at IS NULL) as dispatched_at
+           FROM collab_members m
+           JOIN principals p ON p.id = m.principal_id
+           WHERE m.channel_id = ? AND m.state = 'active'
+           ORDER BY m.principal_id ASC`
+        )
+        .all(body.channelId) as Array<{
+        principal_id: string;
+        role: 'owner' | 'agent';
+        display_name: string;
+        dispatched_at: string | null;
+      }>;
+
+      const members: ChannelMemberEntry[] = rows.map((row) => ({
+        principalId: row.principal_id,
+        displayName: row.display_name,
+        role: row.role,
+        // See ChannelMemberEntry's doc comment: derived from role, not a
+        // second principals.kind SELECT.
+        kind: row.role === 'owner' ? 'human' : 'agent',
+        working: row.dispatched_at !== null,
+        since: row.dispatched_at,
+      }));
+
+      return { channelId: body.channelId, members };
+    }));
   }
 
   // -------------------------------------------------------------------

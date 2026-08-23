@@ -810,8 +810,19 @@ describe('Phase 4 protected semantic manifest', () => {
     // Authorized 2026-08-21: UPDATE_AGENT_PROFILE deliberately joins the
     // existing CREATE_AGENT operator + live-delegate authority gate. The
     // protected approve predicate and frozen Phase 4 seams above are unchanged.
+    // Authorized 2026-08-22 (PRD-007 S4-Members, G1D resolution table item
+    // B-1): added one explicit `case 'LIST_CHANNEL_MEMBERS':` arm to the
+    // 'channel'-seat switch, grouped with the existing
+    // LIST_CHANNELS/GET_CHANNEL_TIMELINE denies (identical seat-lattice
+    // reasoning: a channel-transport seat has no collab surface credential
+    // and gets no read entitlement to the roster), plus its doc-comment
+    // entry. The 'node'-seat branch is UNCHANGED -- LIST_CHANNEL_MEMBERS
+    // falls through the existing default deny; the agentCollabWrite
+    // widening remains scoped to POST_CHANNEL_MESSAGE only. The operator
+    // branch (authorizeOperator) is untouched. The protected approve
+    // predicate and frozen Phase 4 seams above are unchanged.
     const authzSha = createHash('sha256').update(authz).digest('hex');
-    expect(authzSha).toBe('5a68a161b2fe26bd6422782028d944a672a4851a1a7535f1b93a016082fb497f');
+    expect(authzSha).toBe('e122a277c6900c3d6989dc33738b772d926f5d3eebaaa8a4f2c2c074a52ab87e');
     // The migration's own markers: the moved guard must not silently return,
     // and the relocation note must remain declared where it happened.
     expect(authz).not.toContain('export function checkResumeRole');

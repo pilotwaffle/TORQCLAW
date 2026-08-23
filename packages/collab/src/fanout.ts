@@ -43,7 +43,7 @@
  */
 
 import type { AuthLock } from './authlock.js';
-import type { Subscription, ChannelEventFrame, SubscriptionRegistry } from './subscriptions.js';
+import type { Subscription, ChannelEventFrame, CollabPresenceFrame, SubscriptionRegistry } from './subscriptions.js';
 import type { BootstrapDb } from './bootstrap.js';
 import type { CollabObservability } from './observability.js';
 
@@ -253,6 +253,110 @@ export async function fanoutToChannel(deps: FanoutDeps, ev: CommittedChannelEven
   const start = deps.nowMs ? deps.nowMs() : Date.now();
   for (const sub of candidates) {
     await fanoutOne(deps, sub, ev);
+  }
+  if (deps.observability) {
+    const elapsed = (deps.nowMs ? deps.nowMs() : Date.now()) - start;
+    deps.observability.fanoutLatency.record(elapsed);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Presence fan-out (PRD-007 S4, OQ-2 GRANTED 2026-08-23; G1R B-2 binding spec)
+// ---------------------------------------------------------------------------
+
+/**
+ * A committed collab_agent_turns state transition (claim or resolve) --
+ * NOT a CommittedChannelEvent: there is no collab_events row, no
+ * channel_seq, nothing to persist. `working`/`since` are read from the
+ * COMMITTED row by the caller (claimAgentTurn / commitAgentTurnOutput's
+ * post-commit seam) and handed here verbatim; this module never re-derives
+ * them and never queries collab_agent_turns itself.
+ */
+export interface CommittedAgentPresence {
+  channelId: string;
+  principalId: string;
+  working: boolean;
+  since: string | null;
+}
+
+function toPresenceFrame(ev: CommittedAgentPresence, subscriptionId: string): CollabPresenceFrame {
+  return {
+    type: 'collab_presence',
+    protocolVersion: 2,
+    subscriptionId,
+    channelId: ev.channelId,
+    principalId: ev.principalId,
+    working: ev.working,
+    since: ev.since,
+  };
+}
+
+/**
+ * (G1R B-2) Per-subscription presence delivery for ONE candidate. Runs the
+ * EXACT SAME synchronous critical section as fanoutOne: acquire the read
+ * lock, revalidate (readRevalidationSnapshot + revalidationPasses) with NO
+ * await between the read and the sink handoff, close with
+ * 'authorization_lost' and deliver nothing on failure, else hand the frame
+ * to the sink. This is deliberately duplicated rather than shared with
+ * fanoutOne's body because the two frame constructions differ (channel_seq
+ * dedup/backlog-queue semantics apply to ChannelEventFrame only -- a
+ * presence frame is never queued, never deduped by seq, and bypasses
+ * Subscription's queue entirely via a direct sink call, matching
+ * deliverCloseFrame's post-lock-decision delivery style rather than
+ * deliverChannelEvent's buffering/dedup path).
+ */
+export async function fanoutPresenceOne(
+  deps: FanoutDeps,
+  sub: Subscription,
+  ev: CommittedAgentPresence,
+): Promise<void> {
+  // (C4-equivalent) Closed check FIRST, before touching the lock or the DB.
+  if (sub.closed) {
+    return;
+  }
+
+  await deps.lock.acquireRead();
+  try {
+    // (C1-equivalent) Everything from here to the sink handoff is
+    // synchronous -- no await anywhere in this block.
+    if (sub.closed) {
+      return;
+    }
+
+    const snapshot = readRevalidationSnapshot(deps.db, ev.channelId, sub.principalId, sub.credentialId);
+    if (!revalidationPasses(snapshot, sub)) {
+      const wasActive = sub.state !== 'backlog';
+      sub.close('authorization_lost');
+      deps.observability?.markSubscriptionClosed(wasActive);
+      sub.deliverCloseFrame();
+      return;
+    }
+
+    const frame = toPresenceFrame(ev, sub.subscriptionId);
+    // Presence frames are never queued/deduped -- deliver directly via the
+    // subscription's sink, matching deliverCloseFrame's direct-sink style.
+    // Never synthesizes a channel_seq: there is no cursor for this frame.
+    sub.deliverPresence(frame);
+  } finally {
+    deps.lock.releaseRead();
+  }
+}
+
+/**
+ * Fan a committed agent-turn presence transition out to EVERY candidate
+ * subscription on the channel -- (G1R B-2) selected via
+ * `registry.forChannel` with NO channel_seq/rejoinedSeq filter (unlike
+ * fanoutToChannel's H4 filter): presence has no cursor, so there is no
+ * "candidates that might care about this seq" narrowing to apply. Every
+ * live-or-backlog subscription on the channel is a candidate; per-write
+ * revalidation (fanoutPresenceOne) is still the sole authorization gate.
+ */
+export async function fanoutPresenceToChannel(deps: FanoutDeps, ev: CommittedAgentPresence): Promise<void> {
+  const candidates = deps.registry.forChannel(ev.channelId).filter((sub) => !sub.closed);
+
+  const start = deps.nowMs ? deps.nowMs() : Date.now();
+  for (const sub of candidates) {
+    await fanoutPresenceOne(deps, sub, ev);
   }
   if (deps.observability) {
     const elapsed = (deps.nowMs ? deps.nowMs() : Date.now()) - start;

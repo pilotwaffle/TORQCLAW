@@ -127,6 +127,7 @@ export {
   type SubscriptionState,
   type ChannelEventFrame,
   type SubscriptionCloseFrame,
+  type CollabPresenceFrame,
   type DeliveryFrame,
   type QueuedFrame,
   type DeliverySink,
@@ -135,12 +136,16 @@ export {
 } from './subscriptions.js';
 
 // Live slice: per-write revalidation + fan-out (Sections 8.2, 8.3, G1R C1/H1/H4)
+// PRD-007 S4 presence fan-out (OQ-2, GRANTED 2026-08-23; G1R B-2 binding spec)
 export {
   fanoutOne,
   fanoutToChannel,
+  fanoutPresenceOne,
+  fanoutPresenceToChannel,
   readRevalidationSnapshot,
   revalidationPasses,
   type CommittedChannelEvent,
+  type CommittedAgentPresence,
   type FanoutDeps,
   type RevalidationRowsSnapshot,
 } from './fanout.js';

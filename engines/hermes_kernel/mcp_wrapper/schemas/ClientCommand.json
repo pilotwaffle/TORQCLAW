@@ -507,6 +507,24 @@
       "properties": {
         "action": {
           "type": "string",
+          "const": "LIST_CHANNEL_MEMBERS"
+        },
+        "channelId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "action",
+        "channelId"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
           "const": "SET_CHANNEL_EXTERNAL_EXPORT_POLICY"
         },
         "channelId": {

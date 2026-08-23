@@ -371,6 +371,49 @@ export async function handleListChannels(
   }
 }
 
+/**
+ * LIST_CHANNEL_MEMBERS handler body (PRD-007 S4-Members + S4 presence
+ * overlay, OQ-2 GRANTED 2026-08-23). Read-only: SELECT + publishOnly, zero
+ * writes -- same total-handler discipline as handleListChannels above (no
+ * enclosing try/catch around the dispatch switch in server.ts, so this
+ * must never let a throw escape).
+ *
+ * Every returned member object carries `working`/`since` -- computed at
+ * READ TIME by store.listChannelMembers itself (see its doc comment); this
+ * handler does not compute, filter, or touch those fields, it only
+ * forwards the store's result verbatim.
+ */
+export async function handleListChannelMembers(
+  sessionId: string,
+  principalId: string | null,
+  channelId: string,
+): Promise<CollabSurfaceError | null> {
+  if (principalId === null) return COLLAB_IDENTITY_REQUIRED;
+  const store = getStore();
+  if (!store) return { code: 'COLLAB_UNAVAILABLE' };
+  try {
+    const result = await store.listChannelMembers(callerFor(principalId), { channelId });
+    publishOnly(sessionId, {
+      message: 'Channel members listed',
+      metadata: { collabMembers: true, channelId: result.channelId, members: result.members },
+    });
+    return null;
+  } catch (err: any) {
+    if (err?.code === 'COLLAB_NOT_FOUND') {
+      // T-3 byte-identity: non-member and nonexistent channelId both throw
+      // notFound() from inside assertChannelVisible, so this arm is the
+      // SAME code/message shape regardless of which denial cause fired.
+      return { code: 'COLLAB_NOT_FOUND', detail: err.message };
+    }
+    if (err?.code === 'INVALID_REQUEST') {
+      return { code: 'COLLAB_INVALID_REQUEST', detail: err.message };
+    }
+    // Unexpected/unclassified failure: never leak internal detail -- same
+    // reasoning as handleListChannels/handleGetChannelTimeline above.
+    return { code: 'COLLAB_UNAVAILABLE' };
+  }
+}
+
 export async function handleSetChannelExternalExportPolicy(
   sessionId: string,
   principalId: string | null,
