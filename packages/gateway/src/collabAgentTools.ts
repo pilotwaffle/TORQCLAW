@@ -83,9 +83,14 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { CollabError } from '@torqclaw/collab';
-import { COLLAB_CALLER_META_KEY } from '@torqclaw/bridge';
+import {
+  COLLAB_AGENT_TURN_META_KEY,
+  COLLAB_CALLER_META_KEY,
+  type CollabAgentTurnToolContext,
+} from '@torqclaw/bridge';
 import { getStore, callerFor, triggerAutoReply } from './collabSurface.js';
 
 /** The bridge server id these tools register under — fixed, gateway-code-only
@@ -112,7 +117,55 @@ function extractCallerPrincipalId(extra: { _meta?: Record<string, unknown> }): s
   return typeof v === 'string' && v.length > 0 ? v : null;
 }
 
+type ExtractedAgentTurnContext =
+  | { state: 'absent' }
+  | { state: 'invalid' }
+  | { state: 'valid'; context: CollabAgentTurnToolContext };
+
+function extractAgentTurnContext(
+  extra: { _meta?: Record<string, unknown> },
+): ExtractedAgentTurnContext {
+  const meta = extra._meta;
+  if (!meta || !Object.prototype.hasOwnProperty.call(meta, COLLAB_AGENT_TURN_META_KEY)) {
+    return { state: 'absent' };
+  }
+  const value = meta[COLLAB_AGENT_TURN_META_KEY];
+  if (!value || typeof value !== 'object') return { state: 'invalid' };
+  const context = value as Partial<CollabAgentTurnToolContext>;
+  const profile = context.expectedProfile;
+  const envelope = context.personaEnvelope;
+  if (
+    typeof context.channelId !== 'string' || context.channelId.trim().length === 0
+    || typeof context.agentPrincipalId !== 'string' || context.agentPrincipalId.trim().length === 0
+    || typeof context.triggerEventId !== 'string' || context.triggerEventId.trim().length === 0
+    || !Number.isSafeInteger(context.channelSeq) || context.channelSeq! <= 0
+    || typeof context.dispatchRequestId !== 'string' || context.dispatchRequestId.trim().length === 0
+    || !Number.isInteger(context.personaRevision) || context.personaRevision! < 0
+    || (context.recoveryLeaseToken !== undefined
+      && (typeof context.recoveryLeaseToken !== 'string' || context.recoveryLeaseToken.trim().length === 0))
+    || !profile
+    || profile.providerAccountId !== 'ollama-local'
+    || profile.adapterId !== 'ollama-local'
+    || typeof profile.modelId !== 'string' || profile.modelId.trim().length === 0
+    || !Number.isInteger(profile.personaRevision) || profile.personaRevision < 0
+    || profile.personaRevision !== context.personaRevision
+    || !envelope
+    || envelope.version !== 1
+    || typeof envelope.content !== 'string'
+    || envelope.content !== envelope.content.normalize('NFC').trim()
+    || envelope.content.length > 4_000
+    || /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/u.test(envelope.content)
+    || !Number.isInteger(envelope.personaRevision) || envelope.personaRevision < 0
+    || envelope.personaRevision !== context.personaRevision
+    || (envelope.content === '' && envelope.personaRevision !== 0)
+    || typeof envelope.contentSha256 !== 'string'
+    || createHash('sha256').update(envelope.content, 'utf8').digest('hex') !== envelope.contentSha256
+  ) return { state: 'invalid' };
+  return { state: 'valid', context: context as CollabAgentTurnToolContext };
+}
+
 const COLLAB_IDENTITY_REQUIRED_TOOL_ERROR = 'COLLAB_IDENTITY_REQUIRED';
+const COLLAB_AGENT_TURN_CONTEXT_INVALID_TOOL_ERROR = 'COLLAB_AGENT_TURN_CONTEXT_INVALID';
 
 /** Map a thrown value from the collab store to the exact tool-error text the
  *  model receives -- unelaborated, matching collabSurface.ts's own taxonomy
@@ -245,6 +298,38 @@ export function buildCollabAgentMcpServer(): McpServer {
         return { isError: true, content: [{ type: 'text', text: 'COLLAB_UNAVAILABLE' }] };
       }
       try {
+        const extractedTurn = extractAgentTurnContext(extra);
+        if (extractedTurn.state === 'invalid') {
+          return { isError: true, content: [{ type: 'text', text: COLLAB_AGENT_TURN_CONTEXT_INVALID_TOOL_ERROR }] };
+        }
+        if (extractedTurn.state === 'valid') {
+          const turnContext = extractedTurn.context;
+          if (turnContext.agentPrincipalId !== principalId || args.channelId !== turnContext.channelId) {
+            return { isError: true, content: [{ type: 'text', text: COLLAB_AGENT_TURN_CONTEXT_INVALID_TOOL_ERROR }] };
+          }
+          const result = await store.commitAgentTurnToolOutput({
+            channelId: turnContext.channelId,
+            agentPrincipalId: principalId,
+            channelSeq: turnContext.channelSeq,
+            dispatchRequestId: turnContext.dispatchRequestId,
+            recoveryLeaseToken: turnContext.recoveryLeaseToken,
+            expectedProfile: turnContext.expectedProfile,
+            personaEnvelope: turnContext.personaEnvelope,
+            text: args.text,
+          });
+          if (!result.replayed) {
+            triggerAutoReply({
+              channelId: turnContext.channelId,
+              channelSeq: Number(result.cursor),
+              eventId: result.eventId,
+              actorPrincipalId: principalId,
+            });
+          }
+          return {
+            content: [{ type: 'text', text: JSON.stringify(result) }],
+            structuredContent: result as unknown as Record<string, unknown>,
+          };
+        }
         // Server-minted idempotency key, per call -- never derived from
         // `args.text` and never accepted as a tool argument. This is
         // deliberately different from the human-client wire path (005 S3),

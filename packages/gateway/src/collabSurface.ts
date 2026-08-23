@@ -102,6 +102,27 @@ export function isAgentSurfaceCaller(authClass: string, binding: unknown): boole
 }
 
 /**
+ * PB-1(a): boot-time gate for the keyless web-search in-process MCP server
+ * (server.ts's registration of WEB_SEARCH_SERVER_ID / research__web_search).
+ * CLAUDE.md §6 forbids network egress / external APIs without explicit
+ * operator approval; this tool shells out to the DDGS CLI or a configured
+ * SEARXNG_URL, i.e. real network egress, so it must default OFF like every
+ * other opt-in external-network capability in this file. Unrelated to
+ * collab -- it does NOT chain through collabEnabled() -- but lives here
+ * alongside agentParticipationEnabled() so both boot-time registration
+ * gates share one home and one TRUTHY parsing rule, and so tests can
+ * reference this function the same way they reference its sibling. Read
+ * per-call, never captured at import, for the same stale-module-constant
+ * reason as every other flag in this file. Mirrors the Python twin's gate
+ * (engines/hermes_kernel/mcp_wrapper/server.py's
+ * `if os.environ.get("TORQCLAW_WEB_SEARCH_ENABLED") == "1"` for
+ * hermes__web_search) so LOCAL_EDGE and FRONTIER agree on the same default.
+ */
+export function webSearchEnabled(): boolean {
+  return TRUTHY.has((process.env.TORQCLAW_WEB_SEARCH_ENABLED ?? '').trim().toLowerCase());
+}
+
+/**
  * PRD-TCLAW-AGENT-PARTICIPATION-007 S3: injected, never imported directly.
  * autoReplyDispatcher.ts imports getStore/callerFor/getCollabDbForAutoReply
  * FROM this module, so this module cannot import autoReplyDispatcher.ts
@@ -244,6 +265,15 @@ export type CollabSurfaceError = {
  *  collab principal (§2a: refuse, never substitute or synthesize). */
 export const COLLAB_IDENTITY_REQUIRED: CollabSurfaceError = { code: 'COLLAB_IDENTITY_REQUIRED' };
 
+/** Narrow event seam for adjacent collaboration control surfaces. */
+export function publishCollabSurface(
+  sessionId: string,
+  message: string,
+  metadata: Record<string, unknown>,
+): void {
+  publishOnly(sessionId, { message, metadata });
+}
+
 /**
  * S3 (CO-1 fix): `kind` is derived from the connection's own resolved
  * principal via a real DB read (collabIdentity.ts's getPrincipalKind),
@@ -337,6 +367,37 @@ export async function handleListChannels(
     // Unexpected/unclassified failure: never leak internal detail -- a
     // hidden channel must not become distinguishable through an error
     // message, so this arm stays generic regardless of what store threw.
+    return { code: 'COLLAB_UNAVAILABLE' };
+  }
+}
+
+export async function handleSetChannelExternalExportPolicy(
+  sessionId: string,
+  principalId: string | null,
+  input: {
+    channelId: string;
+    externalExportPolicy: 'local_only' | 'operator_confirmed_non_sensitive';
+    idempotencyKey: string;
+  },
+): Promise<CollabSurfaceError | null> {
+  if (principalId === null) return COLLAB_IDENTITY_REQUIRED;
+  const store = getStore();
+  if (!store) return { code: 'COLLAB_UNAVAILABLE' };
+  try {
+    const result = await store.setChannelExternalExportPolicy(
+      callerFor(principalId),
+      { channelId: input.channelId, externalExportPolicy: input.externalExportPolicy },
+      input.idempotencyKey,
+    );
+    publishOnly(sessionId, {
+      message: 'Channel external export policy updated',
+      metadata: { channelExternalExportPolicyUpdated: true, ...result },
+    });
+    return null;
+  } catch (err: any) {
+    if (err?.code === 'IDEMPOTENCY_CONFLICT') return { code: 'COLLAB_IDEMPOTENCY_CONFLICT' };
+    if (err?.code === 'INVALID_REQUEST') return { code: 'COLLAB_INVALID_REQUEST' };
+    if (err?.code === 'COLLAB_NOT_FOUND') return { code: 'COLLAB_NOT_FOUND' };
     return { code: 'COLLAB_UNAVAILABLE' };
   }
 }

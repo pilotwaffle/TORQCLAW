@@ -194,6 +194,153 @@
       "properties": {
         "action": {
           "type": "string",
+          "const": "LIST_AGENTS"
+        },
+        "limit": {
+          "default": 50,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "action",
+        "limit"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "LIST_AGENT_PROVIDERS"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "CREATE_AGENT"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "providerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "modelId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "autostart": {
+          "default": false,
+          "type": "boolean"
+        },
+        "externalContextConfirmed": {
+          "default": false,
+          "type": "boolean"
+        },
+        "channelIds": {
+          "default": [],
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          }
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "action",
+        "displayName",
+        "providerId",
+        "modelId",
+        "autostart",
+        "externalContextConfirmed",
+        "channelIds",
+        "idempotencyKey"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "UPDATE_AGENT_PROFILE"
+        },
+        "agentPrincipalId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "iconId": {
+          "type": "string",
+          "enum": [
+            "robot",
+            "brain",
+            "shield",
+            "search",
+            "code",
+            "spark",
+            "bolt",
+            "target"
+          ]
+        },
+        "systemDirectives": {
+          "default": "",
+          "type": "string",
+          "maxLength": 4000
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "reconfirmExternalContext": {
+          "default": false,
+          "type": "boolean"
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "action",
+        "agentPrincipalId",
+        "iconId",
+        "systemDirectives",
+        "expectedRevision",
+        "reconfirmExternalContext",
+        "idempotencyKey"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
           "const": "GET_RECEIPT"
         },
         "taskId": {
@@ -352,6 +499,39 @@
       "required": [
         "action",
         "limit"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "SET_CHANNEL_EXTERNAL_EXPORT_POLICY"
+        },
+        "channelId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "externalExportPolicy": {
+          "type": "string",
+          "enum": [
+            "local_only",
+            "operator_confirmed_non_sensitive"
+          ]
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "action",
+        "channelId",
+        "externalExportPolicy",
+        "idempotencyKey"
       ],
       "additionalProperties": false
     },

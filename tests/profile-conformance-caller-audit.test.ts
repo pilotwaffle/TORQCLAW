@@ -20,15 +20,16 @@ describe('AC-10A TypeScript compiler-API production caller audit', () => {
       'executeTool:packages/inference/src/ollama.ts',
     ]);
     expect(calls.every((call) => call.resolved)).toBe(true);
-    // PRD-TCLAW-AGENT-PARTICIPATION-007 S2: executeTool gained a 4th,
-    // OPTIONAL parameter (callerCollabPrincipalId) so the in-process collab
-    // tool handler can learn which agent principal a task is bound to,
-    // without it ever being a tool ARGUMENT (model output). The 3rd
-    // position (req.effectiveProfile) is unchanged and still forwarded —
-    // this assertion's core guarantee (effectiveProfile forwarding) holds.
-    expect(calls[0]!.argumentTexts).toEqual([
+    // The fourth and fifth positions are gateway-owned metadata, never model
+    // arguments. The fifth binds the immutable turn identity and exact local
+    // execution profile used by the atomic agent-turn resolution writer.
+    expect(calls[0]!.argumentTexts.slice(0, 4)).toEqual([
       'realName', 'toolArgs', 'req.effectiveProfile', 'req.payload.callerCollabPrincipalId',
     ]);
+    expect(calls[0]!.argumentTexts).toHaveLength(5);
+    expect(calls[0]!.argumentTexts[4]).toBe('buildManagedAgentToolContext(req)');
+    const source = readFileSync(join(REPO_ROOT, 'packages', 'inference', 'src', 'ollama.ts'), 'utf8');
+    expect(source).toContain('personaEnvelope: req.payload.agentPersonaEnvelope!');
   });
 
   it('inventories the two assertResolvedProfile ingress calls', () => {

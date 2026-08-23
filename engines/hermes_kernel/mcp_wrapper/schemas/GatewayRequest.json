@@ -57,6 +57,165 @@
         },
         "callerCollabPrincipalId": {
           "type": "string"
+        },
+        "subscriptionExecutionTarget": {
+          "type": "object",
+          "properties": {
+            "providerId": {
+              "type": "string",
+              "enum": [
+                "grok-subscription",
+                "kimi-subscription",
+                "qwen-subscription",
+                "zai-subscription"
+              ]
+            },
+            "providerAccountId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "adapterId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "modelId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "exactModelId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "runtimeFingerprint": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "personaRevision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "personaContentSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "confirmed": {
+              "type": "boolean",
+              "const": true
+            }
+          },
+          "required": [
+            "providerId",
+            "providerAccountId",
+            "adapterId",
+            "modelId",
+            "exactModelId",
+            "runtimeFingerprint",
+            "personaRevision",
+            "personaContentSha256",
+            "confirmed"
+          ],
+          "additionalProperties": false
+        },
+        "localExecutionTarget": {
+          "type": "object",
+          "properties": {
+            "providerId": {
+              "type": "string",
+              "const": "ollama-local"
+            },
+            "adapterId": {
+              "type": "string",
+              "const": "ollama-local"
+            },
+            "modelId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "required": [
+            "providerId",
+            "adapterId",
+            "modelId"
+          ],
+          "additionalProperties": false
+        },
+        "agentPersonaEnvelope": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number",
+              "const": 1
+            },
+            "content": {
+              "type": "string",
+              "maxLength": 4000
+            },
+            "personaRevision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "contentSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "version",
+            "content",
+            "personaRevision",
+            "contentSha256"
+          ],
+          "additionalProperties": false
+        },
+        "agentTurnContext": {
+          "type": "object",
+          "properties": {
+            "channelId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "agentPrincipalId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "channelSeq": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "triggerEventId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "personaRevision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "recoveryLeaseToken": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          "required": [
+            "channelId",
+            "agentPrincipalId",
+            "channelSeq",
+            "triggerEventId",
+            "personaRevision"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -126,6 +285,98 @@
         "memoryUsed": {
           "default": true,
           "type": "boolean"
+        },
+        "agentReach": {
+          "type": "object",
+          "properties": {
+            "requestedChannels": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "github",
+                  "twitter",
+                  "youtube",
+                  "reddit",
+                  "facebook",
+                  "instagram",
+                  "bilibili",
+                  "xiaohongshu",
+                  "linkedin",
+                  "xiaoyuzhou",
+                  "v2ex",
+                  "xueqiu",
+                  "rss",
+                  "exa_search",
+                  "web"
+                ]
+              }
+            },
+            "localChannels": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "github",
+                  "twitter",
+                  "youtube",
+                  "reddit",
+                  "facebook",
+                  "instagram",
+                  "bilibili",
+                  "xiaohongshu",
+                  "linkedin",
+                  "xiaoyuzhou",
+                  "v2ex",
+                  "xueqiu",
+                  "rss",
+                  "exa_search",
+                  "web"
+                ]
+              }
+            },
+            "frontierChannels": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "github",
+                  "twitter",
+                  "youtube",
+                  "reddit",
+                  "facebook",
+                  "instagram",
+                  "bilibili",
+                  "xiaohongshu",
+                  "linkedin",
+                  "xiaoyuzhou",
+                  "v2ex",
+                  "xueqiu",
+                  "rss",
+                  "exa_search",
+                  "web"
+                ]
+              }
+            },
+            "localSatisfies": {
+              "type": "boolean"
+            },
+            "frontierSatisfies": {
+              "type": "boolean"
+            },
+            "writeIntent": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "requestedChannels",
+            "localChannels",
+            "frontierChannels",
+            "localSatisfies",
+            "frontierSatisfies",
+            "writeIntent"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

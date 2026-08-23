@@ -51,7 +51,7 @@ describe('Slice B effective profile policy', () => {
       tool('filesystem__read_file', 'read'),
       tool('filesystem__write_file', 'write'),
       tool('terminal__run', 'exec'),
-      tool('websearch__search', 'send'),
+      tool('research__web_search', 'send'),
     ];
     const readOnly = resolveEffectiveProfile('read_only', tools);
     const workspace = resolveEffectiveProfile('workspace_write', tools);
@@ -175,12 +175,12 @@ describe('G1R COLLAB-WRITE-PROFILE ruling — agent_conversation profile', () =>
     const tools = [
       tool('collab__post_message', 'read'),
       tool('filesystem__read_file', 'read'),
-      tool('websearch__search', 'read'),
+      tool('research__web_search', 'read'),
     ];
     const profile = resolveEffectiveProfile('agent_conversation', tools);
     expect(profile.allowedOperationIds).toContain('collab__post_message');
     expect(profile.allowedOperationIds).not.toContain('filesystem__read_file');
-    expect(profile.allowedOperationIds).not.toContain('websearch__search');
+    expect(profile.allowedOperationIds).not.toContain('research__web_search');
   });
 
   it('falsifiability probe 2b: widening allowedNamespaces to * WOULD admit unrelated read tools (proves the conjunct is load-bearing)', () => {
@@ -194,7 +194,7 @@ describe('G1R COLLAB-WRITE-PROFILE ruling — agent_conversation profile', () =>
     const tools = [
       tool('collab__post_message', 'read'),
       tool('filesystem__read_file', 'read'),
-      tool('websearch__search', 'read'),
+      tool('research__web_search', 'read'),
     ];
     const definition = widened.agent_conversation;
     const allowed = tools.filter((t) =>
@@ -203,7 +203,7 @@ describe('G1R COLLAB-WRITE-PROFILE ruling — agent_conversation profile', () =>
       definition.allowedSideEffects.includes('none'), // every tool above is capability:'read' -> side effect 'none'
     );
     expect(allowed.map((t) => t.name)).toEqual(
-      expect.arrayContaining(['filesystem__read_file', 'websearch__search']),
+      expect.arrayContaining(['filesystem__read_file', 'research__web_search']),
     );
   });
 

@@ -557,7 +557,9 @@ describe('G1R B-S0-1: the SHIPPED setToolAdmissionCheck closure is flag-independ
     const prevDir = process.env.TORQCLAW_DATA_DIR;
     const prevFlag = process.env.TORQCLAW_COLLAB_ENABLED;
     const prevForce = process.env.TORQCLAW_E2E_FORCE_GATED_TOOL;
+    const prevPort = process.env.TORQCLAW_PORT;
     process.env.TORQCLAW_DATA_DIR = dataDir;
+    process.env.TORQCLAW_PORT = '0';
     delete process.env.TORQCLAW_COLLAB_ENABLED; // THE PREMISE
     // Deterministic tool-choice seam (ollama.ts:228-253): without this the
     // executor falls through to the REAL Ollama /v1 loop and hangs/times
@@ -782,6 +784,8 @@ describe('G1R B-S0-1: the SHIPPED setToolAdmissionCheck closure is flag-independ
       else process.env.TORQCLAW_COLLAB_ENABLED = prevFlag;
       if (prevForce === undefined) delete process.env.TORQCLAW_E2E_FORCE_GATED_TOOL;
       else process.env.TORQCLAW_E2E_FORCE_GATED_TOOL = prevForce;
+      if (prevPort === undefined) delete process.env.TORQCLAW_PORT;
+      else process.env.TORQCLAW_PORT = prevPort;
     }
   }, 120000);
 });

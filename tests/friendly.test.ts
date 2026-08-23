@@ -563,7 +563,7 @@ describe('lock-taxonomy DRIFT guard (mirrors RULE_LABELS drift guard at RULE_LAB
   // formatLockState branches on, so a future engine change that silently
   // adds/removes a safetyLock or flips overridable is caught here.
   const HARD_LOCK_RULES = ['PRIVACY_OVERRIDE', 'USER_LOCAL_ONLY', 'LOCAL_TOOL_INTENT'] as const;
-  const FIRM_NO_LOCK_RULE = 'LOCAL_INTENT' as const;
+  const FIRM_NO_LOCK_RULES = ['LOCAL_INTENT', 'AGENT_REACH_LOCAL', 'AGENT_REACH_FRONTIER', 'AGENT_SUBSCRIPTION_PROVIDER'] as const;
   const OVERRIDABLE_RULES = ['LOW_CLASSIFIER_CONFIDENCE', 'TOOL_COUNT_OVERFLOW', 'LATENCY_CRITICAL', 'HEURISTIC_EVAL'] as const;
 
   // Mirrors engine.ts RULE_META exactly (score/reason/tier omitted — those
@@ -577,9 +577,12 @@ describe('lock-taxonomy DRIFT guard (mirrors RULE_LABELS drift guard at RULE_LAB
     TOOL_COUNT_OVERFLOW: { overridable: true },
     LATENCY_CRITICAL: { overridable: true },
     HEURISTIC_EVAL: { overridable: true },
+    AGENT_REACH_LOCAL: { overridable: false },
+    AGENT_REACH_FRONTIER: { overridable: false },
+    AGENT_SUBSCRIPTION_PROVIDER: { overridable: false },
   };
 
-  it('the RULE_SHAPE key set covers exactly all 8 RouterRuleIdSchema options (no rule missing/extra)', () => {
+  it('the RULE_SHAPE key set covers exactly all 11 RouterRuleIdSchema options (no rule missing/extra)', () => {
     const shapeKeys = new Set(Object.keys(RULE_SHAPE));
     const schemaKeys = new Set(RouterRuleIdSchema.options as readonly string[]);
     expect(shapeKeys).toEqual(schemaKeys);
@@ -603,12 +606,14 @@ describe('lock-taxonomy DRIFT guard (mirrors RULE_LABELS drift guard at RULE_LAB
     }
   });
 
-  it('LOCAL_INTENT is non-overridable AND carries no safetyLock -> branch (b) "Fixed for this task"', () => {
-    const meta = RULE_SHAPE[FIRM_NO_LOCK_RULE]!;
-    expect(meta.safetyLock).toBeUndefined();
-    expect(meta.overridable).toBe(false);
-    const diag = { score: 1, reason: 'x', tier: 'OLLAMA_LOCAL', ruleId: FIRM_NO_LOCK_RULE, ...meta } as RouterDiagnostics;
-    expect(formatLockState(diag)?.value).toBe('Fixed for this task');
+  it('fixed routing rules carry no safetyLock -> branch (b) "Fixed for this task"', () => {
+    for (const rule of FIRM_NO_LOCK_RULES) {
+      const meta = RULE_SHAPE[rule]!;
+      expect(meta.safetyLock).toBeUndefined();
+      expect(meta.overridable).toBe(false);
+      const diag = { score: 1, reason: 'x', tier: 'OLLAMA_LOCAL', ruleId: rule, ...meta } as RouterDiagnostics;
+      expect(formatLockState(diag)?.value).toBe('Fixed for this task');
+    }
   });
 
   it('the 4 heuristic/overridable rules render branch (c)', () => {

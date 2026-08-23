@@ -48,6 +48,9 @@ export function friendlyMessage(ev: GatewayEvent): string {
       if (r.startsWith('TOOL_COUNT_OVERFLOW')) return 'Needs several tools — using the cloud model';
       if (r.startsWith('LOW_CLASSIFIER_CONFIDENCE')) return 'Tricky to size up — using the cloud model to be safe';
       if (r.startsWith('LATENCY_CRITICAL')) return 'Local model is waking up — using the cloud for a fast answer';
+      if (r.startsWith('AGENT_REACH_LOCAL')) return 'Research channel available — staying on this machine';
+      if (r.startsWith('AGENT_REACH_FRONTIER')) return 'Research channel unavailable here — using the frontier tier';
+      if (r.startsWith('AGENT_SUBSCRIPTION_PROVIDER')) return 'Agent subscription selected — using its external provider';
       const score = Number(meta.score ?? NaN);
       if (!Number.isNaN(score))
         return score < 50
@@ -172,7 +175,7 @@ export function field(label: string, value: unknown): { label: string; value: st
   return { label, value: String(value) };
 }
 
-/** 2. RULE_LABELS — all 8 RouterRuleIdSchema values. Wording is reused from
+/** 2. RULE_LABELS — all RouterRuleIdSchema values. Wording is reused from
  *  friendlyMessage's TIER_SELECTED reason-prefix branches so a live event
  *  and its later receipt replay describe the routing decision identically. */
 export const RULE_LABELS: Record<RouterRuleId, string> = {
@@ -184,6 +187,9 @@ export const RULE_LABELS: Record<RouterRuleId, string> = {
   TOOL_COUNT_OVERFLOW: 'Needed several tools — used the cloud model',
   LATENCY_CRITICAL: 'Local model was waking up — used the cloud for a fast answer',
   HEURISTIC_EVAL: 'Routed by complexity score',
+  AGENT_REACH_LOCAL: 'Agent Reach channels were available on this machine',
+  AGENT_REACH_FRONTIER: 'Agent Reach channels required the frontier tier',
+  AGENT_SUBSCRIPTION_PROVIDER: 'Agent subscription required its external provider',
 };
 
 /** 3. formatReceiptState — a friendly label for the receipt's terminal

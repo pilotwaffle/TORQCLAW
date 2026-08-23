@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -11,7 +11,15 @@ import { randomUUID } from 'node:crypto';
 process.env.TORQCLAW_DATA_DIR = mkdtempSync(join(tmpdir(), 'torq-receipts-'));
 const { db } = await import('../packages/gateway/src/storage.js');
 const receipts = await import('../packages/gateway/src/receipts.js');
-const { projectReceipt, materializeReceipt, safeMaterializeReceipt, rebuildAll, PROJECTION_VERSION } = receipts;
+const {
+  projectReceipt,
+  materializeReceipt,
+  safeMaterializeReceipt,
+  safeMaterializeAndVerifyReceipt,
+  withVerifiedTerminalReceipt,
+  rebuildAll,
+  PROJECTION_VERSION,
+} = receipts;
 
 const schemaPath = join(
   dirname(fileURLToPath(import.meta.url)), '..', 'packages', 'gateway', 'db', 'schema.sql',
@@ -192,6 +200,11 @@ describe('TCLAW-4A run receipt projection', () => {
       // safeMaterializeReceipt is the ONLY form dispatch.ts calls. It must
       // NEVER throw, regardless of what the projector/write path does.
       expect(() => safeMaterializeReceipt(taskId)).not.toThrow();
+      expect(safeMaterializeAndVerifyReceipt(taskId)).toBe(false);
+      const downstream = vi.fn();
+      const guardedEmit = withVerifiedTerminalReceipt(taskId, downstream as never);
+      guardedEmit('ERROR', 'terminal failure');
+      expect(downstream).not.toHaveBeenCalled();
     } finally {
       // Restore the table so later tests in this file are unaffected —
       // schema.sql is idempotent (CREATE TABLE IF NOT EXISTS).
@@ -214,7 +227,7 @@ describe('TCLAW-4A run receipt projection', () => {
     expect(bareCalls.length).toBe(0);
 
     const guardedCalls = src.match(/safeMaterializeReceipt\(/g) ?? [];
-    // 7 call sites: SUCCESS, BLOCKED, FAILED, CAP_EXCEEDED (TCLAW-1A-core),
+    // 9 call sites: SUCCESS, BLOCKED, FAILED, CAP_EXCEEDED (TCLAW-1A-core),
     // FRONTIER_UNAVAILABLE, emitToolDenied, and C2's FRONTIER
     // structured-grant refusal (§1.4, G2A D-2/N-1) -- a terminal outcome
     // like any other, so it projects a receipt like any other.
@@ -223,7 +236,7 @@ describe('TCLAW-4A run receipt projection', () => {
     // routes (dispatchLegacy and dispatchFailover): both call the shared
     // refuseFrontierGrantedRun terminal. That is the point of factoring it
     // out -- one rule, one terminal, no drift between the routes.
-    expect(guardedCalls.length).toBe(7);
+    expect(guardedCalls.length).toBe(9);
   });
 
   it('(d) no-fabrication: failed task with NULL telemetry -> cost/iterations/elapsed NULL', () => {

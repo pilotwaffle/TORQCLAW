@@ -14,6 +14,7 @@ import CostPanel from './CostPanel';
 import ApprovalHistoryPanel from './ApprovalHistoryPanel';
 import MemoryPanel from './MemoryPanel';
 import ChannelsPanel from './ChannelsPanel';
+import AgentsPanel from './AgentsPanel';
 
 // TCLAW-5B-2 [G1R RC-5 proof, commit 2]: the terminal "copy safe export" chip
 // requires that an ERROR event's requestId equals the taskId GET_SAFE_EXPORT
@@ -39,7 +40,6 @@ import ChannelsPanel from './ChannelsPanel';
 // chip ships.
 
 const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL ?? 'ws://localhost:18790/ws';
-const GATEWAY_TOKEN = process.env.NEXT_PUBLIC_GATEWAY_TOKEN ?? '';
 
 // Redesign 7/7: composer attachments are feature-flagged. KERNEL GAP: the
 // wire carries attachmentIds on SUBMIT_PROMPT, but the gateway exposes NO
@@ -148,8 +148,8 @@ function navItemClass(active: boolean): string {
   }`;
 }
 
-export default function TorqTerminal() {
-  const { events, isConnected, sendCommand, reconnect } = useGatewayStream(GATEWAY_URL, GATEWAY_TOKEN);
+export default function TorqTerminal({ operatorCredential = '' }: { operatorCredential?: string }) {
+  const { events, isConnected, sendCommand, reconnect } = useGatewayStream(GATEWAY_URL, operatorCredential);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [input, setInput] = useState('');
   const [debouncedInput, setDebouncedInput] = useState('');
@@ -165,7 +165,7 @@ export default function TorqTerminal() {
   // three may be open simultaneously, no coordination logic between them.
   const [approvalsOpen, setApprovalsOpen] = useState(false);
   // PRD-UI-1 §1/§3: sidebar view switching.
-  const [view, setView] = useState<'tasks' | 'approvals' | 'memory' | 'channels'>('tasks');
+  const [view, setView] = useState<'tasks' | 'approvals' | 'memory' | 'channels' | 'agents'>('tasks');
   // Stop-button UX: 'requested' once a cancel is sent (button shows "stopping…"),
   // 'failed' if the send was dropped so the user knows to retry. Cleared when the
   // next task starts.
@@ -855,12 +855,20 @@ export default function TorqTerminal() {
               Memory
             </button>
             {COLLAB_UI_ENABLED && (
-              <button type="button" onClick={() => setView('channels')} className={navItemClass(view === 'channels')}>
-                <svg className="h-[15px] w-[15px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-                  <path d="M8 10h8M8 14h5M21 12c0 4.4-4 8-9 8-1.3 0-2.5-.2-3.6-.6L3 21l1.7-4.3C3.6 15.5 3 13.8 3 12c0-4.4 4-8 9-8s9 3.6 9 8Z" />
-                </svg>
-                Channels
-              </button>
+              <>
+                <button type="button" onClick={() => setView('agents')} className={navItemClass(view === 'agents')}>
+                  <svg className="h-[15px] w-[15px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                    <circle cx="12" cy="8" r="4" /><path d="M4 21c.8-5 3.5-7 8-7s7.2 2 8 7" />
+                  </svg>
+                  Agents
+                </button>
+                <button type="button" onClick={() => setView('channels')} className={navItemClass(view === 'channels')}>
+                  <svg className="h-[15px] w-[15px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                    <path d="M8 10h8M8 14h5M21 12c0 4.4-4 8-9 8-1.3 0-2.5-.2-3.6-.6L3 21l1.7-4.3C3.6 15.5 3 13.8 3 12c0-4.4 4-8 9-8s9 3.6 9 8Z" />
+                  </svg>
+                  Channels
+                </button>
+              </>
             )}
           </nav>
           <div className="min-h-0 flex-1 overflow-y-auto px-2.5 pt-2">
@@ -887,8 +895,11 @@ export default function TorqTerminal() {
         {view === 'memory' && (
           <MemoryPanel events={events} sendCommand={sendCommand} onClose={() => setView('tasks')} />
         )}
-        {COLLAB_UI_ENABLED && view === 'channels' && (
+        {COLLAB_UI_ENABLED && view === 'channels' && isConnected && (
           <ChannelsPanel events={events} sendCommand={sendCommand} onClose={() => setView('tasks')} />
+        )}
+        {COLLAB_UI_ENABLED && view === 'agents' && isConnected && (
+          <AgentsPanel events={events} sendCommand={sendCommand} onClose={() => setView('tasks')} />
         )}
       <div
         ref={scrollRef}
@@ -2467,4 +2478,3 @@ function ToolPermissionCard({
     </div>
   );
 }
-

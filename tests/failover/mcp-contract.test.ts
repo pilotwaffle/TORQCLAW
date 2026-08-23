@@ -86,6 +86,22 @@ describe('shared FastMCP contract', () => {
     await expect(pollObservations(active, 0, 9_000, oldKeys)).rejects.toThrow('invalid poll response');
   });
 
+  it('preserves bounded engine provenance from terminal observations', async () => {
+    const result = await pollObservations(active, 0, 9_000, {
+      async callTool() {
+        return jsonResult({
+          status: 'TERMINAL', cursor: 1, terminal: true, terminalCommitted: true,
+          terminalOutcome: 'completed',
+          observations: [{
+            kind: 'result', dispatchAttempted: false, text: 'done',
+            telemetry: { engineUsed: 'hermes:fake', costSource: 'unavailable' },
+          }],
+        });
+      },
+    });
+    expect(result.observations[0]?.telemetry).toMatchObject({ engineUsed: 'hermes:fake' });
+  });
+
   it('accepts only a marker that matches the committed terminal observation', async () => {
     await expect(pollObservations(active, 0, 9_000, {
       async callTool() {

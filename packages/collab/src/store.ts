@@ -86,6 +86,7 @@ export type CollabErrorCode =
   | 'INVALID_REQUEST'
   | 'LAST_OPERATOR_CREDENTIAL'
   | 'IDEMPOTENCY_CONFLICT'
+  | 'PERSONA_REVISION_CONFLICT'
   | 'COLLAB_NOT_PERMITTED'
   | 'COLLAB_NOT_FOUND'
   | 'CHANNEL_ARCHIVED'
@@ -162,6 +163,7 @@ interface ChannelRow {
   state: 'active' | 'archived';
   owner_principal_id: string;
   channel_epoch: number;
+  external_export_policy: 'local_only' | 'operator_confirmed_non_sensitive';
   created_at: string;
   updated_at: string;
 }
@@ -187,6 +189,32 @@ interface EventRow {
   kind: string;
   content_json: string;
   created_at: string;
+}
+
+interface AgentRuntimeProfileRow {
+  agent_principal_id: string;
+  provider_account_id: string;
+  adapter_id: string;
+  model_id: string;
+  autostart: 0 | 1;
+  external_context_confirmed: 0 | 1;
+  external_context_provider_account_id: string | null;
+  external_context_model_id: string | null;
+  external_context_runtime_fingerprint: string | null;
+  external_context_exact_model_id: string | null;
+  external_context_persona_revision: number | null;
+  external_context_persona_content_sha256: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface AgentPersonaRow {
+  agent_principal_id: string;
+  icon_id: AgentIconId;
+  system_directives: string;
+  revision: number;
+  created_at: string;
+  updated_at: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +250,7 @@ export interface RevokeCredentialResult {
 export interface CreateChannelResult {
   channelId: string;
   name: string;
+  externalExportPolicy: 'local_only';
 }
 
 export interface ChannelMemberResult {
@@ -251,6 +280,13 @@ export interface ListChannelsEntry {
   state: 'active' | 'archived';
   role: 'owner' | 'agent';
   lastAcknowledgedCursor: string;
+  externalExportPolicy: 'local_only' | 'operator_confirmed_non_sensitive';
+}
+
+export interface SetChannelExternalExportPolicyResult {
+  channelId: string;
+  externalExportPolicy: 'local_only' | 'operator_confirmed_non_sensitive';
+  updatedAt: string;
 }
 
 export interface ListChannelsResult {
@@ -284,6 +320,125 @@ export interface PostChannelMessageResult {
   eventId: string;
   cursor: string;
   occurredAt: string;
+}
+
+export interface AgentTurnRuntimeSnapshot {
+  providerAccountId: string;
+  adapterId: string;
+  modelId: string;
+  personaRevision: number;
+  runtimeFingerprint?: string | null;
+  exactModelId?: string | null;
+  personaContentSha256?: string | null;
+}
+
+export interface AgentPersonaEnvelope {
+  version: 1;
+  content: string;
+  personaRevision: number;
+  contentSha256: string;
+}
+
+export interface AgentTurnIdentity {
+  channelId: string;
+  agentPrincipalId: string;
+  channelSeq: number;
+  triggerEventId: string;
+}
+
+export interface ClaimedAgentTurn {
+  status: 'claimed' | 'duplicate';
+  identity: AgentTurnIdentity;
+  personaEnvelope: AgentPersonaEnvelope;
+  runtimeProfile: AgentRuntimeProfile;
+}
+
+export interface LegacyAgentTurnRefusal {
+  status: 'legacy_terminated';
+  identity: AgentTurnIdentity;
+}
+
+export type AgentTurnClaimResult = ClaimedAgentTurn | LegacyAgentTurnRefusal;
+
+export interface CommitAgentTurnFallbackInput {
+  channelId: string;
+  agentPrincipalId: string;
+  channelSeq: number;
+  dispatchRequestId: string;
+  recoveryLeaseToken?: string;
+  expectedProfile: AgentTurnRuntimeSnapshot;
+  personaEnvelope: AgentPersonaEnvelope;
+  text: string;
+}
+
+export interface CommitAgentTurnFallbackResult extends PostChannelMessageResult {
+  outputKind: 'tool' | 'fallback';
+  replayed: boolean;
+}
+
+export interface CommitAgentTurnOutputInput extends CommitAgentTurnFallbackInput {
+  outputKind: 'tool' | 'fallback';
+}
+
+export interface AgentRuntimeProfile {
+  agentPrincipalId: string;
+  providerAccountId: string;
+  adapterId: string;
+  modelId: string;
+  autostart: boolean;
+  externalContextConfirmed: boolean;
+  externalContextRuntimeFingerprint: string | null;
+  externalContextExactModelId: string | null;
+  externalContextPersonaRevision: number | null;
+  externalContextPersonaContentSha256: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpsertAgentRuntimeProfileInput {
+  agentPrincipalId: string;
+  providerAccountId: string;
+  adapterId: string;
+  modelId: string;
+  autostart: boolean;
+  externalContextConfirmed: boolean;
+  externalContextRuntimeFingerprint?: string | null;
+  externalContextExactModelId?: string | null;
+  externalContextPersonaRevision?: number | null;
+  externalContextPersonaContentSha256?: string | null;
+}
+
+export interface ProvisionAgentInput extends UpsertAgentRuntimeProfileInput {
+  displayName: string;
+  channelIds: string[];
+}
+
+export interface ProvisionAgentResult extends AgentRuntimeProfile {
+  displayName: string;
+  status: 'active';
+  membershipResults: Array<{ channelId: string; ok: true }>;
+}
+
+export const AGENT_ICON_IDS = ['robot', 'brain', 'shield', 'search', 'code', 'spark', 'bolt', 'target'] as const;
+export type AgentIconId = typeof AGENT_ICON_IDS[number];
+
+export interface AgentPersona {
+  agentPrincipalId: string;
+  iconId: AgentIconId;
+  systemDirectives: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpsertAgentPersonaInput {
+  agentPrincipalId: string;
+  iconId: AgentIconId;
+  systemDirectives: string;
+  expectedRevision: number;
+  reconfirmExternalContext?: boolean;
+  externalContextRuntimeFingerprint?: string | null;
+  externalContextExactModelId?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +510,70 @@ export class Mutex {
 }
 
 export class CollaborationStore {
+  async claimAgentTurn(input: AgentTurnIdentity & { nowIso: string }): Promise<AgentTurnClaimResult> {
+    const identity: AgentTurnIdentity = {
+      channelId: this.normalizeRuntimeIdentifier(input.channelId, 'channelId'),
+      agentPrincipalId: this.normalizeRuntimeIdentifier(input.agentPrincipalId, 'agentPrincipalId'),
+      channelSeq: input.channelSeq,
+      triggerEventId: this.normalizeRuntimeIdentifier(input.triggerEventId, 'triggerEventId'),
+    };
+    if (!Number.isSafeInteger(identity.channelSeq) || identity.channelSeq <= 0) {
+      throw new CollabError('INVALID_REQUEST', 'channelSeq must be a positive safe integer');
+    }
+    return this.withReadThenSequencer(() => this.mutex.withLock(() =>
+      this.runNaturallyIdempotentCommand(identity.agentPrincipalId, 'CLAIM_AGENT_TURN', (tx) => {
+        const existing = tx.prepare(`
+          SELECT trigger_event_id AS triggerEventId, state,
+                 persona_envelope_version AS version, persona_content AS content,
+                 persona_revision AS personaRevision, persona_content_sha256 AS contentSha256
+            FROM collab_agent_turns
+           WHERE channel_id = ? AND agent_principal_id = ? AND channel_seq = ?
+        `).get(identity.channelId, identity.agentPrincipalId, identity.channelSeq) as {
+          triggerEventId: string; state: string; version: number | null; content: string | null;
+          personaRevision: number | null; contentSha256: string | null;
+        } | undefined;
+        if (existing) {
+          if (existing.triggerEventId !== identity.triggerEventId) {
+            throw new CollabError('COLLAB_NOT_PERMITTED', 'Agent turn trigger identity changed');
+          }
+          const absent = existing.version === null && existing.content === null
+            && existing.personaRevision === null && existing.contentSha256 === null;
+          if (absent) {
+            if (existing.state === 'dispatched') {
+              tx.prepare(`UPDATE collab_agent_turns SET state = 'terminated', resolved_at = ?
+                WHERE channel_id = ? AND agent_principal_id = ? AND channel_seq = ? AND state = 'dispatched'`)
+                .run(input.nowIso, identity.channelId, identity.agentPrincipalId, identity.channelSeq);
+            }
+            return { status: 'legacy_terminated', identity };
+          }
+          return {
+            status: 'duplicate',
+            identity,
+            personaEnvelope: this.validatePersonaEnvelope({
+              version: existing.version, content: existing.content,
+              personaRevision: existing.personaRevision, contentSha256: existing.contentSha256,
+            }),
+            runtimeProfile: this.runtimeProfileForClaim(tx, identity.agentPrincipalId),
+          };
+        }
+        const runtimeProfile = this.runtimeProfileForClaim(tx, identity.agentPrincipalId);
+        const persona = tx.prepare(`SELECT system_directives AS systemDirectives, revision
+          FROM collab_agent_personas WHERE agent_principal_id = ?`)
+          .get(identity.agentPrincipalId) as { systemDirectives: string; revision: number } | undefined;
+        const envelope = this.mintPersonaEnvelope(persona?.systemDirectives ?? '', persona?.revision ?? 0);
+        tx.prepare(`INSERT INTO collab_agent_turns(
+          channel_id, agent_principal_id, channel_seq, trigger_event_id, state,
+          dispatch_request_id, dispatched_at, resolved_at,
+          persona_envelope_version, persona_content, persona_revision, persona_content_sha256
+        ) VALUES(?, ?, ?, ?, 'dispatched', NULL, ?, NULL, ?, ?, ?, ?)`)
+          .run(identity.channelId, identity.agentPrincipalId, identity.channelSeq,
+            identity.triggerEventId, input.nowIso, envelope.version, envelope.content,
+            envelope.personaRevision, envelope.contentSha256);
+        return { status: 'claimed', identity, personaEnvelope: envelope, runtimeProfile };
+      }),
+    ));
+  }
+
   private readonly env: CollaborationStoreEnv;
   private readonly mutex = new Mutex();
 
@@ -490,6 +709,496 @@ export class CollaborationStore {
         return { result, redacted, secretBytes: cred.secretBytes };
       })
       )
+    );
+  }
+
+  /**
+   * Atomically provisions a runtime-backed agent. The principal is inserted
+   * suspended and the profile with autostart disabled; only after every
+   * requested membership and event is committed does the same transaction
+   * activate the principal and apply the requested autostart value.
+   *
+   * The live authority callback is deliberately excluded from the hashed
+   * request body and invoked inside the writer transaction immediately before
+   * mutation. It must re-read the authoritative gateway grant/epoch.
+   */
+  async provisionAgent(
+    caller: CallerContext,
+    body: Omit<ProvisionAgentInput, 'agentPrincipalId'>,
+    idempotencyKey: string,
+    hasLiveDelegateAuthority: () => boolean,
+  ): Promise<ProvisionAgentResult> {
+    const normalizedName = normalizeName(body.displayName);
+    if ('error' in normalizedName) throw new CollabError('INVALID_REQUEST', normalizedName.message);
+    const normalizedBody = {
+      displayName: normalizedName.name,
+      providerAccountId: this.normalizeRuntimeIdentifier(body.providerAccountId, 'providerAccountId'),
+      adapterId: this.normalizeRuntimeIdentifier(body.adapterId, 'adapterId'),
+      modelId: this.normalizeRuntimeIdentifier(body.modelId, 'modelId'),
+      autostart: body.autostart,
+      externalContextConfirmed: body.externalContextConfirmed,
+      externalContextRuntimeFingerprint: body.externalContextRuntimeFingerprint ?? null,
+      externalContextExactModelId: body.externalContextExactModelId ?? null,
+      externalContextPersonaRevision: body.externalContextPersonaRevision ?? null,
+      externalContextPersonaContentSha256: body.externalContextPersonaContentSha256 ?? null,
+      channelIds: [...new Set(body.channelIds.map((value) => this.normalizeRuntimeIdentifier(value, 'channelId')))],
+    };
+    if (typeof normalizedBody.autostart !== 'boolean') {
+      throw new CollabError('INVALID_REQUEST', 'autostart must be a boolean');
+    }
+    if (typeof normalizedBody.externalContextConfirmed !== 'boolean') {
+      throw new CollabError('INVALID_REQUEST', 'externalContextConfirmed must be a boolean');
+    }
+    if (normalizedBody.providerAccountId !== 'ollama-local'
+      && (normalizedBody.autostart || normalizedBody.externalContextConfirmed)) {
+      throw new CollabError(
+        'INVALID_REQUEST',
+        'External agents must be created inactive and explicitly reconfirmed after profile creation',
+      );
+    }
+    this.validateExternalContextBinding(normalizedBody);
+    if (
+      normalizedBody.autostart
+      && normalizedBody.providerAccountId !== 'ollama-local'
+      && !normalizedBody.externalContextConfirmed
+    ) {
+      throw new CollabError(
+        'INVALID_REQUEST',
+        'External subscription autostart requires provider/model-specific context export confirmation',
+      );
+    }
+
+    const committed: CommittedChannelEvent[] = [];
+    const result = await runAuthorizationMutation(
+      this.coordinatorDeps(),
+      () => this.mutex.withLock(() => this.runKeyedCommand(
+        caller.principalId,
+        'PROVISION_AGENT',
+        idempotencyKey,
+        normalizedBody,
+        (tx) => {
+          this.assertOperatorCaller(tx, caller);
+          if (!hasLiveDelegateAuthority()) {
+            throw new CollabError('COLLAB_NOT_PERMITTED', 'Live delegate authority is required to provision agents');
+          }
+          for (const channelId of normalizedBody.channelIds) {
+            const channel = this.assertChannelOwner(tx, caller, channelId);
+            if (channel.state === 'archived') {
+              throw new CollabError('CHANNEL_ARCHIVED', 'Channel is archived');
+            }
+          }
+        },
+        (tx) => {
+          const operator = this.getOperatorOrThrow(tx);
+          const agentId = this.env.uuids.next();
+          const createdAt = this.env.clock.next();
+          tx.prepare(
+            'INSERT INTO principals(id, kind, display_name, owner_principal_id, status, auth_epoch, revoked_at, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
+          ).run(agentId, 'agent', normalizedBody.displayName, operator.id, 'suspended', 1, null, createdAt, createdAt);
+
+          tx.prepare(`
+            INSERT INTO collab_agent_runtime_profiles(
+              agent_principal_id, provider_account_id, adapter_id, model_id,
+              autostart, external_context_confirmed,
+              external_context_provider_account_id, external_context_model_id,
+              external_context_runtime_fingerprint, external_context_exact_model_id,
+              external_context_persona_revision, external_context_persona_content_sha256,
+              created_at, updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          `).run(
+            agentId,
+            normalizedBody.providerAccountId,
+            normalizedBody.adapterId,
+            normalizedBody.modelId,
+            0,
+            normalizedBody.externalContextConfirmed ? 1 : 0,
+            normalizedBody.externalContextConfirmed ? normalizedBody.providerAccountId : null,
+            normalizedBody.externalContextConfirmed ? normalizedBody.modelId : null,
+            normalizedBody.externalContextConfirmed ? normalizedBody.externalContextRuntimeFingerprint : null,
+            normalizedBody.externalContextConfirmed ? normalizedBody.externalContextExactModelId : null,
+            normalizedBody.externalContextConfirmed ? normalizedBody.externalContextPersonaRevision : null,
+            normalizedBody.externalContextConfirmed ? normalizedBody.externalContextPersonaContentSha256 : null,
+            createdAt,
+            createdAt,
+          );
+
+          const membershipResults: Array<{ channelId: string; ok: true }> = [];
+          for (const channelId of normalizedBody.channelIds) {
+            const channel = this.getChannelOrThrow(tx, channelId);
+            const rejoinedSeq = this.getMaxChannelSeq(tx, channel.id);
+            const channelSeq = rejoinedSeq + 1;
+            const joinedAt = this.env.clock.next();
+            tx.prepare(
+              'INSERT INTO collab_members(channel_id, principal_id, role, state, membership_epoch, rejoined_seq, joined_at, removed_at) VALUES(?,?,?,?,?,?,?,?)',
+            ).run(channel.id, agentId, 'agent', 'active', 1, rejoinedSeq, joinedAt, null);
+
+            const eventId = this.env.uuids.next();
+            const occurredAt = this.env.clock.next();
+            const payload = { channelId: channel.id, principalId: agentId, membershipEpoch: 1 };
+            tx.prepare(
+              'INSERT INTO collab_events(id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at) VALUES(?,?,?,?,?,?,?,?)',
+            ).run(
+              eventId,
+              1,
+              channel.id,
+              channelSeq,
+              caller.principalId,
+              'member_added',
+              canonicalJson(payload),
+              occurredAt,
+            );
+            committed.push({
+              channelId: channel.id,
+              channelSeq,
+              eventId,
+              kind: 'member_added',
+              actorPrincipalId: caller.principalId,
+              occurredAt,
+              payload,
+            });
+            membershipResults.push({ channelId: channel.id, ok: true });
+          }
+
+          const activatedAt = this.env.clock.next();
+          tx.prepare(
+            'UPDATE collab_agent_runtime_profiles SET autostart = ?, updated_at = ? WHERE agent_principal_id = ?',
+          ).run(normalizedBody.autostart ? 1 : 0, activatedAt, agentId);
+          tx.prepare(
+            "UPDATE principals SET status = 'active', updated_at = ? WHERE id = ? AND status = 'suspended'",
+          ).run(activatedAt, agentId);
+
+          const provisioned: ProvisionAgentResult = {
+            agentPrincipalId: agentId,
+            displayName: normalizedBody.displayName,
+            status: 'active',
+            providerAccountId: normalizedBody.providerAccountId,
+            adapterId: normalizedBody.adapterId,
+            modelId: normalizedBody.modelId,
+            autostart: normalizedBody.autostart,
+            externalContextConfirmed: normalizedBody.externalContextConfirmed,
+            externalContextRuntimeFingerprint: normalizedBody.externalContextRuntimeFingerprint,
+            externalContextExactModelId: normalizedBody.externalContextExactModelId,
+            externalContextPersonaRevision: normalizedBody.externalContextPersonaRevision,
+            externalContextPersonaContentSha256: normalizedBody.externalContextPersonaContentSha256,
+            membershipResults,
+            createdAt,
+            updatedAt: activatedAt,
+          };
+          return { result: provisioned, redacted: provisioned };
+        },
+      )),
+      () => ({ subscriptions: [] }),
+    );
+
+    for (const event of committed) {
+      await fanoutToChannel(
+        {
+          lock: this.lock,
+          registry: this.registry,
+          db: this.env.db,
+          observability: this.observability,
+          nowMs: this.nowMs,
+        },
+        event,
+      );
+    }
+    return result;
+  }
+
+  /** Returns an owned agent's runtime binding without exposing credentials. */
+  async getAgentRuntimeProfile(
+    caller: CallerContext,
+    body: { agentPrincipalId: string },
+  ): Promise<AgentRuntimeProfile | null> {
+    return this.withReadOnly(() => this.runReadCommand(() => {
+      this.assertOperatorCaller(this.env.db, caller);
+      this.assertOwnedAgent(this.env.db, caller, body.agentPrincipalId);
+      const row = this.env.db
+        .prepare('SELECT * FROM collab_agent_runtime_profiles WHERE agent_principal_id = ?')
+        .get(body.agentPrincipalId) as AgentRuntimeProfileRow | undefined;
+      return row ? this.runtimeProfileFromRow(row) : null;
+    }));
+  }
+
+  /**
+   * Creates or replaces an owned agent's runtime binding. The account field is
+   * an opaque catalog reference; secrets remain in the provider/secret layer.
+   */
+  async upsertAgentRuntimeProfile(
+    caller: CallerContext,
+    body: UpsertAgentRuntimeProfileInput,
+    idempotencyKey: string,
+  ): Promise<AgentRuntimeProfile> {
+    const normalizedBody: UpsertAgentRuntimeProfileInput = {
+      agentPrincipalId: this.normalizeRuntimeIdentifier(body.agentPrincipalId, 'agentPrincipalId'),
+      providerAccountId: this.normalizeRuntimeIdentifier(body.providerAccountId, 'providerAccountId'),
+      adapterId: this.normalizeRuntimeIdentifier(body.adapterId, 'adapterId'),
+      modelId: this.normalizeRuntimeIdentifier(body.modelId, 'modelId'),
+      autostart: body.autostart,
+      externalContextConfirmed: body.externalContextConfirmed,
+      externalContextRuntimeFingerprint: body.externalContextRuntimeFingerprint ?? null,
+      externalContextExactModelId: body.externalContextExactModelId ?? null,
+      externalContextPersonaRevision: body.externalContextPersonaRevision ?? null,
+      externalContextPersonaContentSha256: body.externalContextPersonaContentSha256 ?? null,
+    };
+    if (typeof normalizedBody.autostart !== 'boolean') {
+      throw new CollabError('INVALID_REQUEST', 'autostart must be a boolean');
+    }
+    if (typeof normalizedBody.externalContextConfirmed !== 'boolean') {
+      throw new CollabError('INVALID_REQUEST', 'externalContextConfirmed must be a boolean');
+    }
+    this.validateExternalContextBinding(normalizedBody);
+    if (
+      normalizedBody.autostart
+      && normalizedBody.providerAccountId !== 'ollama-local'
+      && !normalizedBody.externalContextConfirmed
+    ) {
+      throw new CollabError(
+        'INVALID_REQUEST',
+        'External subscription autostart requires provider/model-specific context export confirmation',
+      );
+    }
+
+    return this.withReadThenSequencer(() =>
+      this.mutex.withLock(() =>
+        this.runKeyedCommand(
+          caller.principalId,
+          'UPSERT_AGENT_RUNTIME_PROFILE',
+          idempotencyKey,
+          { ...normalizedBody },
+          (tx) => {
+            this.assertOperatorCaller(tx, caller);
+            this.assertOwnedAgent(tx, caller, normalizedBody.agentPrincipalId);
+          },
+          (tx) => {
+            const existing = tx
+              .prepare('SELECT created_at FROM collab_agent_runtime_profiles WHERE agent_principal_id = ?')
+              .get(normalizedBody.agentPrincipalId) as { created_at: string } | undefined;
+            const now = this.env.clock.next();
+            const createdAt = existing?.created_at ?? now;
+            let effectivePersonaRevision = normalizedBody.externalContextPersonaRevision ?? null;
+            let effectivePersonaContentSha256 = normalizedBody.externalContextPersonaContentSha256 ?? null;
+            if (normalizedBody.externalContextConfirmed
+              && normalizedBody.providerAccountId !== 'ollama-local') {
+              const persona = tx.prepare(`
+                SELECT system_directives AS systemDirectives, revision
+                  FROM collab_agent_personas WHERE agent_principal_id = ?
+              `).get(normalizedBody.agentPrincipalId) as {
+                systemDirectives: string;
+                revision: number;
+              } | undefined;
+              const canonicalContent = persona?.systemDirectives ?? '';
+              const derivedRevision = canonicalContent === '' ? 0 : persona!.revision;
+              const derivedHash = createHash('sha256').update(canonicalContent, 'utf8').digest('hex');
+              if (effectivePersonaRevision !== derivedRevision
+                || effectivePersonaContentSha256 !== derivedHash) {
+                throw new CollabError('INVALID_REQUEST', 'External consent persona binding is stale');
+              }
+              effectivePersonaRevision = derivedRevision;
+              effectivePersonaContentSha256 = derivedHash;
+            }
+
+            tx.prepare(`
+              INSERT INTO collab_agent_runtime_profiles(
+                agent_principal_id, provider_account_id, adapter_id, model_id,
+                autostart, external_context_confirmed,
+                external_context_provider_account_id, external_context_model_id,
+                external_context_runtime_fingerprint, external_context_exact_model_id,
+                external_context_persona_revision, external_context_persona_content_sha256,
+                created_at, updated_at
+              ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+              ON CONFLICT(agent_principal_id) DO UPDATE SET
+                provider_account_id=excluded.provider_account_id,
+                adapter_id=excluded.adapter_id,
+                model_id=excluded.model_id,
+                autostart=excluded.autostart,
+                external_context_confirmed=excluded.external_context_confirmed,
+                external_context_provider_account_id=excluded.external_context_provider_account_id,
+                external_context_model_id=excluded.external_context_model_id,
+                external_context_runtime_fingerprint=excluded.external_context_runtime_fingerprint,
+                external_context_exact_model_id=excluded.external_context_exact_model_id,
+                external_context_persona_revision=excluded.external_context_persona_revision,
+                external_context_persona_content_sha256=excluded.external_context_persona_content_sha256,
+                updated_at=excluded.updated_at
+            `).run(
+              normalizedBody.agentPrincipalId,
+              normalizedBody.providerAccountId,
+              normalizedBody.adapterId,
+              normalizedBody.modelId,
+              normalizedBody.autostart ? 1 : 0,
+              normalizedBody.externalContextConfirmed ? 1 : 0,
+              normalizedBody.externalContextConfirmed ? normalizedBody.providerAccountId : null,
+              normalizedBody.externalContextConfirmed ? normalizedBody.modelId : null,
+              normalizedBody.externalContextConfirmed ? normalizedBody.externalContextRuntimeFingerprint : null,
+              normalizedBody.externalContextConfirmed ? normalizedBody.externalContextExactModelId : null,
+              normalizedBody.externalContextConfirmed ? effectivePersonaRevision : null,
+              normalizedBody.externalContextConfirmed ? effectivePersonaContentSha256 : null,
+              createdAt,
+              now,
+            );
+
+            const result: AgentRuntimeProfile = {
+              ...normalizedBody,
+              externalContextRuntimeFingerprint: normalizedBody.externalContextRuntimeFingerprint ?? null,
+              externalContextExactModelId: normalizedBody.externalContextExactModelId ?? null,
+              externalContextPersonaRevision: effectivePersonaRevision,
+              externalContextPersonaContentSha256: effectivePersonaContentSha256,
+              createdAt,
+              updatedAt: now,
+            };
+            return { result, redacted: result };
+          },
+        ),
+      ),
+    );
+  }
+
+  async upsertAgentPersona(
+    caller: CallerContext,
+    body: UpsertAgentPersonaInput,
+    idempotencyKey: string,
+    hasLiveDelegateAuthority: () => boolean,
+  ): Promise<AgentPersona> {
+    const agentPrincipalId = this.normalizeRuntimeIdentifier(body.agentPrincipalId, 'agentPrincipalId');
+    const iconId = this.normalizeAgentIcon(body.iconId);
+    const systemDirectives = this.normalizeSystemDirectives(body.systemDirectives);
+    if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 0) {
+      throw new CollabError('INVALID_REQUEST', 'expectedRevision must be a non-negative integer');
+    }
+    const expectedRevision = body.expectedRevision;
+    const reconfirmExternalContext = body.reconfirmExternalContext === true;
+    const externalContextRuntimeFingerprint = body.externalContextRuntimeFingerprint ?? null;
+    const externalContextExactModelId = body.externalContextExactModelId ?? null;
+    if (reconfirmExternalContext
+      && (!/^[a-f0-9]{64}$/.test(externalContextRuntimeFingerprint ?? '')
+        || !externalContextExactModelId)) {
+      throw new CollabError('INVALID_REQUEST', 'External subscription reconfirmation binding is incomplete');
+    }
+    if (!reconfirmExternalContext
+      && (externalContextRuntimeFingerprint !== null || externalContextExactModelId !== null)) {
+      throw new CollabError('INVALID_REQUEST', 'Disabled external reconfirmation cannot retain a binding');
+    }
+    const normalizedBody = {
+      agentPrincipalId,
+      iconId,
+      systemDirectives,
+      expectedRevision,
+      reconfirmExternalContext,
+      externalContextRuntimeFingerprint,
+      externalContextExactModelId,
+    };
+
+    return this.withReadThenSequencer(() =>
+      this.mutex.withLock(() =>
+        this.runKeyedCommand(
+          caller.principalId,
+          'UPSERT_AGENT_PERSONA',
+          idempotencyKey,
+          normalizedBody,
+          (tx) => {
+            this.assertOperatorCaller(tx, caller);
+            if (!hasLiveDelegateAuthority()) {
+              throw new CollabError('COLLAB_NOT_PERMITTED', 'Live delegate authority is required to edit agents');
+            }
+            this.assertOwnedAgent(tx, caller, agentPrincipalId);
+          },
+          (tx) => {
+            const existing = tx.prepare(
+              `SELECT created_at, revision, system_directives
+                 FROM collab_agent_personas WHERE agent_principal_id = ?`,
+            ).get(agentPrincipalId) as {
+              created_at: string;
+              revision: number;
+              system_directives: string;
+            } | undefined;
+            const now = this.env.clock.next();
+            const createdAt = existing?.created_at ?? now;
+            let revision: number;
+            if (!existing) {
+              if (expectedRevision !== 0) {
+                throw new CollabError('PERSONA_REVISION_CONFLICT', 'Agent profile changed; reload it before saving');
+              }
+              tx.prepare(`
+                INSERT INTO collab_agent_personas(
+                  agent_principal_id, icon_id, system_directives, revision, created_at, updated_at
+                ) VALUES(?,?,?,?,?,?)
+              `).run(agentPrincipalId, iconId, systemDirectives, 1, createdAt, now);
+              revision = 1;
+            } else {
+              if (expectedRevision !== existing.revision) {
+                throw new CollabError('PERSONA_REVISION_CONFLICT', 'Agent profile changed; reload it before saving');
+              }
+              const update = tx.prepare(`
+                UPDATE collab_agent_personas
+                   SET icon_id = ?, system_directives = ?, revision = revision + 1, updated_at = ?
+                 WHERE agent_principal_id = ? AND revision = ?
+              `).run(iconId, systemDirectives, now, agentPrincipalId, expectedRevision) as { changes: number };
+              if (update.changes !== 1) {
+                throw new CollabError('PERSONA_REVISION_CONFLICT', 'Agent profile changed; reload it before saving');
+              }
+              revision = expectedRevision + 1;
+            }
+            // Every persona mutation advances the claimed snapshot identity.
+            // Revoke the old external binding even for icon-only edits, then
+            // optionally install one new binding from the just-written
+            // canonical persona in this same keyed transaction.
+            tx.prepare(`
+              UPDATE collab_agent_runtime_profiles
+                 SET autostart = 0,
+                     external_context_confirmed = 0,
+                     external_context_provider_account_id = NULL,
+                     external_context_model_id = NULL,
+                     external_context_runtime_fingerprint = NULL,
+                     external_context_exact_model_id = NULL,
+                     external_context_persona_revision = NULL,
+                     external_context_persona_content_sha256 = NULL,
+                     updated_at = ?
+               WHERE agent_principal_id = ? AND provider_account_id <> 'ollama-local'
+            `).run(now, agentPrincipalId);
+            if (reconfirmExternalContext) {
+              const profile = tx.prepare(`
+                SELECT provider_account_id AS providerAccountId, model_id AS modelId
+                  FROM collab_agent_runtime_profiles WHERE agent_principal_id = ?
+              `).get(agentPrincipalId) as { providerAccountId: string; modelId: string } | undefined;
+              if (!profile || profile.providerAccountId === 'ollama-local'
+                || externalContextExactModelId !== profile.modelId) {
+                throw new CollabError('INVALID_REQUEST', 'External subscription reconfirmation target changed');
+              }
+              const personaRevision = systemDirectives === '' ? 0 : revision;
+              const personaContentSha256 = createHash('sha256').update(systemDirectives, 'utf8').digest('hex');
+              tx.prepare(`
+                UPDATE collab_agent_runtime_profiles
+                   SET autostart = 1,
+                       external_context_confirmed = 1,
+                       external_context_provider_account_id = provider_account_id,
+                       external_context_model_id = model_id,
+                       external_context_runtime_fingerprint = ?,
+                       external_context_exact_model_id = ?,
+                       external_context_persona_revision = ?,
+                       external_context_persona_content_sha256 = ?,
+                       updated_at = ?
+                 WHERE agent_principal_id = ? AND provider_account_id <> 'ollama-local'
+              `).run(
+                externalContextRuntimeFingerprint,
+                externalContextExactModelId,
+                personaRevision,
+                personaContentSha256,
+                now,
+                agentPrincipalId,
+              );
+            }
+            const result: AgentPersona = {
+              agentPrincipalId,
+              iconId,
+              systemDirectives,
+              revision,
+              createdAt,
+              updatedAt: now,
+            };
+            return { result, redacted: result };
+          },
+        ),
+      ),
     );
   }
 
@@ -1031,9 +1740,9 @@ export class CollaborationStore {
           try {
             tx
               .prepare(
-                'INSERT INTO collab_channels(id, name, name_key, state, owner_principal_id, channel_epoch, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)'
+                "INSERT INTO collab_channels(id, name, name_key, state, owner_principal_id, channel_epoch, external_export_policy, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)"
               )
-              .run(channelId, normalizedBody.name, key, 'active', operator.id, 1, now, now);
+              .run(channelId, normalizedBody.name, key, 'active', operator.id, 1, 'local_only', now, now);
           } catch (err) {
             throw this.mapChannelNameConflict(err);
           }
@@ -1063,12 +1772,54 @@ export class CollaborationStore {
               eventNow
             );
 
-          const result: CreateChannelResult = { channelId, name: normalizedBody.name };
+          const result: CreateChannelResult = {
+            channelId,
+            name: normalizedBody.name,
+            externalExportPolicy: 'local_only',
+          };
           return { result, redacted: result };
         }
       )
       )
     );
+  }
+
+  async setChannelExternalExportPolicy(
+    caller: CallerContext,
+    body: { channelId: string; externalExportPolicy: 'local_only' | 'operator_confirmed_non_sensitive' },
+    idempotencyKey: string,
+  ): Promise<SetChannelExternalExportPolicyResult> {
+    const channelId = this.normalizeRuntimeIdentifier(body.channelId, 'channelId');
+    if (!['local_only', 'operator_confirmed_non_sensitive'].includes(body.externalExportPolicy)) {
+      throw new CollabError('INVALID_REQUEST', 'Invalid channel external export policy');
+    }
+    const normalizedBody = { channelId, externalExportPolicy: body.externalExportPolicy };
+    return this.withReadThenSequencer(() => this.mutex.withLock(() => this.runKeyedCommand(
+      caller.principalId,
+      'SET_CHANNEL_EXTERNAL_EXPORT_POLICY',
+      idempotencyKey,
+      normalizedBody,
+      (tx) => { this.assertChannelOwner(tx, caller, channelId); },
+      (tx) => {
+        const channel = this.assertChannelOwner(tx, caller, channelId);
+        const now = this.env.clock.next();
+        tx.prepare('UPDATE collab_channels SET external_export_policy = ?, updated_at = ? WHERE id = ?')
+          .run(normalizedBody.externalExportPolicy, now, channelId);
+        tx.prepare(`INSERT INTO collab_channel_export_policy_audit(
+          id, channel_id, actor_principal_id, prior_policy, new_policy, idempotency_key, created_at
+        ) VALUES(?,?,?,?,?,?,?)`).run(
+          this.env.uuids.next(), channelId, caller.principalId,
+          channel.external_export_policy, normalizedBody.externalExportPolicy,
+          idempotencyKey, now,
+        );
+        const result: SetChannelExternalExportPolicyResult = {
+          channelId,
+          externalExportPolicy: normalizedBody.externalExportPolicy,
+          updatedAt: now,
+        };
+        return { result, redacted: result };
+      },
+    )));
   }
 
   async addChannelMember(
@@ -1580,6 +2331,266 @@ export class CollaborationStore {
     return result;
   }
 
+  async commitAgentTurnFallbackOutput(
+    body: CommitAgentTurnFallbackInput,
+  ): Promise<CommitAgentTurnFallbackResult> {
+    return this.commitAgentTurnOutput({ ...body, outputKind: 'fallback' });
+  }
+
+  async commitAgentTurnToolOutput(
+    body: CommitAgentTurnFallbackInput,
+  ): Promise<CommitAgentTurnFallbackResult> {
+    return this.commitAgentTurnOutput({ ...body, outputKind: 'tool' });
+  }
+
+  private async commitAgentTurnOutput(
+    body: CommitAgentTurnOutputInput,
+  ): Promise<CommitAgentTurnFallbackResult> {
+    const agentPrincipalId = this.normalizeRuntimeIdentifier(body.agentPrincipalId, 'agentPrincipalId');
+    const dispatchRequestId = this.normalizeRuntimeIdentifier(body.dispatchRequestId, 'dispatchRequestId');
+    if (!Number.isSafeInteger(body.channelSeq) || body.channelSeq <= 0) {
+      throw new CollabError('INVALID_REQUEST', 'channelSeq must be a positive safe integer');
+    }
+    if (!Number.isInteger(body.expectedProfile.personaRevision) || body.expectedProfile.personaRevision < 0) {
+      throw new CollabError('INVALID_REQUEST', 'personaRevision must be a non-negative integer');
+    }
+    const expectedProfile: AgentTurnRuntimeSnapshot = {
+      providerAccountId: this.normalizeRuntimeIdentifier(
+        body.expectedProfile.providerAccountId,
+        'providerAccountId',
+      ),
+      adapterId: this.normalizeRuntimeIdentifier(body.expectedProfile.adapterId, 'adapterId'),
+      modelId: this.normalizeRuntimeIdentifier(body.expectedProfile.modelId, 'modelId'),
+      personaRevision: body.expectedProfile.personaRevision,
+      runtimeFingerprint: body.expectedProfile.runtimeFingerprint ?? null,
+      exactModelId: body.expectedProfile.exactModelId ?? null,
+      personaContentSha256: body.expectedProfile.personaContentSha256 ?? null,
+    };
+    const executionEnvelope = this.validatePersonaEnvelope(body.personaEnvelope);
+    if (expectedProfile.personaRevision !== executionEnvelope.personaRevision) {
+      throw new CollabError('INVALID_REQUEST', 'Execution profile and persona envelope revisions differ');
+    }
+    const normalized = normalizeMessageText(body.text);
+    if ('error' in normalized) throw new CollabError('INVALID_REQUEST', normalized.message);
+    const recoveryLeaseToken = body.recoveryLeaseToken?.trim() || null;
+    let committed: CommittedChannelEvent | undefined;
+
+    const result = await this.withReadThenSequencer(() =>
+      this.mutex.withLock(() =>
+        this.runNaturallyIdempotentCommand(agentPrincipalId, 'COMMIT_AGENT_TURN_FALLBACK', (tx) => {
+          const turn = tx.prepare(`
+            SELECT state, dispatch_request_id AS dispatchRequestId,
+                   output_event_id AS outputEventId, output_kind AS outputKind,
+                   recovery_lease_token AS recoveryLeaseToken,
+                   persona_envelope_version AS personaVersion,
+                   persona_content AS personaContent,
+                   persona_revision AS personaRevision,
+                   persona_content_sha256 AS personaContentSha256
+              FROM collab_agent_turns
+             WHERE channel_id = ? AND agent_principal_id = ? AND channel_seq = ?
+          `).get(body.channelId, agentPrincipalId, body.channelSeq) as {
+            state: string;
+            dispatchRequestId: string | null;
+            outputEventId: string | null;
+            outputKind: 'tool' | 'fallback' | null;
+            recoveryLeaseToken: string | null;
+            personaVersion: number | null;
+            personaContent: string | null;
+            personaRevision: number | null;
+            personaContentSha256: string | null;
+          } | undefined;
+          if (!turn || turn.dispatchRequestId !== dispatchRequestId) {
+            throw new CollabError('COLLAB_NOT_PERMITTED', 'Agent turn ownership could not be verified');
+          }
+          const leaseMatches = recoveryLeaseToken === null
+            ? turn.recoveryLeaseToken === null
+            : turn.recoveryLeaseToken === recoveryLeaseToken;
+          if (!leaseMatches) {
+            throw new CollabError('COLLAB_NOT_PERMITTED', 'Agent turn recovery lease is not current');
+          }
+          const claimedEnvelope = this.validatePersonaEnvelope({
+            version: turn.personaVersion,
+            content: turn.personaContent,
+            personaRevision: turn.personaRevision,
+            contentSha256: turn.personaContentSha256,
+          });
+          if (!this.personaEnvelopesEqual(claimedEnvelope, executionEnvelope)) {
+            throw new CollabError('COLLAB_NOT_PERMITTED', 'Execution persona does not match the claimed snapshot');
+          }
+          // Replay is intentionally resolved before live authorization is
+          // re-read. Once an output event is atomically bound, an exact retry
+          // returns that immutable event even if persona/runtime membership
+          // changes later. Only a fresh write is subject to the live checks
+          // below; moving this arm after them would make authorized retries
+          // non-idempotent and strand already-committed output.
+          if (turn.outputEventId) {
+            const event = tx.prepare(`
+              SELECT id AS eventId, channel_seq AS channelSeq, created_at AS occurredAt
+                FROM collab_events WHERE id = ? AND channel_id = ?
+            `).get(turn.outputEventId, body.channelId) as {
+              eventId: string;
+              channelSeq: number;
+              occurredAt: string;
+            } | undefined;
+            if (!event || turn.outputKind === null) {
+              throw new CollabError('COLLAB_NOT_PERMITTED', 'Agent turn output is already bound');
+            }
+            return {
+              eventId: event.eventId,
+              cursor: String(event.channelSeq),
+              occurredAt: event.occurredAt,
+              outputKind: turn.outputKind,
+              replayed: true,
+            };
+          }
+          if (turn.state !== 'dispatched') {
+            throw new CollabError('COLLAB_NOT_PERMITTED', 'Agent turn is not dispatchable');
+          }
+
+          const live = tx.prepare(`
+            SELECT p.kind, p.status AS principalStatus, c.state AS channelState,
+                   m.state AS memberState,
+                   r.provider_account_id AS providerAccountId,
+                   r.adapter_id AS adapterId,
+                   r.model_id AS modelId,
+                   r.autostart,
+                    COALESCE(persona.system_directives, '') AS personaContent,
+                    COALESCE(persona.revision, 0) AS personaRevision,
+                    r.external_context_confirmed AS externalContextConfirmed,
+                    r.external_context_provider_account_id AS externalContextProviderAccountId,
+                    r.external_context_model_id AS externalContextModelId,
+                    r.external_context_runtime_fingerprint AS externalContextRuntimeFingerprint,
+                    r.external_context_exact_model_id AS externalContextExactModelId,
+                    r.external_context_persona_revision AS externalContextPersonaRevision,
+                    r.external_context_persona_content_sha256 AS externalContextPersonaContentSha256
+              FROM principals p
+              JOIN collab_channels c ON c.id = ?
+              JOIN collab_members m ON m.channel_id = c.id AND m.principal_id = p.id
+              JOIN collab_agent_runtime_profiles r ON r.agent_principal_id = p.id
+              LEFT JOIN collab_agent_personas persona ON persona.agent_principal_id = p.id
+             WHERE p.id = ?
+          `).get(body.channelId, agentPrincipalId) as {
+            kind: string;
+            principalStatus: string;
+            channelState: string;
+            memberState: string;
+            providerAccountId: string;
+            adapterId: string;
+            modelId: string;
+            autostart: number;
+            personaRevision: number;
+            personaContent: string;
+            externalContextConfirmed: number;
+            externalContextProviderAccountId: string | null;
+            externalContextModelId: string | null;
+            externalContextRuntimeFingerprint: string | null;
+            externalContextExactModelId: string | null;
+            externalContextPersonaRevision: number | null;
+            externalContextPersonaContentSha256: string | null;
+          } | undefined;
+          const liveEnvelope = live
+            ? this.mintPersonaEnvelope(live.personaContent, live.personaRevision)
+            : null;
+          const externalBindingValid = expectedProfile.providerAccountId === 'ollama-local'
+            || (live?.externalContextConfirmed === 1
+              && live.externalContextProviderAccountId === expectedProfile.providerAccountId
+              && live.externalContextModelId === expectedProfile.modelId
+              && live.externalContextRuntimeFingerprint === expectedProfile.runtimeFingerprint
+              && live.externalContextExactModelId === expectedProfile.exactModelId
+              && live.externalContextPersonaRevision === expectedProfile.personaRevision
+              && live.externalContextPersonaContentSha256 === expectedProfile.personaContentSha256);
+          const stopped = tx.prepare(`
+            SELECT 1 FROM collab_autoreply_stop
+             WHERE scope = 'global' OR (scope = 'channel' AND channel_id = ?)
+             LIMIT 1
+          `).get(body.channelId) !== undefined;
+          const authorized = live?.kind === 'agent'
+            && live.principalStatus === 'active'
+            && live.channelState === 'active'
+            && live.memberState === 'active'
+            && live.autostart === 1
+            && live.providerAccountId === expectedProfile.providerAccountId
+            && live.adapterId === expectedProfile.adapterId
+            && live.modelId === expectedProfile.modelId
+            && liveEnvelope !== null
+            && this.personaEnvelopesEqual(liveEnvelope, claimedEnvelope)
+            && externalBindingValid
+            && !stopped;
+          if (!authorized) {
+            throw new CollabError('COLLAB_NOT_PERMITTED', 'Live agent turn authorization changed');
+          }
+
+          const nextSeq = this.getMaxChannelSeq(tx, body.channelId) + 1;
+          const eventId = this.env.uuids.next();
+          const occurredAt = this.env.clock.next();
+          tx.prepare(`
+            INSERT INTO collab_events(
+              id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at
+            ) VALUES(?, 1, ?, ?, ?, 'message_posted', ?, ?)
+          `).run(
+            eventId,
+            body.channelId,
+            nextSeq,
+            agentPrincipalId,
+            canonicalJson({ channelId: body.channelId, text: normalized.text }),
+            occurredAt,
+          );
+          const bound = tx.prepare(`
+            UPDATE collab_agent_turns
+               SET output_event_id = ?, output_kind = ?, state = 'completed',
+                   resolved_at = ?
+             WHERE channel_id = ? AND agent_principal_id = ? AND channel_seq = ?
+               AND state = 'dispatched' AND output_event_id IS NULL
+               AND dispatch_request_id = ?
+               AND recovery_lease_token IS ?
+          `).run(
+            eventId,
+            body.outputKind,
+            occurredAt,
+            body.channelId,
+            agentPrincipalId,
+            body.channelSeq,
+            dispatchRequestId,
+            recoveryLeaseToken,
+          ) as { changes: number | bigint };
+          if (Number(bound.changes) !== 1) {
+            throw new CollabError('COLLAB_NOT_PERMITTED', 'Agent turn output ownership changed');
+          }
+          committed = {
+            channelId: body.channelId,
+            channelSeq: nextSeq,
+            eventId,
+            kind: 'message_posted',
+            actorPrincipalId: agentPrincipalId,
+            occurredAt,
+            payload: { channelId: body.channelId, text: normalized.text },
+          };
+          return {
+            eventId,
+            cursor: String(nextSeq),
+            occurredAt,
+            outputKind: body.outputKind,
+            replayed: false,
+          };
+        }),
+      ),
+    );
+
+    if (committed) {
+      await fanoutToChannel(
+        {
+          lock: this.lock,
+          registry: this.registry,
+          db: this.env.db,
+          observability: this.observability,
+          nowMs: this.nowMs,
+        },
+        committed,
+      );
+    }
+    return result;
+  }
+
   /**
    * ACK_CHANNEL_CURSOR: naturally-idempotent path (C1). Takes the sequencer
    * mutex and BEGIN IMMEDIATE, runs its predicate in-transaction, but NEVER
@@ -1835,7 +2846,9 @@ export class CollaborationStore {
       const stateFilter = body.includeArchived ? "('active','archived')" : "('active')";
       const rows = db
         .prepare(
-          `SELECT c.id as channel_id, c.name as name, c.state as state, m.role as role, m.membership_epoch as membership_epoch
+          `SELECT c.id as channel_id, c.name as name, c.state as state,
+                  c.external_export_policy as external_export_policy,
+                  m.role as role, m.membership_epoch as membership_epoch
            FROM collab_channels c
            JOIN collab_members m ON m.channel_id = c.id
            WHERE m.principal_id = ? AND m.state = 'active' AND c.state IN ${stateFilter}
@@ -1849,6 +2862,7 @@ export class CollaborationStore {
         state: 'active' | 'archived';
         role: 'owner' | 'agent';
         membership_epoch: number;
+        external_export_policy: 'local_only' | 'operator_confirmed_non_sensitive';
       }>;
 
       // Frame-cut (H3): trim to the 64 KiB result-frame bound in addition
@@ -1875,6 +2889,7 @@ export class CollaborationStore {
           state: row.state,
           role: row.role,
           lastAcknowledgedCursor: cursorRow ? String(cursorRow.acknowledged_seq) : '0',
+          externalExportPolicy: row.external_export_policy,
         };
 
         const entryBytes = encoder.encode(JSON.stringify(entry)).length;
@@ -2062,6 +3077,140 @@ export class CollaborationStore {
       throw new CollabError('INVALID_REQUEST', `${principalId} is not an agent principal`);
     }
     return row;
+  }
+
+  private assertOwnedAgent(tx: BootstrapDb, caller: CallerContext, principalId: string): PrincipalRow {
+    const agent = this.getAgentTargetOrThrow(tx, principalId);
+    if (agent.owner_principal_id !== caller.principalId) {
+      throw new CollabError('COLLAB_NOT_PERMITTED', 'Agent is not owned by the invoking operator');
+    }
+    return agent;
+  }
+
+  private normalizeRuntimeIdentifier(value: unknown, field: string): string {
+    if (typeof value !== 'string') {
+      throw new CollabError('INVALID_REQUEST', `${field} must be a string`);
+    }
+    const normalized = value.normalize('NFC').trim();
+    if (normalized.length === 0 || normalized.length > 200 || /[\u0000-\u001f\u007f]/.test(normalized)) {
+      throw new CollabError('INVALID_REQUEST', `${field} must contain 1-200 printable characters`);
+    }
+    return normalized;
+  }
+
+  private normalizeAgentIcon(value: unknown): AgentIconId {
+    if (typeof value !== 'string' || !AGENT_ICON_IDS.includes(value as AgentIconId)) {
+      throw new CollabError('INVALID_REQUEST', 'iconId is not an allowed agent icon');
+    }
+    return value as AgentIconId;
+  }
+
+  private normalizeSystemDirectives(value: unknown): string {
+    if (typeof value !== 'string') {
+      throw new CollabError('INVALID_REQUEST', 'systemDirectives must be a string');
+    }
+    const normalized = value.normalize('NFC').trim();
+    if (normalized.length > 4000) {
+      throw new CollabError('INVALID_REQUEST', 'systemDirectives must contain at most 4000 characters');
+    }
+    if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/u.test(normalized)) {
+      throw new CollabError('INVALID_REQUEST', 'systemDirectives contain forbidden control characters');
+    }
+    return normalized;
+  }
+
+  private mintPersonaEnvelope(source: unknown, revision: number): AgentPersonaEnvelope {
+    const content = this.normalizeSystemDirectives(source);
+    if (content === '') {
+      return {
+        version: 1,
+        content: '',
+        personaRevision: 0,
+        contentSha256: createHash('sha256').update('', 'utf8').digest('hex'),
+      };
+    }
+    if (!Number.isInteger(revision) || revision <= 0) {
+      throw new CollabError('COLLAB_NOT_PERMITTED', 'Nonblank persona has no valid revision');
+    }
+    return {
+      version: 1,
+      content,
+      personaRevision: revision,
+      contentSha256: createHash('sha256').update(content, 'utf8').digest('hex'),
+    };
+  }
+
+  private validatePersonaEnvelope(value: {
+    version: unknown; content: unknown; personaRevision: unknown; contentSha256: unknown;
+  } | undefined): AgentPersonaEnvelope {
+    if (!value || value.version !== 1 || typeof value.content !== 'string'
+      || !Number.isInteger(value.personaRevision) || (value.personaRevision as number) < 0
+      || typeof value.contentSha256 !== 'string') {
+      throw new CollabError('COLLAB_NOT_PERMITTED', 'Agent turn persona envelope is missing or malformed');
+    }
+    const content = this.normalizeSystemDirectives(value.content);
+    const hash = createHash('sha256').update(content, 'utf8').digest('hex');
+    if (content !== value.content || hash !== value.contentSha256
+      || (content === '' && value.personaRevision !== 0)) {
+      throw new CollabError('COLLAB_NOT_PERMITTED', 'Agent turn persona envelope failed integrity validation');
+    }
+    return { version: 1, content, personaRevision: value.personaRevision as number, contentSha256: hash };
+  }
+
+  private personaEnvelopesEqual(left: AgentPersonaEnvelope, right: AgentPersonaEnvelope): boolean {
+    return left.version === right.version && left.content === right.content
+      && left.personaRevision === right.personaRevision && left.contentSha256 === right.contentSha256;
+  }
+
+  private runtimeProfileForClaim(tx: BootstrapDb, agentPrincipalId: string): AgentRuntimeProfile {
+    const row = tx.prepare('SELECT * FROM collab_agent_runtime_profiles WHERE agent_principal_id = ?')
+      .get(agentPrincipalId) as AgentRuntimeProfileRow | undefined;
+    if (!row) throw new CollabError('COLLAB_NOT_PERMITTED', 'Agent runtime profile is unavailable');
+    return this.runtimeProfileFromRow(row);
+  }
+
+  private runtimeProfileFromRow(row: AgentRuntimeProfileRow): AgentRuntimeProfile {
+    return {
+      agentPrincipalId: row.agent_principal_id,
+      providerAccountId: row.provider_account_id,
+      adapterId: row.adapter_id,
+      modelId: row.model_id,
+      autostart: row.autostart === 1,
+      externalContextConfirmed:
+        row.external_context_confirmed === 1
+        && row.external_context_provider_account_id === row.provider_account_id
+        && row.external_context_model_id === row.model_id,
+      externalContextRuntimeFingerprint: row.external_context_runtime_fingerprint,
+      externalContextExactModelId: row.external_context_exact_model_id,
+      externalContextPersonaRevision: row.external_context_persona_revision,
+      externalContextPersonaContentSha256: row.external_context_persona_content_sha256,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private validateExternalContextBinding(body: Pick<
+    UpsertAgentRuntimeProfileInput,
+    'providerAccountId' | 'modelId' | 'externalContextConfirmed'
+      | 'externalContextRuntimeFingerprint' | 'externalContextExactModelId'
+      | 'externalContextPersonaRevision' | 'externalContextPersonaContentSha256'
+  >): void {
+    if (!body.externalContextConfirmed) {
+      if (body.externalContextRuntimeFingerprint !== null
+        || body.externalContextExactModelId !== null
+        || body.externalContextPersonaRevision !== null
+        || body.externalContextPersonaContentSha256 !== null) {
+        throw new CollabError('INVALID_REQUEST', 'Disabled external consent cannot retain a binding');
+      }
+      return;
+    }
+    if (!/^[a-f0-9]{64}$/.test(body.externalContextRuntimeFingerprint ?? '')
+      || body.externalContextExactModelId !== body.modelId
+      || !Number.isInteger(body.externalContextPersonaRevision)
+      || (body.externalContextPersonaRevision ?? -1) < 0
+      || !/^[a-f0-9]{64}$/.test(body.externalContextPersonaContentSha256 ?? '')) {
+      throw new CollabError('INVALID_REQUEST', 'External subscription consent binding is incomplete');
+    }
   }
 
   private getOperatorOrThrow(tx: BootstrapDb): PrincipalRow {

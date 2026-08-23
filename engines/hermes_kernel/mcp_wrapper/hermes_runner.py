@@ -39,6 +39,29 @@ class MalformedProviderResponseError(Exception):
     """The provider returned a response outside the runner contract."""
 
 
+class HermesTaskFailedError(Exception):
+    """The vendored agent returned {"failed": True, ...} instead of raising.
+
+    conversation_loop.py's retry-exhaustion / no-fallback / policy-block /
+    generic-API-error branches (verified at :852, :3093, :3203-3216 and
+    others) all return this shape rather than raise, carrying a free-text
+    `error` and an optional `failure_reason` (a vendored FailoverReason
+    value, only present at :3208). This wrapper turns that structured
+    signal into an exception so it flows through the same normalize/finish
+    path as every other typed runner failure instead of being read as a
+    successful `final_response` string by the caller.
+
+    `failure_reason` is carried for classification only (see
+    normalize_provider_failure) — never surfaced as raw text; `error` is
+    NOT stored on `args`/`str(self)` so an incidental `str(exc)` fallback
+    can never leak vendor-authored prose (invariant 9)."""
+
+    def __init__(self, failure_reason: str | None, error: str | None):
+        super().__init__()
+        self.failure_reason = failure_reason
+        self.error = error
+
+
 def _response_status(value) -> int | None:
     response = value.get("response") if isinstance(value, Mapping) else getattr(value, "response", None)
     candidate = value.get("status_code") if isinstance(value, Mapping) else getattr(value, "status_code", None)
@@ -49,6 +72,55 @@ def _response_status(value) -> int | None:
     return candidate if isinstance(candidate, int) and not isinstance(candidate, bool) else None
 
 
+def _map_failover_reason(failure_reason: str | None) -> dict[str, object]:
+    """Total mapping: every vendored FailoverReason value (agent.error_classifier)
+    -> the ledger's allowlisted normalized-failure vocabulary
+    (attempt_ledger._SAFE_FAILURE_CODES). Never raises LedgerError — every
+    input, including None, an unmapped/unknown reason string, or a reason the
+    vendored enum drops in a future revision, resolves to an explicit default.
+
+    Rulings (G1D packet, B-4):
+      - rate_limit                          -> retryable/http_429
+      - timeout                             -> retryable/connection
+      - overloaded, server_error            -> retryable/http_5xx
+      - auth, auth_permanent                -> authentication/http_401
+      - billing                             -> terminal/engine_failure
+                                                (NOT budget — budget is
+                                                reserved for TorqClaw's own
+                                                maxCostUsd enforcement, not a
+                                                provider-side billing refusal)
+      - everything else (context/payload/
+        model/policy/format/provider-
+        specific/unknown/unrecognized)      -> terminal/engine_failure
+                                                (explicit default)
+
+    No new ledger codes are introduced here; every returned code is already
+    present in attempt_ledger._SAFE_FAILURE_CODES.
+    """
+    _RATE_LIMIT = {"rate_limit"}
+    _TIMEOUT = {"timeout"}
+    _SERVER_5XX = {"overloaded", "server_error"}
+    _AUTH = {"auth", "auth_permanent"}
+
+    reason = failure_reason if isinstance(failure_reason, str) else None
+    if reason in _RATE_LIMIT:
+        return {"failureClass": "retryable", "code": "http_429", "retryable": True}
+    if reason in _TIMEOUT:
+        return {"failureClass": "retryable", "code": "connection", "retryable": True}
+    if reason in _SERVER_5XX:
+        return {"failureClass": "retryable", "code": "http_5xx", "retryable": True}
+    if reason in _AUTH:
+        return {"failureClass": "authentication", "code": "http_401", "retryable": False}
+    # billing and every remaining/unrecognized FailoverReason value
+    # (context_overflow, payload_too_large, image_too_large, model_not_found,
+    # provider_policy_blocked, content_policy_blocked, format_error,
+    # invalid_encrypted_content, multimodal_tool_content_unsupported,
+    # thinking_signature, long_context_tier,
+    # oauth_long_context_beta_forbidden, llama_cpp_grammar_pattern, unknown,
+    # None, or any string not in the vendored enum at all) fall through here.
+    return {"failureClass": "terminal", "code": "engine_failure", "retryable": False}
+
+
 def normalize_provider_failure(value) -> dict[str, object]:
     """Convert typed runner/provider failures to the frozen safe taxonomy.
 
@@ -56,6 +128,11 @@ def normalize_provider_failure(value) -> dict[str, object]:
     status fields. It never serializes exception text, headers, URLs, bodies,
     or response objects.
     """
+    if isinstance(value, HermesTaskFailedError):
+        # Structured-field classification only — failure_reason is a
+        # vendored FailoverReason .value string; value.error (free text) is
+        # deliberately never read here.
+        return _map_failover_reason(value.failure_reason)
     status = _response_status(value)
     if status == 408:
         return {"failureClass": "retryable", "code": "http_408", "retryable": True}
@@ -703,6 +780,20 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
             system_message=system_message,
             task_id=task_id,
         )
+        if isinstance(result, Mapping) and result.get("failed") is True:
+            # conversation_loop.py returns rather than raises on retry
+            # exhaustion / no-fallback / policy-block / generic API error
+            # (:852, :3093, :3203-3216 and siblings). That "failed" field is
+            # the ONLY signal consulted here — never final_response text —
+            # so this branch fires whether or not the shape also happens to
+            # satisfy the string-typed final_response check below.
+            raise HermesTaskFailedError(
+                failure_reason=(
+                    result.get("failure_reason")
+                    if isinstance(result.get("failure_reason"), str) else None
+                ),
+                error=result.get("error") if isinstance(result.get("error"), str) else None,
+            )
         if not isinstance(result, Mapping) or not isinstance(result.get("final_response"), str):
             raise MalformedProviderResponseError()
         # If the approval hook blocked a tool, this run is BLOCKED, not done —

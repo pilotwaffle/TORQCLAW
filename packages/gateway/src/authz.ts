@@ -204,6 +204,10 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     // resolve to -- explicit named deny so the decision is legible and
     // pinned by a test (house pattern, matching every other arm here).
     case 'LIST_CHANNELS':
+    case 'SET_CHANNEL_EXTERNAL_EXPORT_POLICY':
+    case 'LIST_AGENTS':
+    case 'LIST_AGENT_PROVIDERS':
+    case 'CREATE_AGENT':
     case 'GET_CHANNEL_TIMELINE':
     // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S3: POST_CHANNEL_MESSAGE is the only
     // new mutation this PRD's surface adds (§5), and it inherits the exact
@@ -297,8 +301,24 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
 function authorizeOperator(cmd: ClientCommand, ctx: AuthzContext): AuthzDecision {
   const surface = ctx.surface;
 
+  if (
+    cmd.action === 'CREATE_AGENT'
+    || cmd.action === 'UPDATE_AGENT_PROFILE'
+    || cmd.action === 'LIST_AGENTS'
+  ) {
+    if (!surface) return DENY_AUTHORITY;
+    if (surface.currentRole() !== 'operator') return DENY_SURFACE_NOT_OPERATOR;
+    return surface.holdsAuthority('delegate') ? ALLOW : DENY_AUTHORITY;
+  }
+
   // No surface layer => legacy behaviour, unchanged (SI-4).
   if (!surface) return ALLOW;
+
+  if (
+    cmd.action === 'LIST_AGENT_PROVIDERS'
+  ) {
+    return surface.currentRole() === 'operator' ? ALLOW : DENY_SURFACE_NOT_OPERATOR;
+  }
 
   // Phase 4 (R-10a, PRD-TCLAW-REMOTE-SKILL-SOURCES-005 §2/§7.1): APPROVE_SKILL
   // joins the approve-authority gate. Specified against current master

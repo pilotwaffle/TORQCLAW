@@ -218,13 +218,14 @@ function normalizeObservation(value: unknown, operation: ResilienceToolName): No
   if (raw.telemetry !== undefined) {
     if (raw.telemetry === null || typeof raw.telemetry !== 'object' || Array.isArray(raw.telemetry)) throw new ResilienceEnvelopeError(operation, 'telemetry is invalid');
     const telemetry = raw.telemetry as Record<string, unknown>;
-    const allowedTelemetry = ['costUsd', 'costSource', 'inferenceLatencyMs', 'iterations', 'cancelled'];
+    const allowedTelemetry = ['costUsd', 'costSource', 'inferenceLatencyMs', 'iterations', 'cancelled', 'engineUsed'];
     if (Object.keys(telemetry).some((key) => !allowedTelemetry.includes(key))) throw new ResilienceEnvelopeError(operation, 'telemetry is not normalized');
     if (telemetry.costUsd !== undefined && typeof telemetry.costUsd !== 'number') throw new ResilienceEnvelopeError(operation, 'costUsd is invalid');
     if (telemetry.costSource !== undefined && !['exact', 'account_delta', 'unavailable'].includes(String(telemetry.costSource))) throw new ResilienceEnvelopeError(operation, 'costSource is invalid');
     if (telemetry.inferenceLatencyMs !== undefined && typeof telemetry.inferenceLatencyMs !== 'number') throw new ResilienceEnvelopeError(operation, 'latency is invalid');
     if (telemetry.iterations !== undefined && !Number.isSafeInteger(telemetry.iterations)) throw new ResilienceEnvelopeError(operation, 'iterations is invalid');
     if (telemetry.cancelled !== undefined && typeof telemetry.cancelled !== 'boolean') throw new ResilienceEnvelopeError(operation, 'cancelled is invalid');
+    if (telemetry.engineUsed !== undefined && (typeof telemetry.engineUsed !== 'string' || telemetry.engineUsed.length === 0 || telemetry.engineUsed.length > 128)) throw new ResilienceEnvelopeError(operation, 'engineUsed is invalid');
     out.telemetry = { ...telemetry };
   }
   if (raw.providerId !== undefined) {

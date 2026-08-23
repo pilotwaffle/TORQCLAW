@@ -110,7 +110,7 @@ export const BUILT_IN_PROFILE_DEFINITIONS = {
   browser_research: {
     profileId: 'browser_research',
     profileVersion: PROFILE_VERSION,
-    allowedNamespaces: ['browser', 'playwright', 'websearch'],
+    allowedNamespaces: ['browser', 'playwright', 'research'],
     allowedCapabilities: ['read'],
     allowedSideEffects: ['none'],
     allowedTiers: ['LOCAL_EDGE', 'FRONTIER'],

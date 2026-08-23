@@ -807,8 +807,11 @@ describe('Phase 4 protected semantic manifest', () => {
     // The operator branch (authorizeOperator) is untouched.
     // Recompute and re-authorize deliberately on any future approved
     // change; never delete this pin.
+    // Authorized 2026-08-21: UPDATE_AGENT_PROFILE deliberately joins the
+    // existing CREATE_AGENT operator + live-delegate authority gate. The
+    // protected approve predicate and frozen Phase 4 seams above are unchanged.
     const authzSha = createHash('sha256').update(authz).digest('hex');
-    expect(authzSha).toBe('93df7677e4ebd44e02856e96e4f285681f729845f316f64767621b1f205406b1');
+    expect(authzSha).toBe('5a68a161b2fe26bd6422782028d944a672a4851a1a7535f1b93a016082fb497f');
     // The migration's own markers: the moved guard must not silently return,
     // and the relocation note must remain declared where it happened.
     expect(authz).not.toContain('export function checkResumeRole');

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ClientCommand, GatewayRequest } from '@torqclaw/contracts';
 import { classifyTaskType } from './classifier.js';
 import { sessions } from './sessions.js';
-import { predictTools } from '@torqclaw/bridge';
+import { predictTools, resolveAgentReachRouting } from '@torqclaw/bridge';
 import { resolveProfile } from './profileResolver.js';
 
 // chars/4: standard cheap approximation, good enough for routing thresholds.
@@ -35,6 +35,7 @@ export async function enrichCommand(
   // Resolve policy before selecting tools. The resulting snapshot is carried
   // on the gateway-owned request and is re-checked by the bridge at dispatch.
   const effectiveProfile = resolveProfile({ taskType: cls.taskType }).profile;
+  const agentReach = await resolveAgentReachRouting(cmd.prompt);
 
   return {
     id: randomUUID(),
@@ -66,6 +67,7 @@ export async function enrichCommand(
       classifierLatencyMs: cls.latencyMs,
       estimatedTokens: contextSize,
       memoryUsed: useMemory,
+      agentReach,
     },
     effectiveProfile,
   };

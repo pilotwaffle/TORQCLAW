@@ -2,13 +2,17 @@ import asyncio
 import inspect
 import json
 import os
+import sys
 import time
 from pathlib import Path
+
+import pytest
 
 from mcp_wrapper import server, task_store
 from mcp_wrapper import failover_runtime
 from mcp_wrapper.attempt_ledger import AttemptLedger
 from mcp_wrapper.hermes_runner import (
+    HermesTaskFailedError,
     InvalidCredentialsError,
     MalformedProviderResponseError,
     MissingCredentialsError,
@@ -280,6 +284,7 @@ def test_real_handler_boundary_stub_completion_and_one_successor(monkeypatch, tm
         assert terminal is not None
         assert terminal["observations"][0]["kind"] == "result"
         assert terminal["observations"][0]["text"].strip()
+        assert terminal["observations"][0]["telemetry"]["engineUsed"] == "hermes:fake"
         assert terminal["terminalCommitted"] is True
         assert terminal["terminalOutcome"] == "completed"
         outbox = await server.resilience_page_outbox(0, 100)
@@ -600,3 +605,366 @@ def test_real_submit_connection_failure_uses_one_eligible_successor(monkeypatch,
 
     asyncio.run(run_once())
     assert calls == ["primary", "fallback"]
+
+
+# ── T4 fix: a vendored {"failed": True} return must never surface as a
+#    completed RESULT (G1D-FABLE-PRD-007-S7-AND-T4-PACKET-2026-08-22, Item A) ──
+
+def test_finish_internal_observation_derives_failure_kind_from_code():
+    """T-A1: _finish_internal_observation must DERIVE kind from `code`, never
+    hardcode kind:"result" (B-2). RED before the fix: the prior implementation
+    always wrote {"kind": "result", **observation} regardless of `code`, so a
+    retryable failure observation would have been persisted as a completed
+    task. GREEN after: task state is "failed", not "completed"."""
+    task_id = task_store.create({"payload": {"prompt": "b2-probe"}})
+    server._finish_internal_observation(
+        task_id,
+        {"failureClass": "retryable", "code": "http_5xx", "retryable": True},
+    )
+    status = task_store.status(task_id)
+    # Pre-fix this assertion failed: status["state"] == "completed".
+    assert status["state"] == "failed"
+    assert status["result"] is None
+    assert status["telemetry"]["normalizedFailure"] == {
+        "failureClass": "retryable", "code": "http_5xx", "retryable": True,
+    }
+    events = task_store.status(task_id)["events"]
+    assert [event["metadata"]["kind"] for event in events if event["type"] == "OBSERVATION"] == ["failure"]
+
+
+_ALL_FAILOVER_REASONS = [
+    "auth", "auth_permanent", "billing", "rate_limit", "overloaded",
+    "server_error", "timeout", "context_overflow", "payload_too_large",
+    "image_too_large", "model_not_found", "provider_policy_blocked",
+    "content_policy_blocked", "format_error", "invalid_encrypted_content",
+    "multimodal_tool_content_unsupported", "thinking_signature",
+    "long_context_tier", "oauth_long_context_beta_forbidden",
+    "llama_cpp_grammar_pattern", "unknown",
+]
+
+
+def test_failover_reason_enum_matches_vendored_source_exactly():
+    """Fixture-freshness guard for T-A2: fail loudly (not silently under-test)
+    if the vendored FailoverReason enum gains/loses a member this list
+    doesn't know about."""
+    vendor = Path(__file__).resolve().parents[1] / "vendor" / "hermes-agent"
+    sys.path.insert(0, str(vendor))
+    from agent.error_classifier import FailoverReason  # type: ignore
+    assert {member.value for member in FailoverReason} == set(_ALL_FAILOVER_REASONS)
+
+
+@pytest.mark.parametrize("reason", _ALL_FAILOVER_REASONS + [None, "not_a_real_reason"])
+def test_failover_reason_mapping_is_total_and_ledger_safe(reason):
+    """T-A2 totality: every vendored FailoverReason value (plus None and an
+    unrecognized string, proving the explicit default) maps to a
+    normalized-failure dict AttemptLedger._failure() accepts without raising
+    LedgerError -- i.e. the mapping never invents a ledger code outside
+    attempt_ledger._SAFE_FAILURE_CODES."""
+    failure = normalize_provider_failure(HermesTaskFailedError(reason, "vendor prose"))
+    validated = AttemptLedger._failure(failure)  # raises LedgerError if invalid
+    assert validated == failure
+    if reason == "billing":
+        # G1D ruling: billing is a provider-side refusal, not TorqClaw's own
+        # maxCostUsd enforcement -- must NOT land in the budget class.
+        assert failure["failureClass"] != "budget"
+
+
+def _failed_result(final_response, failure_reason=None, error="synthetic vendor failure"):
+    return {
+        "final_response": final_response,
+        "messages": [],
+        "api_calls": 1,
+        "completed": False,
+        "failed": True,
+        "error": error,
+        **({"failure_reason": failure_reason} if failure_reason is not None else {}),
+    }
+
+
+def test_hermes_task_failed_rate_limit_shape_never_completes_as_result(monkeypatch):
+    """T-A3: the :3203-3216 shape (final_response is the vendor's retry-
+    exhaustion prose, failed:True, failure_reason:"rate_limit") must become a
+    failed task with a non-"result" observation kind, and the stored result
+    must NOT be the vendor's error text.
+
+    RED before the fix: run_hermes_sync returned {"result": final_response,
+    ...} and run_hermes_loop called task_store.complete(...), so
+    status["state"] == "completed" and status["result"] == the error text --
+    both assertions below would have failed."""
+    monkeypatch.setenv("HERMES_MODEL", "configured-model")
+    monkeypatch.setattr("mcp_wrapper.hermes_runner.hermes_available", lambda: (True, None))
+    vendor_text = "API call failed after 3 retries: connection reset"
+    monkeypatch.setattr(
+        "mcp_wrapper.hermes_runner.run_hermes_sync",
+        lambda task_id, payload: (_ for _ in ()).throw(
+            HermesTaskFailedError("rate_limit", vendor_text)
+        ),
+    )
+    task_id = "ta3-rate-limit-" + str(time.time_ns())
+    payload = {
+        "payload": _payload("will fail"),
+        "activeTuple": {"taskId": task_id, "attemptId": "attempt", "epoch": 0},
+        "providerRef": _provider("primary"),
+    }
+    task_store.create(payload, task_id=task_id)
+
+    asyncio.run(server.run_hermes_loop(task_id, payload))
+
+    status = task_store.status(task_id)
+    assert status["state"] == "failed"
+    assert status["result"] != vendor_text
+    assert status["result"] is None
+    assert vendor_text not in json.dumps(status)
+    assert status["telemetry"]["normalizedFailure"] == {
+        "failureClass": "retryable", "code": "http_429", "retryable": True,
+    }
+    observation_events = [e for e in status["events"] if e["type"] == "OBSERVATION"]
+    assert len(observation_events) == 1
+    assert observation_events[0]["metadata"]["kind"] != "result"
+
+
+@pytest.mark.parametrize(
+    "final_response,failure_reason,error_text",
+    [
+        # :852 shape -- no fallback provider available, no failure_reason key.
+        (
+            "No fallback provider available. Try again after the reset, "
+            "or add a fallback provider in config.yaml.",
+            None,
+            "rate limited",
+        ),
+        # :3093 shape -- content-policy block, no failure_reason key.
+        (
+            "The model provider's safety filter blocked this request.",
+            None,
+            "content_policy_blocked: unsafe content",
+        ),
+    ],
+)
+def test_hermes_task_failed_shapes_without_failure_reason_still_fail_closed(
+        monkeypatch, final_response, failure_reason, error_text):
+    """T-A4: the :852 and :3093 shapes carry NO failure_reason key at all
+    (unlike :3208). The mapping's explicit default (terminal/engine_failure)
+    must still apply -- this must never fall through to a completed task or
+    raise. RED before the fix: these shapes were read as ordinary
+    final_response strings and completed the task with the vendor prose as
+    the result."""
+    monkeypatch.setenv("HERMES_MODEL", "configured-model")
+    monkeypatch.setattr("mcp_wrapper.hermes_runner.hermes_available", lambda: (True, None))
+    monkeypatch.setattr(
+        "mcp_wrapper.hermes_runner.run_hermes_sync",
+        lambda task_id, payload: (_ for _ in ()).throw(HermesTaskFailedError(failure_reason, error_text)),
+    )
+    task_id = "ta4-" + str(time.time_ns())
+    payload = {
+        "payload": _payload("will fail too"),
+        "activeTuple": {"taskId": task_id, "attemptId": "attempt", "epoch": 0},
+        "providerRef": _provider("primary"),
+    }
+    task_store.create(payload, task_id=task_id)
+
+    asyncio.run(server.run_hermes_loop(task_id, payload))
+
+    status = task_store.status(task_id)
+    assert status["state"] == "failed"
+    assert status["result"] is None
+    assert final_response not in json.dumps(status)
+    assert status["telemetry"]["normalizedFailure"] == {
+        "failureClass": "terminal", "code": "engine_failure", "retryable": False,
+    }
+
+
+def test_approval_blocked_resilience_observation_is_side_effect_uncertainty(monkeypatch, tmp_path):
+    """T-A5: the existing approval-blocked branch (server.py, PENDING_APPROVAL
+    -> task_store.fail with failureClass "side_effect_uncertainty") must
+    surface, via the real resilience poll path, as failureClass
+    "side_effect_uncertainty" with terminalOutcome "cancelled_uncertain" --
+    not as a completed result and not as an ordinary failed/failed outcome.
+    RED before this suite existed: this path had no direct regression test
+    proving _terminal_observation's cancelled_uncertain branch was reachable
+    end-to-end from run_hermes_loop."""
+    monkeypatch.setenv("TORQCLAW_PROVIDER_FAILOVER_ENABLED", "1")
+    monkeypatch.setenv("TORQCLAW_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr("mcp_wrapper.hermes_runner.hermes_available", lambda: (True, None))
+    monkeypatch.setattr(
+        "mcp_wrapper.hermes_runner.run_hermes_sync",
+        lambda task_id, payload: {
+            "result": "",
+            "telemetry": {"blockedOn": "write_file", "blockedArgs": {"path": "x"},
+                          "costUsd": 0.0, "costSource": "exact"},
+        },
+    )
+    failover_runtime.reset_for_tests()
+    task_id = "ta5-approval-" + str(time.time_ns())
+    deadline = int(time.time() * 1000) + 20_000
+    plan = _plan(task_id, deadline)
+    request = _gateway_request(task_id, "needs approval")
+
+    async def run_once():
+        admitted = await server.resilience_admit_frontier(task_id, plan, deadline, ["primary", "fallback"])
+        active = admitted["activeTuple"]
+        submitted = await server.resilience_submit_attempt(
+            request, plan, active, _provider("primary"), deadline, task_id + ":submit",
+        )
+        assert submitted["status"] == "SUBMITTED"
+        for _ in range(100):
+            page = await server.resilience_poll_observations(active, 0, deadline)
+            if page["status"] == "TERMINAL":
+                return page
+            await asyncio.sleep(0.01)
+        raise AssertionError("approval-blocked task never reached a terminal observation")
+
+    page = asyncio.run(run_once())
+    observation = page["observations"][0]
+    assert observation["kind"] != "result"
+    assert observation["failure"]["failureClass"] == "side_effect_uncertainty"
+    # code is "uncertain", not "approval_blocked": attempt_ledger's
+    # _SAFE_FAILURE_CODES only allowlists {"dispatch_attempted", "uncertain"}
+    # under side_effect_uncertainty (attempt_ledger.py is out of scope).
+    assert observation["failure"]["code"] == "uncertain"
+    assert page["terminalOutcome"] == "cancelled_uncertain"
+
+
+def test_hermes_task_failed_terminal_is_exactly_one_failure_observation(monkeypatch):
+    """T-A6: exactly one terminal OBSERVATION event is recorded, never a
+    result alongside it, and no extra terminal writes occur."""
+    monkeypatch.setenv("HERMES_MODEL", "configured-model")
+    monkeypatch.setattr("mcp_wrapper.hermes_runner.hermes_available", lambda: (True, None))
+    monkeypatch.setattr(
+        "mcp_wrapper.hermes_runner.run_hermes_sync",
+        lambda task_id, payload: (_ for _ in ()).throw(HermesTaskFailedError("overloaded", "server overloaded")),
+    )
+    task_id = "ta6-" + str(time.time_ns())
+    payload = {
+        "payload": _payload("overloaded case"),
+        "activeTuple": {"taskId": task_id, "attemptId": "attempt", "epoch": 0},
+        "providerRef": _provider("primary"),
+    }
+    task_store.create(payload, task_id=task_id)
+
+    asyncio.run(server.run_hermes_loop(task_id, payload))
+
+    status = task_store.status(task_id)
+    observation_events = [e for e in status["events"] if e["type"] == "OBSERVATION"]
+    assert len(observation_events) == 1
+    assert observation_events[0]["metadata"]["kind"] == "failure"
+    assert status["state"] == "failed"
+    assert status["result"] is None
+
+
+def test_hermes_task_failed_second_poll_is_stable_terminal(monkeypatch):
+    """T-A7: polling status twice after the failure terminal yields the same
+    terminal state both times -- one failure observation total, no further
+    state mutation on the second read."""
+    monkeypatch.setenv("HERMES_MODEL", "configured-model")
+    monkeypatch.setattr("mcp_wrapper.hermes_runner.hermes_available", lambda: (True, None))
+    monkeypatch.setattr(
+        "mcp_wrapper.hermes_runner.run_hermes_sync",
+        lambda task_id, payload: (_ for _ in ()).throw(HermesTaskFailedError("auth", "bad credentials")),
+    )
+    task_id = "ta7-" + str(time.time_ns())
+    payload = {
+        "payload": _payload("auth failure case"),
+        "activeTuple": {"taskId": task_id, "attemptId": "attempt", "epoch": 0},
+        "providerRef": _provider("primary"),
+    }
+    task_store.create(payload, task_id=task_id)
+
+    asyncio.run(server.run_hermes_loop(task_id, payload))
+
+    first = task_store.status(task_id)
+    second = task_store.status(task_id)
+    assert first == second
+    assert first["state"] == "failed"
+    observation_events = [e for e in first["events"] if e["type"] == "OBSERVATION"]
+    assert len(observation_events) == 1
+    assert first["telemetry"]["normalizedFailure"] == {
+        "failureClass": "authentication", "code": "http_401", "retryable": False,
+    }
+
+
+def test_web_search_tool_registration_is_gated_by_env_flag(monkeypatch):
+    """CORRECTION 1: web_search (keyless_web_search-backed) must only be
+    registered on the MCP server when TORQCLAW_WEB_SEARCH_ENABLED=1 is set
+    at boot -- network egress requires explicit operator approval (CLAUDE.md
+    §6), default off. agent_reach_doctor is unaffected either way.
+
+    Registration happens at module-import time (the `if` guard wraps the
+    `@mcp.tool()` decorator), so re-importing the module is required to
+    observe both states within one test process."""
+    import importlib
+
+    monkeypatch.delenv("TORQCLAW_WEB_SEARCH_ENABLED", raising=False)
+    from mcp_wrapper import server as server_module
+    importlib.reload(server_module)
+    try:
+        tool_names_off = {t.name for t in asyncio.run(server_module.mcp.list_tools())}
+        assert "web_search" not in tool_names_off
+        assert "agent_reach_doctor" in tool_names_off
+
+        monkeypatch.setenv("TORQCLAW_WEB_SEARCH_ENABLED", "1")
+        importlib.reload(server_module)
+        tool_names_on = {t.name for t in asyncio.run(server_module.mcp.list_tools())}
+        assert "web_search" in tool_names_on
+        assert "agent_reach_doctor" in tool_names_on
+    finally:
+        # Restore the module to its default (flag-off) registration state so
+        # later tests in this process observe the same `server` object this
+        # suite imported at collection time, not a leftover flag-on copy.
+        monkeypatch.delenv("TORQCLAW_WEB_SEARCH_ENABLED", raising=False)
+        importlib.reload(server_module)
+
+
+def test_hermes_task_failed_detection_branch_raises_from_real_vendor_shape(monkeypatch):
+    """CORRECTION 2: regression test for the detection branch itself
+    (hermes_runner.py's `if isinstance(result, Mapping) and result.get(
+    "failed") is True:` check inside run_hermes_sync), not merely for
+    run_hermes_loop's handling of an already-raised HermesTaskFailedError
+    (which is all the T-A3/T-A6/T-A7 tests above exercise, by monkeypatching
+    run_hermes_sync directly).
+
+    This test patches mcp_wrapper.hermes_runner.AIAgent -- the narrowest
+    seam upstream of the detection branch -- with a fake agent whose
+    run_conversation returns the real vendor "failed" shape (via
+    _failed_result), and calls run_hermes_sync directly so the real
+    detection/raise code at :783-796 executes.
+
+    Proof this is load-bearing: temporarily commenting out the `if
+    isinstance(result, Mapping) and result.get("failed") is True:` branch in
+    hermes_runner.py (~:783-796) makes this test FAIL (run_hermes_sync
+    returns the vendor shape instead of raising, or raises
+    MalformedProviderResponseError because final_response is not the sole
+    signal) -- restoring the branch makes it PASS again, with a clean diff
+    against the pre-edit file."""
+    monkeypatch.setenv("HERMES_MODEL", "configured-model")
+    monkeypatch.setattr("mcp_wrapper.hermes_runner.hermes_available", lambda: (True, None))
+
+    class _FakeAgent:
+        def __init__(self, **kwargs):
+            # P2-0 L1b (_suppress_skill_nudge) requires this attribute to
+            # exist and be settable -- it fails closed otherwise, which
+            # would mask the detection branch under a different exception.
+            self._skill_nudge_interval = 5
+
+        def run_conversation(self, prompt, system_message=None, task_id=None):
+            return _failed_result(
+                "API call failed after 3 retries: Connection error",
+                failure_reason="rate_limit",
+            )
+
+        def interrupt(self, reason):
+            return None
+
+    monkeypatch.setattr("mcp_wrapper.hermes_runner.AIAgent", _FakeAgent)
+
+    task_id = "detection-branch-" + str(time.time_ns())
+    payload = {"payload": _payload("will fail via real vendor shape")}
+    task_store.create(payload, task_id=task_id)
+
+    with pytest.raises(HermesTaskFailedError) as excinfo:
+        from mcp_wrapper import hermes_runner
+        hermes_runner.run_hermes_sync(task_id, payload)
+
+    assert excinfo.value.failure_reason == "rate_limit"
+    assert "API call failed after 3 retries" not in str(excinfo.value)
+    assert str(excinfo.value) == ""

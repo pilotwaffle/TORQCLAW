@@ -225,6 +225,7 @@ export interface ChannelListEntry {
   state: 'active' | 'archived' | string;
   role: 'owner' | 'agent' | string;
   lastAcknowledgedCursor: string;
+  externalExportPolicy: 'local_only' | 'operator_confirmed_non_sensitive';
 }
 
 export interface TimelineEventEntry {
@@ -716,6 +717,7 @@ export default function ChannelsPanel({
 
   // ── Selected channel + timeline ─────────────────────────────────────────
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
+  const selectedChannel = channels?.find((channel) => channel.channelId === selectedChannelId) ?? null;
 
   // Keyed by channelId (ReceiptsPanel keyed-detail approach) but with the
   // null-initialized snapshot rule (never []-init — G1R SC-1 discipline).
@@ -1327,6 +1329,27 @@ export default function ChannelsPanel({
 
           {selectedChannelId && (
             <>
+              {selectedChannel?.role === 'owner' && (
+                <div className="mb-3 flex items-center justify-between gap-3 rounded border border-border-strong px-3 py-2 text-[10.5px]">
+                  <span className="text-faint">
+                    External subscription context: {selectedChannel.externalExportPolicy === 'operator_confirmed_non_sensitive' ? 'operator-confirmed non-sensitive' : 'local only'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => sendCommand({
+                      action: 'SET_CHANNEL_EXTERNAL_EXPORT_POLICY',
+                      channelId: selectedChannel.channelId,
+                      externalExportPolicy: selectedChannel.externalExportPolicy === 'local_only'
+                        ? 'operator_confirmed_non_sensitive'
+                        : 'local_only',
+                      idempotencyKey: crypto.randomUUID(),
+                    })}
+                    className="rounded border border-border-strong px-2 py-1 text-muted hover:border-torque/40"
+                  >
+                    {selectedChannel.externalExportPolicy === 'local_only' ? 'Confirm non-sensitive export' : 'Revoke external export'}
+                  </button>
+                </div>
+              )}
               {/* S5: roster — two separately-labeled sections, two distinct
                   sources (A9). NO dispatch affordance anywhere in this
                   block: RosterSection's props are plain data, zero

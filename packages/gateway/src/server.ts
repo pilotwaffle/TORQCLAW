@@ -14,7 +14,16 @@ import { dispatch, mintGrantedRequest, emitToolDenied } from './dispatch.js';
 import { decideApproval, handleListApprovals } from './approvals.js';
 import { makeEmitter, sessionBus, persistAndPublish, taskStore, publishOnly } from './events.js';
 import { router } from '@torqclaw/router';
-import { connectBridge, connectInProcessServer, approveSkill, getSkillDraft, cancelHermesTask } from '@torqclaw/bridge';
+import {
+  connectBridge,
+  connectInProcessServer,
+  approveSkill,
+  getSkillDraft,
+  cancelHermesTask,
+  buildKeylessWebSearchMcpServer,
+  WEB_SEARCH_SERVER_ID,
+  WEB_SEARCH_TOOL_CAPABILITIES,
+} from '@torqclaw/bridge';
 import type { DeliverySink } from '@torqclaw/collab';
 import { buildCollabAgentMcpServer, COLLAB_AGENT_SERVER_ID, COLLAB_AGENT_TOOL_CAPABILITIES } from './collabAgentTools.js';
 import { describeSkillDecision } from './skillDecision.js';
@@ -41,7 +50,17 @@ import { sweepExpiredApprovals, sweepExpiredGrants } from './approvalWriter.js';
 import { rebuildDeliveryProjection } from './approvalDelivery.js';
 import { revokeInertGrants, admitToolCall } from './grantAdmission.js';
 import { decideApprovalC2 } from './c2Broker.js';
-import { collabSurfaceCommandsEnabled, agentParticipationEnabled, isAgentSurfaceCaller, handleListChannels, handleGetChannelTimeline, handlePostChannelMessage, handleAckChannelCursor, setAutoReplyTrigger, getStore } from './collabSurface.js';
+import { collabSurfaceCommandsEnabled, agentParticipationEnabled, webSearchEnabled, isAgentSurfaceCaller, handleListChannels, handleSetChannelExternalExportPolicy, handleGetChannelTimeline, handlePostChannelMessage, handleAckChannelCursor, setAutoReplyTrigger, getStore } from './collabSurface.js';
+import {
+  handleCreateAgent,
+  handleListAgentProviders,
+  handleListAgents,
+  handleUpdateAgentProfile,
+  extractAgentMutationReporting,
+  normalizeAgentMutationTerminalResult,
+  type AgentMutationOutcome,
+  type AgentMutationReporting,
+} from './agentSurface.js';
 import { onChannelMessageCommitted, recoverStrandedAgentTurns } from './autoReplyDispatcher.js';
 import { getCollabDbForAutoReply } from './collabSurface.js';
 import { handleSetAutoreplyStop } from './autoReplyStopHandler.js';
@@ -286,6 +305,17 @@ app.get('/ws', { websocket: true }, (socket) => {
   const sendErr = (code: string, detail?: unknown) =>
     socket.send(JSON.stringify({ type: 'ERROR', code, detail }));
 
+  const publishAgentMutationTerminal = (
+    reporting: AgentMutationReporting,
+    outcome: AgentMutationOutcome,
+  ) => {
+    const metadata = normalizeAgentMutationTerminalResult(reporting, outcome);
+    publishOnly(sessionId!, {
+      message: String(metadata.message),
+      metadata,
+    });
+  };
+
   socket.on('message', async (raw: Buffer) => {
     let frame: unknown;
     try {
@@ -439,10 +469,16 @@ app.get('/ws', { websocket: true }, (socket) => {
     }
 
     // ── Gate 2: every subsequent frame must be a valid ClientCommand ──
-    const cmd = ClientCommandSchema.safeParse(frame);
-    if (!cmd.success) return sendErr('SCHEMA_VIOLATION', cmd.error.flatten());
-
     const sid = sessionId!;
+    const mutationReporting = extractAgentMutationReporting(frame);
+    const cmd = ClientCommandSchema.safeParse(frame);
+    if (!cmd.success) {
+      if (mutationReporting) {
+        publishAgentMutationTerminal(mutationReporting, { status: 'error', errorCode: 'invalid_request' });
+        return;
+      }
+      return sendErr('SCHEMA_VIOLATION', cmd.error.flatten());
+    }
 
     // ── Gate 3: role-based command authorization ──
     // C1-4 / H-1: hand authorize() the presenting surface's own authority
@@ -475,6 +511,10 @@ app.get('/ws', { websocket: true }, (socket) => {
     });
     if (!decision.ok) {
       app.log.warn({ role, action: cmd.data.action }, 'authz denied');
+      if (mutationReporting) {
+        publishAgentMutationTerminal(mutationReporting, { status: 'error', errorCode: 'not_permitted' });
+        return;
+      }
       sendErr('UNAUTHORIZED', { action: cmd.data.action, reason: decision.reason });
       return;
     }
@@ -713,7 +753,14 @@ app.get('/ws', { websocket: true }, (socket) => {
         // FRONTIER: interrupt the Python agent via the bridge. LOCAL_EDGE: flip
         // the in-memory flag the ollama loop polls. Set both — the flag is free
         // and the bridge call no-ops if this wasn't a tracked frontier task.
-        cancellations.request(reqId);
+        const subscriptionTermination = await cancellations.requestAndWait(reqId);
+        if (subscriptionTermination.tracked && !subscriptionTermination.confirmed) {
+          emitCancel(
+            'SYSTEM',
+            'Subscription process termination could not be confirmed; the task failed closed.',
+            { cancellationUncertain: true },
+          );
+        }
         try {
           await cancelHermesTask(reqId, 'USER_CANCELLED');
         } catch (err: any) {
@@ -797,6 +844,75 @@ app.get('/ws', { websocket: true }, (socket) => {
         // synthesize).
         const listErr = await handleListChannels(sid, connectionAuth?.principalId ?? null, cmd.data.limit);
         if (listErr) sendErr(listErr.code, listErr.detail);
+        break;
+      }
+      case 'SET_CHANNEL_EXTERNAL_EXPORT_POLICY': {
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        const policyErr = await handleSetChannelExternalExportPolicy(
+          sid,
+          connectionAuth?.principalId ?? null,
+          cmd.data,
+        );
+        if (policyErr) sendErr(policyErr.code, policyErr.detail);
+        else await handleListChannels(sid, connectionAuth?.principalId ?? null, 100);
+        break;
+      }
+      case 'LIST_AGENTS': {
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        const agentListErr = await handleListAgents(
+          sid,
+          connectionAuth?.principalId ?? null,
+          cmd.data.limit,
+          () => surfaceAuthz !== undefined
+            && surfaceAuthz.currentRole() === 'operator'
+            && surfaceAuthz.holdsAuthority('delegate'),
+        );
+        if (agentListErr) sendErr(agentListErr.code, agentListErr.detail);
+        break;
+      }
+      case 'LIST_AGENT_PROVIDERS': {
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        const providerListErr = await handleListAgentProviders(sid, connectionAuth?.principalId ?? null);
+        if (providerListErr) sendErr(providerListErr.code, providerListErr.detail);
+        break;
+      }
+      case 'CREATE_AGENT': {
+        if (!collabSurfaceCommandsEnabled()) {
+          publishAgentMutationTerminal(mutationReporting!, { status: 'error', errorCode: 'not_enabled' });
+          break;
+        }
+        const createAgentOutcome = await handleCreateAgent(
+          connectionAuth?.principalId ?? null,
+          cmd.data,
+          () => surfaceAuthz !== undefined
+            && surfaceAuthz.currentRole() === 'operator'
+            && surfaceAuthz.holdsAuthority('delegate'),
+        );
+        publishAgentMutationTerminal(mutationReporting!, createAgentOutcome);
+        break;
+      }
+      case 'UPDATE_AGENT_PROFILE': {
+        if (!collabSurfaceCommandsEnabled()) {
+          publishAgentMutationTerminal(mutationReporting!, { status: 'error', errorCode: 'not_enabled' });
+          break;
+        }
+        const updateAgentOutcome = await handleUpdateAgentProfile(
+          connectionAuth?.principalId ?? null,
+          cmd.data,
+          () => surfaceAuthz !== undefined
+            && surfaceAuthz.currentRole() === 'operator'
+            && surfaceAuthz.holdsAuthority('delegate'),
+        );
+        publishAgentMutationTerminal(mutationReporting!, updateAgentOutcome);
         break;
       }
       case 'GET_CHANNEL_TIMELINE': {
@@ -987,6 +1103,40 @@ app.get('/ws', { websocket: true }, (socket) => {
 });
 
 await connectBridge(); // discover + namespace MCP servers before traffic
+
+// PB-1(a): CLAUDE.md §6 -- network egress requires explicit operator
+// approval; default off. This mirrors the Python twin's gate
+// (hermes__web_search in engines/hermes_kernel/mcp_wrapper/server.py, guarded
+// by `if os.environ.get("TORQCLAW_WEB_SEARCH_ENABLED") == "1"`) so LOCAL_EDGE
+// and FRONTIER agree on the same default. Read once at boot (webSearchEnabled(),
+// collabSurface.ts), same discipline as agentParticipationEnabled() just below:
+// tool REGISTRATION is boot-time-only, not something a live connection can
+// race against, since connectBridge() has already run and the listener has
+// not opened yet.
+//
+// Unlike the agentParticipationEnabled() block below, a registration failure
+// here is NOT wrapped in a fail-closed throw: no downstream invariant treats
+// research__web_search's absence as a broken profile-admission precondition
+// the way collab tool absence breaks every agent auto-reply turn (see that
+// block's comment). An operator who explicitly opted in but hit a
+// registration failure gets the CLAUDE.md §4 "malformed/unreachable server
+// degrades only that server" outcome -- a startup warning, not a crashed
+// gateway -- which is the correct posture for an isolated, non-load-bearing
+// tool server.
+if (webSearchEnabled()) {
+  try {
+    await connectInProcessServer(
+      WEB_SEARCH_SERVER_ID,
+      buildKeylessWebSearchMcpServer(),
+      { capabilities: WEB_SEARCH_TOOL_CAPABILITIES },
+    );
+  } catch (err: any) {
+    console.warn(
+      `[torqclaw] TORQCLAW_WEB_SEARCH_ENABLED is set but the keyless web-search tool failed to register: ${err?.message ?? err}. ` +
+      'Continuing without it -- research__web_search will not be available this session.',
+    );
+  }
+}
 
 // PRD-TCLAW-AGENT-PARTICIPATION-007 S2: register the in-process collab
 // tool server AFTER connectBridge() returns — never inside it, and never

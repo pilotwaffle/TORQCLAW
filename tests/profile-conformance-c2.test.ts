@@ -81,7 +81,7 @@ describe('AC-C2 canonical policy/hash vectors', () => {
   it('AC-C2-4 one copied security field changes hash while the admitted set stays identical', () => {
     const tools = SYNTHETIC_TOOLS.map((tool) => ({ ...tool })) as RegisteredTool[];
     const readToolBaseline = resolveEffectiveProfile('read_only', tools);
-    const readFlagChanged = resolveEffectiveProfile('read_only', tools.map((tool) => tool.name === 'websearch__search'
+    const readFlagChanged = resolveEffectiveProfile('read_only', tools.map((tool) => tool.name === 'research__web_search'
       ? { ...tool, requiresApproval: true } : tool));
     expect(readFlagChanged.allowedOperationIds).toEqual(readToolBaseline.allowedOperationIds);
     expect(readFlagChanged.policyHash).not.toBe(readToolBaseline.policyHash);
@@ -97,7 +97,7 @@ describe('AC-C2 canonical policy/hash vectors', () => {
     const baselineTools = SYNTHETIC_TOOLS as readonly RegisteredTool[];
     const baseline = resolveEffectiveProfile('read_only', baselineTools);
     const added = resolveEffectiveProfile('read_only', [...baselineTools, frozenTool('db__read_row', 'read', false)] as RegisteredTool[]);
-    const dropped = resolveEffectiveProfile('read_only', baselineTools.filter((tool) => tool.name !== 'websearch__search'));
+    const dropped = resolveEffectiveProfile('read_only', baselineTools.filter((tool) => tool.name !== 'research__web_search'));
     expect(added.allowedOperationIds).toHaveLength(baseline.allowedOperationIds.length + 1);
     expect(dropped.allowedOperationIds).toHaveLength(baseline.allowedOperationIds.length - 1);
     expect(added.policyHash).not.toBe(baseline.policyHash);

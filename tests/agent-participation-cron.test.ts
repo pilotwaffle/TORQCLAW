@@ -624,7 +624,7 @@ describe('CRON — end-to-end (real dispatcher, real profile, committed rows)', 
     try {
       returned = await cronScheduleHandler.handleCreateSchedule(handle, seeded.operatorId, {
         channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
-        intervalSeconds: 60, promptHint: null, idempotencyKey: randomUUID(), idempotencyKey: randomUUID(),
+        intervalSeconds: 60, promptHint: null, idempotencyKey: randomUUID(),
       });
     } catch (e) { threw = e; }
 

@@ -87,6 +87,7 @@ CREATE TABLE collab_channels (
   state TEXT NOT NULL CHECK(state IN ('active','archived')),
   owner_principal_id TEXT NOT NULL REFERENCES principals(id),
   channel_epoch INTEGER NOT NULL DEFAULT 1 CHECK(channel_epoch > 0),
+  external_export_policy TEXT NOT NULL DEFAULT 'local_only' CHECK(external_export_policy IN ('local_only','operator_confirmed_non_sensitive')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -291,6 +292,9 @@ CREATE TABLE collab_schema_migrations (
  * is strictly safer and no harder to build).
  */
 export const AGENT_AUTOREPLY_MIGRATION_ID = '20260818_001_agent_autoreply_v1';
+export const AGENT_TURN_OUTPUT_MIGRATION_ID = '20260821_005_agent_turn_output_v1';
+export const AGENT_TURN_PERSONA_ENVELOPE_MIGRATION_ID = '20260821_006_agent_turn_persona_envelope_v1';
+export const CHANNEL_EXTERNAL_EXPORT_POLICY_MIGRATION_ID = '20260822_007_channel_external_export_policy_v1';
 
 export function runAgentAutoreplyMigration(db: Database.Database): void {
   const transaction = db.transaction(() => {
@@ -336,6 +340,177 @@ CREATE UNIQUE INDEX IF NOT EXISTS collab_autoreply_stop_channel_singleton
     );
   });
 
+  try {
+    db.exec('BEGIN EXCLUSIVE');
+    transaction();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+
+  runAgentTurnOutputMigration(db);
+}
+
+export function runAgentTurnOutputMigration(db: Database.Database): void {
+  const transaction = db.transaction(() => {
+    const existing = db
+      .prepare('SELECT 1 FROM collab_schema_migrations WHERE id = ?')
+      .get(AGENT_TURN_OUTPUT_MIGRATION_ID);
+    if (existing) return;
+
+    const columns = new Set(
+      (db.prepare('PRAGMA table_info(collab_agent_turns)').all() as Array<{ name: string }>)
+        .map((column) => column.name),
+    );
+    if (!columns.has('output_event_id')) {
+      db.exec('ALTER TABLE collab_agent_turns ADD COLUMN output_event_id TEXT');
+    }
+    if (!columns.has('output_kind')) {
+      db.exec("ALTER TABLE collab_agent_turns ADD COLUMN output_kind TEXT CHECK(output_kind IN ('tool','fallback'))");
+    }
+    if (!columns.has('recovery_attempt')) {
+      db.exec('ALTER TABLE collab_agent_turns ADD COLUMN recovery_attempt INTEGER NOT NULL DEFAULT 0 CHECK(recovery_attempt >= 0)');
+    }
+    if (!columns.has('recovery_lease_token')) {
+      db.exec('ALTER TABLE collab_agent_turns ADD COLUMN recovery_lease_token TEXT');
+    }
+
+    db.exec(`
+CREATE UNIQUE INDEX IF NOT EXISTS collab_agent_turns_output_event_unique
+  ON collab_agent_turns(output_event_id) WHERE output_event_id IS NOT NULL;
+
+CREATE TRIGGER IF NOT EXISTS collab_agent_turn_output_pair_insert
+BEFORE INSERT ON collab_agent_turns
+WHEN (NEW.output_event_id IS NULL) <> (NEW.output_kind IS NULL)
+BEGIN SELECT RAISE(ABORT, 'agent turn output fields must be paired'); END;
+
+CREATE TRIGGER IF NOT EXISTS collab_agent_turn_output_pair_update
+BEFORE UPDATE OF output_event_id, output_kind ON collab_agent_turns
+WHEN (NEW.output_event_id IS NULL) <> (NEW.output_kind IS NULL)
+BEGIN SELECT RAISE(ABORT, 'agent turn output fields must be paired'); END;
+
+CREATE TRIGGER IF NOT EXISTS collab_agent_turn_output_immutable
+BEFORE UPDATE OF output_event_id, output_kind ON collab_agent_turns
+WHEN OLD.output_event_id IS NOT NULL
+ AND (NEW.output_event_id IS NOT OLD.output_event_id OR NEW.output_kind IS NOT OLD.output_kind)
+BEGIN SELECT RAISE(ABORT, 'agent turn output binding is immutable'); END;
+    `);
+
+    db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
+      AGENT_TURN_OUTPUT_MIGRATION_ID,
+      new Date().toISOString(),
+    );
+  });
+
+  try {
+    db.exec('BEGIN EXCLUSIVE');
+    transaction();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+
+  runAgentTurnPersonaEnvelopeMigration(db);
+}
+
+export function runAgentTurnPersonaEnvelopeMigration(db: Database.Database): void {
+  const transaction = db.transaction(() => {
+    const existing = db.prepare('SELECT 1 FROM collab_schema_migrations WHERE id = ?')
+      .get(AGENT_TURN_PERSONA_ENVELOPE_MIGRATION_ID);
+    if (existing) return;
+    const columns = new Set(
+      (db.prepare('PRAGMA table_info(collab_agent_turns)').all() as Array<{ name: string }>)
+        .map((column) => column.name),
+    );
+    if (!columns.has('persona_envelope_version')) db.exec('ALTER TABLE collab_agent_turns ADD COLUMN persona_envelope_version INTEGER');
+    if (!columns.has('persona_content')) db.exec('ALTER TABLE collab_agent_turns ADD COLUMN persona_content TEXT');
+    if (!columns.has('persona_revision')) db.exec('ALTER TABLE collab_agent_turns ADD COLUMN persona_revision INTEGER');
+    if (!columns.has('persona_content_sha256')) db.exec('ALTER TABLE collab_agent_turns ADD COLUMN persona_content_sha256 TEXT');
+
+    const forbiddenClause = FORBIDDEN_PERSONA_CODEPOINTS
+      .map((codepoint) => `instr(NEW.persona_content, char(${codepoint})) > 0`)
+      .join(' OR ');
+    db.exec(`
+CREATE TRIGGER IF NOT EXISTS collab_agent_turn_persona_insert_guard
+BEFORE INSERT ON collab_agent_turns
+WHEN
+  ((NEW.persona_envelope_version IS NULL) + (NEW.persona_content IS NULL) +
+   (NEW.persona_revision IS NULL) + (NEW.persona_content_sha256 IS NULL)) NOT IN (0, 4)
+  OR (NEW.persona_envelope_version IS NOT NULL AND (
+    NEW.persona_envelope_version <> 1 OR NEW.persona_revision < 0 OR
+    length(NEW.persona_content) > 4000 OR length(NEW.persona_content_sha256) <> 64 OR
+    NEW.persona_content_sha256 GLOB '*[^0-9a-f]*' OR
+    (NEW.persona_content = '' AND NEW.persona_revision <> 0) OR ${forbiddenClause}
+  ))
+BEGIN SELECT RAISE(ABORT, 'agent turn persona envelope is malformed'); END;
+
+CREATE TRIGGER IF NOT EXISTS collab_agent_turn_persona_update_guard
+BEFORE UPDATE OF persona_envelope_version, persona_content, persona_revision, persona_content_sha256
+ON collab_agent_turns
+WHEN ((NEW.persona_envelope_version IS NULL) + (NEW.persona_content IS NULL) +
+      (NEW.persona_revision IS NULL) + (NEW.persona_content_sha256 IS NULL)) NOT IN (0, 4)
+BEGIN SELECT RAISE(ABORT, 'agent turn persona envelope must be all-or-none'); END;
+
+CREATE TRIGGER IF NOT EXISTS collab_agent_turn_persona_immutable
+BEFORE UPDATE OF persona_envelope_version, persona_content, persona_revision, persona_content_sha256
+ON collab_agent_turns
+WHEN NEW.persona_envelope_version IS NOT OLD.persona_envelope_version
+  OR NEW.persona_content IS NOT OLD.persona_content
+  OR NEW.persona_revision IS NOT OLD.persona_revision
+  OR NEW.persona_content_sha256 IS NOT OLD.persona_content_sha256
+BEGIN SELECT RAISE(ABORT, 'agent turn persona envelope is immutable'); END;
+    `);
+    db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
+      AGENT_TURN_PERSONA_ENVELOPE_MIGRATION_ID,
+      new Date().toISOString(),
+    );
+  });
+  try {
+    db.exec('BEGIN EXCLUSIVE');
+    transaction();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  runChannelExternalExportPolicyMigration(db);
+}
+
+/** Durable, default-deny channel policy for exporting collaboration context
+ * to a trusted subscription runtime. Audit storage is additive because the
+ * v1 collab_audit kind constraint is intentionally closed. */
+export function runChannelExternalExportPolicyMigration(db: Database.Database): void {
+  const transaction = db.transaction(() => {
+    const existing = db.prepare('SELECT 1 FROM collab_schema_migrations WHERE id = ?')
+      .get(CHANNEL_EXTERNAL_EXPORT_POLICY_MIGRATION_ID);
+    if (existing) return;
+    const columns = new Set(
+      (db.prepare('PRAGMA table_info(collab_channels)').all() as Array<{ name: string }>)
+        .map((column) => column.name),
+    );
+    if (!columns.has('external_export_policy')) {
+      db.exec("ALTER TABLE collab_channels ADD COLUMN external_export_policy TEXT NOT NULL DEFAULT 'local_only' CHECK(external_export_policy IN ('local_only','operator_confirmed_non_sensitive'))");
+    }
+    db.exec(`
+CREATE TABLE IF NOT EXISTS collab_channel_export_policy_audit (
+  id TEXT PRIMARY KEY,
+  channel_id TEXT NOT NULL REFERENCES collab_channels(id),
+  actor_principal_id TEXT NOT NULL REFERENCES principals(id),
+  prior_policy TEXT NOT NULL CHECK(prior_policy IN ('local_only','operator_confirmed_non_sensitive')),
+  new_policy TEXT NOT NULL CHECK(new_policy IN ('local_only','operator_confirmed_non_sensitive')),
+  idempotency_key TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS collab_channel_export_policy_audit_channel_created
+  ON collab_channel_export_policy_audit(channel_id, created_at);
+    `);
+    db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
+      CHANNEL_EXTERNAL_EXPORT_POLICY_MIGRATION_ID,
+      new Date().toISOString(),
+    );
+  });
   try {
     db.exec('BEGIN EXCLUSIVE');
     transaction();
@@ -469,6 +644,314 @@ CREATE INDEX IF NOT EXISTS collab_agent_schedule_runs_state_fired
 
   try {
     db.exec('BEGIN EXCLUSIVE');
+    transaction();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/**
+ * Additive, secret-free execution metadata for agent principals.
+ *
+ * This deliberately remains separate from `principals`: identity and
+ * credential lifecycle semantics stay unchanged, while runtime adapters can
+ * evolve independently. `provider_account_id` is an opaque account/catalog
+ * identifier, never a token, API key, cookie, or vendor credential.
+ */
+export const AGENT_RUNTIME_PROFILE_MIGRATION_ID = '20260820_001_agent_runtime_profile_v1';
+export const AGENT_RUNTIME_EXTERNAL_CONTEXT_MIGRATION_ID = '20260820_002_agent_runtime_external_context_v1';
+export const AGENT_RUNTIME_TRUSTED_SUBSCRIPTION_MIGRATION_ID = '20260821_007_agent_runtime_trusted_subscription_v1';
+export const AGENT_PERSONA_MIGRATION_ID = '20260821_003_agent_persona_v1';
+export const AGENT_PERSONA_REVISION_MIGRATION_ID = '20260821_004_agent_persona_revision_v1';
+
+const FORBIDDEN_PERSONA_CODEPOINTS = [
+  ...Array.from({ length: 9 }, (_, index) => index),
+  11,
+  12,
+  ...Array.from({ length: 18 }, (_, index) => index + 14),
+  ...Array.from({ length: 33 }, (_, index) => index + 127),
+  0x061c,
+  0x200e,
+  0x200f,
+  ...Array.from({ length: 5 }, (_, index) => index + 0x202a),
+  ...Array.from({ length: 4 }, (_, index) => index + 0x2066),
+];
+
+export function runAgentRuntimeProfileMigration(db: Database.Database): void {
+  const transaction = db.transaction(() => {
+    const existing = db
+      .prepare('SELECT 1 FROM collab_schema_migrations WHERE id = ?')
+      .get(AGENT_RUNTIME_PROFILE_MIGRATION_ID);
+    if (existing) return;
+
+    db.exec(`
+CREATE TABLE IF NOT EXISTS collab_agent_runtime_profiles (
+  agent_principal_id TEXT PRIMARY KEY REFERENCES principals(id),
+  provider_account_id TEXT NOT NULL CHECK(length(trim(provider_account_id)) > 0),
+  adapter_id TEXT NOT NULL CHECK(length(trim(adapter_id)) > 0),
+  model_id TEXT NOT NULL CHECK(length(trim(model_id)) > 0),
+  autostart INTEGER NOT NULL DEFAULT 0 CHECK(autostart IN (0,1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS collab_agent_runtime_profiles_provider
+  ON collab_agent_runtime_profiles(provider_account_id, adapter_id);
+    `);
+
+    db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
+      AGENT_RUNTIME_PROFILE_MIGRATION_ID,
+      new Date().toISOString(),
+    );
+  });
+
+  try {
+    db.exec('BEGIN EXCLUSIVE');
+    transaction();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+
+  runAgentRuntimeExternalContextMigration(db);
+  runAgentRuntimeTrustedSubscriptionMigration(db);
+  runAgentPersonaMigration(db);
+  runAgentPersonaRevisionMigration(db);
+}
+
+export function runAgentPersonaMigration(db: Database.Database): void {
+  const transaction = db.transaction(() => {
+    const existing = db
+      .prepare('SELECT 1 FROM collab_schema_migrations WHERE id = ?')
+      .get(AGENT_PERSONA_MIGRATION_ID);
+    if (existing) return;
+
+    db.exec(`
+CREATE TABLE IF NOT EXISTS collab_agent_personas (
+  agent_principal_id TEXT PRIMARY KEY REFERENCES principals(id),
+  icon_id TEXT NOT NULL DEFAULT 'robot'
+    CHECK(icon_id IN ('robot','brain','shield','search','code','spark','bolt','target')),
+  system_directives TEXT NOT NULL DEFAULT ''
+    CHECK(length(system_directives) <= 4000 AND instr(system_directives, char(0)) = 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+    `);
+
+    db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
+      AGENT_PERSONA_MIGRATION_ID,
+      new Date().toISOString(),
+    );
+  });
+
+  try {
+    db.exec('BEGIN EXCLUSIVE');
+    transaction();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+export function runAgentPersonaRevisionMigration(db: Database.Database): void {
+  const transaction = db.transaction(() => {
+    const existing = db
+      .prepare('SELECT 1 FROM collab_schema_migrations WHERE id = ?')
+      .get(AGENT_PERSONA_REVISION_MIGRATION_ID);
+    if (existing) return;
+
+    const columns = new Set(
+      (db.prepare('PRAGMA table_info(collab_agent_personas)').all() as Array<{ name: string }>)
+        .map((column) => column.name),
+    );
+    if (!columns.has('revision')) {
+      db.exec(`ALTER TABLE collab_agent_personas
+        ADD COLUMN revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0)`);
+    }
+
+    const forbiddenClause = FORBIDDEN_PERSONA_CODEPOINTS
+      .map((codepoint) => `instr(NEW.system_directives, char(${codepoint})) > 0`)
+      .join(' OR ');
+    db.exec(`
+CREATE TRIGGER IF NOT EXISTS collab_agent_personas_directives_insert_guard
+BEFORE INSERT ON collab_agent_personas
+WHEN ${forbiddenClause}
+BEGIN
+  SELECT RAISE(ABORT, 'system directives contain forbidden control characters');
+END;
+
+CREATE TRIGGER IF NOT EXISTS collab_agent_personas_directives_update_guard
+BEFORE UPDATE OF system_directives ON collab_agent_personas
+WHEN ${forbiddenClause}
+BEGIN
+  SELECT RAISE(ABORT, 'system directives contain forbidden control characters');
+END;
+    `);
+
+    db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
+      AGENT_PERSONA_REVISION_MIGRATION_ID,
+      new Date().toISOString(),
+    );
+  });
+
+  try {
+    db.exec('BEGIN EXCLUSIVE');
+    transaction();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/**
+ * Adds an explicit, provider/model-bound acknowledgement for external model
+ * context export. False is the durable default. The companion provider/model
+ * columns prevent a prior acknowledgement from silently surviving a runtime
+ * selection change.
+ */
+export function runAgentRuntimeExternalContextMigration(db: Database.Database): void {
+  const transaction = db.transaction(() => {
+    const existing = db
+      .prepare('SELECT 1 FROM collab_schema_migrations WHERE id = ?')
+      .get(AGENT_RUNTIME_EXTERNAL_CONTEXT_MIGRATION_ID);
+    if (existing) return;
+
+    const columns = new Set(
+      (db.prepare('PRAGMA table_info(collab_agent_runtime_profiles)').all() as Array<{ name: string }>)
+        .map((column) => column.name),
+    );
+    if (!columns.has('external_context_confirmed')) {
+      db.exec(`ALTER TABLE collab_agent_runtime_profiles
+        ADD COLUMN external_context_confirmed INTEGER NOT NULL DEFAULT 0
+        CHECK(external_context_confirmed IN (0,1))`);
+    }
+    if (!columns.has('external_context_provider_account_id')) {
+      db.exec('ALTER TABLE collab_agent_runtime_profiles ADD COLUMN external_context_provider_account_id TEXT');
+    }
+    if (!columns.has('external_context_model_id')) {
+      db.exec('ALTER TABLE collab_agent_runtime_profiles ADD COLUMN external_context_model_id TEXT');
+    }
+
+    db.exec(`
+CREATE TRIGGER IF NOT EXISTS collab_agent_runtime_external_context_insert
+BEFORE INSERT ON collab_agent_runtime_profiles
+WHEN
+  (NEW.external_context_confirmed = 0 AND
+    (NEW.external_context_provider_account_id IS NOT NULL OR NEW.external_context_model_id IS NOT NULL))
+  OR
+  (NEW.external_context_confirmed = 1 AND
+    (NEW.external_context_provider_account_id IS NULL OR NEW.external_context_model_id IS NULL
+      OR NEW.external_context_provider_account_id <> NEW.provider_account_id
+      OR NEW.external_context_model_id <> NEW.model_id))
+BEGIN
+  SELECT RAISE(ABORT, 'external context acknowledgement must match provider and model');
+END;
+
+CREATE TRIGGER IF NOT EXISTS collab_agent_runtime_external_context_update
+BEFORE UPDATE ON collab_agent_runtime_profiles
+WHEN
+  (NEW.external_context_confirmed = 0 AND
+    (NEW.external_context_provider_account_id IS NOT NULL OR NEW.external_context_model_id IS NOT NULL))
+  OR
+  (NEW.external_context_confirmed = 1 AND
+    (NEW.external_context_provider_account_id IS NULL OR NEW.external_context_model_id IS NULL
+      OR NEW.external_context_provider_account_id <> NEW.provider_account_id
+      OR NEW.external_context_model_id <> NEW.model_id))
+BEGIN
+  SELECT RAISE(ABORT, 'external context acknowledgement must match provider and model');
+END;
+    `);
+
+    db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
+      AGENT_RUNTIME_EXTERNAL_CONTEXT_MIGRATION_ID,
+      new Date().toISOString(),
+    );
+  });
+
+  try {
+    db.exec('BEGIN EXCLUSIVE');
+    transaction();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/**
+ * Upgrades external-context acknowledgement to an exact immutable runtime and
+ * persona binding. Every pre-existing acknowledgement is deliberately reset;
+ * an old provider/model checkbox cannot authorize the default-on executor.
+ */
+export function runAgentRuntimeTrustedSubscriptionMigration(db: Database.Database): void {
+  const transaction = db.transaction(() => {
+    const existing = db.prepare('SELECT 1 FROM collab_schema_migrations WHERE id = ?')
+      .get(AGENT_RUNTIME_TRUSTED_SUBSCRIPTION_MIGRATION_ID);
+    if (existing) return;
+    const columns = new Set(
+      (db.prepare('PRAGMA table_info(collab_agent_runtime_profiles)').all() as Array<{ name: string }>)
+        .map((column) => column.name),
+    );
+    if (!columns.has('external_context_runtime_fingerprint')) {
+      db.exec('ALTER TABLE collab_agent_runtime_profiles ADD COLUMN external_context_runtime_fingerprint TEXT');
+    }
+    if (!columns.has('external_context_exact_model_id')) {
+      db.exec('ALTER TABLE collab_agent_runtime_profiles ADD COLUMN external_context_exact_model_id TEXT');
+    }
+    if (!columns.has('external_context_persona_revision')) {
+      db.exec('ALTER TABLE collab_agent_runtime_profiles ADD COLUMN external_context_persona_revision INTEGER');
+    }
+    if (!columns.has('external_context_persona_content_sha256')) {
+      db.exec('ALTER TABLE collab_agent_runtime_profiles ADD COLUMN external_context_persona_content_sha256 TEXT');
+    }
+    db.exec(`
+UPDATE collab_agent_runtime_profiles
+   SET external_context_confirmed = 0,
+       external_context_provider_account_id = NULL,
+       external_context_model_id = NULL,
+       external_context_runtime_fingerprint = NULL,
+       external_context_exact_model_id = NULL,
+       external_context_persona_revision = NULL,
+       external_context_persona_content_sha256 = NULL;
+DROP TRIGGER IF EXISTS collab_agent_runtime_external_context_insert;
+DROP TRIGGER IF EXISTS collab_agent_runtime_external_context_update;
+CREATE TRIGGER collab_agent_runtime_external_context_insert
+BEFORE INSERT ON collab_agent_runtime_profiles
+WHEN (NEW.external_context_confirmed = 0 AND (NEW.external_context_provider_account_id IS NOT NULL
+  OR NEW.external_context_model_id IS NOT NULL OR NEW.external_context_runtime_fingerprint IS NOT NULL
+  OR NEW.external_context_exact_model_id IS NOT NULL OR NEW.external_context_persona_revision IS NOT NULL
+  OR NEW.external_context_persona_content_sha256 IS NOT NULL))
+OR (NEW.external_context_confirmed = 1 AND (NEW.external_context_provider_account_id <> NEW.provider_account_id
+  OR NEW.external_context_model_id <> NEW.model_id OR NEW.external_context_exact_model_id <> NEW.model_id
+  OR length(NEW.external_context_runtime_fingerprint) <> 64
+  OR NEW.external_context_persona_revision IS NULL OR NEW.external_context_persona_revision < 0
+  OR length(NEW.external_context_persona_content_sha256) <> 64))
+BEGIN SELECT RAISE(ABORT, 'external context consent binding is incomplete'); END;
+CREATE TRIGGER collab_agent_runtime_external_context_update
+BEFORE UPDATE ON collab_agent_runtime_profiles
+WHEN (NEW.external_context_confirmed = 0 AND (NEW.external_context_provider_account_id IS NOT NULL
+  OR NEW.external_context_model_id IS NOT NULL OR NEW.external_context_runtime_fingerprint IS NOT NULL
+  OR NEW.external_context_exact_model_id IS NOT NULL OR NEW.external_context_persona_revision IS NOT NULL
+  OR NEW.external_context_persona_content_sha256 IS NOT NULL))
+OR (NEW.external_context_confirmed = 1 AND (NEW.external_context_provider_account_id <> NEW.provider_account_id
+  OR NEW.external_context_model_id <> NEW.model_id OR NEW.external_context_exact_model_id <> NEW.model_id
+  OR length(NEW.external_context_runtime_fingerprint) <> 64
+  OR NEW.external_context_persona_revision IS NULL OR NEW.external_context_persona_revision < 0
+  OR length(NEW.external_context_persona_content_sha256) <> 64))
+BEGIN SELECT RAISE(ABORT, 'external context consent binding is incomplete'); END;
+    `);
+    db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
+      AGENT_RUNTIME_TRUSTED_SUBSCRIPTION_MIGRATION_ID,
+      new Date().toISOString(),
+    );
+  });
+  db.exec('BEGIN EXCLUSIVE');
+  try {
     transaction();
     db.exec('COMMIT');
   } catch (error) {
