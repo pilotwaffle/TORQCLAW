@@ -33,3 +33,28 @@ scratchpad/
 packages/gateway/.playwright-mcp/
 tests/resilience/p0-report-correction*.json
 torq-live-current.png
+
+# B-5 hardening (G1D PRD-007 S7/T4 packet, 2026-08-22) -- operator-local
+# runtime state, agent-CLI scratch, and screenshot/log churn that must never
+# be committed. Report-only if already on disk untracked; never delete.
+.runtime/
+.qwen/
+/.playwright-mcp/
+*.log
+*.bak
+*.bak-*
+live-*.png
+shot-*.png
+baseline-*.png
+s[0-9]-*.png
+s[0-9]-[a-z0-9-]*.png
+route-menu.png
+agents-mobile-proof.png
+.torqclaw/
+*-credential.token
+test_write_probe.txt
+# G2A follow-up 3 (2026-08-22): operator-local Playwright demo/recon scratch
+# with machine-absolute paths. Report-only; never committed, never deleted.
+/recon2.mjs
+/record.mjs
+/responsive-840.png
