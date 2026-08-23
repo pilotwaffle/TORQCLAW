@@ -37,6 +37,7 @@ dependencies = [
     "uvicorn[standard]>=0.24.0,<1",
     "pywinpty>=2.0.0,<3; sys_platform == 'win32'",
     "Pillow==12.2.0",
+    "ddgs>=9.15.0",
 ]
 
 [tool.uv]
