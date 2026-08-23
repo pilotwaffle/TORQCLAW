@@ -25,7 +25,7 @@
     "browser_research": {
       "profileId": "browser_research",
       "profileVersion": 1,
-      "allowedNamespaces": ["browser", "playwright", "websearch"],
+      "allowedNamespaces": ["browser", "playwright", "research"],
       "allowedCapabilities": ["read"],
       "allowedSideEffects": ["none"],
       "allowedTiers": ["LOCAL_EDGE", "FRONTIER"],
@@ -129,7 +129,7 @@
   ],
   "fixedPolicyVector": {
     "label": "read_only-live-module-v1",
-    "canonicalPreimage": "{\"allowedOperationIds\":[\"browser__snapshot\",\"filesystem__read_file\",\"playwright__snapshot\",\"shell__inspect\",\"websearch__search\"],\"allowedTiers\":[\"LOCAL_EDGE\"],\"approvalRequirements\":{\"exec\":false,\"send\":false,\"write\":false},\"capabilityClasses\":[\"read\"],\"operationApprovals\":{\"browser__snapshot\":false,\"filesystem__read_file\":false,\"playwright__snapshot\":false,\"shell__inspect\":false,\"websearch__search\":false},\"operationCapabilities\":{\"browser__snapshot\":\"read\",\"filesystem__read_file\":\"read\",\"playwright__snapshot\":\"read\",\"shell__inspect\":\"read\",\"websearch__search\":\"read\"},\"operationSideEffects\":{\"browser__snapshot\":\"none\",\"filesystem__read_file\":\"none\",\"playwright__snapshot\":\"none\",\"shell__inspect\":\"none\",\"websearch__search\":\"none\"},\"profileId\":\"read_only\",\"profileVersion\":1,\"schemaVersion\":\"torqclaw.effective-profile/v1\",\"scopes\":{\"network\":\"none\",\"path\":\"none\"},\"sideEffectClasses\":[\"none\"],\"toolRegistryVersion\":\"torqclaw.tools/v1\"}",
-    "expectedSha256": "3ef1dd5f3fdec47f77830e64d1e2eb2da624a434824b0fb3c5645af2996e67a5"
+    "canonicalPreimage": "{\"allowedOperationIds\":[\"browser__snapshot\",\"filesystem__read_file\",\"playwright__snapshot\",\"research__web_search\",\"shell__inspect\"],\"allowedTiers\":[\"LOCAL_EDGE\"],\"approvalRequirements\":{\"exec\":false,\"send\":false,\"write\":false},\"capabilityClasses\":[\"read\"],\"operationApprovals\":{\"browser__snapshot\":false,\"filesystem__read_file\":false,\"playwright__snapshot\":false,\"research__web_search\":false,\"shell__inspect\":false},\"operationCapabilities\":{\"browser__snapshot\":\"read\",\"filesystem__read_file\":\"read\",\"playwright__snapshot\":\"read\",\"research__web_search\":\"read\",\"shell__inspect\":\"read\"},\"operationSideEffects\":{\"browser__snapshot\":\"none\",\"filesystem__read_file\":\"none\",\"playwright__snapshot\":\"none\",\"research__web_search\":\"none\",\"shell__inspect\":\"none\"},\"profileId\":\"read_only\",\"profileVersion\":1,\"schemaVersion\":\"torqclaw.effective-profile/v1\",\"scopes\":{\"network\":\"none\",\"path\":\"none\"},\"sideEffectClasses\":[\"none\"],\"toolRegistryVersion\":\"torqclaw.tools/v1\"}",
+    "expectedSha256": "e9b6d5a39f51d3e170c2ded7c616a3418914d7b24ac6b509db3136e1f33df562"
   }
 }

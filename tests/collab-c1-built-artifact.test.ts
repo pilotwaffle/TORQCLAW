@@ -14,6 +14,7 @@ import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 // NOTE: the collab migrations are deliberately NOT imported here any more.
@@ -162,6 +163,14 @@ describe('C1 built-artifact enforcement (§5(c))', () => {
       '20260811_003_surface_audit_c1',
       '20260818_001_agent_autoreply_v1',
       '20260818_002_agent_cron_v1',
+      '20260820_001_agent_runtime_profile_v1',
+      '20260820_002_agent_runtime_external_context_v1',
+      '20260821_003_agent_persona_v1',
+      '20260821_004_agent_persona_revision_v1',
+      '20260821_005_agent_turn_output_v1',
+      '20260821_006_agent_turn_persona_envelope_v1',
+      '20260821_007_agent_runtime_trusted_subscription_v1',
+      '20260822_007_channel_external_export_policy_v1',
     ]);
     collab.close();
 
@@ -181,9 +190,9 @@ describe('C1 built-artifact enforcement (§5(c))', () => {
     // alongside the two C1 calls (same seam, same idempotency guarantee).
     // CRON slice (G1R Gate-1 §2A, 2026-08-18): 5, not 4 -- migrateCollabDb
     // now ALSO runs runAgentCronMigration, same seam, same guarantee.
-    expect((again.prepare('SELECT COUNT(*) AS n FROM collab_schema_migrations').get() as { n: number }).n).toBe(5);
+    expect((again.prepare('SELECT COUNT(*) AS n FROM collab_schema_migrations').get() as { n: number }).n).toBe(13);
     again.close();
-    console.log('C1_ARTIFACT_SELF_MIGRATED collab=5 migrations, state=3 tables');
+    console.log('C1_ARTIFACT_SELF_MIGRATED collab=13 migrations, state=3 tables');
   }, 120000);
 
   it('the booted dist ACCEPTS a valid C1 surface and REFUSES revoked/expired/inert ones', async () => {
@@ -281,35 +290,55 @@ describe('C1 built-artifact enforcement (§5(c))', () => {
     const pepper = Buffer.alloc(32, 0x23);
     const s = await prepare(dataDir, pepper);
 
-    try {
-      // Stale artifact: revoked/expired credentials report as active.
-      const stale = original.replace(
-        /const state = row\.state === 'active' && !expired \? 'active' : 'revoked';/,
-        "const state = 'active'; /* STALE ARTIFACT */",
-      );
-      expect(stale).not.toBe(original);   // the edit must actually apply
-      writeFileSync(distSurfaces, stale, 'utf8');
+    // Inject the stale source through a child-only ESM loader instead of
+    // rewriting the shared workspace dist. A concurrent full-suite build
+    // cannot erase this mutation, and no other artifact test can observe it.
+    const stale = original.replace(
+      /const state = row\.state === 'active' && !expired \? 'active' : 'revoked';/,
+      "const state = 'active'; /* STALE ARTIFACT */",
+    );
+    expect(stale).not.toBe(original);   // the edit must actually apply
+    const staleDir = mkdtempSync(join(tmpdir(), 'torq-c1-a11-loader-'));
+    const staleSource = join(staleDir, 'surfaces.stale.js');
+    const loader = join(staleDir, 'loader.mjs');
+    writeFileSync(staleSource, stale, 'utf8');
+    writeFileSync(loader, `
+import { readFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
+const target = pathToFileURL(process.env.TORQCLAW_TEST_STALE_TARGET).href;
+export async function load(url, context, nextLoad) {
+  if (url === target) {
+    return {
+      format: 'module',
+      source: await readFile(process.env.TORQCLAW_TEST_STALE_SOURCE, 'utf8'),
+      shortCircuit: true,
+    };
+  }
+  return nextLoad(url, context);
+}
+`, 'utf8');
 
-      gateway = await launchGateway(env(dataDir, s.collabPath, pepper));
-      await gateway.ready;
-      const attempt = await connectAndCollect(gateway.url, {
-        role: 'operator', token: 'root-token',
-        clientInfo: { name: 'a11-stale', version: '0.1.0' },
-        auth: { kind: 'surface', credential: s.expiredTok.token },
-      });
-      await closeWire(attempt);
-      await gateway.stop();
-      gateway = null;
+    gateway = await launchGateway({
+      ...env(dataDir, s.collabPath, pepper),
+      TORQCLAW_TEST_STALE_TARGET: distSurfaces,
+      TORQCLAW_TEST_STALE_SOURCE: staleSource,
+    }, true, '--experimental-loader=' + pathToFileURL(loader).href);
+    await gateway.ready;
+    const attempt = await connectAndCollect(gateway.url, {
+      role: 'operator', token: 'root-token',
+      clientInfo: { name: 'a11-stale', version: '0.1.0' },
+      auth: { kind: 'surface', credential: s.expiredTok.token },
+    });
+    await closeWire(attempt);
+    await gateway.stop();
+    gateway = null;
 
-      // The stale artifact FAILS to refuse a revoked surface (A2). This is
-      // the observation that makes (a)+(b) insufficient on their own: the
-      // TS source was correct the whole time.
-      const staleRefused = JSON.stringify(attempt.rawMessages) === JSON.stringify(AUTH_FAILED);
-      expect(staleRefused).toBe(false);
-      console.log('A11_STALE_DIST_ACCEPTED_WHAT_SOURCE_REFUSES true');
-    } finally {
-      writeFileSync(distSurfaces, original, 'utf8');
-    }
+    // The stale artifact FAILS to refuse a revoked surface (A2). This is
+    // the observation that makes (a)+(b) insufficient on their own: the
+    // TS source was correct the whole time.
+    const staleRefused = JSON.stringify(attempt.rawMessages) === JSON.stringify(AUTH_FAILED);
+    expect(staleRefused).toBe(false);
+    console.log('A11_STALE_DIST_ACCEPTED_WHAT_SOURCE_REFUSES true');
 
     // Restored artifact refuses it again.
     const dir2 = mkdtempSync(join(tmpdir(), 'torq-c1-a11-fixed-'));

@@ -56,7 +56,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { runCollaborationMigration, runAgentAutoreplyMigration } from '../packages/collab/src/index.js';
+import {
+  runCollaborationMigration,
+  runAgentAutoreplyMigration,
+  runAgentRuntimeProfileMigration,
+  runAgentRuntimeExternalContextMigration,
+  runAgentPersonaMigration,
+  runAgentPersonaRevisionMigration,
+  runAgentTurnOutputMigration,
+} from '../packages/collab/src/index.js';
 import { ensureGatewayBuild, GATEWAY_DIST_ENTRY } from './helpers/collab-gateway-harness.js';
 
 const REPO_ROOT = join(GATEWAY_DIST_ENTRY, '..', '..', '..', '..');
@@ -83,6 +91,11 @@ function seedOneAgentChannel(dbPath: string): Seeded {
   const db = new Database(dbPath);
   runCollaborationMigration(db);
   runAgentAutoreplyMigration(db);
+  runAgentRuntimeProfileMigration(db);
+  runAgentRuntimeExternalContextMigration(db);
+  runAgentPersonaMigration(db);
+  runAgentPersonaRevisionMigration(db);
+  runAgentTurnOutputMigration(db);
   const operatorId = randomUUID();
   const agentAId = randomUUID();
   const now = nowIso();
@@ -102,6 +115,16 @@ function seedOneAgentChannel(dbPath: string): Seeded {
   db.prepare(
     "INSERT INTO collab_members(channel_id, principal_id, role, state, membership_epoch, rejoined_seq, joined_at, removed_at) VALUES (?, ?, 'agent', 'active', 1, 0, ?, NULL)",
   ).run(channelId, agentAId, now);
+  db.prepare(
+    `INSERT INTO collab_agent_runtime_profiles(
+       agent_principal_id, provider_account_id, adapter_id, model_id, autostart, created_at, updated_at
+     ) VALUES (?, 'ollama-local', 'ollama-local', 'torq-ai-v5', 1, ?, ?)`,
+  ).run(agentAId, now, now);
+  db.prepare(
+    `INSERT INTO collab_agent_personas(
+       agent_principal_id, icon_id, system_directives, created_at, updated_at, revision
+     ) VALUES (?, 'robot', '', ?, ?, 1)`,
+  ).run(agentAId, now, now);
   db.close();
   return { collabDbPath: dbPath, operatorId, agentAId, channelId };
 }
@@ -215,22 +238,17 @@ describe('a failed agent turn does not re-enter the coalescing cascade', () => {
     );
   }
 
-  it('NEGATIVE: a deterministically failing turn drops its coalesced follow-up (no turn row at the later seq)', async () => {
+  it('NEGATIVE: a deterministically failing dispatch drops its coalesced follow-up (no turn row at the later seq)', async () => {
     capturedErrors = [];
 
-    // Sanity: the registry really is missing the tool, so the failure below
-    // is the genuine §5A assertion and not some unrelated breakage.
-    const registryNames = bridge.getRegistry().map((t: any) => t.name);
-    expect(
-      registryNames,
-      'precondition: collab__post_message must be ABSENT so the real §5A assertion fires',
-    ).not.toContain('collab__post_message');
-
-    // The dispatcher must never reach dispatch() in this test -- the §5A
-    // assertion throws before any GatewayRequest is minted. This override
-    // exists purely to PROVE that: if it ever runs, the test fails loudly.
+    // Managed turns expose zero model tools, so the historical missing-tool
+    // assertion is no longer a valid failure source. Throw at the existing
+    // dispatch seam to exercise the real dispatchOneTurn failure guard.
     let dispatchWasCalled = false;
-    autoReplyDispatcher.setAutoReplyDispatchForTest(() => { dispatchWasCalled = true; });
+    autoReplyDispatcher.setAutoReplyDispatchForTest(() => {
+      dispatchWasCalled = true;
+      throw new Error('TEST_DETERMINISTIC_DISPATCH_FAILURE');
+    });
 
     // Post TWO operator messages. The SECOND must be triggered while the
     // FIRST turn is still in flight -- that overlap is the ONLY thing that
@@ -259,23 +277,23 @@ describe('a failed agent turn does not re-enter the coalescing cascade', () => {
     // Let any (incorrect) coalesced follow-up have a real window to land.
     await new Promise((r) => setTimeout(r, 600));
 
-    expect(dispatchWasCalled, 'the §5A assertion must throw BEFORE any dispatch').toBe(false);
+    expect(dispatchWasCalled, 'the deterministic dispatch failure must be exercised').toBe(true);
 
     // The failure was the real structural assertion, and it was LOUD.
     expect(
-      capturedErrors.some((e) => e.includes("agent turn cannot post")),
-      `expected the real §5A failure to be logged; saw: ${JSON.stringify(capturedErrors)}`,
+      capturedErrors.some((e) => e.includes('TEST_DETERMINISTIC_DISPATCH_FAILURE')),
+      `expected the deterministic dispatch failure to be logged; saw: ${JSON.stringify(capturedErrors)}`,
     ).toBe(true);
 
     // ---- THE ASSERTION, ON DATABASE ROWS ----
     const turns = agentTurnRows(seeded.collabDbPath, seeded.channelId);
 
-    // The first turn WAS claimed and DID resolve terminated (§5A resolves the
-    // row 'terminated' before throwing). Without this, "no second row" could
+    // The first turn WAS claimed and DID resolve terminated. Without this,
+    // "no second row" could
     // pass vacuously against a build that never claimed anything.
     const first = turns.filter((t) => t.channelSeq === seq1);
     expect(first.length, 'the triggering turn must have been claimed').toBe(1);
-    expect(first[0]!.state, 'the §5A assertion resolves the turn terminated before throwing').toBe('terminated');
+    expect(first[0]!.state, 'the failed dispatch resolves the turn terminated before throwing').toBe('terminated');
 
     // THE OVERLAP ACTUALLY HAPPENED -- this test is not the vacuous variant.
     // Trigger 2 arrived while turn 1 held inFlight, so it set the dirty flag
@@ -311,7 +329,7 @@ describe('a failed agent turn does not re-enter the coalescing cascade', () => {
     ).toEqual([]);
   }, 30000);
 
-  it('POSITIVE CONTROL: with the tool admitted, a SUCCESSFUL turn with a dirty flag DOES coalesce and re-dispatch', async () => {
+  it('POSITIVE CONTROL: a successful dispatch with a dirty flag DOES coalesce and re-dispatch', async () => {
     capturedErrors = [];
 
     // Register the REAL in-process collab MCP server. predictTools now finds
@@ -336,7 +354,7 @@ describe('a failed agent turn does not re-enter the coalescing cascade', () => {
       void (async () => {
         events.taskStore.create(req, diag);
         await new Promise((r) => setTimeout(r, 400));
-        events.taskStore.complete(req.id, 'ok', {});
+        events.taskStore.complete(req.id, '', {});
       })();
     });
 

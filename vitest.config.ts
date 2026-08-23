@@ -57,5 +57,13 @@ export default defineConfig({
   test: {
     include: ['tests/**/*.test.{ts,tsx}'],
     environment: 'node',
+    // Built-artifact and failover files spawn their own Node, Python, build,
+    // and server processes. Vitest's CPU-derived default (20 workers on the
+    // primary Windows builder) multiplies that nested fanout until otherwise
+    // healthy per-test deadlines expire. Two file workers preserve parallel
+    // execution while allowing at most one competing suite beside a nested-
+    // process test, placing a deterministic ceiling on subprocess pressure.
+    minWorkers: 1,
+    maxWorkers: 2,
   },
 });

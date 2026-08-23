@@ -344,8 +344,16 @@ describe('PRD-TCLAW-AGENT-PARTICIPATION-007 S3 — anti-storm mechanism 2 (idemp
       expect(strandedSeqs).not.toContain(3);
 
       // Reclaim: flips seq 1 back to a fresh 'dispatched' row for redispatch.
-      const reclaimed = collab.reclaimStrandedAgentTurn(db, { channelId, agentPrincipalId: agentId, channelSeq: 1, nowIso: nowIso() });
-      expect(reclaimed).toBe(true);
+      const strandedTurn = stranded.find((turn: any) => turn.channelSeq === 1)!;
+      const reclaimed = collab.reclaimStrandedAgentTurn(db, {
+        channelId,
+        agentPrincipalId: agentId,
+        channelSeq: 1,
+        nowIso: nowIso(),
+        expectedDispatchedAt: strandedTurn.dispatchedAt,
+        leaseToken: 's3-recovery-lease',
+      });
+      expect(reclaimed).toEqual({ leaseToken: 's3-recovery-lease', attempt: 1 });
       const afterReclaim = collab.findStrandedAgentTurns(db, nowIso(), 30);
       // Immediately after reclaim, dispatched_at is "now" -- inside the
       // grace window -- so it is NOT immediately re-found as stranded
@@ -359,8 +367,14 @@ describe('PRD-TCLAW-AGENT-PARTICIPATION-007 S3 — anti-storm mechanism 2 (idemp
       // WHERE state='dispatched' guard is what actually prevents a
       // resolved row from ever being reclaimed -- proven directly:
       collab.resolveAgentTurn(db, { channelId, agentPrincipalId: agentId, channelSeq: 1, state: 'no_post', nowIso: nowIso() });
-      const reclaimAfterResolve = collab.reclaimStrandedAgentTurn(db, { channelId, agentPrincipalId: agentId, channelSeq: 1, nowIso: nowIso() });
-      expect(reclaimAfterResolve, 'a RESOLVED row must never be reclaimable').toBe(false);
+      const reclaimAfterResolve = collab.reclaimStrandedAgentTurn(db, {
+        channelId,
+        agentPrincipalId: agentId,
+        channelSeq: 1,
+        nowIso: nowIso(),
+        expectedDispatchedAt: strandedTurn.dispatchedAt,
+      });
+      expect(reclaimAfterResolve, 'a RESOLVED row must never be reclaimable').toBeNull();
     } finally {
       db.close();
       rmSync(dir, { recursive: true, force: true });

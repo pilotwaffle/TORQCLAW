@@ -85,7 +85,7 @@ export const SYNTHETIC_TOOLS: readonly Readonly<RegisteredTool>[] = Object.freez
   frozenTool('browser__click', 'write', true),
   frozenTool('playwright__snapshot', 'read', false),
   frozenTool('playwright__fill', 'write', true),
-  frozenTool('websearch__search', 'read', false),
+  frozenTool('research__web_search', 'read', false),
   frozenTool('shell__inspect', 'read', false),
   frozenTool('shell__run_command', 'exec', true),
   frozenTool('terminal__set_option', 'write', true),

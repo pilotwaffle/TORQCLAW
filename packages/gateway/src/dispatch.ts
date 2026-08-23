@@ -20,7 +20,11 @@ import { collabEnabled } from './principalBridge.js';
 import {
   summarizeArgs, buildActionLabel, redactCardText, REDACTION_NOTE,
 } from './approvalCard.js';
-import { safeMaterializeReceipt, safeMaterializeReceipt as projectReceiptSafely } from './receipts.js';
+import {
+  safeMaterializeReceipt,
+  safeMaterializeReceipt as projectReceiptSafely,
+  withVerifiedTerminalReceipt,
+} from './receipts.js';
 import {
   resolveBudgetWithSource,
   resolveSessionCap,
@@ -31,6 +35,29 @@ import {
   recordSpendSafe,
 } from './spend.js';
 import { randomUUID } from 'node:crypto';
+import {
+  executeSubscriptionAgentTurn,
+  SubscriptionRuntimeError,
+} from './subscriptionAgentRuntime.js';
+import {
+  admitLiveSubscriptionExecution,
+  subscriptionAgentExecutionEnabled,
+} from './subscriptionExecutionAdmission.js';
+
+function subscriptionExecutionTarget(req: GatewayRequest) {
+  const target = req.payload.subscriptionExecutionTarget;
+  return target ?? null;
+}
+
+export function failureSideEffectNote(tier: ComputeTier, subscriptionExecution: boolean): string {
+  if (subscriptionExecution) {
+    return 'Trusted subscription CLI execution may have started. Provider or vendor-built-in tool ' +
+      'side effects may have occurred; provider cost is unavailable.';
+  }
+  return tier === ComputeTier.LOCAL_EDGE
+    ? 'No changes were made \u2014 this task ran locally with no approved write tools.'
+    : 'Some steps may have completed before the failure.';
+}
 
 /** Translate opaque transport failures into something the operator can act on.
  *  A raw "fetch failed" almost always means the provider rejected the call —
@@ -162,7 +189,7 @@ export function buildGateFacts(
  *  ("Task aborted by user: tool denied") with recovery chips. A separate task
  *  from the original blocked run (which already terminated with PENDING_APPROVAL). */
 export function emitToolDenied(req: GatewayRequest, toolName: string, diag: RouterDiagnostics): void {
-  const emit = makeEmitter(req.sessionId, req.id, diag.tier);
+  const emit = withVerifiedTerminalReceipt(req.id, makeEmitter(req.sessionId, req.id, diag.tier));
   taskStore.create(req, diag);
   taskStore.fail(req.id, `DENIED: tool ${toolName} denied by user`);
   emit('ERROR', `Task aborted by user: tool ${toolName} denied.`, {
@@ -178,23 +205,56 @@ export function emitToolDenied(req: GatewayRequest, toolName: string, diag: Rout
  *  Invariant 7: this is the SINGLE terminal emission point. Execution layers
  *  THROW typed errors; only the catch/complete here emits RESULT or ERROR. */
 function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
-  const emit = makeEmitter(req.sessionId, req.id, diag.tier);
+  const emit = withVerifiedTerminalReceipt(req.id, makeEmitter(req.sessionId, req.id, diag.tier));
+  const subscriptionTarget = subscriptionExecutionTarget(req);
 
   // Apply resolved budget so the bridge enforces it; warn once when a FRONTIER
   // task runs unlimited (real money, no breaker).
   // TCLAW-1A-core: also capture `source` (per_task/env_default/unlimited) so
   // it can be threaded onto the persisted telemetry for the receipt projector
   // (receipts.ts budget_source), replacing the previously-hardcoded null.
-  const { budget, source: budgetSource } = resolveBudgetWithSource(req);
+  const { budget, source: budgetSource } = subscriptionTarget
+    ? { budget: undefined, source: 'unavailable' as const }
+    : resolveBudgetWithSource(req);
   const effectiveReq: GatewayRequest =
     budget === undefined
       ? req
       : { ...req, constraints: { ...req.constraints, maxCost: budget } };
-  if (budget === undefined && diag.tier === ComputeTier.FRONTIER) {
+  if (subscriptionTarget) {
+    emit('SYSTEM', 'Subscription provider usage is account-managed; dollar cost is unavailable.');
+  } else if (budget === undefined && diag.tier === ComputeTier.FRONTIER) {
     emit('SYSTEM', 'No budget set — this cloud task runs without a spend cap.');
   }
 
   taskStore.create(effectiveReq, diag); // persist BEFORE executing
+
+  if (subscriptionTarget && !subscriptionAgentExecutionEnabled()) {
+    taskStore.fail(req.id, 'SUBSCRIPTION_EXECUTION_DISABLED', {
+      subscription: true,
+      costSource: 'unavailable',
+    });
+    emit('ERROR', 'Subscription agent execution is disabled by server policy.', {
+      recovery: ['COPY_DIAGNOSTIC'],
+      sideEffectNote: 'Nothing ran - the request never reached the subscription provider.',
+    });
+    safeMaterializeReceipt(req.id);
+    cancellations.clear(req.id);
+    return;
+  }
+
+  if (subscriptionTarget && diag.tier !== ComputeTier.FRONTIER) {
+    taskStore.fail(req.id, 'SUBSCRIPTION_TARGET_REQUIRES_FRONTIER', {
+      subscription: true,
+      costSource: 'unavailable',
+    });
+    emit('ERROR', 'Subscription execution was refused because routing did not authorize the external tier.', {
+      recovery: ['COPY_DIAGNOSTIC'],
+      sideEffectNote: 'Nothing ran - the request never reached the subscription provider.',
+    });
+    safeMaterializeReceipt(req.id);
+    cancellations.clear(req.id);
+    return;
+  }
 
   // TCLAW-1A-core CAP GATE — THE HARD INVARIANT: enforcement happens BEFORE
   // spend. FRONTIER-only (LOCAL_EDGE is never evaluated, never blocked —
@@ -206,7 +266,7 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
   // (resolveSessionCap/resolveDailyCap read TORQCLAW_SESSION_CAP_USD /
   // TORQCLAW_DAILY_CAP_USD) — there is deliberately no client-settable cap
   // path here (G1R correction B).
-  if (diag.tier === ComputeTier.FRONTIER) {
+  if (diag.tier === ComputeTier.FRONTIER && !subscriptionTarget) {
     const breach = evaluateCaps(
       sessionTotal(req.sessionId),
       dailyTotal(),
@@ -266,7 +326,7 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
 
   // Graceful frontier degradation: don't throw a bare error if the engine
   // never connected — tell the user plainly and offer a local re-run.
-  if (diag.tier === ComputeTier.FRONTIER && !isHermesAvailable()) {
+  if (diag.tier === ComputeTier.FRONTIER && !subscriptionTarget && !isHermesAvailable()) {
     taskStore.fail(req.id, 'FRONTIER_UNAVAILABLE: hermes engine unreachable');
     emit(
       'ERROR',
@@ -285,10 +345,82 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
 
   void (async () => {
     try {
-      const result =
-        diag.tier === ComputeTier.LOCAL_EDGE
-          ? await executeLocalEdge(effectiveReq, emit)
+      if (subscriptionTarget) {
+        const admission = admitLiveSubscriptionExecution(effectiveReq, subscriptionTarget);
+        if (!admission.ok) {
+          throw new SubscriptionRuntimeError('RUNTIME_NOT_READY');
+        }
+      }
+      const result = subscriptionTarget
+        ? await (async () => {
+            const termination = cancellations.beginTerminationTracking(req.id);
+            try {
+              const subscriptionResult = await executeSubscriptionAgentTurn({
+                profile: {
+                  providerAccountId: subscriptionTarget.providerAccountId,
+                  adapterId: subscriptionTarget.adapterId,
+                  modelId: subscriptionTarget.modelId,
+                  autostart: subscriptionTarget.confirmed,
+                  externalContextConfirmed: subscriptionTarget.confirmed,
+                  externalContextRuntimeFingerprint: subscriptionTarget.runtimeFingerprint,
+                  externalContextExactModelId: subscriptionTarget.exactModelId,
+                  externalContextPersonaRevision: subscriptionTarget.personaRevision,
+                  externalContextPersonaContentSha256: subscriptionTarget.personaContentSha256,
+                },
+                prompt: effectiveReq.payload.prompt,
+                signal: termination.signal,
+                personaEnvelope: effectiveReq.payload.agentPersonaEnvelope,
+                turnContext: effectiveReq.payload.agentTurnContext,
+                admit: () => admitLiveSubscriptionExecution(effectiveReq, subscriptionTarget).ok,
+              });
+              if (termination.signal.aborted) throw new SubscriptionRuntimeError('CANCELLED');
+              termination.complete(true);
+              return {
+                text: subscriptionResult.text,
+                telemetry: {
+                  subscription: true,
+                  providerId: subscriptionResult.providerId,
+                  modelId: subscriptionResult.modelId,
+                  adapterId: subscriptionTarget.adapterId,
+                  runtimeFingerprint: subscriptionResult.runtimeFingerprint,
+                  exactModelId: subscriptionResult.modelId,
+                  costSource: 'unavailable',
+                  cancelled: false,
+                },
+              };
+            } catch (error) {
+              termination.complete(
+                !(error instanceof SubscriptionRuntimeError)
+                || error.code !== 'TERMINATION_UNCONFIRMED',
+              );
+              throw error;
+            }
+          })()
+        : diag.tier === ComputeTier.LOCAL_EDGE
+          ? await (async () => {
+              const termination = cancellations.beginTerminationTracking(req.id);
+              try {
+                return await executeLocalEdge(effectiveReq, emit, termination.signal);
+              } finally {
+                // AbortSignal is the in-process termination authority. Once
+                // executeLocalEdge has unwound, no local provider/tool work
+                // remains that can outlive the task terminal.
+                termination.complete(true);
+              }
+            })()
           : await executeHermesTask(effectiveReq, emit);
+
+      // Subscription receipts are authoritative execution records, so the
+      // complete/receipt boundary gets the same live binding check as spawn,
+      // session and pre-prompt. A STOP, membership, lease, profile or consent
+      // change after provider output refuses the terminal rather than
+      // materializing a stale-authority success receipt.
+      if (subscriptionTarget) {
+        if (cancellations.isCancelled(req.id)) throw new SubscriptionRuntimeError('CANCELLED');
+        if (!admitLiveSubscriptionExecution(effectiveReq, subscriptionTarget).ok) {
+          throw new SubscriptionRuntimeError('RUNTIME_NOT_READY');
+        }
+      }
 
       // TCLAW-1A-core: thread budgetSource onto the persisted telemetry so
       // the receipt projector (receipts.ts) can read a real budget_source
@@ -296,6 +428,10 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
       // first so this never overwrites an actual collected field.
       const telemetryWithSource = { ...(result.telemetry ?? {}), budgetSource };
       taskStore.complete(req.id, result.text, telemetryWithSource);
+      // Persist the authoritative receipt before result emission. The task
+      // write and projector are synchronous, so pollers cannot observe a
+      // completed subscription task before this projection attempt returns.
+      safeMaterializeReceipt(req.id);
       // Cancelled tasks (and budget-broken ones) must not poison memory.
       if (!result.telemetry?.cancelled) {
         sessions.storeEpisode(
@@ -306,16 +442,11 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
       // P2.5 receipt: a compact, honest summary from REAL telemetry only.
       // toolsUsed is reconstructed console-side from TOOL_CALL events.
       emit('SYSTEM', 'Done', { receipt: buildReceipt(diag.tier, result.telemetry, effectiveReq) });
-      // TCLAW-4A: materialize the persisted run_receipts projection. MUST be
-      // the guarded wrapper — its own try/catch — so a projector throw can
-      // NEVER be caught by the outer catch below, which would flip this
-      // already-completed task into a failure and emit a phantom ERROR.
-      safeMaterializeReceipt(req.id);
       // TCLAW-1A-core: record spend at the SUCCESS terminal, FRONTIER-only —
       // LOCAL_EDGE never touches the ledger (free, never charged, never
       // clutters the cap total). Guarded (own try/catch): a ledger-write
       // throw must never break the already-completed terminal path.
-      if (diag.tier === ComputeTier.FRONTIER) {
+      if (diag.tier === ComputeTier.FRONTIER && !subscriptionTarget) {
         // costSource only ever exists on the Hermes (FRONTIER) telemetry
         // shape (Record<string, unknown>) — ExecutionResult's LOCAL_EDGE
         // telemetry type has no such field (LOCAL_EDGE is never charged, so
@@ -394,7 +525,11 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
       }
 
       const isBudget = error instanceof CircuitBreakerError;
-      const isCancelled = error instanceof HermesCancelledError;
+      const isSubscriptionCancelled =
+        error instanceof SubscriptionRuntimeError && error.code === 'CANCELLED';
+      const isSubscriptionTerminationUncertain =
+        error instanceof SubscriptionRuntimeError && error.code === 'TERMINATION_UNCONFIRMED';
+      const isCancelled = error instanceof HermesCancelledError || isSubscriptionCancelled;
       const reason = isBudget ? `BUDGET: ${error.message}` : String(error?.message ?? error);
       // G1R correction A (part 1+2): a BREACHED task must not persist zero
       // telemetry. CircuitBreakerError carries the last-known provider-
@@ -414,8 +549,18 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
         req.id, reason,
         isBudget
           ? { budgetSource, costUsd: breachCostUsd, costSource: breachCostSource }
-          : isCancelled
+          : error instanceof HermesCancelledError
             ? { ...(error as HermesCancelledError).telemetry, budgetSource }
+            : subscriptionTarget
+              ? {
+                  subscription: true,
+                  providerId: subscriptionTarget.providerId,
+                  modelId: subscriptionTarget.modelId,
+                  adapterId: subscriptionTarget.adapterId,
+                  costSource: 'unavailable',
+                  cancelled: isSubscriptionCancelled,
+                  cancellationUncertain: isSubscriptionTerminationUncertain,
+                }
             : undefined,
       );
       // TCLAW-1A-core: record the breach's spend in the ledger, FRONTIER-only.
@@ -440,12 +585,9 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
       //   generic -> RETRY + COPY_DIAGNOSTIC
       // Honesty: on LOCAL_EDGE with no approved write tool, no side effect can
       // have occurred — say so. Otherwise some steps may have completed.
-      const noSideEffects = diag.tier === ComputeTier.LOCAL_EDGE;
       const metaOut: Record<string, unknown> = {
         prompt: req.payload.prompt,
-        sideEffectNote: noSideEffects
-          ? 'No changes were made — this task ran locally with no approved write tools.'
-          : 'Some steps may have completed before the failure.',
+        sideEffectNote: failureSideEffectNote(diag.tier, Boolean(subscriptionTarget)),
       };
       const isLocalTimeout =
         diag.tier === ComputeTier.LOCAL_EDGE && /timeout|aborted/i.test(reason);
@@ -531,7 +673,11 @@ function refuseFrontierGrantedRun(req: GatewayRequest, emit: ReturnType<typeof m
  * it cannot open resilience projection state or add a poll/delay to legacy
  * requests. The gateway remains the only terminal owner. */
 export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
-  if (diag.tier === ComputeTier.FRONTIER && process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED?.toLowerCase() === 'true') {
+  if (
+    diag.tier === ComputeTier.FRONTIER
+    && !subscriptionExecutionTarget(req)
+    && process.env.TORQCLAW_PROVIDER_FAILOVER_ENABLED?.toLowerCase() === 'true'
+  ) {
     void dispatchFailover(req, diag);
     return;
   }
@@ -539,7 +685,7 @@ export function dispatch(req: GatewayRequest, diag: RouterDiagnostics): void {
 }
 
 async function dispatchFailover(req: GatewayRequest, diag: RouterDiagnostics): Promise<void> {
-  const emit = makeEmitter(req.sessionId, req.id, diag.tier);
+  const emit = withVerifiedTerminalReceipt(req.id, makeEmitter(req.sessionId, req.id, diag.tier));
   const { budget, source: budgetSource } = resolveBudgetWithSource(req);
   const effectiveReq: GatewayRequest = budget === undefined
     ? req
@@ -568,7 +714,7 @@ async function dispatchFailover(req: GatewayRequest, diag: RouterDiagnostics): P
     const telemetry: Record<string, unknown> = { ...(result.telemetry ?? {}), budgetSource, failoverEnabled: true };
     taskStore.complete(req.id, result.text, telemetry);
     if (!telemetry.cancelled) sessions.storeEpisode(req.id, req.sessionId, req.payload.taskType, req.payload.prompt, result.text);
-    emit('RESULT', result.text, { failoverEnabled: true });
+    emit('RESULT', result.text, telemetry);
     emit('SYSTEM', 'Done', { receipt: { tier: diag.tier, failoverEnabled: true } });
     projectReceiptSafely(req.id);
     const cost = typeof telemetry.costUsd === 'number' ? telemetry.costUsd : undefined;

@@ -171,7 +171,7 @@ describe('AC-3/AC-4 conjunctive profile admission', () => {
     ]);
     const browser = resolveEffectiveProfile('browser_research');
     expect(predictTools('AUTONOMOUS_RESEARCH', browser)).toEqual([
-      'playwright__snapshot', 'websearch__search',
+      'playwright__snapshot', 'research__web_search',
     ]);
   });
 });
@@ -179,8 +179,8 @@ describe('AC-3/AC-4 conjunctive profile admission', () => {
 describe('AC-5 execution-time rechecks and denial boundaries', () => {
   it('an admitted member reaches the actual no-client boundary', async () => {
     const profile = resolveEffectiveProfile('read_only');
-    await expect(executeTool('websearch__search', {}, profile)).rejects
-      .toThrow("No MCP client connected for server 'websearch'");
+    await expect(executeTool('research__web_search', {}, profile)).rejects
+      .toThrow("No MCP client connected for server 'research'");
   });
 
   it('denied, unknown, and non-member calls stop before client lookup with explicit reasons', async () => {
@@ -195,9 +195,9 @@ describe('AC-5 execution-time rechecks and denial boundaries', () => {
 
   it('rejects stale live registry/policy by re-resolution before execution', async () => {
     const profile = resolveEffectiveProfile('read_only');
-    getRegistry().push({ ...frozenTool('websearch__new_read', 'read', false) });
+    getRegistry().push({ ...frozenTool('research__new_read', 'read', false) });
     expect(() => assertCurrentPolicy(profile)).toThrow("Stale effective profile policy 'read_only'");
-    await expect(executeTool('websearch__search', {}, profile)).rejects
+    await expect(executeTool('research__web_search', {}, profile)).rejects
       .toThrow("Stale effective profile policy 'read_only'");
   });
 });

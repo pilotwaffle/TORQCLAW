@@ -389,12 +389,12 @@ describe('G1R live acceptance oracle', () => {
   ];
 
   it('accepts only one correlated authenticated-shaped live result', () => {
-    expect(evaluateLiveAcceptance(events(), { expectedModel: 'model-x' }).ok).toBe(true);
+    expect(evaluateLiveAcceptance(events(), { expectedModels: ['model-x', 'model-y'] }).ok).toBe(true);
     expect(buildLiveRequest()).toMatchObject({
       prompt: 'Reply with exactly TORQCLAW_LIVE_OK. Do not call tools.',
       useMemory: false,
       executionMode: 'CLOUD_OK',
-      maxCostUsd: 0.25,
+      maxCostUsd: 0.50,
     });
   });
 
@@ -404,12 +404,12 @@ describe('G1R live acceptance oracle', () => {
   });
 
   it('rejects status-only, timeout-shaped, and unrelated terminal streams', () => {
-    expect(evaluateLiveAcceptance(events().slice(0, 3), { expectedModel: 'model-x' }).ok).toBe(false);
-    expect(evaluateLiveAcceptance([{ type: 'CONNECTED' }, { type: 'SYSTEM', message: 'still running' }], { expectedModel: 'model-x' }).ok).toBe(false);
+    expect(evaluateLiveAcceptance(events().slice(0, 3), { expectedModels: ['model-x'] }).ok).toBe(false);
+    expect(evaluateLiveAcceptance([{ type: 'CONNECTED' }, { type: 'SYSTEM', message: 'still running' }], { expectedModels: ['model-x'] }).ok).toBe(false);
     expect(evaluateLiveAcceptance([
       ...events().slice(0, 3),
       { type: 'RESULT', requestId: 'other', tier: 'API_EXTERNAL', message: 'wrong', metadata: { engineUsed: 'hermes:model-x' } },
-    ], { expectedModel: 'model-x' }).ok).toBe(false);
+    ], { expectedModels: ['model-x'] }).ok).toBe(false);
   });
 
   it.each([
@@ -421,7 +421,7 @@ describe('G1R live acceptance oracle', () => {
     ['wrong request', { requestId: 'req-2' }],
     ['missing engine', { metadata: {} }],
   ])('rejects %s', (_label, change) => {
-    expect(evaluateLiveAcceptance(events(change), { expectedModel: 'model-x' }).ok).toBe(false);
+    expect(evaluateLiveAcceptance(events(change), { expectedModels: ['model-x'] }).ok).toBe(false);
   });
 
   it.each([
@@ -430,6 +430,6 @@ describe('G1R live acceptance oracle', () => {
     [{ type: 'TIER_SELECTED', requestId: 'other', tier: 'API_EXTERNAL' }],
     [{ type: 'TIER_SELECTED', requestId: 'req-1', tier: 'OLLAMA_LOCAL' }],
   ])('rejects wrong/error/pending/unrelated events', (badEvent) => {
-    expect(evaluateLiveAcceptance([...events().slice(0, 2), badEvent, ...events().slice(2)], { expectedModel: 'model-x' }).ok).toBe(false);
+    expect(evaluateLiveAcceptance([...events().slice(0, 2), badEvent, ...events().slice(2)], { expectedModels: ['model-x'] }).ok).toBe(false);
   });
 });

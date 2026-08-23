@@ -3,10 +3,11 @@ import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { buildLauncherConfig } from './launcher-config.mjs';
 import { doctorPassed, runDoctor } from './doctor-core.mjs';
+import { resolveDoctorAuth } from './doctor.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const LIVE_PROMPT = 'Reply with exactly TORQCLAW_LIVE_OK. Do not call tools.';
-const LIVE_MAX_COST_USD = 0.25;
+const LIVE_MAX_COST_USD = 0.50;
 
 export function requireLiveEnvironment(env) {
   for (const key of ['HERMES_MODEL', 'HERMES_PROVIDER', 'HERMES_API_KEY']) {
@@ -28,14 +29,17 @@ export function buildLiveRequest() {
 }
 
 export function evaluateLiveAcceptance(events, {
-  expectedModel,
+  expectedModels,
   submitSentAfterConnected = true,
 } = {}) {
   if (!submitSentAfterConnected) return { ok: false, reason: 'submit was not sent after CONNECTED' };
   if (!Array.isArray(events) || !events.some((event) => event?.type === 'CONNECTED')) {
     return { ok: false, reason: 'missing CONNECTED' };
   }
-  if (!expectedModel) return { ok: false, reason: 'missing expected model' };
+  if (!Array.isArray(expectedModels) || expectedModels.length === 0) {
+    return { ok: false, reason: 'missing expected models' };
+  }
+  const allowedEngines = expectedModels.map((model) => `hermes:${model}`);
 
   let requestId = null;
   let sawFrontier = false;
@@ -63,8 +67,9 @@ export function evaluateLiveAcceptance(events, {
       if (event.message !== 'TORQCLAW_LIVE_OK') {
         return { ok: false, reason: 'live sentinel mismatch' };
       }
-      if (event.metadata?.engineUsed !== `hermes:${expectedModel}`) {
-        return { ok: false, reason: 'RESULT engineUsed mismatch or stub' };
+      if (!allowedEngines.includes(event.metadata?.engineUsed)) {
+        const actual = String(event.metadata?.engineUsed ?? 'missing').slice(0, 200);
+        return { ok: false, reason: `RESULT engineUsed mismatch: expected one of ${allowedEngines.join(', ')}, got ${actual}` };
       }
       if (result) return { ok: false, reason: 'multiple RESULT terminals' };
       result = event;
@@ -86,6 +91,19 @@ export async function runLiveAcceptance({
   const effectiveConfig = config ?? buildLauncherConfig(env, { production: true });
   const runtime = await runDoctor({ mode: 'runtime', production: true, root, env });
   if (!doctorPassed(runtime)) throw new Error('runtime readiness failed');
+  const auth = resolveDoctorAuth({ ...env, TORQCLAW_RUNTIME_MODE: 'production' });
+  if (auth.kind !== 'surface') {
+    throw new Error(auth.detail ?? 'production operator credential unavailable');
+  }
+  let expectedModels = [env.HERMES_MODEL];
+  if (env.TORQCLAW_PROVIDER_FAILOVER_ENABLED === 'true') {
+    const { loadProviderChainsDocument } = await import('../packages/gateway/dist/providerChains.js');
+    const document = loadProviderChainsDocument(env);
+    const chainName = env.TORQCLAW_FAILOVER_DEFAULT_CHAIN || 'default';
+    const chain = document.chains[chainName];
+    if (!chain) throw new Error(`live acceptance provider chain not found: ${chainName}`);
+    expectedModels = chain.providers.map((provider) => provider.modelId);
+  }
 
   const events = [];
   let submitSentAfterConnected = false;
@@ -102,9 +120,9 @@ export async function runLiveAcceptance({
     };
     socket.on('open', () => {
       socket.send(JSON.stringify({
-        role: 'operator',
-        token: env.TORQCLAW_GATEWAY_TOKEN,
+        expectedRole: 'operator',
         clientInfo: { name: 'torqclaw-live-acceptance', version: '1.0.0' },
+        auth: { kind: 'surface', credential: auth.credential },
       }));
     });
     socket.on('message', (raw) => {
@@ -112,7 +130,8 @@ export async function runLiveAcceptance({
       try { event = JSON.parse(raw.toString()); } catch { finish(reject, new Error('malformed gateway event')); return; }
       events.push(event);
       if (event.type === 'ERROR' || event.type === 'PENDING_APPROVAL') {
-        finish(reject, new Error(`live acceptance received ${event.type}`));
+        const detail = String(event.code ?? event.message ?? 'no detail').slice(0, 200);
+        finish(reject, new Error(`live acceptance received ${event.type}: ${detail}`));
         return;
       }
       if (event.type === 'CONNECTED' && !connected) {
@@ -130,7 +149,7 @@ export async function runLiveAcceptance({
   }).finally(() => { try { socket.close(); } catch { /* already closed */ } });
 
   const verdict = evaluateLiveAcceptance(events, {
-    expectedModel: env.HERMES_MODEL,
+    expectedModels,
     submitSentAfterConnected,
   });
   if (!verdict.ok) throw new Error(`live acceptance failed: ${verdict.reason}`);

@@ -14,6 +14,9 @@ const RULE_META: Record<RouterRuleId, { overridable: boolean; safetyLock?: strin
   USER_LOCAL_ONLY: { overridable: false, safetyLock: 'USER_LOCAL_ONLY' },
   LOCAL_INTENT: { overridable: false },
   LOCAL_TOOL_INTENT: { overridable: false, safetyLock: 'LOCAL_TOOL_INTENT' },
+  AGENT_REACH_LOCAL: { overridable: true },
+  AGENT_REACH_FRONTIER: { overridable: true },
+  AGENT_SUBSCRIPTION_PROVIDER: { overridable: false },
   LOW_CLASSIFIER_CONFIDENCE: { overridable: true },
   TOOL_COUNT_OVERFLOW: { overridable: true },
   LATENCY_CRITICAL: { overridable: true },
@@ -121,6 +124,47 @@ export class TorqClawRouter {
         humanReason: 'This uses a tool that only exists on your local machine, so the cloud can\'t run it.',
         blockedAlternatives: [{ tier: ComputeTier.FRONTIER, why: 'The named tool/integration lives only on the local edge bridge; the frontier engine cannot reach it.' }],
         ...RULE_META.LOCAL_TOOL_INTENT,
+      };
+    }
+
+    // RULE 1c: the gateway resolved and confirmed an agent's subscription
+    // runtime profile. This is explicit external-provider intent, not a
+    // heuristic. The privacy, user-local-only, local-intent, and local-tool
+    // locks above remain load-bearing and always win before this branch.
+    if (req.payload.subscriptionExecutionTarget?.confirmed === true) {
+      const target = req.payload.subscriptionExecutionTarget;
+      return {
+        score: 100,
+        reason: `AGENT_SUBSCRIPTION_PROVIDER: confirmed ${target.providerId} runtime binding.`,
+        tier: ComputeTier.FRONTIER,
+        ruleId: 'AGENT_SUBSCRIPTION_PROVIDER',
+        humanReason: 'This agent is bound to a confirmed external subscription provider, so the request uses that provider through the frontier boundary.',
+        blockedAlternatives: [{ tier: ComputeTier.LOCAL_EDGE, why: 'The selected agent is explicitly bound to an external subscription provider.' }],
+        ...RULE_META.AGENT_SUBSCRIPTION_PROVIDER,
+      };
+    }
+
+    const agentReach = req.enrichment.agentReach;
+    if (agentReach?.localSatisfies) {
+      return {
+        score: 20,
+        reason: 'AGENT_REACH_LOCAL: every requested channel is available locally.',
+        tier: ComputeTier.LOCAL_EDGE,
+        ruleId: 'AGENT_REACH_LOCAL',
+        humanReason: 'Agent Reach confirmed every requested channel is available on this machine.',
+        blockedAlternatives: [{ tier: ComputeTier.FRONTIER, why: 'The required Agent Reach channels are already available locally.' }],
+        ...RULE_META.AGENT_REACH_LOCAL,
+      };
+    }
+    if (agentReach && !agentReach.localSatisfies && agentReach.frontierSatisfies) {
+      return {
+        score: 80,
+        reason: 'AGENT_REACH_FRONTIER: local channels missing; frontier availability confirmed.',
+        tier: ComputeTier.FRONTIER,
+        ruleId: 'AGENT_REACH_FRONTIER',
+        humanReason: 'A requested Agent Reach channel is unavailable locally and confirmed available on the frontier tier.',
+        blockedAlternatives: [{ tier: ComputeTier.LOCAL_EDGE, why: 'At least one requested Agent Reach channel is unavailable locally.' }],
+        ...RULE_META.AGENT_REACH_FRONTIER,
       };
     }
 

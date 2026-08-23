@@ -28,6 +28,8 @@ export const WINDOW_EVENT_COUNT = 40;
 export type AnchorWindowResult = {
   /** The rendered, model-facing text block. */
   text: string;
+  /** Message-only external context with no channel, actor, or event identifiers. */
+  subscriptionText: string;
   anchorCount: number;
   windowCount: number;
   elided: number;
@@ -105,6 +107,13 @@ export async function buildAnchorWindowContext(
   const anchorLines = anchor.map(renderEvent);
   const windowLines = nonOverlapping.map(renderEvent);
 
+  const renderSubscriptionMessage = (ev: TimelineEventObject): string | null =>
+    ev.kind === 'message_posted' && typeof ev.payload.text === 'string'
+      ? ev.payload.text
+      : null;
+  const anchorMessages = anchor.map(renderSubscriptionMessage).filter((text): text is string => text !== null);
+  const windowMessages = nonOverlapping.map(renderSubscriptionMessage).filter((text): text is string => text !== null);
+
   const parts: string[] = [];
   if (anchorLines.length > 0) {
     parts.push(`--- CHANNEL START (first ${anchorLines.length} event(s), including the authorizing instruction) ---`);
@@ -120,8 +129,14 @@ export async function buildAnchorWindowContext(
     parts.push(...windowLines);
   }
 
+  const subscriptionParts: string[] = [];
+  if (anchorMessages.length > 0) subscriptionParts.push(...anchorMessages);
+  if (elided > 0) subscriptionParts.push(`[PARTIAL CONTEXT: ${elided} earlier event(s) omitted]`);
+  if (windowMessages.length > 0) subscriptionParts.push(...windowMessages);
+
   return {
     text: parts.join('\n'),
+    subscriptionText: subscriptionParts.join('\n'),
     anchorCount: anchorLines.length,
     windowCount: windowLines.length,
     elided,

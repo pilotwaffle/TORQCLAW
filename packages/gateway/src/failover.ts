@@ -22,6 +22,7 @@ import {
   type ResilienceClient,
 } from '@torqclaw/bridge';
 import { makeEmitter, type Emitter } from './events.js';
+import { withVerifiedTerminalReceipt } from './receipts.js';
 import {
   assertFrontier,
   buildFailoverPlan,
@@ -350,7 +351,10 @@ export async function runFailoverTask(
   const clockMs = () => options.nowMs ?? Date.now();
   const bridge = { ...defaultBridge, ...(options.bridge ?? {}) };
   await projection.ensureInitialResilienceProjection(async (afterCursor, limit) => bridge.pageOutbox(afterCursor, limit, options.client));
-  const emit = options.emit ?? makeEmitter(req.sessionId, req.id, ComputeTier.FRONTIER);
+  const emit = withVerifiedTerminalReceipt(
+    req.id,
+    options.emit ?? makeEmitter(req.sessionId, req.id, ComputeTier.FRONTIER),
+  );
   const admitted: AdmitResponse = await bridge.admitFrontier(req.id, plan, plan.eligibleProviderIds, plan.taskDeadlineMs, `${req.id}:admit`, options.client);
   if (!admitted.activeTuple || (admitted.status !== 'ADMITTED' && admitted.status !== 'EXISTING')) {
     throw new FailoverTerminalError({ failureClass: 'terminal', code: 'admission_rejected', retryable: false }, false, 'terminal');
@@ -620,7 +624,10 @@ export async function recoverFailoverTasks(options: {
     const controller = new AbortController();
     const run: ActiveRun = { requestId: candidate.taskId, active, controller, plan: storedPlan, chain, bridge, client: options.client, providerSubmitNotBeforeMs };
     activeRuns.set(candidate.taskId, run);
-    const emit = makeEmitter(candidate.request.sessionId, candidate.taskId, ComputeTier.FRONTIER);
+    const emit = withVerifiedTerminalReceipt(
+      candidate.taskId,
+      makeEmitter(candidate.request.sessionId, candidate.taskId, ComputeTier.FRONTIER),
+    );
     try {
       const attempt = await bridge.executeHermesAttempt(candidate.request, storedPlan, active, providerReference(provider), emit, { client: options.client, signal: controller.signal, providerSubmitNotBeforeMs: run.providerSubmitNotBeforeMs });
       let observation: NormalizedObservation = attempt.observation ?? { kind: 'result' as const, dispatchAttempted: attempt.dispatchAttempted, text: attempt.text, telemetry: attempt.telemetry };
@@ -656,7 +663,11 @@ export async function recoverFailoverTasks(options: {
       if (projected?.active_attempt_id !== null || projected?.active_epoch !== null || typeof projected?.terminal_outcome !== 'string') {
         throw new Error('FAILOVER_RECOVERY_PROJECTION_STALE');
       }
-      if (observation.kind === 'result') emit('RESULT', observation.text ?? attempt.text, { failoverEnabled: true, recovered: true });
+      if (observation.kind === 'result') emit('RESULT', observation.text ?? attempt.text, {
+        ...(observation.telemetry ?? attempt.telemetry ?? {}),
+        failoverEnabled: true,
+        recovered: true,
+      });
       else emit('ERROR', `Execution failed: failover ${failure.code}.`, { failoverEnabled: true, recovered: true, normalizedFailure: failure, terminalOutcome: projected.terminal_outcome });
       summary.terminalized += 1;
     } finally {

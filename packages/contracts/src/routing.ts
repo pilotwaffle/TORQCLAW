@@ -10,6 +10,94 @@ export const TaskTypeSchema = z.enum([
 ]);
 export type TaskType = z.infer<typeof TaskTypeSchema>;
 
+export const AgentReachChannelSchema = z.enum([
+  'github', 'twitter', 'youtube', 'reddit', 'facebook', 'instagram',
+  'bilibili', 'xiaohongshu', 'linkedin', 'xiaoyuzhou', 'v2ex', 'xueqiu',
+  'rss', 'exa_search', 'web',
+]);
+export type AgentReachChannel = z.infer<typeof AgentReachChannelSchema>;
+
+export const AgentReachRoutingSchema = z.object({
+  requestedChannels: z.array(AgentReachChannelSchema),
+  localChannels: z.array(AgentReachChannelSchema),
+  frontierChannels: z.array(AgentReachChannelSchema),
+  localSatisfies: z.boolean(),
+  frontierSatisfies: z.boolean(),
+  writeIntent: z.boolean(),
+});
+export type AgentReachRouting = z.infer<typeof AgentReachRoutingSchema>;
+
+export const SubscriptionProviderIdSchema = z.enum([
+  'grok-subscription',
+  'kimi-subscription',
+  'qwen-subscription',
+  'zai-subscription',
+]);
+export type SubscriptionProviderId = z.infer<typeof SubscriptionProviderIdSchema>;
+
+/**
+ * A resolved subscription runtime binding. This object is gateway-owned: it
+ * is assembled from the authenticated agent runtime profile and is never a
+ * field on ClientCommand or copied from websocket input. `confirmed: true`
+ * records that the gateway completed the profile/readiness checks before the
+ * router may select an external subscription provider.
+ */
+export const SubscriptionExecutionTargetSchema = z.object({
+  providerId: SubscriptionProviderIdSchema,
+  providerAccountId: z.string().trim().min(1).max(200),
+  adapterId: z.string().trim().min(1).max(200),
+  modelId: z.string().trim().min(1).max(200),
+  exactModelId: z.string().trim().min(1).max(200),
+  runtimeFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  personaRevision: z.number().int().nonnegative(),
+  personaContentSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  confirmed: z.literal(true),
+}).strict();
+export type SubscriptionExecutionTarget = z.infer<typeof SubscriptionExecutionTargetSchema>;
+
+/**
+ * A resolved local runtime binding. Like the subscription target above, this
+ * is gateway-owned and must never be copied from a ClientCommand/websocket
+ * frame. Its absence preserves the process-wide TORQCLAW_LOCAL_MODEL default.
+ */
+export const LocalExecutionTargetSchema = z.object({
+  providerId: z.literal('ollama-local'),
+  adapterId: z.literal('ollama-local'),
+  modelId: z.string().trim().min(1).max(200),
+}).strict();
+export type LocalExecutionTarget = z.infer<typeof LocalExecutionTargetSchema>;
+
+const PERSONA_FORBIDDEN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/u;
+
+/** Immutable gateway-minted persona snapshot for one managed-agent turn. */
+export const AgentPersonaEnvelopeSchema = z.object({
+  version: z.literal(1),
+  content: z.string().max(4_000).refine(
+    (value) => value === value.normalize('NFC').trim() && !PERSONA_FORBIDDEN.test(value),
+    'persona content must be canonical NFC-trimmed text without control or bidi characters',
+  ),
+  personaRevision: z.number().int().nonnegative(),
+  contentSha256: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict().superRefine((value, ctx) => {
+  if (value.content === '' && value.personaRevision !== 0) {
+    ctx.addIssue({ code: 'custom', path: ['personaRevision'], message: 'blank persona revision must be zero' });
+  }
+});
+export type AgentPersonaEnvelope = z.infer<typeof AgentPersonaEnvelopeSchema>;
+
+/** Gateway-owned identity for one managed-agent channel turn. It is carried
+ * only as internal tool-call metadata; no field is exposed to the model's
+ * tool schema or accepted from ClientCommand. */
+export const AgentTurnContextSchema = z.object({
+  channelId: z.string().trim().min(1).max(200),
+  agentPrincipalId: z.string().trim().min(1).max(200),
+  channelSeq: z.number().int().positive(),
+  triggerEventId: z.string().trim().min(1).max(200),
+  personaRevision: z.number().int().nonnegative(),
+  recoveryLeaseToken: z.uuid().optional(),
+}).strict();
+export type AgentTurnContext = z.infer<typeof AgentTurnContextSchema>;
+
 export enum ComputeTier {
   LOCAL_EDGE = 'OLLAMA_LOCAL',
   FRONTIER = 'API_EXTERNAL',
@@ -23,6 +111,7 @@ export const EnrichmentMetaSchema = z.object({
   estimatedTokens: z.number(),
   // P4.5: whether tiered memory was assembled for this task (useMemory toggle).
   memoryUsed: z.boolean().default(true),
+  agentReach: AgentReachRoutingSchema.optional(),
 });
 
 /** The fully-enriched internal request. Built ONLY by the gateway. */
@@ -58,6 +147,18 @@ export const GatewayRequestSchema = z.object({
      *  intentionally out of S2's scope. S2 builds and proves the tool
      *  surface against this field as a precondition. */
     callerCollabPrincipalId: z.string().optional(),
+    /** Gateway-owned resolved subscription binding. Never accepted from a
+     *  ClientCommand/websocket frame. Privacy and local-only routing locks
+     *  still take precedence over this external execution intent. */
+    subscriptionExecutionTarget: SubscriptionExecutionTargetSchema.optional(),
+    /** Gateway-owned local agent runtime binding. Ordinary local requests
+     *  omit this and continue to use TORQCLAW_LOCAL_MODEL. */
+    localExecutionTarget: LocalExecutionTargetSchema.optional(),
+    /** Exact persona snapshot minted and persisted by the claim transaction. */
+    agentPersonaEnvelope: AgentPersonaEnvelopeSchema.optional(),
+    /** Gateway-owned managed-turn identity. Never copied from client input
+     * and never rendered into model-visible tool arguments. */
+    agentTurnContext: AgentTurnContextSchema.optional(),
   }),
   constraints: z.object({
     latencySensitivity: z.enum(['HIGH', 'LOW']),
@@ -78,6 +179,9 @@ export const RouterRuleIdSchema = z.enum([
   'USER_LOCAL_ONLY',
   'LOCAL_INTENT',
   'LOCAL_TOOL_INTENT',
+  'AGENT_REACH_LOCAL',
+  'AGENT_REACH_FRONTIER',
+  'AGENT_SUBSCRIPTION_PROVIDER',
   'LOW_CLASSIFIER_CONFIDENCE',
   'TOOL_COUNT_OVERFLOW',
   'LATENCY_CRITICAL',

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { db, getFailoverProjection, getProviderAttemptProjections } from './storage.js';
-import { publishOnly } from './events.js';
+import { publishOnly, type Emitter } from './events.js';
 import { sessions } from './sessions.js';
 
 /**
@@ -403,6 +403,35 @@ export function safeMaterializeReceipt(taskId: string): void {
   } catch (e) {
     console.error(`[receipts] projection failed for ${taskId}`, e);
   }
+}
+
+const selectMaterializedReceipt = db.prepare('SELECT task_id FROM run_receipts WHERE task_id = ?');
+
+/** Materialize the current receipt projection and prove that its durable row exists. */
+export function safeMaterializeAndVerifyReceipt(taskId: string): boolean {
+  try {
+    materializeReceipt(taskId);
+    return Boolean(selectMaterializedReceipt.get(taskId));
+  } catch (e) {
+    console.error(`[gateway] receipt materialization failed for task ${taskId}:`, e);
+    return false;
+  }
+}
+
+/**
+ * Fail closed at the publication boundary: terminal task events are observable
+ * only after their receipt has been durably materialized and re-read.
+ */
+export function withVerifiedTerminalReceipt(taskId: string, emit: Emitter): Emitter {
+  return ((...args: Parameters<Emitter>) => {
+    const [type, message] = args;
+    const terminal = type === 'RESULT'
+      || type === 'ERROR'
+      || type === 'PENDING_APPROVAL'
+      || (type === 'SYSTEM' && message === 'Done');
+    if (terminal && !safeMaterializeAndVerifyReceipt(taskId)) return;
+    emit(...args);
+  }) as Emitter;
 }
 
 /** Rebuild exactly one task's receipt. Returns 1 if a row existed to project,

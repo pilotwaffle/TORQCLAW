@@ -161,6 +161,8 @@ describe('real startup recovery controller', () => {
       expect(storage.db.prepare('SELECT state FROM tasks WHERE request_id=?').get(taskIds[mode])).toEqual({ state: 'completed' });
       expect(storage.getFailoverProjection(taskIds[mode])).toMatchObject({ active_attempt_id: null, active_epoch: null, terminal_outcome: 'completed' });
       expect(storage.db.prepare("SELECT COUNT(*) AS count FROM events WHERE request_id=? AND type='RESULT'").get(taskIds[mode])).toEqual({ count: 1 });
+      const resultEvent = storage.db.prepare("SELECT metadata FROM events WHERE request_id=? AND type='RESULT'").get(taskIds[mode]) as { metadata: string };
+      expect(JSON.parse(resultEvent.metadata)).toMatchObject({ costSource: 'unavailable', failoverEnabled: true, recovered: true });
     }
 
     expect((await getStatus(taskIds.successor, client)).status).toBe('TERMINAL');

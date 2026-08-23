@@ -1,7 +1,12 @@
 // Core modules
 export {
   runCollaborationMigration, runAgentAutoreplyMigration, AGENT_AUTOREPLY_MIGRATION_ID,
+  runAgentTurnOutputMigration, AGENT_TURN_OUTPUT_MIGRATION_ID,
   runAgentCronMigration, AGENT_CRON_MIGRATION_ID,
+  runAgentRuntimeProfileMigration, AGENT_RUNTIME_PROFILE_MIGRATION_ID,
+  runAgentRuntimeExternalContextMigration, AGENT_RUNTIME_EXTERNAL_CONTEXT_MIGRATION_ID,
+  runAgentPersonaMigration, AGENT_PERSONA_MIGRATION_ID,
+  runAgentPersonaRevisionMigration, AGENT_PERSONA_REVISION_MIGRATION_ID,
 } from './migration.js';
 export { DeterministicClock, DeterministicUuids } from './harness.js';
 
@@ -100,6 +105,12 @@ export {
   type GetChannelTimelineResult,
   type AckChannelCursorResult,
   type PostChannelMessageResult,
+  type AgentRuntimeProfile,
+  type UpsertAgentRuntimeProfileInput,
+  type ProvisionAgentInput,
+  type ProvisionAgentResult,
+  type AgentPersona,
+  type UpsertAgentPersonaInput,
   type SubscribeChannelResult,
   type UnsubscribeChannelResult,
 } from './store.js';
@@ -290,12 +301,15 @@ export {
   resolveAgentTurn,
   findStrandedAgentTurns,
   reclaimStrandedAgentTurn,
+  getAgentTurnOutput,
   isAutoreplyStopped,
   setAutoreplyStop,
   clearAutoreplyStop,
   type AutoreplyDb,
   type AgentTurnState,
   type StrandedTurn,
+  type AgentTurnRecoveryLease,
+  type AgentTurnOutputBinding,
 } from './autoReply.js';
 
 // CRON — scheduled autonomous agent turns (G1R Gate-1 §2A).

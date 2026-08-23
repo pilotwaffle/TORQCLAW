@@ -1,6 +1,11 @@
 import type { GatewayRequest } from '@torqclaw/contracts';
+import { createHash } from 'node:crypto';
 import { router } from '@torqclaw/router';
-import { getToolsForTask, executeTool } from '@torqclaw/bridge';
+import {
+  getToolsForTask,
+  executeTool,
+  type CollabAgentTurnToolContext,
+} from '@torqclaw/bridge';
 import type { Emitter, ExecutionResult } from './types.js';
 import { ToolApprovalRequired } from './approval.js';
 
@@ -62,29 +67,112 @@ const OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://localhost:11434';
 // with num_ctx 8192 baked in — the /v1 endpoint can't set num_ctx per-request.
 const LOCAL_MODEL = process.env.TORQCLAW_LOCAL_MODEL || 'torq-local';
 
+function requiresNativeChat(modelId: string): boolean {
+  return modelId === 'torq-ai-v5' || modelId.startsWith('torq-ai-v5:');
+}
+
 const MAX_ITERATIONS = 5;
 const MAX_TOOL_RESULT_CHARS = 6_000; // ~1.5k tokens; raw file reads must not nuke the window
 const INFERENCE_TIMEOUT_MS = 120_000;
+const TORQ_AI_V5_CONTEXT_TOKENS = 8_192;
+
+async function ollamaApiError(response: Response): Promise<Error> {
+  try {
+    const outer = JSON.parse(await response.text()) as { error?: unknown };
+    let detail: unknown = outer.error;
+    if (typeof detail === 'string') {
+      try {
+        detail = JSON.parse(detail);
+      } catch {
+        detail = undefined;
+      }
+    }
+    if (detail && typeof detail === 'object' && 'error' in detail) {
+      detail = (detail as { error?: unknown }).error;
+    }
+    if (detail && typeof detail === 'object') {
+      const parsed = detail as {
+        type?: unknown;
+        n_prompt_tokens?: unknown;
+        n_ctx?: unknown;
+      };
+      if (
+        parsed.type === 'exceed_context_size_error'
+        && Number.isInteger(parsed.n_prompt_tokens)
+        && Number.isInteger(parsed.n_ctx)
+      ) {
+        return new Error(
+          `OLLAMA_CONTEXT_EXCEEDED required_tokens=${parsed.n_prompt_tokens} ` +
+          `configured_tokens=${parsed.n_ctx}`,
+        );
+      }
+    }
+  } catch {
+    // Provider bodies are untrusted and may contain prompt fragments. Never
+    // persist or rethrow them; retain only the HTTP status below.
+  }
+  return new Error(`Ollama API error: ${response.status} ${response.statusText}`);
+}
 
 async function callOllama(
   messages: unknown[],
   tools?: unknown[],
   signal?: AbortSignal,
   toolChoice?: unknown,
+  modelId = LOCAL_MODEL,
+  deterministicManagedAgent = false,
 ) {
+  const requestSignal = signal
+    ? AbortSignal.any([signal, AbortSignal.timeout(INFERENCE_TIMEOUT_MS)])
+    : AbortSignal.timeout(INFERENCE_TIMEOUT_MS);
+  if (requiresNativeChat(modelId)) {
+    const res = await fetch(`${OLLAMA_HOST}/api/chat`, {
+      method: 'POST',
+      signal: requestSignal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: modelId,
+        messages,
+        tools: tools && tools.length > 0 ? tools : undefined,
+        stream: false,
+        think: false,
+        keep_alive: -1,
+        options: {
+          num_ctx: TORQ_AI_V5_CONTEXT_TOKENS,
+          ...(deterministicManagedAgent ? { temperature: 0 } : {}),
+        },
+      }),
+    });
+    if (!res.ok) throw await ollamaApiError(res);
+    const data = await res.json();
+    return {
+      choices: [{
+        message: data.message ?? { role: 'assistant', content: '' },
+        finish_reason: data.done_reason ?? null,
+      }],
+      usage: {
+        prompt_tokens: data.prompt_eval_count,
+        completion_tokens: data.eval_count,
+        total_tokens:
+          typeof data.prompt_eval_count === 'number' && typeof data.eval_count === 'number'
+            ? data.prompt_eval_count + data.eval_count
+            : undefined,
+      },
+    };
+  }
   const res = await fetch(`${OLLAMA_HOST}/v1/chat/completions`, {
     method: 'POST',
-    signal: signal ?? AbortSignal.timeout(INFERENCE_TIMEOUT_MS),
+    signal: requestSignal,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: LOCAL_MODEL,
+      model: modelId,
       messages,
       tools: tools && tools.length > 0 ? tools : undefined,
       tool_choice: tools && tools.length > 0 ? (toolChoice ?? 'auto') : undefined,
       keep_alive: '10m',
     }),
   });
-  if (!res.ok) throw new Error(`Ollama API error: ${res.status} ${res.statusText}`);
+  if (!res.ok) throw await ollamaApiError(res);
   return res.json();
 }
 
@@ -109,7 +197,7 @@ export function requestedLocalToolSequence(prompt: string, available: string[]):
  *  timeout return the honest cancelled message rather than keep thinking. */
 async function finalizeCancelled(
   messages: any[], start: number, iterations: number, toolCallCount: number,
-  emit: Emitter,
+  emit: Emitter, modelId: string, deterministicManagedAgent: boolean,
 ): Promise<ExecutionResult> {
   emit('SYSTEM', 'Stopping — wrapping up any answer so far');
   try {
@@ -120,15 +208,18 @@ async function finalizeCancelled(
       }],
       undefined,
       AbortSignal.timeout(FINALIZE_TIMEOUT_MS),
+      undefined,
+      modelId,
+      deterministicManagedAgent,
     );
     return doneCancelled(
       final.choices?.[0]?.message?.content ?? '(cancelled)',
-      start, iterations, toolCallCount,
+      start, iterations, toolCallCount, modelId,
     );
   } catch {
     return doneCancelled(
       '(cancelled — no further work will run; some earlier steps may have completed)',
-      start, iterations, toolCallCount,
+      start, iterations, toolCallCount, modelId,
     );
   }
 }
@@ -181,16 +272,27 @@ export function looksLikeFabricatedToolRun(text: string): boolean {
 export async function executeLocalEdge(
   req: GatewayRequest,
   emit: Emitter,
+  signal?: AbortSignal,
 ): Promise<ExecutionResult> {
   const start = performance.now();
+  const personaContent = validateManagedPersonaEnvelope(req);
+  const modelId = req.payload.localExecutionTarget?.modelId ?? LOCAL_MODEL;
+  const deterministicManagedAgent = Boolean(
+    req.payload.agentTurnContext,
+  );
+  const finish = (
+    text: string, startedAt: number, iterations: number, toolCallCount: number,
+  ): ExecutionResult => done(text, startedAt, iterations, toolCallCount, modelId);
 
   // Task-filtered, namespaced, alias-mapped, approval-gated toolset.
   // S2: callerCollabPrincipalId gates collab__* tool visibility — omitted
   // (undefined) for a task with no bound agent identity, which is every
   // task dispatched by this repo today.
-  const { openAITools, resolveAlias, requiresApproval } = await getToolsForTask(
+  const discoveredTools = await getToolsForTask(
     req.payload.taskType, 'LOCAL_EDGE', req.effectiveProfile, req.payload.callerCollabPrincipalId,
   );
+  const { resolveAlias, requiresApproval } = discoveredTools;
+  const openAITools = req.payload.agentTurnContext ? [] : discoveredTools.openAITools;
   const requestedTools = requestedLocalToolSequence(
     req.payload.prompt,
     openAITools.map((t) => t.function.name),
@@ -203,6 +305,7 @@ export async function executeLocalEdge(
     ? openAITools.map((t) => `- ${t.function.name}: ${t.function.description}`).join('\n')
     : '(none available for this task)';
   const context = req.payload.assembledContext;
+  const agentDirectives = personaContent;
   const messages: any[] = [
     {
       role: 'system',
@@ -226,7 +329,14 @@ export async function executeLocalEdge(
         `AVAILABLE TOOLS:\n${toolList}` +
         (context ? `\n\n${context}` : ''),
     },
-    { role: 'user', content: req.payload.prompt },
+    ...(agentDirectives ? [{
+      role: 'system',
+      content:
+        'SUBORDINATE AGENT PERSONA (operator-authored):\n' +
+        'These instructions are subordinate only to the immutable TORQCLAW rules above.\n' +
+        `--- AGENT DIRECTIVES ---\n${agentDirectives}\n--- END AGENT DIRECTIVES ---`,
+    }] : []),
+    { role: 'user', content: `--- BEGIN UNTRUSTED CHANNEL CONTENT ---\n${req.payload.prompt}\n--- END UNTRUSTED CHANNEL CONTENT ---` },
   ];
 
   // E2E determinism seam: force a gated-tool hit so the approval loop can be
@@ -248,12 +358,12 @@ export async function executeLocalEdge(
     const admission = admitTool(req.id, forced, forcedArgs);
     if (!admission.ok) {
       emit('TOOL_CALL', `Refused ${forced}`, { granted: true, refused: admission.reason });
-      return done(
+      return finish(
         `[e2e] refused ${forced}: ${admission.reason}`, start, 1, 0,
       );
     }
     emit('TOOL_CALL', `Executing ${forced}`, { granted: true });
-    return done(`[e2e] executed ${forced} under grant`, start, 1, 1);
+    return finish(`[e2e] executed ${forced} under grant`, start, 1, 1);
   }
 
   let iterations = 0;
@@ -262,7 +372,9 @@ export async function executeLocalEdge(
   while (iterations < MAX_ITERATIONS) {
     // Cancellation check #1: between iterations.
     if (isCancelled(req.id)) {
-      return finalizeCancelled(messages, start, iterations, toolCallCount, emit);
+      return finalizeCancelled(
+        messages, start, iterations, toolCallCount, emit, modelId, deterministicManagedAgent,
+      );
     }
     iterations++;
     const nextRequested = requestedTools[toolCallCount];
@@ -279,8 +391,10 @@ export async function executeLocalEdge(
     const result = await callOllama(
       messages,
       toolsForCall,
-      undefined,
+      signal,
       forcedAlias ? 'required' : undefined,
+      modelId,
+      deterministicManagedAgent,
     );
     router.markLocalModelWarm(); // feed the cold-start rule real data
     const message = result.choices?.[0]?.message;
@@ -294,7 +408,7 @@ export async function executeLocalEdge(
       // honest fallback rather than returning fabricated JSON to the user.
       const content = message.content ?? '';
       if (looksLikeRawToolCall(content)) {
-        return done(
+        return finish(
           "I don't have the tools needed to complete that request on the local model. " +
           'Try switching to Cloud mode, or ask something the local model can answer directly.',
           start, iterations, toolCallCount,
@@ -306,7 +420,7 @@ export async function executeLocalEdge(
       // dressed up as real ones — worse than an honest refusal. Replace it.
       if (looksLikeFabricatedToolRun(content)) {
         emit('SYSTEM', 'Discarded a fabricated tool run from the local model');
-        return done(
+        return finish(
           'The local model started inventing tool results instead of running real ' +
           'tools, so I stopped and discarded that answer. Switch to Cloud mode for ' +
           'this task, or rephrase it so the local model can answer from its own ' +
@@ -325,14 +439,16 @@ export async function executeLocalEdge(
         });
         continue;
       }
-      return done(content, start, iterations, toolCallCount);
+      return finish(content, start, iterations, toolCallCount);
     }
 
     for (const toolCall of message.tool_calls) {
       // Cancellation check #2: between tool calls within an iteration. Stop
       // before firing any further tool — no side effects after stop.
       if (isCancelled(req.id)) {
-        return finalizeCancelled(messages, start, iterations, toolCallCount, emit);
+        return finalizeCancelled(
+          messages, start, iterations, toolCallCount, emit, modelId, deterministicManagedAgent,
+        );
       }
       toolCallCount++;
       const alias = toolCall.function.name;
@@ -392,7 +508,11 @@ export async function executeLocalEdge(
         // passes undefined here, and executeTool omits the _meta key
         // entirely in that case (byte-identical to pre-S2 behavior).
         const toolResult = await executeTool(
-          realName, toolArgs, req.effectiveProfile, req.payload.callerCollabPrincipalId,
+          realName,
+          toolArgs,
+          req.effectiveProfile,
+          req.payload.callerCollabPrincipalId,
+          buildManagedAgentToolContext(req),
         );
         // P3: head+tail truncation — keep the start AND end. Errors and the
         // useful tail of a result cluster at log ends; a head-only cut drops them.
@@ -413,21 +533,61 @@ export async function executeLocalEdge(
     role: 'user',
     content: 'Stop using tools. Give your best final answer from the information gathered so far.',
   });
-  const final = await callOllama(messages, undefined);
+  const final = await callOllama(
+    messages, undefined, signal, undefined, modelId, deterministicManagedAgent,
+  );
   router.markLocalModelWarm();
-  return done(
+  return finish(
     final.choices?.[0]?.message?.content ?? '(no answer)',
     start, iterations + 1, toolCallCount,
   );
 }
 
+export function validateManagedPersonaEnvelope(req: GatewayRequest): string | undefined {
+  const turn = req.payload.agentTurnContext;
+  const envelope = req.payload.agentPersonaEnvelope;
+  if (!turn && !envelope) return undefined;
+  if (!turn || !envelope || envelope.version !== 1
+    || envelope.content !== envelope.content.normalize('NFC').trim()
+    || envelope.content.length > 4_000
+    || /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/u.test(envelope.content)
+    || !Number.isInteger(envelope.personaRevision) || envelope.personaRevision < 0
+    || envelope.personaRevision !== turn.personaRevision
+    || turn.agentPrincipalId !== req.payload.callerCollabPrincipalId
+    || createHash('sha256').update(envelope.content, 'utf8').digest('hex') !== envelope.contentSha256
+    || (envelope.content === '' && envelope.personaRevision !== 0)) {
+    throw new Error('MANAGED_AGENT_PERSONA_ENVELOPE_REFUSED');
+  }
+  return envelope.content || undefined;
+}
+
+export function buildManagedAgentToolContext(
+  req: GatewayRequest,
+): CollabAgentTurnToolContext | undefined {
+  const turn = req.payload.agentTurnContext;
+  const target = req.payload.localExecutionTarget;
+  if (!turn || !target) return undefined;
+  return {
+    ...turn,
+    dispatchRequestId: req.id,
+    expectedProfile: {
+      providerAccountId: target.providerId,
+      adapterId: target.adapterId,
+      modelId: target.modelId,
+      personaRevision: turn.personaRevision,
+    },
+    personaEnvelope: req.payload.agentPersonaEnvelope!,
+  };
+}
+
 function done(
   text: string, start: number, iterations: number, toolCallCount: number,
+  modelId = LOCAL_MODEL,
 ): ExecutionResult {
   return {
     text,
     telemetry: {
-      engineUsed: LOCAL_MODEL,
+      engineUsed: modelId,
       iterations,
       toolCallCount,
       inferenceLatencyMs: Math.round(performance.now() - start),
@@ -437,8 +597,9 @@ function done(
 
 function doneCancelled(
   text: string, start: number, iterations: number, toolCallCount: number,
+  modelId = LOCAL_MODEL,
 ): ExecutionResult {
-  const r = done(text, start, iterations, toolCallCount);
+  const r = done(text, start, iterations, toolCallCount, modelId);
   r.telemetry.cancelled = true;
   return r;
 }

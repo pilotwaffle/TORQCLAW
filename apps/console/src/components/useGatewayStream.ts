@@ -12,7 +12,54 @@ const MAX_EVENTS = 1_000; // ring buffer: a 24/7 console must not leak memory
 const SESSION_KEY = 'torqclaw.sessionId';
 const CURSOR_KEY = 'torqclaw.lastSeenSeq';
 
-export function useGatewayStream(url: string, token: string) {
+export type GatewayControlError = {
+  type: 'ERROR';
+  code: string;
+  detail?: unknown;
+};
+
+export function classifyGatewayFrame(raw: unknown):
+  | { kind: 'event'; event: GatewayEvent }
+  | { kind: 'control-error'; error: GatewayControlError; disconnect: false }
+  | { kind: 'invalid'; error: unknown } {
+  if (
+    typeof raw === 'object' && raw !== null &&
+    (raw as Record<string, unknown>).type === 'ERROR' &&
+    typeof (raw as Record<string, unknown>).code === 'string'
+  ) {
+    const frame = raw as Record<string, unknown>;
+    return {
+      kind: 'control-error',
+      disconnect: false,
+      error: {
+        type: 'ERROR',
+        code: frame.code as string,
+        ...(frame.detail === undefined ? {} : { detail: frame.detail }),
+      },
+    };
+  }
+
+  const parsed = GatewayEventSchema.safeParse(raw);
+  return parsed.success
+    ? { kind: 'event', event: parsed.data }
+    : { kind: 'invalid', error: parsed.error };
+}
+
+export function buildSurfaceConnectFrame(
+  credential: string,
+  sessionId?: string,
+  lastSeenSeq: number | null = null,
+) {
+  return {
+    expectedRole: 'operator' as const,
+    auth: { kind: 'surface' as const, credential },
+    sessionId,
+    lastSeenSeq,
+    clientInfo: { name: 'torq-console', version: '0.1.0' },
+  };
+}
+
+export function useGatewayStream(url: string, credential: string) {
   const [events, setEvents] = useState<GatewayEvent[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -25,30 +72,32 @@ export function useGatewayStream(url: string, token: string) {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      attemptRef.current = 0;
-      setIsConnected(true);
       // First frame: authenticate + resume the durable session.
       ws.send(
-        JSON.stringify({
-          role: 'operator',
-          token,
-          sessionId: sessionStorage.getItem(SESSION_KEY) ?? undefined,
-          lastSeenSeq: Number(sessionStorage.getItem(CURSOR_KEY)) || null,
-          clientInfo: { name: 'torq-console', version: '0.1.0' },
-        }),
+        JSON.stringify(buildSurfaceConnectFrame(
+          credential,
+          sessionStorage.getItem(SESSION_KEY) ?? undefined,
+          Number(sessionStorage.getItem(CURSOR_KEY)) || null,
+        )),
       );
     };
 
     ws.onmessage = (e) => {
       let raw: unknown;
       try { raw = JSON.parse(e.data); } catch { return; }
-      const parsed = GatewayEventSchema.safeParse(raw);
-      if (!parsed.success) {
+      const parsed = classifyGatewayFrame(raw);
+      if (parsed.kind === 'control-error') {
+        console.warn('Gateway command rejected', parsed.error.code, parsed.error.detail);
+        return;
+      }
+      if (parsed.kind === 'invalid') {
         console.warn('Schema-invalid frame dropped', parsed.error);
         return;
       }
-      const ev = parsed.data;
+      const ev = parsed.event;
       if (ev.type === 'CONNECTED' && (ev.metadata as any)?.sessionId) {
+        attemptRef.current = 0;
+        setIsConnected(true);
         sessionStorage.setItem(SESSION_KEY, (ev.metadata as any).sessionId);
       }
       if (ev.seq != null) sessionStorage.setItem(CURSOR_KEY, String(ev.seq));
@@ -71,7 +120,7 @@ export function useGatewayStream(url: string, token: string) {
       attemptRef.current++;
       reconnectTimerRef.current = setTimeout(connect, delay);
     };
-  }, [url, token]);
+  }, [url, credential]);
 
   useEffect(() => {
     closedByUser.current = false;

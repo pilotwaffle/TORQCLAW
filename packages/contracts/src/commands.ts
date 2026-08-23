@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { SubscriptionProviderIdSchema } from './routing.js';
 
 /** Dumb client, smart server: the ONLY judgment calls the client makes
  *  are things only the user can know. */
@@ -55,6 +56,39 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     // by construction (a client cannot even ask for another session's list).
     action: z.literal('LIST_RECEIPTS'),
     limit: z.number().int().min(1).max(100).default(20),
+  }),
+  z.object({
+    action: z.literal('LIST_AGENTS'),
+    limit: z.number().int().min(1).max(100).default(50),
+  }),
+  z.object({
+    action: z.literal('LIST_AGENT_PROVIDERS'),
+  }),
+  z.object({
+    action: z.literal('CREATE_AGENT'),
+    displayName: z.string().trim().min(1).max(80),
+    providerId: z.string().trim().min(1).max(80),
+    modelId: z.string().trim().min(1).max(160),
+    autostart: z.boolean().default(false),
+    /** Explicit operator consent for unattended channel context to leave the
+     *  machine. Required when a subscription-backed agent autostarts. */
+    externalContextConfirmed: z.boolean().default(false),
+    channelIds: z.array(z.string().trim().min(1).max(160)).max(20).default([]),
+    idempotencyKey: z.uuid(),
+  }),
+  z.object({
+    action: z.literal('UPDATE_AGENT_PROFILE'),
+    agentPrincipalId: z.uuid(),
+    iconId: z.enum(['robot', 'brain', 'shield', 'search', 'code', 'spark', 'bolt', 'target']),
+    systemDirectives: z.string().trim().max(4000).refine(
+      (value) => !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/u.test(value),
+      'System directives contain forbidden control or bidirectional formatting characters',
+    ).default(''),
+    expectedRevision: z.number().int().min(0),
+    /** Explicit operator reconsent after the persona write. The gateway
+     * derives and atomically binds the resulting canonical persona snapshot. */
+    reconfirmExternalContext: z.boolean().default(false),
+    idempotencyKey: z.uuid(),
   }),
   z.object({
     // TCLAW-4B: fetch one receipt (+ optionally its evidence events) by task.
@@ -132,6 +166,12 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     // an operator-wide or unscoped listing.
     action: z.literal('LIST_CHANNELS'),
     limit: z.number().int().min(1).max(100).default(20),
+  }),
+  z.object({
+    action: z.literal('SET_CHANNEL_EXTERNAL_EXPORT_POLICY'),
+    channelId: z.string().trim().min(1).max(160),
+    externalExportPolicy: z.enum(['local_only', 'operator_confirmed_non_sensitive']),
+    idempotencyKey: z.uuid(),
   }),
   z.object({
     // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S1: read-only, cursor-paged channel
@@ -279,7 +319,20 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     action: z.literal('LIST_SCHEDULES'),
     channelId: z.string().min(1),
   }),
-]);
+]).superRefine((command, ctx) => {
+  if (
+    command.action === 'CREATE_AGENT'
+    && SubscriptionProviderIdSchema.safeParse(command.providerId).success
+    && command.autostart
+    && !command.externalContextConfirmed
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['externalContextConfirmed'],
+      message: 'subscription autostart requires explicit external context confirmation',
+    });
+  }
+});
 export type ClientCommand = z.infer<typeof ClientCommandSchema>;
 
 /** First frame on every connection — no anonymous sockets.

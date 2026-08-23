@@ -610,7 +610,11 @@ export type GatewayHandle = {
   stop: () => Promise<void>;
 };
 
-export async function launchGateway(env: Record<string, string>, useTestPreload = true): Promise<GatewayHandle> {
+export async function launchGateway(
+  env: Record<string, string>,
+  useTestPreload = true,
+  additionalNodeOptions?: string,
+): Promise<GatewayHandle> {
   const port = await reservePort();
   const childEnv: NodeJS.ProcessEnv = { ...process.env, ...env, TORQCLAW_PORT: String(port), TORQCLAW_HOST: '127.0.0.1' };
   delete childEnv.NODE_OPTIONS;
@@ -626,6 +630,9 @@ export async function launchGateway(env: Record<string, string>, useTestPreload 
   if (useTestPreload) {
     childEnv.NODE_ENV = 'test';
     childEnv.NODE_OPTIONS = '--import=' + pathToFileURL(PRELOAD).href;
+  }
+  if (additionalNodeOptions) {
+    childEnv.NODE_OPTIONS = [childEnv.NODE_OPTIONS, additionalNodeOptions].filter(Boolean).join(' ');
   }
   const child = spawn(process.execPath, [GATEWAY_DIST_ENTRY], {
     cwd: join(ROOT, 'packages', 'gateway'), env: childEnv,

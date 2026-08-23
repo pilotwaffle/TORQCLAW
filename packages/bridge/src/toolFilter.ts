@@ -23,7 +23,7 @@ const TOOL_ROUTING_MAP: Record<TaskType, string[]> = {
   SUMMARIZATION: ['filesystem__', 'collab__'],
   ROUTINE_AUTOMATION: ['filesystem__', 'scheduler__', 'tradingview__', 'desktop_commander__', 'playwright__', 'collab__'],
   COMPLEX_CODING: ['filesystem__', 'github__', 'sandbox__', 'desktop_commander__', 'playwright__', 'collab__'],
-  AUTONOMOUS_RESEARCH: ['websearch__', 'filesystem__', 'tradingview__', 'playwright__', 'collab__'],
+  AUTONOMOUS_RESEARCH: ['research__', 'filesystem__', 'tradingview__', 'playwright__', 'collab__'],
 };
 
 /** S2: the bridge server id the in-process collab tools register under

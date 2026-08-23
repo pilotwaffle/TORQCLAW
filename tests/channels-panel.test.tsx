@@ -35,6 +35,7 @@ function channelRow(overrides: Record<string, unknown> = {}) {
     name: 'general',
     state: 'active',
     role: 'owner',
+    externalExportPolicy: 'local_only',
     lastAcknowledgedCursor: '0',
     ...overrides,
   };
@@ -72,6 +73,7 @@ function timelineEvent(overrides: Record<string, unknown> = {}) {
 // read path + ack; S6_FULL_ALLOWLIST adds the composer post on top.
 const READ_ONLY_ALLOWLIST = new Set(['LIST_CHANNELS', 'GET_CHANNEL_TIMELINE']);
 const S6_ALLOWLIST = new Set(['LIST_CHANNELS', 'GET_CHANNEL_TIMELINE', 'ACK_CHANNEL_CURSOR']);
+const CHANNEL_OWNER_ALLOWLIST = new Set([...S6_ALLOWLIST, 'SET_CHANNEL_EXTERNAL_EXPORT_POLICY']);
 const S3_ALLOWLIST = new Set(['LIST_CHANNELS', 'GET_CHANNEL_TIMELINE', 'POST_CHANNEL_MESSAGE']);
 const S6_FULL_ALLOWLIST = new Set([...S3_ALLOWLIST, 'ACK_CHANNEL_CURSOR']);
 const DANGEROUS_ACTIONS = new Set([
@@ -190,8 +192,43 @@ describe('ChannelsPanel', () => {
     // per-principal read-state cursor write (idempotent, monotonic), never
     // content -- POST_CHANNEL_MESSAGE remains the only content mutation and
     // stays unreachable with an empty composer.
-    for (const a of actions) expect(S6_ALLOWLIST.has(a)).toBe(true);
+    for (const a of actions) expect(CHANNEL_OWNER_ALLOWLIST.has(a)).toBe(true);
     for (const a of actions) expect(DANGEROUS_ACTIONS.has(a)).toBe(false);
+    for (const [command] of sc.mock.calls) {
+      if ((command as any).action !== 'SET_CHANNEL_EXTERNAL_EXPORT_POLICY') continue;
+      expect(command).toEqual({
+        action: 'SET_CHANNEL_EXTERNAL_EXPORT_POLICY',
+        channelId: 'chan-1',
+        externalExportPolicy: 'operator_confirmed_non_sensitive',
+        idempotencyKey: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+      });
+    }
+  });
+
+  it('channel owner can explicitly confirm or revoke non-sensitive external export; non-owners cannot', () => {
+    const sc = vi.fn(() => true);
+    const local = channelListFrame([channelRow()]);
+    const { rerender } = renderPanel([local], sc);
+    fireEvent.click(screen.getByText('general'));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm non-sensitive export' }));
+    expect(sc).toHaveBeenLastCalledWith(expect.objectContaining({
+      action: 'SET_CHANNEL_EXTERNAL_EXPORT_POLICY',
+      channelId: 'chan-1',
+      externalExportPolicy: 'operator_confirmed_non_sensitive',
+    }));
+
+    const confirmed = channelListFrame([channelRow({
+      externalExportPolicy: 'operator_confirmed_non_sensitive',
+    })]);
+    rerender(<ChannelsPanel events={[confirmed]} sendCommand={sc} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke external export' }));
+    expect(sc).toHaveBeenLastCalledWith(expect.objectContaining({
+      action: 'SET_CHANNEL_EXTERNAL_EXPORT_POLICY',
+      externalExportPolicy: 'local_only',
+    }));
+
+    rerender(<ChannelsPanel events={[channelListFrame([channelRow({ role: 'member' })])]} sendCommand={sc} onClose={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: /external export/i })).not.toBeInTheDocument();
   });
 
   it('T-12: no-fabrication sweep — channel list renders no last-message preview, no member count, no numeric unread badge', () => {

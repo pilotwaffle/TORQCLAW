@@ -6,3 +6,5 @@ export * from "./serverConfig.js";
 export * from './pathScope.js';
 export * from './capability.js';
 export * from './profilePolicy.js';
+export * from './keylessWebSearch.js';
+export * from './agentReachProbe.js';

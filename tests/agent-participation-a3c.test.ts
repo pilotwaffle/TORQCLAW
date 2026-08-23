@@ -106,13 +106,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { runCollaborationMigration, runAgentAutoreplyMigration } from '../packages/collab/src/index.js';
+import {
+  runCollaborationMigration,
+  runAgentAutoreplyMigration,
+  runAgentRuntimeProfileMigration,
+  runAgentRuntimeExternalContextMigration,
+  runAgentPersonaMigration,
+  runAgentPersonaRevisionMigration,
+  runAgentTurnOutputMigration,
+} from '../packages/collab/src/index.js';
 import { ensureGatewayBuild, GATEWAY_DIST_ENTRY } from './helpers/collab-gateway-harness.js';
 
 const REPO_ROOT = join(GATEWAY_DIST_ENTRY, '..', '..', '..', '..');
 const GATEWAY_DIST_DIR = join(REPO_ROOT, 'packages', 'gateway', 'dist');
 const COLLAB_DIST_DIR = join(REPO_ROOT, 'packages', 'collab', 'dist');
-const BRIDGE_DIST_DIR = join(REPO_ROOT, 'packages', 'bridge', 'dist');
 
 beforeAll(async () => { await ensureGatewayBuild(); }, 200000);
 
@@ -130,6 +137,11 @@ function seedTwoAgentChannel(dbPath: string): Seeded {
   const db = new Database(dbPath);
   runCollaborationMigration(db);
   runAgentAutoreplyMigration(db);
+  runAgentRuntimeProfileMigration(db);
+  runAgentRuntimeExternalContextMigration(db);
+  runAgentPersonaMigration(db);
+  runAgentPersonaRevisionMigration(db);
+  runAgentTurnOutputMigration(db);
   const operatorId = randomUUID();
   const agentAId = randomUUID();
   const agentBId = randomUUID();
@@ -153,6 +165,16 @@ function seedTwoAgentChannel(dbPath: string): Seeded {
     db.prepare(
       "INSERT INTO collab_members(channel_id, principal_id, role, state, membership_epoch, rejoined_seq, joined_at, removed_at) VALUES (?, ?, 'agent', 'active', 1, 0, ?, NULL)",
     ).run(channelId, id, now);
+    db.prepare(
+      `INSERT INTO collab_agent_runtime_profiles(
+         agent_principal_id, provider_account_id, adapter_id, model_id, autostart, created_at, updated_at
+       ) VALUES (?, 'ollama-local', 'ollama-local', 'torq-ai-v5', 1, ?, ?)`,
+    ).run(id, now, now);
+    db.prepare(
+      `INSERT INTO collab_agent_personas(
+         agent_principal_id, icon_id, system_directives, created_at, updated_at, revision
+       ) VALUES (?, 'robot', '', ?, ?, 1)`,
+    ).run(id, now, now);
   }
   db.close();
   return { collabDbPath: dbPath, operatorId, agentAId, agentBId, channelId };
@@ -191,9 +213,7 @@ describe('PRD-TCLAW-AGENT-PARTICIPATION-007 A3-c — two agents actually convers
   let dataDir: string;
   let seeded: Seeded;
   let collab: typeof import('../packages/collab/dist/index.js');
-  let bridge: typeof import('../packages/bridge/dist/index.js');
   let collabSurface: typeof import('../packages/gateway/dist/collabSurface.js');
-  let collabAgentTools: typeof import('../packages/gateway/dist/collabAgentTools.js');
   let autoReplyDispatcher: typeof import('../packages/gateway/dist/autoReplyDispatcher.js');
   let events: typeof import('../packages/gateway/dist/events.js');
   let storage: typeof import('../packages/gateway/dist/storage.js');
@@ -237,9 +257,7 @@ describe('PRD-TCLAW-AGENT-PARTICIPATION-007 A3-c — two agents actually convers
     setEnv('TORQCLAW_COLLAB_TEST_PEPPER', pepper.toString('base64'));
 
     collab = await import(pathToFileURL(join(COLLAB_DIST_DIR, 'index.js')).href) as any;
-    bridge = await import(pathToFileURL(join(BRIDGE_DIST_DIR, 'index.js')).href) as any;
     collabSurface = await import(pathToFileURL(join(GATEWAY_DIST_DIR, 'collabSurface.js')).href) as any;
-    collabAgentTools = await import(pathToFileURL(join(GATEWAY_DIST_DIR, 'collabAgentTools.js')).href) as any;
     autoReplyDispatcher = await import(pathToFileURL(join(GATEWAY_DIST_DIR, 'autoReplyDispatcher.js')).href) as any;
     events = await import(pathToFileURL(join(GATEWAY_DIST_DIR, 'events.js')).href) as any;
     storage = await import(pathToFileURL(join(GATEWAY_DIST_DIR, 'storage.js')).href) as any;
@@ -268,19 +286,11 @@ describe('PRD-TCLAW-AGENT-PARTICIPATION-007 A3-c — two agents actually convers
       return autoReplyDispatcher.onChannelMessageCommitted(params);
     });
 
-    // Register the REAL in-process collab MCP server so bridge.executeTool
-    // routes through the REAL registry/approval/capability/policy path
-    // (identical to agent-participation-s2.test.ts's registerCollabTools()).
-    await bridge.connectInProcessServer(
-      collabAgentTools.COLLAB_AGENT_SERVER_ID,
-      collabAgentTools.buildCollabAgentMcpServer(),
-      { capabilities: collabAgentTools.COLLAB_AGENT_TOOL_CAPABILITIES },
-    );
-
-    // THE SEAM: replace ONLY dispatch(). See the file header for exactly
-    // what remains real vs. substituted. req.effectiveProfile is used
-    // VERBATIM, unmodified -- the real policy object runAgentTurn actually
-    // computed for this turn, per "THE FINDING" above.
+    // THE SEAM: replace only dispatch/model inference. Managed turns expose
+    // zero model tools; the scripted model text is completed on the real task
+    // row, then the production atomic writer validates the claimed envelope,
+    // live profile/persona, membership, STOP, lease, and output binding before
+    // it posts or records no_post.
     autoReplyDispatcher.setAutoReplyDispatchForTest((req: any, _diag: any) => {
       void (async () => {
         // Real task-row bookkeeping so runDispatchAndWait's poll (unchanged,
@@ -303,25 +313,10 @@ describe('PRD-TCLAW-AGENT-PARTICIPATION-007 A3-c — two agents actually convers
 
           if (row) {
             const reply = nextScriptedReply(row.agentPrincipalId);
-            if (reply !== null) {
-              // THE REAL CALL, THE REAL PROFILE: identical to what
-              // collabAgentTools.ts's own post_message handler executes for
-              // a real model's tool call, under the EXACT profile object
-              // runAgentTurn resolved for this turn (never substituted).
-              try {
-                await bridge.executeTool(
-                  'collab__post_message',
-                  { channelId: row.channelId, text: reply },
-                  req.effectiveProfile,
-                  row.agentPrincipalId,
-                );
-              } catch (toolErr: any) {
-                observedRefusals.push(String(toolErr?.message ?? toolErr));
-                throw toolErr;
-              }
-            }
+            events.taskStore.complete(req.id, reply ?? '', {});
+            return;
           }
-          events.taskStore.complete(req.id, 'ok', {});
+          events.taskStore.complete(req.id, '', {});
         } catch (err) {
           events.taskStore.fail(req.id, String((err as any)?.message ?? err));
         }

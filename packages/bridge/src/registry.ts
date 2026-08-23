@@ -3,7 +3,12 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { EffectiveProfile } from '@torqclaw/contracts';
+import type {
+  AgentPersonaEnvelope,
+  AgentTurnContext,
+  EffectiveProfile,
+  LocalExecutionTarget,
+} from '@torqclaw/contracts';
 
 import { type PathScope, checkPath, extractPaths } from './pathScope.js';
 import { type Capability, classifyCapability, isWriteClass, scopeModeFor } from './capability.js';
@@ -284,12 +289,25 @@ export function isHermesAvailable(): boolean {
  *  path to set or influence it. See collabAgentTools.ts (gateway) for the
  *  reader side. */
 export const COLLAB_CALLER_META_KEY = 'io.torqclaw/collab-caller-principal-id';
+export const COLLAB_AGENT_TURN_META_KEY = 'io.torqclaw/agent-turn-context';
+
+export type CollabAgentTurnToolContext = AgentTurnContext & {
+  dispatchRequestId: string;
+  personaEnvelope: AgentPersonaEnvelope;
+  expectedProfile: {
+    providerAccountId: LocalExecutionTarget['providerId'];
+    adapterId: LocalExecutionTarget['adapterId'];
+    modelId: string;
+    personaRevision: number;
+  };
+};
 
 export async function executeTool(
   namespacedName: string,
   args: unknown,
   effectiveProfile?: EffectiveProfile,
   callerCollabPrincipalId?: string,
+  agentTurnContext?: CollabAgentTurnToolContext,
 ): Promise<unknown> {
   const entry = registry.find((t) => t.name === namespacedName);
   if (!entry) throw new Error(`Unknown tool '${namespacedName}'`);
@@ -328,7 +346,12 @@ export async function executeTool(
     // params shape) is unaffected; only the in-process collab server reads
     // this key.
     ...(callerCollabPrincipalId
-      ? { _meta: { [COLLAB_CALLER_META_KEY]: callerCollabPrincipalId } }
+      ? { _meta: {
+          [COLLAB_CALLER_META_KEY]: callerCollabPrincipalId,
+          ...(entry.sourceServerId === 'collab' && agentTurnContext
+            ? { [COLLAB_AGENT_TURN_META_KEY]: agentTurnContext }
+            : {}),
+        } }
       : {}),
   });
   if (result.isError) {
@@ -347,6 +370,9 @@ export async function connectBridge(): Promise<void> {
     id: 'hermes',
     transport: { type: 'streamable-http', url: hermesUrl, token: hermesToken },
     approvalPatterns: [], // engine meta-tools are control-plane, not user tools
+    // Explicit P1 classification: web_search performs network reads only.
+    // All other Hermes tools retain fail-closed capability classification.
+    capabilities: { web_search: 'read', agent_reach_doctor: 'read' },
   };
   // Remembered so the background reconnect can retry the same endpoint (B-1).
   hermesReconnectConfig = hermesConfig;
