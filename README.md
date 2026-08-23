@@ -8,13 +8,13 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Gateway tests](https://img.shields.io/badge/tests-1860%20passed%20TS%20%C2%B7%20477%20Python-brightgreen)](#verification)
 
-![A write-capable tool call is blocked, the operator approves once, the run produces a receipt](docs/demo.gif)
+![Two cloud-routed tasks run through the Hermes engine with route badges, step traces, and live session spend](docs/demo.gif)
 
-*The approval gate in action (4× speed): a cloud-routed task tries `write_file`, the engine blocks it pending approval, the operator allows it once, and the receipt lands with the written file in the workspace.*
+*Live console demo: cloud-routed tasks through the Hermes engine — route badges, step traces, session budget and spend tracking, and a running task that can be stopped mid-flight.*
 
-<video src="docs/assets/torqclaw-demo-v2.mp4" controls muted width="100%"></video>
+<video src="docs/assets/torqclaw-demo-2026-08-20.mp4" controls muted width="100%"></video>
 
-*Quick demo: live tasks across both tiers, the approval gate, and the console in action.*
+*For the approval gate itself — a blocked write-capable tool call, a one-time operator allow, and the resulting receipt — see [Tool approvals](#tool-approvals).*
 
 Most agent frameworks optimize for autonomy. TORQCLAW optimizes for **trust**: every agent runs behind a gateway that enforces what the operator decided, not what the model wants.
 
@@ -464,7 +464,7 @@ Completed:
 
 In progress:
 
-- Resilient extensibility — provider failover and execution profiles landed; the local verified-skill lifecycle (install, activation, rollback) is integrated end to end and ON for this deployment (see "Verified skills" above). Remaining from that PRD: a governed disable surface (in flight) and Phase 4 signed remote sources (deferred until after C1/C2).
+- Resilient extensibility — provider failover and execution profiles landed; the local verified-skill lifecycle (install, activation, rollback, disable) is integrated end to end and ON for this deployment (see "Verified skills" above). Signed remote skill sources are landed behind `TORQCLAW_REMOTE_SKILL_SOURCES` (default off). Remaining from that PRD: console surfaces for rollback, disable, and version listing (MCP tools only today), plus the recorded caveats — a live two-provider failover pilot and RFC 8785 interoperability vectors for canonical signing.
 
 Not started:
 
