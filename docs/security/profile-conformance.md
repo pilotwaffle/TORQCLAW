@@ -10,7 +10,7 @@ in the test suite.
 |---|---|---|---|---|---|---|
 | read_only | * | read | none | LOCAL_EDGE | path=none, network=none | write=false, exec=false, send=false |
 | workspace_write | filesystem | read, write | none, filesystem_write | LOCAL_EDGE, FRONTIER | path=workspace, network=none | write=true, exec=false, send=false |
-| browser_research | browser, playwright, websearch | read | none | LOCAL_EDGE, FRONTIER | path=none, network=browser | write=false, exec=false, send=false |
+| browser_research | browser, playwright, research | read | none | LOCAL_EDGE, FRONTIER | path=none, network=browser | write=false, exec=false, send=false |
 | terminal_power | desktop_commander, sandbox, shell, terminal | read, write, exec | none, process | LOCAL_EDGE, FRONTIER | path=configured, network=configured | write=true, exec=true, send=false |
 | agent_conversation | collab | read | none, collab_write | LOCAL_EDGE | path=none, network=none | write=false, exec=false, send=false |
 <!-- PROFILE-CONFORMANCE:END -->

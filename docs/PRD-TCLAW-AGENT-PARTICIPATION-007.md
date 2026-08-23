@@ -878,7 +878,22 @@ operator lands the WIP or explicitly authorizes co-editing.
   side-channel as an **explicit entitlement** per §2a? It discloses that a principal is
   executing *something*, which exceeds channel-message entitlement. **Until ruled, S4 ships
   "Members" only.**
-- **OQ-3 (BLOCKING S3 completeness).** Must STOP survive a gateway restart? (U-6.)
+- **OQ-3 — CLOSED 2026-08-22 (G1D reconciliation).** Must STOP survive a gateway restart? (U-6.)
+  **Answered by implementation, not by ruling:** `84bfda3` persists STOP (global and per-channel)
+  and demonstrated it over a real booted gateway — persistence across a fresh connection,
+  seat-lattice denial, a message whose *content* is a stop command has zero effect, and zero
+  `collab_agent_turns` rows after a post to a stopped channel with an eligible second agent
+  present. `3cb29ad` (G1R, zero blockers) independently reproduced the S3 probes. The R-3a
+  "open design point" text in §4 S3 is therefore superseded: STOP **does** survive restart, and
+  no UI non-persistence disclosure is owed. Re-verification on the final tree is A-S7-3 in
+  `docs/prd-reviews/G1D-FABLE-PRD-007-S7-AND-T4-PACKET-2026-08-22.md`.
+- **F1 / F2 disposition (from `3cb29ad`, recorded 2026-08-22): FILED, NON-BLOCKING.**
+  F1 — the coalesced re-dispatch path bypasses `resolveEligibleAgents`' SQL self-reply guard
+  (narrow blind spot; every lap is loud). F2 — a deterministic policy failure re-dispatches
+  once more under a new PK before stopping (log-flood, not silent). Both sit on the
+  approval-is-consent-not-containment surface; neither can produce a silent post. They are
+  tracked here rather than fixed in S7 so the slice stays bounded; either may be pulled into
+  a later bounded correction without renewed Gate 1.
 - **OQ-4.** Final flag naming (`TORQCLAW_AGENT_PARTICIPATION`, `TORQCLAW_AGENT_AUTOREPLY`) —
   an operator decision, per the 005 precedent.
 - **OQ-5.** Does an agent take a turn on **every** qualifying message, or may it choose

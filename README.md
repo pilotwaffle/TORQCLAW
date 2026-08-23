@@ -88,7 +88,7 @@ Console: `http://127.0.0.1:3000` · Gateway: `127.0.0.1:18790` · Engine health:
 
 The install wrappers run the submodule, frozen pnpm, contracts build, `uv sync --locked`, vendored Hermes editable install, and Hermes import checks. They never create or overwrite `.env`. Everything runs on loopback, and the engine defaults to stub mode — the stack comes up with **zero API keys and zero cloud spend**. Add a provider (`HERMES_PROVIDER`, `HERMES_MODEL`, `HERMES_API_KEY`) only when you want the FRONTIER tier. See [Configuration](#configuration).
 
-Before any non-loopback deployment, replace both `TORQCLAW_GATEWAY_TOKEN=change-me` and `NEXT_PUBLIC_GATEWAY_TOKEN=change-me` with the same non-placeholder value.
+Production rejects the deprecated shared gateway token. Bootstrap an operator credential once with `node ops/bootstrap-operator.mjs`; production probes read `TORQCLAW_OPERATOR_CREDENTIAL` or the generated `operator-credential.token` file.
 
 ## Program status
 
@@ -322,7 +322,7 @@ Graphify project profile files are present on `master` through governed Graphify
 | `TORQCLAW_DATA_DIR` | `~/.torqclaw` | Gateway state DB, credentials, skill queue |
 | `TORQCLAW_PORT` / `TORQCLAW_HOST` | `18790` / `127.0.0.1` | Loopback-first gateway binding |
 | `TORQCLAW_CONSOLE_PORT` / `HERMES_BIND_HOST` | `3000` / `127.0.0.1` | Portable console and engine ports/hosts |
-| `TORQCLAW_GATEWAY_TOKEN` | unset dev mode | Required for non-loopback deployment |
+| `TORQCLAW_OPERATOR_CREDENTIAL` | generated credential file | Optional override for production operator probes; the shared gateway token is forbidden in production |
 | `HERMES_ENGINE_URL` / `HERMES_ENGINE_TOKEN` | `http://127.0.0.1:8000/mcp` | Python engine MCP endpoint; local URLs cannot carry credentials |
 | `OLLAMA_HOST` / `TORQCLAW_LOCAL_MODEL` | `localhost:11434` / `torq-local` | LOCAL_EDGE model config |
 | `HERMES_MODEL` / `HERMES_PROVIDER` / `HERMES_API_KEY` / `HERMES_BASE_URL` | unset stub mode | FRONTIER provider config |
