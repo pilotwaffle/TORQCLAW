@@ -2,7 +2,30 @@
 
 Single-file program state, updated only after meaningful progress with tests + independent verifier passing. Detailed history lives in `docs/prd-reviews/*` and the per-project memory index.
 
-_Last updated: 2026-08-15 (PRD-1 Profile Conformance Suite: SHIPPED — merged `069f556b`, hotfix `e60587c`, transform anchor `09ca3f0`, all pushed to origin/master, CI green; evidence bulk cleaned on operator instruction, documentary record retained)._
+_Last updated: 2026-08-23 (PRD-007 Phase 1 + ACP continuation: 2568/1 TS tests, 518/1 Py tests, 14/14 typecheck, 8/8 build, reachability PASS, vendor clean; GLM-5.3 alias binding `endpoint_bound` shipped (PR #54), first live GLM53_OK turn; four pre-existing ACP client defects fixed fail-closed; operator granted OQ-2 in own words; S1–S7 all shipped; zai readiness connected; open G2A non-blocking: frame.id validation, ignoredKinds, T-6 pin, kind-from-role guard, S4 human-task presence, web-search egress)._
+
+## SHIPPED: PRD-007 Phase 1 + ACP continuation — Agent Model Conversational Dispatch with GLM-5.3
+
+**Status: COMPLETE, INDEPENDENTLY VERIFIED, G2A-APPROVED (round 4 APPROVE), MERGED AND PUSHED to origin/master as 4252a6a (PR #53) and 962d6bf (PR #54) on 2026-08-23.** Commit `962d6bf` = merge of PR #54 (GLM-5.3 alias binding + ACP client fixes); prior PR #53 = `4252a6a` (Windows spawn + S1–S7 base).
+
+Main outcomes (PR #53 + #54):
+- **Hermes `failed: True`** → `failed` attempt field (HermesTaskFailedError + FailoverReason mapping + kind derivation + approval-blocked telemetry wrap). Terminal ERROR on kimi-sub-primary exhaustion, zero RESULT fallback.
+- **Lease predicate** `resolveAgentTurn` gate: session resume binds exactly once per agent-scoped task. A-3c (two-agent STOP) passes on live dist and real DB rows.
+- **Windows npm-shim spawn** `claude-agent-acp` → `resolveSpawnTarget()` parses .cmd entry point, spawns `node <path>`. spawnError + 8s readiness timeout.
+- **GLM-5.3 alias binding endpoint_bound** (PR #54): ACP client alias union + env isolation proof (CLAUDE_CONFIG_DIR + cwd isolation zai-only, defense in depth). First live GLM-5.3 turn GLM53_OK; zai readiness connected/glm-5.3/endpoint_bound. Operator granted OQ-2 in own words 2026-08-23.
+- **Members roster** with server role/kind labels. Working-now overlay {principalId, displayName, working, since} co-members only, read-time from collab_agent_turns, live push with per-delivery revalidation (trigger-only dispatcher).
+- **ACP client defects fixed fail-closed** (PR #54): benign session/update kinds allowlist (never throw); consumed-content credential scan (raw-line SECRET regex matching "token"); agent→client reverse requests denied; benign kinds during handshake/pin crash→-32601 for fs/terminal.
+- **LIST_CHANNEL_MEMBERS** shipped with Members roster and dispatcher integration.
+- **Web search gated default OFF** on both LOCAL_EDGE and FRONTIER tiers (TORQCLAW_WEB_SEARCH_ENABLED=unset → registry strips `research__web_search`); gate behavior verified live boot real dist.
+- **PRD-007 S1–S7 ALL SHIPPED** (PR #53 + #54); OQ-3 closed (agent task contract); OQ-2 granted operator-wording.
+
+Tests verified: vitest 170 files 2568/1 passed (2 load-sensitive collab-build-lock, failover-controller-timeout untouched, green in isolation); Python 518/1 passed; typecheck 14/14 uncached; `pnpm build --force` 8/8; contracts 8 schemas; reachability PASS; vendor submodule clean; pre-merge deletion audit zero whole-file deletions.
+
+Final G2A verdict: **APPROVE zero conditions** (independent Opus 5, fourth round). Earlier rounds rejected real defects; all corrected before approval.
+
+Operator-owned untracked files left in tree: `.claude/agents/*.md` + modified `.claude/agents/README.md`; `ops/skill-staging/**` (chief-of-staff, thecraighewitt); unrelated docs (TORQ-VIS-002, visualizer, clawed.jpg).
+
+Open / follow-ups (G2A non-blocking): ignoredKinds diagnostic-only (overclaims in doc); frame.id type validation; T-6 as adapter-version pin; kind-from-role guard; `pnpm lint` vacuous; TRUTHY vs "1" web_search gate; N-2..N-5 from earlier G1R; S4 human-task presence NOT granted/not built; web-search egress (operator-owned, stays OFF).
 
 ## SHIPPED: PRD-1 Profile Conformance Suite — full handoff executed, merged, pushed, CI green
 
