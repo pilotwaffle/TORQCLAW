@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 /**
  * PRD-TCLAW-AGENT-PARTICIPATION-007 S3 — the auto-reply trigger resolver,
  * turn watermark, and STOP control.
@@ -86,6 +88,42 @@ export function resolveEligibleAgents(
 
 export type AgentTurnState = 'dispatched' | 'completed' | 'no_post' | 'terminated';
 
+const CLAIM_BUSY_MAX_ATTEMPTS = 3;
+
+type SqliteErrorLike = { code?: unknown };
+
+function sqliteErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const code = (error as SqliteErrorLike).code;
+  return typeof code === 'string' && /^SQLITE_[A-Z0-9_]+$/.test(code) ? code : undefined;
+}
+
+function isDuplicateClaimError(code: string | undefined): boolean {
+  return code === 'SQLITE_CONSTRAINT_PRIMARYKEY' || code === 'SQLITE_CONSTRAINT_UNIQUE';
+}
+
+function isRetryableClaimError(code: string | undefined): boolean {
+  return code === 'SQLITE_BUSY'
+    || code === 'SQLITE_LOCKED'
+    || code?.startsWith('SQLITE_BUSY_') === true
+    || code?.startsWith('SQLITE_LOCKED_') === true;
+}
+
+function waitForClaimRetry(attempt: number): void {
+  // better-sqlite3 is synchronous. Keep this backoff deliberately short and
+  // bounded; the connection's busy_timeout remains the primary wait.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, attempt * 10);
+}
+
+export class AgentTurnClaimError extends Error {
+  readonly code = 'AGENT_TURN_CLAIM_FAILED';
+
+  constructor(sqliteCode: string | undefined) {
+    super(`AGENT_TURN_CLAIM_FAILED sqlite_code=${sqliteCode ?? 'UNKNOWN'}`);
+    this.name = 'AgentTurnClaimError';
+  }
+}
+
 /**
  * Anti-storm requirement 2 (idempotency), and the watermark half of G1R
  * B-3(b): claim the (channel, agent, seq) triple for dispatch. The PRIMARY
@@ -102,19 +140,37 @@ export function claimAgentTurn(
   db: AutoreplyDb,
   params: { channelId: string; agentPrincipalId: string; channelSeq: number; triggerEventId: string; nowIso: string },
 ): boolean {
-  try {
-    db.prepare(
-      `INSERT INTO collab_agent_turns
-         (channel_id, agent_principal_id, channel_seq, trigger_event_id, state, dispatch_request_id, dispatched_at, resolved_at)
-       VALUES (?, ?, ?, ?, 'dispatched', NULL, ?, NULL)`,
-    ).run(params.channelId, params.agentPrincipalId, params.channelSeq, params.triggerEventId, params.nowIso);
-    return true;
-  } catch {
-    // UNIQUE(channel_id, agent_principal_id, channel_seq) violation: this
-    // triple was already claimed (by this process or a prior one). Refuse
-    // silently -- the caller must not dispatch a second turn.
-    return false;
+  const statement = db.prepare(
+    `INSERT INTO collab_agent_turns
+       (channel_id, agent_principal_id, channel_seq, trigger_event_id, state, dispatch_request_id, dispatched_at, resolved_at)
+     VALUES (?, ?, ?, ?, 'dispatched', NULL, ?, NULL)`,
+  );
+  for (let attempt = 1; attempt <= CLAIM_BUSY_MAX_ATTEMPTS; attempt++) {
+    try {
+      statement.run(
+        params.channelId,
+        params.agentPrincipalId,
+        params.channelSeq,
+        params.triggerEventId,
+        params.nowIso,
+      );
+      return true;
+    } catch (error) {
+      const code = sqliteErrorCode(error);
+      if (isDuplicateClaimError(code)) {
+        // This exact triple was already claimed. Preserve durable idempotency.
+        return false;
+      }
+      if (isRetryableClaimError(code) && attempt < CLAIM_BUSY_MAX_ATTEMPTS) {
+        waitForClaimRetry(attempt);
+        continue;
+      }
+      // Never convert operational corruption/locking into "already claimed",
+      // and never surface the raw SQLite message (it may contain SQL/data).
+      throw new AgentTurnClaimError(code);
+    }
   }
+  throw new AgentTurnClaimError('UNKNOWN');
 }
 
 /** Attach the dispatch_request_id once the gateway has minted the
@@ -143,15 +199,53 @@ export function attachDispatchRequestId(
  * Idempotent by WHERE state='dispatched': a second resolve attempt on an
  * already-resolved row is a no-op (0 rows changed), never overwrites a
  * terminal state.
+ *
+ * B-6 (G1D PRD-007 S7/T4 packet, 2026-08-22): `leaseToken`, when provided,
+ * additionally predicates on `AND recovery_lease_token IS ?` -- the exact
+ * fencing style `commitAgentTurnOutput` already uses at store.ts:2545
+ * (`IS` rather than `=` so a NULL lease on a never-reclaimed row compares
+ * correctly). This closes the same race `commitAgentTurnOutput` closes for
+ * output binding: a STALE executor from before a restart must not be able
+ * to resolve a turn a FRESH executor has since reclaimed with a new lease.
+ * `leaseToken` stays optional -- omitted, the predicate is dropped and the
+ * call resolves exactly as it always has -- because `resolveAgentTurn` is
+ * also called from call sites with no lease concept at all (a fresh,
+ * never-recovered dispatch in `dispatchOneTurn`/`runAgentTurn`, and
+ * `packages/collab/src/cron.ts`'s scheduled-turn path), and none of those
+ * callers, nor this function's existing test callers, are in scope for
+ * this change. Making it mandatory would force edits to every one of those
+ * call sites plus `packages/collab/src/index.ts`'s export surface, none of
+ * which this bounded correction is authorized to touch.
+ *
+ * Returns the number of rows actually changed (0 or 1) so a caller on the
+ * recovery path can assert real ownership instead of assuming success from
+ * a void return -- the same discipline `commitAgentTurnOutput` already
+ * applies to its own `changes` check.
  */
 export function resolveAgentTurn(
   db: AutoreplyDb,
-  params: { channelId: string; agentPrincipalId: string; channelSeq: number; state: Exclude<AgentTurnState, 'dispatched'>; nowIso: string },
-): void {
-  db.prepare(
-    `UPDATE collab_agent_turns SET state = ?, resolved_at = ?
-      WHERE channel_id = ? AND agent_principal_id = ? AND channel_seq = ? AND state = 'dispatched'`,
-  ).run(params.state, params.nowIso, params.channelId, params.agentPrincipalId, params.channelSeq);
+  params: { channelId: string; agentPrincipalId: string; channelSeq: number; state: Exclude<AgentTurnState, 'dispatched'>; nowIso: string; leaseToken?: string },
+): number {
+  const info = params.leaseToken !== undefined
+    ? db.prepare(
+        `UPDATE collab_agent_turns SET state = ?, resolved_at = ?
+          WHERE channel_id = ? AND agent_principal_id = ? AND channel_seq = ? AND state = 'dispatched'
+            AND recovery_lease_token IS ?`,
+      ).run(
+        params.state,
+        params.nowIso,
+        params.channelId,
+        params.agentPrincipalId,
+        params.channelSeq,
+        params.leaseToken,
+      ) as { changes: number | bigint }
+    : db.prepare(
+        `UPDATE collab_agent_turns SET state = ?, resolved_at = ?
+          WHERE channel_id = ? AND agent_principal_id = ? AND channel_seq = ? AND state = 'dispatched'`,
+      ).run(params.state, params.nowIso, params.channelId, params.agentPrincipalId, params.channelSeq) as {
+        changes: number | bigint;
+      };
+  return Number(info.changes);
 }
 
 export type StrandedTurn = {
@@ -160,7 +254,36 @@ export type StrandedTurn = {
   channelSeq: number;
   triggerEventId: string;
   dispatchRequestId: string | null;
+  dispatchedAt: string;
 };
+
+export type AgentTurnRecoveryLease = {
+  leaseToken: string;
+  attempt: number;
+};
+
+export type AgentTurnOutputBinding = {
+  eventId: string;
+  outputKind: 'tool' | 'fallback';
+};
+
+export function getAgentTurnOutput(
+  db: AutoreplyDb,
+  params: { channelId: string; agentPrincipalId: string; channelSeq: number; dispatchRequestId: string },
+): AgentTurnOutputBinding | null {
+  const row = db.prepare(`
+    SELECT output_event_id AS eventId, output_kind AS outputKind
+      FROM collab_agent_turns
+     WHERE channel_id = ? AND agent_principal_id = ? AND channel_seq = ?
+       AND dispatch_request_id = ? AND output_event_id IS NOT NULL
+  `).get(
+    params.channelId,
+    params.agentPrincipalId,
+    params.channelSeq,
+    params.dispatchRequestId,
+  ) as AgentTurnOutputBinding | undefined;
+  return row ?? null;
+}
 
 /**
  * G1R B-3(b)'s required recovery: find every row still 'dispatched' whose
@@ -184,7 +307,8 @@ export function findStrandedAgentTurns(
   const rows = db
     .prepare(
       `SELECT channel_id AS channelId, agent_principal_id AS agentPrincipalId, channel_seq AS channelSeq,
-              trigger_event_id AS triggerEventId, dispatch_request_id AS dispatchRequestId
+              trigger_event_id AS triggerEventId, dispatch_request_id AS dispatchRequestId,
+              dispatched_at AS dispatchedAt
          FROM collab_agent_turns
         WHERE state = 'dispatched' AND dispatched_at <= ?`,
     )
@@ -202,15 +326,43 @@ export function findStrandedAgentTurns(
  */
 export function reclaimStrandedAgentTurn(
   db: AutoreplyDb,
-  params: { channelId: string; agentPrincipalId: string; channelSeq: number; nowIso: string },
-): boolean {
+  params: {
+    channelId: string;
+    agentPrincipalId: string;
+    channelSeq: number;
+    nowIso: string;
+    expectedDispatchedAt?: string;
+    leaseToken?: string;
+  },
+): AgentTurnRecoveryLease | null {
+  if (!params.expectedDispatchedAt) return null;
+  const leaseToken = params.leaseToken ?? randomUUID();
   const info = db
     .prepare(
-      `UPDATE collab_agent_turns SET dispatched_at = ?
-        WHERE channel_id = ? AND agent_principal_id = ? AND channel_seq = ? AND state = 'dispatched'`,
+      `UPDATE collab_agent_turns
+          SET dispatched_at = ?,
+              recovery_attempt = recovery_attempt + 1,
+              recovery_lease_token = ?
+        WHERE channel_id = ? AND agent_principal_id = ? AND channel_seq = ?
+          AND state = 'dispatched' AND dispatched_at = ?`,
     )
-    .run(params.nowIso, params.channelId, params.agentPrincipalId, params.channelSeq) as { changes: number | bigint };
-  return Number(info.changes) === 1;
+    .run(
+      params.nowIso,
+      leaseToken,
+      params.channelId,
+      params.agentPrincipalId,
+      params.channelSeq,
+      params.expectedDispatchedAt,
+    ) as { changes: number | bigint };
+  if (Number(info.changes) !== 1) return null;
+  const row = db.prepare(
+    `SELECT recovery_attempt AS attempt FROM collab_agent_turns
+      WHERE channel_id = ? AND agent_principal_id = ? AND channel_seq = ?
+        AND recovery_lease_token = ?`,
+  ).get(params.channelId, params.agentPrincipalId, params.channelSeq, leaseToken) as
+    | { attempt: number }
+    | undefined;
+  return row ? { leaseToken, attempt: row.attempt } : null;
 }
 
 /**
