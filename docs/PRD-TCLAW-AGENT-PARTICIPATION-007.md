@@ -874,10 +874,17 @@ operator lands the WIP or explicitly authorizes co-editing.
   blocker:** the Windows Credential Manager `SecretStore` adapter is still the §19-owed stub,
   so in production the collab surface fails closed to `COLLAB_IDENTITY_REQUIRED` until a real
   adapter lands. Dev/loopback credentials work today. **This PRD does not absorb that work.**
-- **OQ-2 (BLOCKING S4's working overlay).** Does the operator grant the **"working now"**
+- **OQ-2 — RULED 2026-08-23 (GRANTED, operator's own words).** Does the operator grant the **"working now"**
   side-channel as an **explicit entitlement** per §2a? It discloses that a principal is
-  executing *something*, which exceeds channel-message entitlement. **Until ruled, S4 ships
-  "Members" only.**
+  executing *something*, which exceeds channel-message entitlement.
+  **Operator ruling (verbatim):** *"I grant the S4 'working now' side-channel as an explicit
+  §2a entitlement: co-members may learn that a co-member agent is executing a turn, disclosed
+  as exactly {principalId, displayName, working, since}. I understand displayName is verbatim
+  and this exceeds channel-message entitlement."* Scope: **agent** principals only, derived
+  from `collab_agent_turns` (`state='dispatched' AND resolved_at IS NULL`); human-task presence
+  is NOT granted and not built. Delivery must re-derive the caller's entitlement per push
+  (G1R 2026-08-22 B-2). Record in
+  `docs/prd-reviews/G1D-FABLE-PRD-007-S4-AND-GLM-ALIAS-PACKET-2026-08-22.md`.
 - **OQ-3 — CLOSED 2026-08-22 (G1D reconciliation).** Must STOP survive a gateway restart? (U-6.)
   **Answered by implementation, not by ruling:** `84bfda3` persists STOP (global and per-channel)
   and demonstrated it over a real booted gateway — persistence across a fresh connection,
