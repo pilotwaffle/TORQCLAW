@@ -50,7 +50,7 @@ import { sweepExpiredApprovals, sweepExpiredGrants } from './approvalWriter.js';
 import { rebuildDeliveryProjection } from './approvalDelivery.js';
 import { revokeInertGrants, admitToolCall } from './grantAdmission.js';
 import { decideApprovalC2 } from './c2Broker.js';
-import { collabSurfaceCommandsEnabled, agentParticipationEnabled, webSearchEnabled, isAgentSurfaceCaller, handleListChannels, handleSetChannelExternalExportPolicy, handleGetChannelTimeline, handlePostChannelMessage, handleAckChannelCursor, setAutoReplyTrigger, getStore } from './collabSurface.js';
+import { collabSurfaceCommandsEnabled, agentParticipationEnabled, webSearchEnabled, isAgentSurfaceCaller, handleListChannels, handleListChannelMembers, handleSetChannelExternalExportPolicy, handleGetChannelTimeline, handlePostChannelMessage, handleAckChannelCursor, setAutoReplyTrigger, getStore } from './collabSurface.js';
 import {
   handleCreateAgent,
   handleListAgentProviders,
@@ -285,8 +285,28 @@ app.get('/ws', { websocket: true }, (socket) => {
   };
   const collabLiveSink: DeliverySink = (frame) => {
     try {
-      if (frame.type !== 'channel_event' || frame.event.kind !== 'message_posted') return;
       if (!sessionId || socketClosed) return;
+      // PRD-007 S4 presence push (OQ-2, GRANTED 2026-08-23; G1R B-2). Carries
+      // EXACTLY {channelId, principalId, working, since} plus the wire's own
+      // envelope fields -- no taskId, prompt, tier, tool, cost, spend,
+      // provider, or model. Same best-effort, no-delivery-guarantee
+      // discipline as the collabMessagePosted hint below: this is a
+      // publishOnly SYSTEM metadata event, never a persisted or
+      // sequenced frame.
+      if (frame.type === 'collab_presence') {
+        publishOnly(sessionId, {
+          message: 'Channel presence changed',
+          metadata: {
+            collabPresence: true,
+            channelId: frame.channelId,
+            principalId: frame.principalId,
+            working: frame.working,
+            since: frame.since,
+          },
+        });
+        return;
+      }
+      if (frame.type !== 'channel_event' || frame.event.kind !== 'message_posted') return;
       publishOnly(sessionId, {
         message: 'Channel message posted',
         metadata: {
@@ -844,6 +864,26 @@ app.get('/ws', { websocket: true }, (socket) => {
         // synthesize).
         const listErr = await handleListChannels(sid, connectionAuth?.principalId ?? null, cmd.data.limit);
         if (listErr) sendErr(listErr.code, listErr.detail);
+        break;
+      }
+      case 'LIST_CHANNEL_MEMBERS': {
+        // PRD-007 S4-Members: same absent-deny narrowing flag as
+        // LIST_CHANNELS/GET_CHANNEL_TIMELINE above -- turning the surface
+        // off must remove this command entirely too.
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        // §2a: the subject is the CONNECTION's resolved collab principal --
+        // never the gateway seat/role, never a client-supplied id. No
+        // resolved principal => the handler itself returns the terminal
+        // COLLAB_IDENTITY_REQUIRED refusal.
+        const membersErr = await handleListChannelMembers(
+          sid,
+          connectionAuth?.principalId ?? null,
+          cmd.data.channelId,
+        );
+        if (membersErr) sendErr(membersErr.code, membersErr.detail);
         break;
       }
       case 'SET_CHANNEL_EXTERNAL_EXPORT_POLICY': {

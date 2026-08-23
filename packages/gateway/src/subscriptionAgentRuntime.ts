@@ -33,7 +33,13 @@ export async function executeSubscriptionAgentTurn(input: {
   turnContext?: AgentTurnContext;
   admit?: AcpLiveAdmission;
   driver?: SubscriptionProcessDriver;
-}): Promise<{ text: string; providerId: string; modelId: string; runtimeFingerprint: string }> {
+}): Promise<{
+  text: string;
+  providerId: string;
+  modelId: string;
+  runtimeFingerprint: string;
+  ignoredKinds: Record<string, number>;
+}> {
   validateCanonicalBlankSubscriptionTurn(input.personaEnvelope, input.turnContext);
   if (!input.profile.autostart || !input.profile.externalContextConfirmed
     || !input.profile.externalContextRuntimeFingerprint
@@ -59,6 +65,7 @@ export async function executeSubscriptionAgentTurn(input: {
       providerId: input.profile.providerAccountId,
       modelId: result.exactModelId,
       runtimeFingerprint: result.runtimeFingerprint,
+      ignoredKinds: result.ignoredKinds,
     };
   } catch (error) {
     const code = String((error as Error)?.message ?? error);

@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import type {
   SubscriptionPrivateEnvironmentProfileId,
@@ -86,7 +87,25 @@ const SAFE_ENV_NAMES = [
 ] as const;
 
 const SENSITIVE_KEY = /(?:^|[_-])(authorization|cookie|credential|password|secret|token|api[_-]?key)(?:$|[_-])/i;
-const CREDENTIAL_TEXT =
+/** Exported alias of SENSITIVE_KEY for subscriptionAcpRuntime.ts's consumed-result key scan --
+ * a JSON field literally NAMED e.g. `token`/`apiKey` is scanned by key, independent of whether
+ * its string value happens to match CREDENTIAL_TEXT's shape. Distinct from CREDENTIAL_TEXT (which
+ * scans a string's own SHAPE, not the key that holds it): a benign prose value under a sensitive
+ * key still trips this, which is intentional for consumed JSON-RPC results/errors -- unlike
+ * agent_message_chunk / available_commands_update prose, those are structured provider protocol
+ * payloads with no legitimate reason to carry a field named `token`/`secret`/etc. */
+export const SENSITIVE_RESULT_KEY = SENSITIVE_KEY;
+/**
+ * Credential-SHAPED text: a known secret prefix (Bearer token, sk-/ghp-/xox*-/AIza- style API
+ * keys) or a `key|token|secret|...` label immediately followed by `:`/`=` and a value. Deliberately
+ * narrower than a bare keyword match (e.g. `SECRET` in subscriptionAcpRuntime.ts before PRD-007
+ * Item B correction 2) -- prose that merely mentions "token" (a real
+ * `available_commands_update` frame's slash-command listing, usage_update field names like
+ * `inputTokens`) must not match this pattern. Exported so subscriptionAcpRuntime.ts's targeted,
+ * consumed-value-only credential scan uses the exact same definition as sanitizeAcpJsonLine below,
+ * rather than a second hand-maintained copy.
+ */
+export const CREDENTIAL_TEXT =
   /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{8,}|\b(?:sk|ghp|github_pat|xox[baprs]|AIza)[-_A-Za-z0-9]{8,}|(?:api[_ -]?key|authorization|cookie|credential|password|secret|token)\s*[:=]\s*\S+)/i;
 
 const PROBE_PLANS: Record<SubscriptionProviderId, readonly ProbePlan[]> = {
@@ -104,6 +123,61 @@ const PROBE_PLANS: Record<SubscriptionProviderId, readonly ProbePlan[]> = {
     { command: 'claude-agent-acp', args: [], timeoutMs: 8_000, successStatus: 'available' },
   ],
 };
+
+/**
+ * Root of the gateway-owned private-runtime scratch space for subscription adapters that read
+ * user-level Claude Code config (e.g. `~/.claude/settings.json`) from their own HOME/USERPROFILE.
+ * Read live (never cached at import) so tests can repoint it via `TORQCLAW_DATA_DIR`, matching
+ * the pattern in storage.ts.
+ */
+function subscriptionRuntimeDataDir(source: NodeJS.ProcessEnv): string {
+  return source.TORQCLAW_DATA_DIR || path.join(homedir(), '.torqclaw');
+}
+
+/**
+ * The zai profile's isolated `CLAUDE_CONFIG_DIR`: a gateway-owned directory created empty at
+ * call time and never written to. `claude-agent-acp` resolves `CLAUDE_CONFIG_DIR` (or falls back
+ * to `os.homedir()`) for `settingSources: ["user","project","local"]`; pointing it at an empty,
+ * gateway-owned directory keeps any operator-machine `~/.claude/settings.json` model override
+ * (e.g. `claude-opus-4-8`) from ever being read by this child, without touching the real HOME.
+ */
+export function zaiPrivateClaudeConfigDir(source: NodeJS.ProcessEnv = process.env): string {
+  return path.join(
+    subscriptionRuntimeDataDir(source),
+    'subscription-runtimes', 'zai-anthropic-glm-5.3-v1', 'claude-config',
+  );
+}
+
+/**
+ * The zai profile's explicit spawn `cwd`: a sibling gateway-owned empty directory with no
+ * `.claude/` of its own, so `settingSources: ["...","project","local"]` cannot pick up a
+ * project/local settings file placed in whatever directory the gateway process happens to be
+ * running from.
+ */
+export function zaiPrivateSpawnCwd(source: NodeJS.ProcessEnv = process.env): string {
+  return path.join(subscriptionRuntimeDataDir(source), 'subscription-runtimes', 'zai-anthropic-glm-5.3-v1', 'cwd');
+}
+
+/**
+ * Resolves the `cwd` a subscription child process should spawn in. Only the zai profile gets an
+ * explicit, gateway-owned, `.claude/`-free directory (created at call time); every other profile
+ * keeps the prior behavior of inheriting the gateway process's own cwd (`undefined` to `spawn`).
+ *
+ * `source` must be the SAME env object passed to `buildSafeChildEnv` for this same spawn --
+ * `zaiPrivateSpawnCwd` resolves `TORQCLAW_DATA_DIR` from it, exactly as `zaiPrivateClaudeConfigDir`
+ * does inside `buildSafeChildEnv`. Before this fix the two calls could resolve against different
+ * roots (this always defaulted to `process.env` regardless of what env the caller was building),
+ * so a test repointing `TORQCLAW_DATA_DIR` would isolate `CLAUDE_CONFIG_DIR` but not `cwd`.
+ */
+function resolveSubscriptionSpawnCwd(
+  privateEnvironmentProfileId: SubscriptionPrivateEnvironmentProfileId | undefined,
+  source: NodeJS.ProcessEnv,
+): string | undefined {
+  if (privateEnvironmentProfileId !== 'zai-anthropic-glm-5.3-v1') return undefined;
+  const cwd = zaiPrivateSpawnCwd(source);
+  mkdirSync(cwd, { recursive: true });
+  return cwd;
+}
 
 export function buildSafeChildEnv(
   source: NodeJS.ProcessEnv = process.env,
@@ -123,6 +197,9 @@ export function buildSafeChildEnv(
     env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'glm-5.3';
     env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'glm-5.3';
     env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'glm-5.3';
+    const configDir = zaiPrivateClaudeConfigDir(source);
+    mkdirSync(configDir, { recursive: true });
+    env.CLAUDE_CONFIG_DIR = configDir;
   }
   return env;
 }
@@ -373,11 +450,17 @@ async function runInvocation(
     let outputBytes = 0;
     let pending = '';
     const target = resolveSpawnTarget(plan.command, plan.args);
+    // Both cwd and env MUST resolve against the identical env object -- see
+    // resolveSubscriptionSpawnCwd's doc comment. Binding one local `source` (still defaulting to
+    // process.env) rather than writing `process.env` at each call site independently removes the
+    // possibility of the two calls silently drifting onto different roots if either is edited later.
+    const source = process.env;
     const child = spawn(target.command, target.args, {
       shell: false,
       windowsHide: true,
       detached: process.platform !== 'win32',
-      env: buildSafeChildEnv(process.env, plan.privateEnvironmentProfileId),
+      cwd: resolveSubscriptionSpawnCwd(plan.privateEnvironmentProfileId, source),
+      env: buildSafeChildEnv(source, plan.privateEnvironmentProfileId),
       stdio: ['pipe', 'pipe', 'ignore'],
     });
     const finish = (summary: ProcessSummary) => {
@@ -469,11 +552,15 @@ async function openInteractive(
 ): Promise<SubscriptionProcessConnection> {
   if (plan.signal?.aborted) throw new Error('CANCELLED');
   const target = resolveSpawnTarget(plan.command, plan.args);
+  // See runInvocation's matching comment: one local `source` (still defaulting to process.env)
+  // feeds both calls so cwd and CLAUDE_CONFIG_DIR can never resolve against different roots.
+  const source = process.env;
   const child = spawn(target.command, target.args, {
     shell: false,
     windowsHide: true,
     detached: process.platform !== 'win32',
-    env: buildSafeChildEnv(process.env, plan.privateEnvironmentProfileId),
+    cwd: resolveSubscriptionSpawnCwd(plan.privateEnvironmentProfileId, source),
+    env: buildSafeChildEnv(source, plan.privateEnvironmentProfileId),
     stdio: ['pipe', 'pipe', 'ignore'],
   });
   let closed = false;

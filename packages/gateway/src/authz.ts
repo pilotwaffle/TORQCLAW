@@ -209,6 +209,14 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     case 'LIST_AGENT_PROVIDERS':
     case 'CREATE_AGENT':
     case 'GET_CHANNEL_TIMELINE':
+    // PRD-007 S4-Members: LIST_CHANNEL_MEMBERS inherits the exact same
+    // seat-lattice ruling as LIST_CHANNELS/GET_CHANNEL_TIMELINE above -- a
+    // channel seat is a transport identity (channel-http), not a collab
+    // surface credential holder, and gets no read entitlement to the
+    // collab wire surface regardless of what a bare `default:` below would
+    // otherwise resolve to. Explicit named deny so the decision is legible
+    // and pinned by a test (house pattern, matching every other arm here).
+    case 'LIST_CHANNEL_MEMBERS':
     // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S3: POST_CHANNEL_MESSAGE is the only
     // new mutation this PRD's surface adds (§5), and it inherits the exact
     // same seat-lattice ruling as the S1 reads above -- a channel seat is a

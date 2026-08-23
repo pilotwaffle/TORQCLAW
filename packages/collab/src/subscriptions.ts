@@ -84,7 +84,29 @@ export interface SubscriptionCloseFrame {
   reason: SubscriptionCloseReason;
 }
 
-export type DeliveryFrame = ChannelEventFrame | SubscriptionCloseFrame;
+/**
+ * PRD-007 S4 presence push (OQ-2, GRANTED 2026-08-23; G1R B-2 binding spec).
+ * Carries EXACTLY {channelId, principalId, working, since} and nothing
+ * else -- no taskId, prompt, tier, tool, cost, spend, provider, or model
+ * (§4 S4's disclosure list). `principalId` here is always the AGENT
+ * principal whose collab_agent_turns row transitioned, never the
+ * recipient -- the recipient is implied by which subscription's sink this
+ * frame is handed to (fanoutPresenceToChannel in fanout.ts), exactly like
+ * ChannelEventFrame's per-subscription delivery. Never persisted, never
+ * assigned a channel_seq (there is no backing collab_events row -- this is
+ * a pure derived-state push, not a channel event).
+ */
+export interface CollabPresenceFrame {
+  type: 'collab_presence';
+  protocolVersion: 2;
+  subscriptionId: string;
+  channelId: string;
+  principalId: string;
+  working: boolean;
+  since: string | null;
+}
+
+export type DeliveryFrame = ChannelEventFrame | SubscriptionCloseFrame | CollabPresenceFrame;
 
 /**
  * A queued frame with the (M3) per-frame byte-length + enqueue-time
@@ -358,6 +380,28 @@ export class Subscription {
     // state === 'closed'.
     const byteLength = estimateFrameBytes(frame);
     this.sink(frame, { byteLength, enqueuedAtMs: this.nowMs() });
+  }
+
+  /**
+   * PRD-007 S4 presence push (G1R B-2). Delivers a CollabPresenceFrame
+   * directly via the sink -- bypassing the FIFO queue/dedup path entirely
+   * (unlike deliverChannelEvent). Presence has no channel_seq/cursor, so
+   * there is nothing to dedup or buffer against: this frame is delivered
+   * (or dropped, if closed) exactly at the moment fanoutPresenceOne's
+   * synchronous critical section decides to deliver it, mirroring
+   * deliverCloseFrame's direct-sink style rather than deliverChannelEvent's
+   * buffering/backlog machinery. A closed subscription drops the frame
+   * silently (closed check happens in the caller, fanoutPresenceOne, before
+   * this is ever reached -- this method also re-checks defensively).
+   */
+  deliverPresence(frame: CollabPresenceFrame): boolean {
+    if (this._state === 'closed') {
+      return false;
+    }
+    const byteLength = estimateFrameBytes(frame);
+    const enqueuedAtMs = this.nowMs();
+    this.sink(frame, { byteLength, enqueuedAtMs });
+    return true;
   }
 
   private pushFrame(frame: DeliveryFrame): void {

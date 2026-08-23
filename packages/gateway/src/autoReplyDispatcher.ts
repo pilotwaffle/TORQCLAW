@@ -100,7 +100,7 @@ import { router } from '@torqclaw/router';
 import {
   resolveEligibleAgents,
   attachDispatchRequestId,
-  resolveAgentTurn,
+  resolveAgentTurn as resolveAgentTurnRaw,
   findStrandedAgentTurns,
   getAgentTurnOutput,
   reclaimStrandedAgentTurn,
@@ -164,6 +164,42 @@ export function setAutoReplyDispatchForTest(fn: typeof dispatch | null): void {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/**
+ * PRD-007 T-4 / G1R N-3 gap closure: a resolveAgentTurn call (no_post /
+ * terminated / completed-via-local-fallback, across every call site in this
+ * file including the recovery sweep) commits collab_agent_turns' state
+ * transition WITHOUT ever going through claimAgentTurn's or
+ * commitAgentTurnOutput's own post-commit presence-push seam, so a
+ * co-member's "working now" view went stale until the next
+ * LIST_CHANNEL_MEMBERS read. This local wrapper is the ONE choke point for
+ * every resolveAgentTurn call in this file: it performs the exact same
+ * WHERE-guarded UPDATE via the real resolveAgentTurnRaw (unchanged
+ * semantics, unchanged return value), then fires a presence-push TRIGGER
+ * ONLY -- never reading or branching on the presence fields, and never
+ * reaching the roster-read command, here. store.pushPresenceForResolvedTurn
+ * re-reads committed collab_agent_turns truth itself; this wrapper hands it
+ * nothing but the two identifiers. Fire-and-forget with a caught error log:
+ * a missed push must never affect the turn outcome this function already
+ * computed, and must never feed the anti-storm logic (inFlight/dirty) above.
+ */
+function resolveAgentTurn(
+  db: Parameters<typeof resolveAgentTurnRaw>[0],
+  params: Parameters<typeof resolveAgentTurnRaw>[1],
+): number {
+  const changes = resolveAgentTurnRaw(db, params);
+  const store = getStore();
+  if (store) {
+    void store
+      .pushPresenceForResolvedTurn(params.channelId, params.agentPrincipalId)
+      .catch((err: any) => {
+        console.error(
+          `[gateway] presence push after resolved agent turn failed (${err?.message ?? err})`,
+        );
+      });
+  }
+  return changes;
 }
 
 /**
@@ -538,6 +574,17 @@ async function runAgentTurn(
       || runtimeProfile!.externalContextPersonaRevision !== claimed.personaEnvelope.personaRevision
       || runtimeProfile!.externalContextPersonaContentSha256 !== claimed.personaEnvelope.contentSha256) {
       resolveAgentTurn(db, { channelId, agentPrincipalId, channelSeq, state: 'terminated', nowIso: nowIso(), leaseToken: recoveryLeaseToken });
+      // G1D N-2 (PRD-007 S4-Members packet): diagnostic only, no behavior
+      // change -- the turn above is already terminated fail-closed. Names
+      // the agent principal and both fingerprints (bound vs live) so a
+      // stale/rotated binding is legible in logs instead of a silent
+      // no-op, matching the export-policy console.error just above.
+      console.error(
+        `[gateway] subscription agent turn refused by runtime binding mismatch - ` +
+        `agentPrincipalId=${agentPrincipalId} ` +
+        `boundRuntimeFingerprint=${runtimeProfile!.externalContextRuntimeFingerprint} ` +
+        `liveRuntimeFingerprint=${serverBinding?.runtimeFingerprint ?? 'null'}`,
+      );
       return;
     }
     const admitted = await admitCanonicalBlankSubscriptionTurn(

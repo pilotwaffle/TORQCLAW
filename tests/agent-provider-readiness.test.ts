@@ -14,7 +14,15 @@ const processOk: ProcessSummary = {
   exitCode: 0, timedOut: false, outputLimitExceeded: false, spawnError: null,
 };
 
-function readinessDriver(zaiExact: boolean): SubscriptionProcessDriver {
+/**
+ * `zaiAliasAdvertised` mirrors the real adapter shape (packet B-3/B-4): claude-agent-acp never
+ * advertises the vendor model id `glm-5.3` literally, only its own alias set
+ * (`[default, opus, claude-fable-5[1m], sonnet, haiku]`). `true` means the alias set is present
+ * (so probing can pin `opus`, which the zai binding's `advertisedAlias` requires); `false` means
+ * the adapter advertised something unrelated, so no acceptable alias exists and the probe must
+ * fail closed exactly as it would for a genuinely wrong adapter.
+ */
+function readinessDriver(zaiAliasAdvertised: boolean): SubscriptionProcessDriver {
   return {
     async probe() { return processOk; },
     async invoke() { return processOk; },
@@ -26,22 +34,46 @@ function readinessDriver(zaiExact: boolean): SubscriptionProcessDriver {
         const reader = readers.shift();
         if (reader) reader(line); else lines.push(line);
       };
+      const isZai = plan.command === 'claude-agent-acp';
       const expectedModel = plan.command === 'grok' ? 'grok-build-0.1'
         : plan.command === 'kimi' ? 'kimi-code/k3'
-          : plan.command === 'claude-agent-acp' ? (zaiExact ? 'glm-5.3' : 'wrong-model')
+          : isZai ? undefined
             : plan.args.at(-1) ?? 'unknown';
+      const zaiConfigOptions = () => zaiAliasAdvertised
+        ? [{
+          id: 'model', category: 'model', type: 'select', currentValue: 'default',
+          options: [
+            { value: 'default', name: 'Default' }, { value: 'opus', name: 'Opus' },
+            { value: 'claude-fable-5[1m]', name: 'Fable 5 (1M)' },
+            { value: 'sonnet', name: 'Sonnet' }, { value: 'haiku', name: 'Haiku' },
+          ],
+        }]
+        : [{
+          id: 'model', category: 'model', type: 'select', currentValue: 'wrong-model',
+          options: [{ value: 'wrong-model', name: 'Wrong model' }],
+        }];
       return {
         async writeJsonLine(line) {
-          const frame = JSON.parse(line) as { id?: string };
+          const frame = JSON.parse(line) as { id?: string; params?: { value?: string } };
           if (frame.id === 'initialize') {
             emit({ jsonrpc: '2.0', id: 'initialize', result: {} });
           } else if (frame.id === 'session') {
             emit({
               jsonrpc: '2.0', id: 'session', result: {
                 sessionId: 'readiness-session',
-                configOptions: [{
+                configOptions: isZai ? zaiConfigOptions() : [{
                   id: 'model', category: 'model', type: 'select', currentValue: expectedModel,
                   options: [{ value: expectedModel, name: expectedModel }],
+                }],
+              },
+            });
+          } else if (frame.id === 'model' && isZai) {
+            const pinned = frame.params?.value ?? 'default';
+            emit({
+              jsonrpc: '2.0', id: 'model', result: {
+                configOptions: [{
+                  id: 'model', category: 'model', type: 'select', currentValue: pinned,
+                  options: zaiConfigOptions()[0]!.options,
                 }],
               },
             });

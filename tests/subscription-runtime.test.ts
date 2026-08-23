@@ -11,6 +11,8 @@ import {
 } from '../packages/gateway/src/subscriptionAcpRuntime.js';
 import {
   buildSafeChildEnv,
+  zaiPrivateClaudeConfigDir,
+  zaiPrivateSpawnCwd,
   type ProcessSummary,
   type SubscriptionProcessDriver,
 } from '../packages/gateway/src/safeSubscriptionProcess.js';
@@ -100,10 +102,22 @@ describe('trusted subscription ACP catalog and protocol', () => {
 
   it.each([
     'not-json',
-    JSON.stringify({ jsonrpc: '2.0', id: 'x', method: 'fs/read_text_file', params: {} }),
     JSON.stringify({ jsonrpc: '2.0', id: 'x', result: { token: 'secret-value' } }),
-  ])('rejects malformed, reverse-request, and secret frames', (frame) => {
+  ])('rejects malformed and secret frames', (frame) => {
     expect(() => parseStrictAcpFrame(frame)).toThrow(/ACP_/);
+  });
+
+  it('parses (but does not itself act on) a well-formed agent->client reverse request -- answering it is response()\'s job, not the parser\'s (see tests/subscription-acp-benign-frames.test.ts for the deny/method-not-found behavior)', () => {
+    const frame = parseStrictAcpFrame(
+      JSON.stringify({ jsonrpc: '2.0', id: 'x', method: 'fs/read_text_file', params: {} }),
+    );
+    expect(frame).toEqual({ jsonrpc: '2.0', id: 'x', method: 'fs/read_text_file', params: {} });
+  });
+
+  it('still rejects a reverse-request-shaped frame with non-object params as malformed', () => {
+    expect(() => parseStrictAcpFrame(
+      JSON.stringify({ jsonrpc: '2.0', id: 'x', method: 'fs/read_text_file', params: 'not-an-object' }),
+    )).toThrow('ACP_MALFORMED_FRAME');
   });
 
   it('probes sequentially with no prompt, context, MCP server, or client tool', async () => {
@@ -132,6 +146,10 @@ describe('trusted subscription ACP catalog and protocol', () => {
       });
       if (frame.id === 'model') emit({
         jsonrpc: '2.0', id: 'model',
+        result: { configOptions: modelConfig(runtime.exactModelId) },
+      });
+      if (frame.id === 'preprompt-check') emit({
+        jsonrpc: '2.0', id: 'preprompt-check',
         result: { configOptions: modelConfig(runtime.exactModelId) },
       });
       if (frame.id === 'prompt') {
@@ -167,6 +185,9 @@ describe('trusted subscription ACP catalog and protocol', () => {
       if (frame.id === 'session') emit({ jsonrpc: '2.0', id: 'session', result: {
         sessionId: 's', configOptions: modelConfig(runtime.exactModelId),
       } });
+      if (frame.id === 'preprompt-check') emit({ jsonrpc: '2.0', id: 'preprompt-check', result: {
+        configOptions: modelConfig(runtime.exactModelId),
+      } });
       if (frame.id === 'prompt') emit({ jsonrpc: '2.0', method: 'session/update', params: {
         sessionId: 'other', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'x' } },
       } });
@@ -182,11 +203,12 @@ describe('trusted subscription ACP catalog and protocol', () => {
       .toEqual({ PATH: 'bin', USERPROFILE: 'profile' });
   });
 
-  it('maps only the gateway GLM key into the fixed Z.ai child route and model aliases', () => {
-    expect(buildSafeChildEnv({
+  it('maps only the gateway GLM key into the fixed Z.ai child route and model aliases, plus an isolated CLAUDE_CONFIG_DIR', () => {
+    const env = buildSafeChildEnv({
       PATH: 'bin', GLM_API_KEY: 'glm-secret', OPENAI_API_KEY: 'other',
       ANTHROPIC_AUTH_TOKEN: 'spoofed', ANTHROPIC_BASE_URL: 'https://evil.invalid',
-    }, 'zai-anthropic-glm-5.3-v1')).toEqual({
+    }, 'zai-anthropic-glm-5.3-v1');
+    expect(env).toMatchObject({
       PATH: 'bin',
       ANTHROPIC_AUTH_TOKEN: 'glm-secret',
       ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic',
@@ -195,6 +217,33 @@ describe('trusted subscription ACP catalog and protocol', () => {
       ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-5.3',
       ANTHROPIC_DEFAULT_OPUS_MODEL: 'glm-5.3',
     });
+    expect(Object.keys(env).sort()).toEqual([
+      'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+      'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_MODEL',
+      'CLAUDE_CONFIG_DIR', 'PATH',
+    ]);
+    // Gateway-owned, not the operator's real ~/.claude -- see B-3 / zaiPrivateClaudeConfigDir.
+    expect(env.CLAUDE_CONFIG_DIR).toMatch(/[\\/]subscription-runtimes[\\/]zai-anthropic-glm-5\.3-v1[\\/]claude-config$/);
+  });
+
+  it('resolves CLAUDE_CONFIG_DIR and the zai spawn cwd against the SAME data-dir root for a custom source (correction 3)', () => {
+    // Before this fix, safeSubscriptionProcess.ts's resolveSubscriptionSpawnCwd() called
+    // zaiPrivateSpawnCwd() with no args (always defaulting to process.env) while
+    // buildSafeChildEnv resolved CLAUDE_CONFIG_DIR against whatever `source` the caller passed --
+    // so a caller repointing TORQCLAW_DATA_DIR via a custom source (as tests do, matching
+    // storage.ts's pattern) would isolate CLAUDE_CONFIG_DIR but silently leave the spawn cwd
+    // resolving against the real process.env root instead.
+    const customSource = { PATH: 'bin', GLM_API_KEY: 'glm-secret', TORQCLAW_DATA_DIR: 'C:\\custom-data-root' };
+    const env = buildSafeChildEnv(customSource, 'zai-anthropic-glm-5.3-v1');
+    const configDir = zaiPrivateClaudeConfigDir(customSource);
+    const spawnCwd = zaiPrivateSpawnCwd(customSource);
+    expect(env.CLAUDE_CONFIG_DIR).toBe(configDir);
+    expect(configDir.startsWith('C:\\custom-data-root')).toBe(true);
+    expect(spawnCwd.startsWith('C:\\custom-data-root')).toBe(true);
+    // Both live under the identical data-dir root, diverging only in their leaf segment.
+    const root = 'C:\\custom-data-root\\subscription-runtimes\\zai-anthropic-glm-5.3-v1';
+    expect(configDir).toBe(`${root}\\claude-config`);
+    expect(spawnCwd).toBe(`${root}\\cwd`);
   });
 
   it('fails Z.ai readiness before spawn when the gateway key is missing', async () => {

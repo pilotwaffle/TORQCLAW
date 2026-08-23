@@ -32,6 +32,12 @@ function driverFor(modelId: string): SubscriptionProcessDriver {
               options: [{ value: modelId, name: modelId }],
             }],
           } }));
+          if (frame.id === 'preprompt-check') lines.push(JSON.stringify({ jsonrpc: '2.0', id: 'preprompt-check', result: {
+            configOptions: [{
+              id: 'model', category: 'model', type: 'select', currentValue: modelId,
+              options: [{ value: modelId, name: modelId }],
+            }],
+          } }));
           if (frame.id === 'prompt') {
             lines.push(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: {
               sessionId: 'session-1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'answer' } },
