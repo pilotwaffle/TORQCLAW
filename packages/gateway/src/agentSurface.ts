@@ -133,6 +133,17 @@ export async function listAgentProviders(): Promise<AgentProvider[]> {
       })),
       note: localReadiness.note,
     };
+  // Honest labels only -- never "verified"/"attested" for a runtime whose served model is
+  // guaranteed by environment pinning rather than by adapter/provider attestation (packet B-3).
+  // As of PRD-007 Item B correction 2, the zai binding is 'endpoint_bound', not 'env_bound': a
+  // discriminating T-6 negative control showed the ANTHROPIC_* env-var pins -- not the
+  // CLAUDE_CONFIG_DIR/cwd isolation -- are what forces the model, so isolation is retained as
+  // defense in depth but is not the proven control and must not be described as such here.
+  const attestationNote = (attestation: string | undefined): string | null => {
+    if (attestation === 'env_bound') return 'Model pinned by an isolated, client-unreachable environment (env-bound); not adapter-attested.';
+    if (attestation === 'endpoint_bound') return 'Model routing pinned to a fixed endpoint (endpoint-bound); adapter model attestation is not available.';
+    return null;
+  };
   const subscriptions: AgentProvider[] = descriptors.map((descriptor) => ({
     id: descriptor.providerId,
     label: descriptor.label,
@@ -144,6 +155,9 @@ export async function listAgentProviders(): Promise<AgentProvider[]> {
       exactSubscriptionProbePassed(descriptor.providerId, model.id)),
     models: descriptor.models.map((model) => {
       const ready = exactSubscriptionProbePassed(descriptor.providerId, model.id);
+      const probe = probeByModel.get(`${descriptor.providerId}:${model.id}`);
+      const attestation = attestationNote(probe?.modelAttestation ?? undefined);
+      const readyNote = attestation ?? 'Exact ACP model and runtime fingerprint verified.';
       return {
         id: model.id,
         label: model.probeRequired ? `${model.label} (probe required)` : model.label,
@@ -152,7 +166,7 @@ export async function listAgentProviders(): Promise<AgentProvider[]> {
           ? 'Requires a successful exact ACP model and runtime fingerprint probe.'
           : descriptor.risk === 'vendor_builtin_tools_os_tcb'
             ? 'Requires operator acceptance: Grok retains vendor built-in tools and trusts the vendor CLI/OS.'
-            : ready ? 'Exact ACP model and runtime fingerprint verified.' : 'Exact ACP metadata probe has not passed.',
+            : ready ? readyNote : 'Exact ACP metadata probe has not passed.',
       };
     }),
     note: descriptor.risk === 'vendor_builtin_tools_os_tcb'

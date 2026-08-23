@@ -99,6 +99,13 @@ function fakeAcp(onSession?: () => void | Promise<void>) {
                 options: [{ value: runtime.exactModelId, name: runtime.exactModelId }],
               }],
             } }));
+          } else if (frame.id === 'preprompt-check') {
+            lines.push(JSON.stringify({ jsonrpc: '2.0', id: 'preprompt-check', result: {
+              configOptions: [{
+                id: 'model', category: 'model', type: 'select', currentValue: runtime.exactModelId,
+                options: [{ value: runtime.exactModelId, name: runtime.exactModelId }],
+              }],
+            } }));
           } else if (frame.id === 'prompt') {
             counts.prompt += 1;
             const prompt = (JSON.parse(line) as any).params?.prompt?.[0]?.text as string;
