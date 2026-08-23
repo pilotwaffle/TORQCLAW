@@ -16,7 +16,7 @@ from starlette.responses import JSONResponse
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import skill_queue, skill_rollback, task_store
+from . import agent_reach_probe, keyless_web_search, skill_queue, skill_rollback, task_store
 from .contracts import validate_gateway_request
 from . import failover_runtime
 from . import governed_skills, skill_sources
@@ -48,14 +48,26 @@ def _resilience_task(payload: dict) -> bool:
 
 def _finish_internal_observation(task_id: str, observation: dict, *, result: str = "",
                                  telemetry: dict | None = None) -> None:
-    """Persist only normalized internal status; the ledger never receives rich data."""
+    """Persist only normalized internal status; the ledger never receives rich data.
+
+    `kind` is DERIVED from the structured `code` field, never hardcoded: only
+    `code == "completed"` is a result, every other code (including the
+    "terminal"/"engine_failure" failure shape) is a failure observation. A
+    previous version of this function always wrote kind:"result" regardless
+    of `observation`, which happened to be harmless only because every call
+    site at the time passed code:"completed" — it would have silently
+    mislabeled the first failure call site added here (B-2)."""
+    kind = "result" if observation.get("code") == "completed" else "failure"
     task_store.finish_observation(
         task_id,
-        {"kind": "result", **observation},
+        {"kind": kind, **observation},
         result=result,
         telemetry={
             "resilience": True,
-            "normalizedFailure": observation if observation.get("failureClass") else None,
+            "normalizedFailure": ({key: observation.get(key)
+                                    for key in ("failureClass", "code", "retryable")
+                                    if key in observation}
+                                   if kind == "failure" else None),
             **(telemetry or {}),
         },
     )
@@ -96,7 +108,9 @@ async def run_hermes_loop(task_id: str, payload: dict) -> None:
     Explicit live configuration must never silently degrade into a fabricated
     success. Stub mode remains available only when no live model is configured
     (used by deterministic contract tests)."""
-    from .hermes_runner import hermes_available, normalize_provider_failure, run_hermes_sync
+    from .hermes_runner import (
+        HermesTaskFailedError, hermes_available, normalize_provider_failure, run_hermes_sync,
+    )
     resilience_task = _resilience_task(payload)
     provider_ref = payload.get("providerRef")
     resilience_live_configured = (
@@ -129,9 +143,30 @@ async def run_hermes_loop(task_id: str, payload: dict) -> None:
                     {"toolName": blocked_on, "args": tele.get("blockedArgs", {})},
                 )
                 if resilience_task:
+                    # B-3: the failure dict must be wrapped under
+                    # "normalizedFailure" -- failover_runtime.py's
+                    # _terminal_observation reads telemetry.get(
+                    # "normalizedFailure"), not the telemetry dict itself.
+                    # An unwrapped dict here silently fell through
+                    # failover_runtime._failure()'s default and surfaced as
+                    # failureClass "terminal"/"engine_failure" instead of
+                    # "side_effect_uncertainty" (which the gateway maps to
+                    # the "cancelled_uncertain" outcome, never a hard fail).
+                    #
+                    # code is "uncertain", not the more descriptive
+                    # "approval_blocked": attempt_ledger._SAFE_FAILURE_CODES
+                    # only allowlists {"dispatch_attempted", "uncertain"}
+                    # under "side_effect_uncertainty" (attempt_ledger.py is
+                    # out of scope here -- no new ledger codes may be added
+                    # per B-4). "approval_blocked" would raise LedgerError
+                    # inside AttemptLedger._failure() and fall back to the
+                    # unrelated terminal/engine_failure default, which is
+                    # the same symptom the unwrap fix above addresses.
                     task_store.fail(task_id, "normalized_failure", {
-                        "failureClass": "side_effect_uncertainty",
-                        "code": "approval_blocked", "retryable": False,
+                        "normalizedFailure": {
+                            "failureClass": "side_effect_uncertainty",
+                            "code": "uncertain", "retryable": False,
+                        },
                     })
                 else:
                     task_store.complete(task_id, "", {"blockedOn": blocked_on})
@@ -215,6 +250,15 @@ async def run_hermes_loop(task_id: str, payload: dict) -> None:
             {"engineUsed": "hermes-stub", "costUsd": cost, "costSource": _src,
              "dispatchAttempted": False},
         )
+    except HermesTaskFailedError as exc:
+        # The vendored agent returned {"failed": True, ...} (a structured
+        # signal, never an exception, at :852/:3093/:3203-3216 and siblings)
+        # instead of raising. Route it through finish_observation (N-7):
+        # never treat it as a completed task, and never surface exc.error
+        # (vendor-authored free text) as the stored result/error string —
+        # only the safely classified failure crosses into task_store.
+        failure = normalize_provider_failure(exc)
+        _finish_internal_observation(task_id, failure)
     except Exception as exc:  # noqa: BLE001
         if resilience_task:
             forced = os.environ.get("TORQCLAW_E2E_STUB_FAILURE", "")
@@ -243,6 +287,20 @@ async def submit_task(payload: dict) -> dict:
     task_id = task_store.create(payload)
     asyncio.get_event_loop().create_task(run_hermes_loop(task_id, payload))
     return {"task_id": task_id, "state": "running"}
+
+
+# CLAUDE.md §6: network egress requires explicit operator approval; default off. P6 fail-closed otherwise.
+if os.environ.get("TORQCLAW_WEB_SEARCH_ENABLED") == "1":
+    @mcp.tool()
+    async def web_search(query: str, limit: int = 5) -> dict:
+        """Keyless search via DDGS CLI, Python fallback, then SearXNG."""
+        return await keyless_web_search.search(query, limit)
+
+
+@mcp.tool()
+async def agent_reach_doctor() -> dict:
+    """Return sanitized Agent Reach channel availability for tier routing."""
+    return await agent_reach_probe.doctor()
 
 
 @mcp.tool()
