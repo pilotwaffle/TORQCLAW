@@ -2,7 +2,41 @@
 
 Single-file program state, updated only after meaningful progress with tests + independent verifier passing. Detailed history lives in `docs/prd-reviews/*` and the per-project memory index.
 
-_Last updated: 2026-08-23 (PRD-007 Phase 1 + ACP continuation: 2568/1 TS tests, 518/1 Py tests, 14/14 typecheck, 8/8 build, reachability PASS, vendor clean; GLM-5.3 alias binding `endpoint_bound` shipped (PR #54), first live GLM53_OK turn; four pre-existing ACP client defects fixed fail-closed; operator granted OQ-2 in own words; S1–S7 all shipped; zai readiness connected; open G2A non-blocking: frame.id validation, ignoredKinds, T-6 pin, kind-from-role guard, S4 human-task presence, web-search egress)._
+_Last updated: 2026-08-24 (Channels agent-UX slice: SHIPPED — merged 24d188a via PR #59; Cleanup + docs-truth PR #58; PRD-007 S1–S7 + GLM endpoint_bound PRs #53/#54)_
+
+## SHIPPED 2026-08-24: Channels agent-UX slice (Items A, B+C, D) — merged to origin/master 24d188a via PR #59 (commits 7f315e3 code + 463e084 docs)
+
+**22 code paths + 6 governance docs; +3,653/−50 vs origin/master, zero file deletions.**
+- **Item A (Builder P):** greeting-loop fixed — anchor window includes the agent's own collapsed runs (`collapseSelfRuns` + `selfPrincipalId`); commit-time near-duplicate guard resolves `no_post` with persisted `resolution_note='duplicate_suppressed'` (accounted, no retry). Additive migration `20260824_008` (collab count 13→14). Dispatcher unfrozen for exactly 2 hunks, counted at verify and G2A.
+- **Items B+C (Builder Q):** `SET_LOCAL_AGENT_AUTOSTART` (operator + live delegate, ollama-local only, in-transaction guards, one terminal event); operator-only `configurationReadiness` on LIST_AGENTS from the exported `runtimeProfileAllowsAutomaticTurn`; AgentsPanel enable / Test connection / honest Live-Parked badge. Member payload key-set unchanged (6 keys).
+- **Item D (Builder D):** `ADD_CHANNEL_MEMBER`/`REMOVE_CHANNEL_MEMBER` thin call-only wraps; named authz arms in BOTH blocks (ND-4 fail-open closed — `authorizeOperator` tail is ALLOW); ChannelsPanel add-agent picker + per-agent remove; human principals unrepresentable at the store.
+- Gates: independent verify PASS all items + G2A **APPROVE zero blockers**, both hash-bound and committed-blob-verified (`docs/prd-reviews/{VERIFY,G2A}-CHANNELS-SLICE-2026-08-24.md`). Suite 2574/1 skipped/1 load-flake (green isolated); typecheck 14/14; contracts byte-deterministic; reachability PASS; deletion audit clean.
+- Follow-ups filed (non-blocking): B-FOLLOWUP-1 seat-lattice behavioral pin (bounded, Builder); B-FOLLOWUP-2 subscription-path output guard (needs its own G1R unfreeze — route via G1D). Residuals R-1..R-7 recorded in the G2A verdict; R-3 (`authorizeOperator` fail-open default) remains the standing hardening item; R-5 (read-only fork brief violated by a crashed agent — harness-lane control gap).
+- Process: ~15 transport drops across builders/verifier/G2A, all recovered by resume-with-disk-verification; verifier corrected the diff baseline (branch tip ≠ base; audit = `git diff HEAD`); P's evidence packet filed post-hoc (disclosed) to discharge C-2.
+
+Still uncommitted (concurrent-session WIP, report-only): dispatch.ts failover hunk (verifier O-2: echoes `req.payload.prompt` into ERROR payload — needs privacy review in its owning lane before commit), friendly.ts + test, hermesAttempt.ts cap + failover test, .claude/settings.json, .claude/agents/README.md. Operator-owned untracked files preserved untouched.
+
+Next: operator wake-up review of PR #59 in the console; Rooms UI lane (GPT, `E:\TorqClaw-worktrees\rooms-ui`) should now rebase onto 24d188a; B-FOLLOWUP-1/2; AUTH-005 landing; OQ-4 record; operator-owned: OQ-8 already ruled operator-only.
+
+## SHIPPED 2026-08-24: Cleanup + docs-truth slice — merged to origin/master 8209d30 via PR #58 (commit 1ff87fa)
+
+**26 files, +1320/−98.** Closed:
+- ignoredKinds → RESULT telemetry; frame.id fail-closed (string|number) on ACP reverse requests.
+- Portable adapter version pin: `TORQCLAW_ACP_ADAPTER_PIN=1` opt-in hard-fail / resolvable assert 0.64.2 / named skip — pin DORMANT in CI until opt-in set.
+- listChannelMembers kind column-sourced (operator→human); Python web-search gate truthy parity ({1,true,yes,on} trimmed, default OFF).
+- `pnpm lint` self-describing exit-0; cron NB-2 title + NB-4 promptHint + NB-1 poison-router test.
+- PRD-007 header v1.0 S1–S7 SHIPPED + §3/§9 ledger reconciled (OQ-4 ratification STILL OWED; OQ-5 RULED model-side; F1/F2 RESOLVED-on-master on static evidence; coalescing-race test design filed, Gate-1-scoped).
+- FOLLOWUPS: doctor CLOSED; e2e token ruling ratifies CONDITIONAL launcher contract; CI-red cause UNKNOWN; ESLint adoption filed.
+
+Withdrawn (uncommitted concurrent-session WIP, report-only): dispatch.ts failover-payload hunk; friendly.ts safe-export section + tests/friendly.test.ts; hermesAttempt.ts 2K→64K cap + tests/failover/mcp-contract.test.ts; .claude/settings.json; .claude/agents/README.md.
+
+Gates: full vitest 2587–2593/1 skipped (sole red = documented cold-start flake, 6/6 warm); pytest 532/1/11 main repo, clean-worktree 531/1 + env-artifact test_no_vendor_modification (worktree submodule checkout collision, named); typecheck 14/14 uncached; build --force 8/8; contracts OK; reachability PASS; clean-worktree proof on 1ff87fa.
+
+Seats: G1D fable-5; Builders sonnet-5 (M/N/D/O); G1R designated Opus 5 REJECT→resolved (5 of 13 items already fixed on master — stale-ledger lesson); verifier ×2 + G2A-substitute ×2 (Opus 5; REJECT on CI-red pin → delta APPROVE).
+
+Process events: Builder M disclosed one prohibited `git checkout --` (restored byte-clean); five undeclared concurrent-session files caught by the verifier and withdrawn. Live gateway kill attributed to dev-up.mjs tree-kill, NOT the test suite.
+
+Next: channels slice Gate 1 RESOLVED (Builder P Item A in flight; Builder Q Items B/C queued). Operator-owned open: OQ-4 ratification, OQ-8 (willRespond §2a extension, new), AUTH-005 landing, web-search CI pin opt-in.
 
 ## SHIPPED: PRD-007 Phase 1 + ACP continuation — Agent Model Conversational Dispatch with GLM-5.3
 
