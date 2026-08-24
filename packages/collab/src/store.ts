@@ -1345,6 +1345,75 @@ export class CollaborationStore {
     );
   }
 
+  /**
+   * G1D channels-agent-UX packet (2026-08-24), Item B(ii). The narrow local-
+   * only autostart writer: flips ONLY the `autostart` column for an agent
+   * whose runtime profile provider is `ollama-local`. A subscription
+   * profile is rejected outright -- its autostart moves exclusively through
+   * upsertAgentPersona's reconfirmExternalContext path, so this method must
+   * never become a second writer for that column on non-local profiles
+   * (obligation 1's writer-uniqueness invariant gains this as its
+   * companion, never a competitor). No provider/adapter/model fields are
+   * accepted, so this command can never be used to change what an agent
+   * runs -- only whether an already-local agent may answer automatically.
+   */
+  async setLocalAgentAutostart(
+    caller: CallerContext,
+    body: { agentPrincipalId: string; autostart: boolean },
+    idempotencyKey: string,
+    hasLiveDelegateAuthority: () => boolean,
+  ): Promise<AgentRuntimeProfile> {
+    const agentPrincipalId = this.normalizeRuntimeIdentifier(body.agentPrincipalId, 'agentPrincipalId');
+    if (typeof body.autostart !== 'boolean') {
+      throw new CollabError('INVALID_REQUEST', 'autostart must be a boolean');
+    }
+    const autostart = body.autostart;
+    const normalizedBody = { agentPrincipalId, autostart };
+
+    return this.withReadThenSequencer(() =>
+      this.mutex.withLock(() =>
+        this.runKeyedCommand(
+          caller.principalId,
+          'SET_LOCAL_AGENT_AUTOSTART',
+          idempotencyKey,
+          normalizedBody,
+          (tx) => {
+            this.assertOperatorCaller(tx, caller);
+            if (!hasLiveDelegateAuthority()) {
+              throw new CollabError('COLLAB_NOT_PERMITTED', 'Live delegate authority is required to edit agents');
+            }
+            this.assertOwnedAgent(tx, caller, agentPrincipalId);
+          },
+          (tx) => {
+            const existing = tx
+              .prepare('SELECT * FROM collab_agent_runtime_profiles WHERE agent_principal_id = ?')
+              .get(agentPrincipalId) as AgentRuntimeProfileRow | undefined;
+            if (!existing) {
+              throw new CollabError('INVALID_REQUEST', 'Agent has no runtime profile to configure');
+            }
+            if (existing.provider_account_id !== 'ollama-local') {
+              throw new CollabError(
+                'INVALID_REQUEST',
+                'Only a local (ollama-local) agent profile may use this command; subscription autostart requires the persona reconfirmation path',
+              );
+            }
+            const now = this.env.clock.next();
+            tx.prepare(`
+              UPDATE collab_agent_runtime_profiles
+                 SET autostart = ?, updated_at = ?
+               WHERE agent_principal_id = ? AND provider_account_id = 'ollama-local'
+            `).run(autostart ? 1 : 0, now, agentPrincipalId);
+            const updated = tx
+              .prepare('SELECT * FROM collab_agent_runtime_profiles WHERE agent_principal_id = ?')
+              .get(agentPrincipalId) as AgentRuntimeProfileRow;
+            const result = this.runtimeProfileFromRow(updated);
+            return { result, redacted: result };
+          },
+        ),
+      ),
+    );
+  }
+
   async createPrincipalCredential(
     caller: CallerContext,
     body: { principalId: string },

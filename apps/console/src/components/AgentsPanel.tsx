@@ -13,6 +13,15 @@ interface AgentRecord {
   iconId?: AgentIconId;
   systemDirectives?: string;
   personaRevision?: number;
+  autostart?: boolean;
+  externalContextConfirmed?: boolean;
+  /** G1D channels-agent-UX packet (2026-08-24) Item C: server-computed via
+   *  the EXACT runtimeProfileAllowsAutomaticTurn predicate
+   *  (autoReplyDispatcher.ts), never re-derived client-side (B-5). Channel-
+   *  scoped gates (STOP, export policy) are not evaluable in this
+   *  fleet-wide roster, so this reflects "configuration readiness," never
+   *  a per-channel "will respond" guarantee. */
+  configurationReadiness?: 'live' | 'parked';
 }
 
 type AgentIconId = 'robot' | 'brain' | 'shield' | 'search' | 'code' | 'spark' | 'bolt' | 'target';
@@ -82,7 +91,8 @@ export default function AgentsPanel({ events, sendCommand, onClose }: AgentsPane
   const [editSystemDirectives, setEditSystemDirectives] = useState('');
   const [editReconfirmExternalContext, setEditReconfirmExternalContext] = useState(false);
   const handledMutationId = useRef<string | null>(null);
-  const [pendingMutation, setPendingMutation] = useState<{ operation: 'create' | 'update'; idempotencyKey: string } | null>(null);
+  const [pendingMutation, setPendingMutation] = useState<{ operation: 'create' | 'update' | 'autostart'; idempotencyKey: string } | null>(null);
+  const [testingConnection, setTestingConnection] = useState(false);
   const createDialogRef = useRef<HTMLDivElement>(null);
   const editDialogRef = useRef<HTMLDivElement>(null);
   const createInitialRef = useRef<HTMLInputElement>(null);
@@ -101,6 +111,16 @@ export default function AgentsPanel({ events, sendCommand, onClose }: AgentsPane
   const selectedProvider = providers?.find((provider) => provider.id === providerId) ?? providers?.[0];
   const selectedModel = selectedProvider?.models.find((model) => model.id === modelId);
   const usesExternalContext = selectedProvider?.authKind === 'external_cli_session';
+  // The editor must reflect the LIVE roster entry, not the snapshot taken at
+  // open time -- a SET_LOCAL_AGENT_AUTOSTART round trip refreshes `agents`
+  // via LIST_AGENTS, and the toggle must show that result without the
+  // editor being closed and reopened.
+  const liveEditingAgent = editingAgent
+    ? agents?.find((agent) => agent.principalId === editingAgent.principalId) ?? editingAgent
+    : null;
+  const selectedProviderForEditingAgent = liveEditingAgent
+    ? providers?.find((provider) => provider.id === liveEditingAgent.providerId)
+    : undefined;
 
   const closeDialogs = useCallback(() => {
     setDialogOpen(false);
@@ -145,9 +165,15 @@ export default function AgentsPanel({ events, sendCommand, onClose }: AgentsPane
       setSubmitError('The gateway returned an invalid agent mutation result.');
       return;
     }
+    sendCommand({ action: 'LIST_AGENTS', limit: 50 });
+    if (pendingMutation.operation === 'autostart') {
+      // Local-agent autostart is a toggle inside the still-open editor, not
+      // a create/update that should close the drawer -- mirrors the pattern
+      // above, but deliberately does not call closeDialogs().
+      return;
+    }
     setDisplayName('');
     setChannelIds([]);
-    sendCommand({ action: 'LIST_AGENTS', limit: 50 });
     closeDialogs();
   }, [closeDialogs, events, pendingMutation, sendCommand]);
 
@@ -224,6 +250,29 @@ export default function AgentsPanel({ events, sendCommand, onClose }: AgentsPane
     setSubmitError(sent ? null : 'The gateway connection is not open.');
   };
 
+  const toggleLocalAutostart = (nextAutostart: boolean) => {
+    if (!liveEditingAgent || liveEditingAgent.providerId !== 'ollama-local') return;
+    const idempotencyKey = crypto.randomUUID();
+    const sent = sendCommand({
+      action: 'SET_LOCAL_AGENT_AUTOSTART',
+      agentPrincipalId: liveEditingAgent.principalId,
+      autostart: nextAutostart,
+      idempotencyKey,
+    });
+    setPendingMutation(sent ? { operation: 'autostart', idempotencyKey } : null);
+    setSubmitError(sent ? null : 'The gateway connection is not open.');
+  };
+
+  const testConnection = () => {
+    setTestingConnection(true);
+    sendCommand({ action: 'LIST_AGENT_PROVIDERS' });
+  };
+
+  useEffect(() => {
+    if (!testingConnection || !providers) return;
+    setTestingConnection(false);
+  }, [providers, testingConnection]);
+
   const moveIconSelection = (current: AgentIconId, delta: number) => {
     const index = AGENT_ICONS.findIndex((icon) => icon.id === current);
     const next = AGENT_ICONS[(index + delta + AGENT_ICONS.length) % AGENT_ICONS.length]!;
@@ -254,7 +303,16 @@ export default function AgentsPanel({ events, sendCommand, onClose }: AgentsPane
             <button type="button" key={agent.principalId} onClick={() => openAgentEditor(agent)} aria-label={`Edit ${agent.displayName}`} className="relative min-h-64 rounded-2xl border border-white/10 bg-panel-2 p-5 text-left shadow-xl shadow-black/10 transition hover:-translate-y-0.5 hover:border-torque/50">
               <div className="flex items-start justify-between">
                 <div className="grid h-20 w-20 place-items-center rounded-full border border-white/10 bg-gradient-to-br from-torque/70 to-amber-700 text-3xl text-black" title={initials(agent.displayName)}>{iconFor(agent.iconId)}</div>
-                <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ${agent.status === 'active' ? 'bg-emerald-400/15 text-emerald-300' : 'bg-red-400/15 text-red-300'}`}>{agent.status}</span>
+                <div className="flex flex-col items-end gap-1.5">
+                  <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ${agent.status === 'active' ? 'bg-emerald-400/15 text-emerald-300' : 'bg-red-400/15 text-red-300'}`}>{agent.status}</span>
+                  {/* Operator-only configuration readiness (G1D packet Item C, B-4(b)/B-5): never a co-member-visible field, never claims a per-channel guarantee. */}
+                  <span
+                    title="Configuration readiness only -- per-channel conditions (STOP, export policy) are not shown here."
+                    className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ${agent.configurationReadiness === 'live' ? 'bg-torque/15 text-torque' : 'bg-white/5 text-muted'}`}
+                  >
+                    {agent.configurationReadiness === 'live' ? 'Live' : 'Parked'}
+                  </span>
+                </div>
               </div>
               <h3 className="mt-9 truncate text-lg font-semibold text-ink">{agent.displayName}</h3>
               <p className="mt-1 truncate text-xs text-muted">{agent.modelId}</p>
@@ -346,6 +404,38 @@ export default function AgentsPanel({ events, sendCommand, onClose }: AgentsPane
                 <span>Applied as system-level guidance to automatic channel turns. Do not include secrets.</span>
                 <span>{editSystemDirectives.length}/4000</span>
               </div>
+            </section>
+            <section className="mt-7 rounded-2xl border border-white/10 bg-white/[0.025] p-4" aria-labelledby="agent-enablement-label">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h4 id="agent-enablement-label" className="text-sm font-semibold text-ink">Enable this agent to respond</h4>
+                  <p className="mt-1 text-xs leading-5 text-muted">
+                    {liveEditingAgent?.providerId === 'ollama-local'
+                      ? 'Local agents run on this machine. Flip this on to let it answer automatically in its assigned channels.'
+                      : 'Re-binds consent to the CURRENT provider, model, and persona snapshot below -- required every time the persona changes.'}
+                  </p>
+                </div>
+                <button type="button" onClick={testConnection} disabled={testingConnection} className="shrink-0 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-muted hover:text-ink disabled:opacity-40">
+                  {testingConnection ? 'Testing...' : 'Test connection'}
+                </button>
+              </div>
+              {selectedProviderForEditingAgent && (
+                <div className={`mt-3 rounded-xl border p-3 text-xs leading-5 ${selectedProviderForEditingAgent.executionReady ? 'border-emerald-400/20 bg-emerald-400/5 text-emerald-200' : 'border-amber-400/20 bg-amber-400/5 text-amber-100'}`}>
+                  {selectedProviderForEditingAgent.note}
+                </div>
+              )}
+              {liveEditingAgent?.providerId === 'ollama-local' && (
+                <label className="mt-4 flex items-start gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-3 text-sm text-muted">
+                  <input
+                    type="checkbox"
+                    checked={liveEditingAgent.autostart === true}
+                    disabled={Boolean(pendingMutation)}
+                    onChange={(event) => toggleLocalAutostart(event.target.checked)}
+                    className="mt-1"
+                  />
+                  <span><strong className="block text-ink">Enable automatic replies</strong>Applies immediately -- no persona save required.</span>
+                </label>
+              )}
             </section>
             {editingAgent.providerId !== 'ollama-local' && (
               <label className="mt-5 flex items-start gap-3 rounded-xl border border-amber-400/25 bg-amber-400/5 p-3 text-sm text-amber-100">

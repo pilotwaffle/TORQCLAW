@@ -5,6 +5,7 @@ import {
 } from './subscriptionRuntimeCatalog.js';
 import { probeAcpSubscriptionRuntime } from './subscriptionAcpRuntime.js';
 import { agentAutoreplyEnabled } from './autoReplyFlags.js';
+import { runtimeProfileAllowsAutomaticTurn } from './autoReplyDispatcher.js';
 import {
   callerFor,
   COLLAB_IDENTITY_REQUIRED,
@@ -259,6 +260,13 @@ export async function handleListAgents(
         modelId: profile?.modelId ?? localModel,
         autostart: profile?.autostart ?? false,
         externalContextConfirmed: profile?.externalContextConfirmed ?? false,
+        // G1D channels-agent-UX packet (2026-08-24) Item C: the operator-only
+        // readiness roster. This is the EXACT predicate autoReplyDispatcher.ts
+        // applies before an automatic turn -- never a parallel formula (B-5).
+        // Channel-scoped gates (STOP, export policy) are not evaluable here
+        // (no channelId in scope), so this is "configuration readiness," not
+        // "will respond in every channel."
+        configurationReadiness: runtimeProfileAllowsAutomaticTurn(profile ?? null) ? 'live' : 'parked',
         iconId: persona?.iconId ?? 'robot',
         systemDirectives: persona?.systemDirectives ?? '',
         personaRevision: persona?.personaRevision ?? 0,
@@ -324,6 +332,37 @@ export async function handleUpdateAgentProfile(
     if (error?.code === 'PERSONA_REVISION_CONFLICT') {
       return { status: 'conflict', conflict: 'revision' };
     }
+    if (error?.code === 'INVALID_REQUEST') {
+      return { status: 'error', errorCode: 'invalid_request' };
+    }
+    if (error?.code === 'IDEMPOTENCY_CONFLICT') {
+      return { status: 'conflict', conflict: 'idempotency' };
+    }
+    if (error?.code === 'COLLAB_NOT_PERMITTED') {
+      return { status: 'error', errorCode: 'not_permitted' };
+    }
+    return { status: 'error', errorCode: 'unavailable' };
+  }
+}
+
+export async function handleSetLocalAgentAutostart(
+  principalId: string | null,
+  input: { agentPrincipalId: string; autostart: boolean; idempotencyKey: string },
+  hasLiveManageAgentsAuthority: () => boolean,
+): Promise<AgentMutationOutcome> {
+  const identityError = verifyOperator(principalId);
+  if (identityError || principalId === null) return mutationError(identityError ?? COLLAB_IDENTITY_REQUIRED);
+  const store = getStore();
+  if (!store) return { status: 'error', errorCode: 'unavailable' };
+  try {
+    const updated = await store.setLocalAgentAutostart(
+      callerFor(principalId),
+      { agentPrincipalId: input.agentPrincipalId, autostart: input.autostart },
+      input.idempotencyKey,
+      hasLiveManageAgentsAuthority,
+    );
+    return { status: 'success', agent: updated };
+  } catch (error: any) {
     if (error?.code === 'INVALID_REQUEST') {
       return { status: 'error', errorCode: 'invalid_request' };
     }
@@ -445,7 +484,7 @@ export type AgentMutationOutcome =
   | { status: 'error'; errorCode: AgentMutationErrorCode; membershipResults?: unknown[] };
 
 export type AgentMutationReporting = {
-  operation: 'create' | 'update';
+  operation: 'create' | 'update' | 'autostart';
   idempotencyKey: string | null;
 };
 
@@ -456,7 +495,9 @@ export function extractAgentMutationReporting(raw: unknown): AgentMutationReport
   const frame = raw as Record<string, unknown>;
   const operation = frame.action === 'CREATE_AGENT'
     ? 'create'
-    : frame.action === 'UPDATE_AGENT_PROFILE' ? 'update' : null;
+    : frame.action === 'UPDATE_AGENT_PROFILE'
+      ? 'update'
+      : frame.action === 'SET_LOCAL_AGENT_AUTOSTART' ? 'autostart' : null;
   if (operation === null) return null;
   return {
     operation,
@@ -493,7 +534,9 @@ export function normalizeAgentMutationTerminalResult(
   if (outcome.status === 'success') {
     return {
       ...base,
-      message: reporting.operation === 'create' ? 'Agent created.' : 'Agent profile updated.',
+      message: reporting.operation === 'create'
+        ? 'Agent created.'
+        : reporting.operation === 'autostart' ? 'Agent autostart updated.' : 'Agent profile updated.',
       agent: outcome.agent,
       ...(outcome.membershipResults ? { membershipResults: outcome.membershipResults } : {}),
     };

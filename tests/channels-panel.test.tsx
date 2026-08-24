@@ -79,11 +79,19 @@ function timelineEvent(overrides: Record<string, unknown> = {}) {
 // hint/reconnect re-read tests) are unaffected -- the select-time
 // LIST_CHANNEL_MEMBERS call is already cleared by the time they inspect
 // sc.mock.calls, so those allowlists stay unchanged.
-const READ_ONLY_ALLOWLIST = new Set(['LIST_CHANNELS', 'GET_CHANNEL_TIMELINE', 'LIST_CHANNEL_MEMBERS']);
-const S6_ALLOWLIST = new Set(['LIST_CHANNELS', 'GET_CHANNEL_TIMELINE', 'LIST_CHANNEL_MEMBERS', 'ACK_CHANNEL_CURSOR']);
+// Authorized 2026-08-24 (G1D channels-agent-UX packet, Amendment 1 Item D):
+// LIST_AGENTS joins the base read-only set. It is dispatched exactly ONCE,
+// at mount, alongside LIST_CHANNELS (same mount effect) -- feeding the
+// "Add agent…" picker's candidate list. Every allowlist derived from
+// READ_ONLY_ALLOWLIST below therefore also admits it for any test that does
+// not mockClear() before its assertion; S3_ALLOWLIST is intentionally NOT
+// widened here because every test using it clears the mock after mount+
+// select and before asserting (see the S3_ALLOWLIST comment below).
+const READ_ONLY_ALLOWLIST = new Set(['LIST_CHANNELS', 'LIST_AGENTS', 'GET_CHANNEL_TIMELINE', 'LIST_CHANNEL_MEMBERS']);
+const S6_ALLOWLIST = new Set(['LIST_CHANNELS', 'LIST_AGENTS', 'GET_CHANNEL_TIMELINE', 'LIST_CHANNEL_MEMBERS', 'ACK_CHANNEL_CURSOR']);
 const CHANNEL_OWNER_ALLOWLIST = new Set([...S6_ALLOWLIST, 'SET_CHANNEL_EXTERNAL_EXPORT_POLICY']);
 const S3_ALLOWLIST = new Set(['LIST_CHANNELS', 'GET_CHANNEL_TIMELINE', 'POST_CHANNEL_MESSAGE']);
-const S6_FULL_ALLOWLIST = new Set([...S3_ALLOWLIST, 'LIST_CHANNEL_MEMBERS', 'ACK_CHANNEL_CURSOR']);
+const S6_FULL_ALLOWLIST = new Set([...S3_ALLOWLIST, 'LIST_AGENTS', 'LIST_CHANNEL_MEMBERS', 'ACK_CHANNEL_CURSOR']);
 const DANGEROUS_ACTIONS = new Set([
   'SUBMIT_PROMPT',
   'CANCEL_TASK',
@@ -97,11 +105,19 @@ function renderPanel(events: GatewayEvent[], sc = vi.fn(() => true), onClose = v
 }
 
 describe('ChannelsPanel', () => {
-  it('mount dispatch: exactly once, exact shape {action: LIST_CHANNELS, limit: 50}', () => {
+  // Authorized 2026-08-24 (G1D channels-agent-UX packet, Amendment 1 Item
+  // D): the mount effect now ALSO dispatches LIST_AGENTS (same effect, same
+  // render pass) so the "Add agent…" picker's candidate list is ready
+  // before any channel is selected -- exactly once, not per-selection. This
+  // is the sole change to this test's premise: mount dispatch is still
+  // exactly TWO calls (not an open-ended or growing count), both read-only,
+  // and LIST_CHANNELS is still dispatched with its original exact shape.
+  it('mount dispatch: exactly twice — {action: LIST_CHANNELS, limit: 50} and {action: LIST_AGENTS, limit: 50}', () => {
     const sc = vi.fn(() => true);
     renderPanel([], sc);
-    expect(sc).toHaveBeenCalledTimes(1);
+    expect(sc).toHaveBeenCalledTimes(2);
     expect(sc).toHaveBeenCalledWith({ action: 'LIST_CHANNELS', limit: 50 });
+    expect(sc).toHaveBeenCalledWith({ action: 'LIST_AGENTS', limit: 50 });
   });
 
   it('T-10: loading(null) !== empty([]) for the channel list', () => {
@@ -294,14 +310,18 @@ describe('ChannelsPanel', () => {
     expect(sc).toHaveBeenLastCalledWith({ action: 'GET_CHANNEL_TIMELINE', channelId: 'chan-1', cursor: '7', limit: 50 });
   });
 
-  it('flag-off equivalent: this panel is never mounted without a channel selected -> zero collab commands beyond the list mount', () => {
+  // Authorized 2026-08-24 (G1D channels-agent-UX packet, Amendment 1 Item
+  // D): LIST_AGENTS is the second and ONLY other mount-time dispatch (same
+  // effect as LIST_CHANNELS) -- the "beyond the list mount" boundary this
+  // test polices now spans both mount reads, not a growing/open set.
+  it('flag-off equivalent: this panel is never mounted without a channel selected -> zero collab commands beyond the two mount-time reads', () => {
     // ChannelsPanel itself has no internal flag check (the flag lives at the
     // TorqTerminal call site, tested by not rendering ChannelsPanel at all).
-    // Absent a selection, only the mount-time LIST_CHANNELS fires.
+    // Absent a selection, only the mount-time LIST_CHANNELS + LIST_AGENTS fire.
     const sc = vi.fn(() => true);
     renderPanel([], sc);
     const actions = sc.mock.calls.map((c) => (c[0] as any).action);
-    expect(actions).toEqual(['LIST_CHANNELS']);
+    expect(actions).toEqual(['LIST_CHANNELS', 'LIST_AGENTS']);
   });
 
   it('timestamps: ISO-8601 occurredAt renders with a UTC suffix; malformed occurredAt renders verbatim; "Invalid Date" never in the DOM', () => {

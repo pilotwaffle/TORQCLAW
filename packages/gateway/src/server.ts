@@ -50,12 +50,13 @@ import { sweepExpiredApprovals, sweepExpiredGrants } from './approvalWriter.js';
 import { rebuildDeliveryProjection } from './approvalDelivery.js';
 import { revokeInertGrants, admitToolCall } from './grantAdmission.js';
 import { decideApprovalC2 } from './c2Broker.js';
-import { collabSurfaceCommandsEnabled, agentParticipationEnabled, webSearchEnabled, isAgentSurfaceCaller, handleListChannels, handleListChannelMembers, handleSetChannelExternalExportPolicy, handleGetChannelTimeline, handlePostChannelMessage, handleAckChannelCursor, setAutoReplyTrigger, getStore } from './collabSurface.js';
+import { collabSurfaceCommandsEnabled, agentParticipationEnabled, webSearchEnabled, isAgentSurfaceCaller, handleListChannels, handleListChannelMembers, handleSetChannelExternalExportPolicy, handleGetChannelTimeline, handlePostChannelMessage, handleAckChannelCursor, handleAddChannelMember, handleRemoveChannelMember, setAutoReplyTrigger, getStore } from './collabSurface.js';
 import {
   handleCreateAgent,
   handleListAgentProviders,
   handleListAgents,
   handleUpdateAgentProfile,
+  handleSetLocalAgentAutostart,
   extractAgentMutationReporting,
   normalizeAgentMutationTerminalResult,
   type AgentMutationOutcome,
@@ -900,6 +901,32 @@ app.get('/ws', { websocket: true }, (socket) => {
         else await handleListChannels(sid, connectionAuth?.principalId ?? null, 100);
         break;
       }
+      case 'ADD_CHANNEL_MEMBER': {
+        // G1D channels-agent-UX packet (2026-08-24), Amendment 1 Item D: same
+        // absent-deny narrowing flag as every other collab-surface command
+        // above -- turning the surface off must remove this command entirely
+        // too. Operator-seat entitlement was already decided by authorize()
+        // (Gate 3, above) before dispatch ever reached this case -- this
+        // handler performs no additional authority check of its own (ND-1).
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        const addMemberErr = await handleAddChannelMember(sid, connectionAuth?.principalId ?? null, cmd.data);
+        if (addMemberErr) sendErr(addMemberErr.code, addMemberErr.detail);
+        else await handleListChannelMembers(sid, connectionAuth?.principalId ?? null, cmd.data.channelId);
+        break;
+      }
+      case 'REMOVE_CHANNEL_MEMBER': {
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        const removeMemberErr = await handleRemoveChannelMember(sid, connectionAuth?.principalId ?? null, cmd.data);
+        if (removeMemberErr) sendErr(removeMemberErr.code, removeMemberErr.detail);
+        else await handleListChannelMembers(sid, connectionAuth?.principalId ?? null, cmd.data.channelId);
+        break;
+      }
       case 'LIST_AGENTS': {
         if (!collabSurfaceCommandsEnabled()) {
           sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
@@ -953,6 +980,21 @@ app.get('/ws', { websocket: true }, (socket) => {
             && surfaceAuthz.holdsAuthority('delegate'),
         );
         publishAgentMutationTerminal(mutationReporting!, updateAgentOutcome);
+        break;
+      }
+      case 'SET_LOCAL_AGENT_AUTOSTART': {
+        if (!collabSurfaceCommandsEnabled()) {
+          publishAgentMutationTerminal(mutationReporting!, { status: 'error', errorCode: 'not_enabled' });
+          break;
+        }
+        const setAutostartOutcome = await handleSetLocalAgentAutostart(
+          connectionAuth?.principalId ?? null,
+          cmd.data,
+          () => surfaceAuthz !== undefined
+            && surfaceAuthz.currentRole() === 'operator'
+            && surfaceAuthz.holdsAuthority('delegate'),
+        );
+        publishAgentMutationTerminal(mutationReporting!, setAutostartOutcome);
         break;
       }
       case 'GET_CHANNEL_TIMELINE': {

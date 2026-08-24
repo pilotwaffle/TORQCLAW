@@ -25,6 +25,59 @@ import type { CollaborationStore, CallerContext, TimelineEventObject } from '@to
 export const ANCHOR_EVENT_COUNT = 10;
 export const WINDOW_EVENT_COUNT = 40;
 
+/**
+ * G1D N-1 (2026-08-24 channels-agent-UX packet) -- the narrow self-dedupe
+ * rule. Below this length, two "replies" (e.g. "ack", "done", "on it") are
+ * exempt from collapsing/suppression even if byte-identical: short
+ * acknowledgements are legitimate and repeating one is not a greeting loop.
+ * Reviewable, not tuned against a corpus -- the honest floor is "long enough
+ * to carry content", not a statistically fit threshold.
+ */
+export const NEAR_DUPLICATE_MIN_LENGTH = 12;
+
+/**
+ * Reviewable similarity threshold (0..1, Jaccard over normalized word sets).
+ * Deliberately conservative (high) so this only fires on genuinely
+ * near-identical restatements -- the greeting-loop shape -- and never on two
+ * distinct replies that merely share common words.
+ */
+export const NEAR_DUPLICATE_SIMILARITY_THRESHOLD = 0.82;
+
+/**
+ * Normalize text for similarity comparison: casefold, collapse whitespace,
+ * strip punctuation. Deterministic, no model judgment.
+ */
+export function normalizeForSimilarity(text: string): string {
+  return text
+    .normalize('NFC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+/**
+ * Structural (non-model) near-duplicate test shared by the window collapse
+ * below and the dispatcher's duplicate-suppression guard. Short texts (under
+ * NEAR_DUPLICATE_MIN_LENGTH after normalization) are NEVER considered
+ * duplicates of anything -- short acknowledgments must never be suppressed
+ * or collapsed (obligation 10).
+ */
+export function looksLikeNearDuplicateOfOwnRecent(candidate: string, recent: string): boolean {
+  const a = normalizeForSimilarity(candidate);
+  const b = normalizeForSimilarity(recent);
+  if (a.length < NEAR_DUPLICATE_MIN_LENGTH || b.length < NEAR_DUPLICATE_MIN_LENGTH) return false;
+  if (a === b) return true;
+  const wordsA = new Set(a.split(' ').filter(Boolean));
+  const wordsB = new Set(b.split(' ').filter(Boolean));
+  if (wordsA.size === 0 || wordsB.size === 0) return false;
+  let intersection = 0;
+  for (const w of wordsA) if (wordsB.has(w)) intersection += 1;
+  const union = wordsA.size + wordsB.size - intersection;
+  const similarity = union === 0 ? 0 : intersection / union;
+  return similarity >= NEAR_DUPLICATE_SIMILARITY_THRESHOLD;
+}
+
 export type AnchorWindowResult = {
   /** The rendered, model-facing text block. */
   text: string;
@@ -37,6 +90,53 @@ export type AnchorWindowResult = {
 };
 
 /**
+ * G1D N-1: collapse a MUTUALLY NEAR-IDENTICAL RUN of `selfPrincipalId`'s own
+ * `message_posted` events down to the most recent one, replacing the
+ * collapsed prefix of the run with a single synthetic elision marker in
+ * place. This is a RUN collapse, not a global one -- it targets consecutive
+ * self-repetition (the greeting-loop shape) and never touches a distinct
+ * self-reply that happens not to be adjacent to another near-duplicate
+ * (obligation 6b, "the amputation test"): two long, distinct self-authored
+ * messages separated by someone else's message are never in the same run,
+ * so neither is ever collapsed.
+ *
+ * "Mutually near-identical" (not "identical to the very first of the run")
+ * means the run only continues while each next self-message is a
+ * near-duplicate of the immediately preceding KEPT candidate -- a
+ * conservative choice that never drifts across a topic change one
+ * near-duplicate pair at a time.
+ */
+function collapseSelfRuns<T extends TimelineEventObject>(
+  events: T[],
+  selfPrincipalId: string,
+): Array<T | { elisionOf: T; collapsedCount: number }> {
+  const out: Array<T | { elisionOf: T; collapsedCount: number }> = [];
+  let runStart = -1; // index into `out` of the current run's kept representative
+  for (const ev of events) {
+    const isSelfMessage = ev.kind === 'message_posted'
+      && ev.actorPrincipalId === selfPrincipalId
+      && typeof ev.payload.text === 'string';
+    if (isSelfMessage && runStart !== -1) {
+      const prevEntry = out[runStart]!;
+      const prevText = 'elisionOf' in prevEntry
+        ? (prevEntry.elisionOf as T).payload.text as string
+        : (prevEntry as T).payload.text as string;
+      if (looksLikeNearDuplicateOfOwnRecent(ev.payload.text as string, prevText)) {
+        // Extend the run: replace the kept representative with THIS (more
+        // recent) event, tallying how many were collapsed under it.
+        const priorCollapsed = 'elisionOf' in prevEntry ? prevEntry.collapsedCount : 0;
+        out[runStart] = { elisionOf: ev, collapsedCount: priorCollapsed + 1 };
+        continue;
+      }
+    }
+    // Not a continuation: start a fresh potential run at this event.
+    out.push(ev);
+    runStart = isSelfMessage ? out.length - 1 : -1;
+  }
+  return out;
+}
+
+/**
  * Fetch the channel's first ANCHOR_EVENT_COUNT events (cursor "0" forward)
  * and its most recent WINDOW_EVENT_COUNT events (walked backward via
  * repeated forward pages, since getChannelTimeline is forward-only by
@@ -46,11 +146,18 @@ export type AnchorWindowResult = {
  * Two store calls, exactly as G1R's ruling states this needs no new
  * substrate primitive -- getChannelTimeline already exists and is reused
  * verbatim, twice.
+ *
+ * `selfPrincipalId`, when supplied, additionally collapses mutually
+ * near-identical runs of THAT principal's own prior replies (see
+ * collapseSelfRuns above) -- optional and additive: omitted (the cron path,
+ * cronDispatcher.ts, calls this with no selfPrincipalId), behavior is
+ * byte-identical to before this parameter existed.
  */
 export async function buildAnchorWindowContext(
   store: CollaborationStore,
   caller: CallerContext,
   channelId: string,
+  selfPrincipalId?: string,
 ): Promise<AnchorWindowResult> {
   const anchorPage = await store.getChannelTimeline(caller, {
     channelId,
@@ -96,23 +203,48 @@ export async function buildAnchorWindowContext(
   const nonOverlapping = tailBuffer.filter((ev) => Number(ev.cursor) > anchorLastSeq);
   const elided = Math.max(0, tailFirstSeq - anchorLastSeq - 1);
 
-  const renderEvent = (ev: TimelineEventObject): string => {
-    const kind = ev.kind;
-    const text = kind === 'message_posted' && typeof ev.payload.text === 'string'
-      ? ev.payload.text
-      : JSON.stringify(ev.payload);
-    return `[#${ev.cursor}] ${ev.actorPrincipalId} (${kind}): ${text}`;
+  // N-1: collapse self-runs BEFORE rendering, independently within the
+  // anchor and the window (each is rendered as its own labeled block; a run
+  // never spans the elided gap between them).
+  const anchorCollapsed = selfPrincipalId ? collapseSelfRuns(anchor, selfPrincipalId) : anchor;
+  const windowCollapsed = selfPrincipalId ? collapseSelfRuns(nonOverlapping, selfPrincipalId) : nonOverlapping;
+
+  const isElisionEntry = (
+    entry: TimelineEventObject | { elisionOf: TimelineEventObject; collapsedCount: number },
+  ): entry is { elisionOf: TimelineEventObject; collapsedCount: number } => 'elisionOf' in entry;
+
+  const renderEvent = (
+    entry: TimelineEventObject | { elisionOf: TimelineEventObject; collapsedCount: number },
+  ): string => {
+    if (isElisionEntry(entry)) {
+      const ev = entry.elisionOf;
+      const text = typeof ev.payload.text === 'string' ? ev.payload.text : JSON.stringify(ev.payload);
+      return `[#${ev.cursor}] ${ev.actorPrincipalId} posted ${entry.collapsedCount} earlier repl${entry.collapsedCount === 1 ? 'y' : 'ies'} — elided (most recent shown): ${text}`;
+    }
+    const kind = entry.kind;
+    const text = kind === 'message_posted' && typeof entry.payload.text === 'string'
+      ? entry.payload.text
+      : JSON.stringify(entry.payload);
+    return `[#${entry.cursor}] ${entry.actorPrincipalId} (${kind}): ${text}`;
   };
 
-  const anchorLines = anchor.map(renderEvent);
-  const windowLines = nonOverlapping.map(renderEvent);
+  const anchorLines = anchorCollapsed.map(renderEvent);
+  const windowLines = windowCollapsed.map(renderEvent);
 
-  const renderSubscriptionMessage = (ev: TimelineEventObject): string | null =>
-    ev.kind === 'message_posted' && typeof ev.payload.text === 'string'
-      ? ev.payload.text
+  const renderSubscriptionMessage = (
+    entry: TimelineEventObject | { elisionOf: TimelineEventObject; collapsedCount: number },
+  ): string | null => {
+    if (isElisionEntry(entry)) {
+      // Actor-blind (obligation 7): subscriptionText never carries channel,
+      // actor, or event identifiers, so the marker names only the count.
+      return `[${entry.collapsedCount} earlier repl${entry.collapsedCount === 1 ? 'y' : 'ies'} omitted]`;
+    }
+    return entry.kind === 'message_posted' && typeof entry.payload.text === 'string'
+      ? entry.payload.text
       : null;
-  const anchorMessages = anchor.map(renderSubscriptionMessage).filter((text): text is string => text !== null);
-  const windowMessages = nonOverlapping.map(renderSubscriptionMessage).filter((text): text is string => text !== null);
+  };
+  const anchorMessages = anchorCollapsed.map(renderSubscriptionMessage).filter((text): text is string => text !== null);
+  const windowMessages = windowCollapsed.map(renderSubscriptionMessage).filter((text): text is string => text !== null);
 
   const parts: string[] = [];
   if (anchorLines.length > 0) {

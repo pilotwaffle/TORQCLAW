@@ -533,6 +533,36 @@ function selectLatestChannelMembers(
 }
 
 /**
+ * G1D channels-agent-UX packet (2026-08-24), Amendment 1 Item D: the agent
+ * directory row shape LIST_AGENTS actually returns
+ * (packages/gateway/src/agentSurface.ts's handleListAgents), narrowed to
+ * only the fields the "Add agent…" picker needs. Used ONLY to populate the
+ * picker's candidate list -- the picker's exclusion of already-active
+ * members is UI-cosmetic (ND-3), computed client-side against
+ * `selectedServerMembers` (the real LIST_CHANNEL_MEMBERS roster); the
+ * store's own idempotency (store.ts:2016-2025 same-state repetition) is what
+ * actually makes a double-add harmless if the exclusion is ever stale.
+ */
+interface AgentDirectoryEntry {
+  principalId: string;
+  displayName: string;
+}
+
+/** Scans `events` BACKWARD for the newest LIST_AGENTS response frame
+ *  (`metadata: { collabAgents: true, agents }`, agentSurface.ts's
+ *  handleListAgents), validating shape. Malformed frames are skipped, same
+ *  discipline as every other selector in this file. */
+function selectLatestAgents(events: GatewayEvent[]): AgentDirectoryEntry[] | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const meta = (events[i]!.metadata ?? {}) as Record<string, any>;
+    if (meta.collabAgents === true && Array.isArray(meta.agents)) {
+      return meta.agents as AgentDirectoryEntry[];
+    }
+  }
+  return null;
+}
+
+/**
  * PRD-007 S4 presence push (OQ-2, GRANTED 2026-08-23). Scans `events`
  * FORWARD (oldest to newest, unlike the backward-scanning selectors above)
  * so that when several `collabPresence` frames exist for the SAME
@@ -845,6 +875,11 @@ export default function ChannelsPanel({
 
   useEffect(() => {
     requestList();
+    // G1D channels-agent-UX packet (2026-08-24) Item D: LIST_AGENTS is
+    // requested once on mount (same call AgentsPanel already makes) so the
+    // "Add agent…" picker's candidate list is ready before any channel is
+    // selected -- an operator-only read, safe from this operator-only panel.
+    sendCommand({ action: 'LIST_AGENTS', limit: 50 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -998,6 +1033,41 @@ export default function ChannelsPanel({
     }, TIMEOUT_MS);
   };
 
+  // ── G1D channels-agent-UX packet (2026-08-24), Amendment 1 Item D ───────
+  //
+  // "Add agent…" picker + per-member remove. LIST_AGENTS is requested once
+  // on mount (this panel is operator-only, same as AgentsPanel's identical
+  // LIST_AGENTS request) so the picker's candidate list is available as
+  // soon as a channel is selected, without a dedicated per-selection round
+  // trip. Both ADD_CHANNEL_MEMBER and REMOVE_CHANNEL_MEMBER are idempotent
+  // at the store (same-state repetition is a no-op, ND-1) -- this file adds
+  // no client-side de-dup beyond disabling the control while a request is
+  // in flight, which is a UX nicety, not a correctness requirement.
+  const [addMemberPhase, setAddMemberPhase] = useState<'idle' | 'pending'>('idle');
+  const [removeMemberPhase, setRemoveMemberPhase] = useState<Record<string, 'idle' | 'pending'>>({});
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const agentDirectory = useMemo(() => selectLatestAgents(events), [events]);
+
+  const addChannelMember = (channelId: string, agentPrincipalId: string) => {
+    setAddMemberPhase('pending');
+    sendCommand({
+      action: 'ADD_CHANNEL_MEMBER',
+      channelId,
+      agentPrincipalId,
+      idempotencyKey: crypto.randomUUID(),
+    });
+  };
+
+  const removeChannelMember = (channelId: string, agentPrincipalId: string) => {
+    setRemoveMemberPhase((prev) => ({ ...prev, [agentPrincipalId]: 'pending' }));
+    sendCommand({
+      action: 'REMOVE_CHANNEL_MEMBER',
+      channelId,
+      agentPrincipalId,
+      idempotencyKey: crypto.randomUUID(),
+    });
+  };
+
   const selectedServerMembersBase = selectedChannelId
     ? selectLatestChannelMembers(events, selectedChannelId)
     : null;
@@ -1020,6 +1090,13 @@ export default function ChannelsPanel({
     lastMembersFrameIdRef.current[selectedChannelId] = frameId;
     if (membersTimer.current) { clearTimeout(membersTimer.current); membersTimer.current = null; }
     setMembersPhase('idle');
+    // G1D channels-agent-UX packet (2026-08-24) Item D: a fresh
+    // LIST_CHANNEL_MEMBERS response is the completion signal for BOTH
+    // ADD_CHANNEL_MEMBER and REMOVE_CHANNEL_MEMBER (server.ts's dispatch
+    // wiring re-lists members after every successful mutation) -- clear the
+    // in-flight UI state here rather than tracking a separate ack frame.
+    setAddMemberPhase('idle');
+    setRemoveMemberPhase({});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [events, selectedChannelId]);
 
@@ -1572,6 +1649,16 @@ export default function ChannelsPanel({
                 membersPhase={membersPhase}
                 workingNow={workingNow}
                 selfPrincipalId={selfPrincipalId}
+                agentDirectory={agentDirectory}
+                pickerOpen={pickerOpen}
+                onTogglePicker={() => setPickerOpen((open) => !open)}
+                addMemberPhase={addMemberPhase}
+                removeMemberPhase={removeMemberPhase}
+                onAddMember={(agentPrincipalId) => {
+                  addChannelMember(selectedChannelId, agentPrincipalId);
+                  setPickerOpen(false);
+                }}
+                onRemoveMember={(agentPrincipalId) => removeChannelMember(selectedChannelId, agentPrincipalId)}
               />
 
               {/* Timeline honest states, same four-phase shape as the list. */}
@@ -1755,18 +1842,40 @@ function serverMemberLabel(m: ServerChannelMemberEntry, selfPrincipalId: string 
 }
 
 /**
- * S5 — agent co-presence roster (§4 S5 / A5 / A9). STRUCTURAL SAFETY
- * BOUNDARY: every prop here is plain data — no sendCommand, no callback of
- * any kind in scope, zero buttons/links/onClick anywhere in this component.
- * Presence is information, never a control (A5's "no roster row carries any
- * dispatch affordance").
+ * UPDATED STRUCTURAL SAFETY BOUNDARY (G1D channels-agent-UX packet,
+ * 2026-08-24, Amendment 1 Item D): this is NO LONGER a dispatch-free
+ * component. The Members section now carries exactly two operator-only
+ * mutation affordances -- an "Add agent…" picker (ADD_CHANNEL_MEMBER) and a
+ * per-row "remove" button on agent (non-owner, non-self) member rows
+ * (REMOVE_CHANNEL_MEMBER) -- both wired through the new onAddMember/
+ * onRemoveMember callbacks. This is a DELIBERATE, NARROW widening of A5's
+ * original "presence is information, never a control" rule, scoped to
+ * membership control only:
  *
- * Two sections, two distinct sources, rendered independently — see the
- * module-doc S5 block at the top of this file for the full source
+ *   - The "Working now (agents)" presence section below remains 100%
+ *     dispatch-free -- zero buttons/links/onClick, exactly as A5 originally
+ *     required. Presence is still never a control.
+ *   - The member payload itself (ServerChannelMemberEntry) is UNCHANGED --
+ *     still exactly {principalId, displayName, role, kind, working, since}
+ *     (B-4/D-6: no new disclosure). The mutation affordances are rendered
+ *     FROM that same unchanged data, they do not add fields to it.
+ *   - No affordance ever targets the owner row or a human principal --
+ *     server.ts (ADD/REMOVE_CHANNEL_MEMBER dispatch on wire.ts) and,
+ *     underneath, store.addChannelMember/removeChannelMember (store.ts) both
+ *     independently refuse a non-agent or owner-role target regardless of
+ *     what this UI ever renders; the client-side `m.role === 'agent'`
+ *     filter below is a UX nicety, never the enforcement boundary.
+ *   - ND-6 disclosure sentence: "in the room ≠ can speak" -- membership
+ *     alone does not mean an agent will respond (autostart + a live binding
+ *     are also required, store.ts:2650-2661) -- rendered once, plainly,
+ *     under the Members heading.
+ *
+ * Two presence sections, two distinct sources, rendered independently — see
+ * the module-doc S5 block at the top of this file for the full source
  * rationale. `workingNow === null` means the console has no active task
  * right now.
  *
- * PRD-007 S4-Members: the Members section now prefers the REAL
+ * PRD-007 S4-Members: the Members section prefers the REAL
  * LIST_CHANNEL_MEMBERS response (`serverMembers`/`membersPhase`) over the
  * older client-side timeline replay (`members`, still selectChannelMembers's
  * output) -- the replay is used ONLY as a fallback while the real command is
@@ -1777,7 +1886,10 @@ function serverMemberLabel(m: ServerChannelMemberEntry, selfPrincipalId: string 
  * which should not happen in practice but must never crash) falls back to
  * the replay rather than rendering nothing. `members === null` (no timeline
  * loaded yet) preserves the ORIGINAL null=loading convention for the
- * fallback path only.
+ * fallback path only. The add/remove affordances render ONLY on the real
+ * `serverMembers` branch -- the older replay fallback has no role/kind
+ * fields to safely gate a remove button on, so it stays exactly as before,
+ * byte-identical, with no mutation affordance.
  */
 function RosterSection({
   members,
@@ -1785,12 +1897,26 @@ function RosterSection({
   membersPhase,
   workingNow,
   selfPrincipalId,
+  agentDirectory,
+  pickerOpen,
+  onTogglePicker,
+  addMemberPhase,
+  removeMemberPhase,
+  onAddMember,
+  onRemoveMember,
 }: {
   members: ChannelMemberEntry[] | null;
   serverMembers: ServerChannelMemberEntry[] | null;
   membersPhase: Phase;
   workingNow: WorkingNowEntry | null;
   selfPrincipalId: string | null;
+  agentDirectory: AgentDirectoryEntry[] | null;
+  pickerOpen: boolean;
+  onTogglePicker: () => void;
+  addMemberPhase: 'idle' | 'pending';
+  removeMemberPhase: Record<string, 'idle' | 'pending'>;
+  onAddMember: (agentPrincipalId: string) => void;
+  onRemoveMember: (agentPrincipalId: string) => void;
 }) {
   // A real response has resolved for this channel (serverMembers is a real
   // array) -- it is authoritative even if empty, never overridden by the
@@ -1803,10 +1929,68 @@ function RosterSection({
   // exactly when there is something the operator needs to see.
   const membersFetchFailed = membersPhase === 'sendFailed' || membersPhase === 'timeout';
   if (!haveServerMembers && !membersFetchFailed && members === null && workingNow === null) return null;
+
+  // G1D channels-agent-UX packet (2026-08-24) Item D / ND-3: picker
+  // exclusion is UI-cosmetic, client-computed against the REAL
+  // LIST_CHANNEL_MEMBERS roster -- correctness rests on the store's own
+  // idempotency (store.ts:2016-2025 same-state repetition), not on this
+  // filter being perfectly fresh. Only rendered on the haveServerMembers
+  // branch (agentDirectory is otherwise not cross-referenceable against a
+  // trustworthy current-membership set).
+  const memberPrincipalIds = new Set((serverMembers ?? []).map((m) => m.principalId));
+  const addableAgents = (agentDirectory ?? []).filter((a) => !memberPrincipalIds.has(a.principalId));
+
   return (
     <div className="mb-4 space-y-3 border-b border-edge pb-3">
-      <div>
+      <div className="relative">
+        {/* NOTE for future maintainers: `rosterHeading.parentElement` (this
+            div) is relied on by tests/channels-panel-members.test.tsx to
+            scope assertions to the roster's own content (member list,
+            honest-state copy) as distinct from the timeline/other page
+            regions -- the `<h3>Members</h3>` heading MUST stay a DIRECT
+            CHILD of this same div as the member list below it, never wrapped
+            in an intermediate flex/layout div of its own, or those tests'
+            `.parentElement` scoping silently stops covering the member list. */}
         <h3 className="text-[10px] font-bold uppercase tracking-widest text-muted">Members</h3>
+        {haveServerMembers && (
+          <div className="absolute right-0 top-0">
+            <button
+              type="button"
+              onClick={onTogglePicker}
+              disabled={addMemberPhase === 'pending'}
+              className="rounded border border-border-strong px-1.5 py-0.5 text-[10px] text-muted hover:border-torque/40 disabled:opacity-50"
+            >
+              {addMemberPhase === 'pending' ? 'Adding…' : 'Add agent…'}
+            </button>
+            {pickerOpen && (
+              <ul className="absolute right-0 z-10 mt-1 max-h-48 w-56 overflow-y-auto rounded border border-border-strong bg-bg text-[10.5px] shadow-lg">
+                {addableAgents.length === 0 ? (
+                  <li className="px-2 py-1.5 text-faint/75">
+                    {agentDirectory === null ? 'Loading agents…' : 'No other agents to add.'}
+                  </li>
+                ) : (
+                  addableAgents.map((a) => (
+                    <li key={a.principalId}>
+                      <button
+                        type="button"
+                        onClick={() => onAddMember(a.principalId)}
+                        className="block w-full px-2 py-1.5 text-left text-muted hover:bg-edge"
+                      >
+                        {a.displayName}
+                      </button>
+                    </li>
+                  ))
+                )}
+              </ul>
+            )}
+          </div>
+        )}
+        {/* ND-6 disclosure sentence: membership alone is not the same as
+            "will respond" -- ships in the same batch as the picker/remove
+            affordances per the delta-G1R disposition. */}
+        <p className="mt-0.5 max-w-[75%] text-[9px] text-faint/60">
+          Membership puts an agent in the room — it still needs autostart enabled to speak.
+        </p>
         {haveServerMembers ? (
           serverMembers!.length === 0 ? (
             <p className="mt-1 text-[10.5px] text-faint/75">No members seen yet.</p>
@@ -1815,10 +1999,28 @@ function RosterSection({
               {serverMembers!.map((m) => (
                 <li
                   key={m.principalId}
-                  className="rounded border border-border-strong px-1.5 py-0.5 text-[10px] text-muted"
+                  className="flex items-center gap-1 rounded border border-border-strong px-1.5 py-0.5 text-[10px] text-muted"
                   title={`${m.displayName} (${m.principalId}) · ${serverMemberLabel(m, selfPrincipalId)}`}
                 >
-                  {serverMemberLabel(m, selfPrincipalId)} · {m.displayName}
+                  <span>{serverMemberLabel(m, selfPrincipalId)} · {m.displayName}</span>
+                  {/* Remove affordance: agent (non-owner) rows only. The
+                      client-side role check is a UX nicety -- the wire
+                      command and the store beneath it both independently
+                      refuse a non-agent or owner target regardless of what
+                      this filter ever renders (see this function's doc
+                      comment). */}
+                  {m.role === 'agent' && (
+                    <button
+                      type="button"
+                      onClick={() => onRemoveMember(m.principalId)}
+                      disabled={removeMemberPhase[m.principalId] === 'pending'}
+                      aria-label={`Remove ${m.displayName}`}
+                      title={`Remove ${m.displayName}`}
+                      className="text-faint hover:text-torque disabled:opacity-50"
+                    >
+                      {removeMemberPhase[m.principalId] === 'pending' ? '…' : '×'}
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>

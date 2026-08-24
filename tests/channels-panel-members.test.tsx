@@ -259,7 +259,18 @@ describe('ChannelsPanel — S4-Members (real LIST_CHANNEL_MEMBERS wire command)'
     expect(screen.queryByText(/Other Op/)).not.toBeInTheDocument();
   });
 
-  it('T-11 structural: the Members section still renders zero buttons/links for a server-sourced roster (presence is information, never a control)', () => {
+  // Authorized 2026-08-24 (G1D channels-agent-UX packet, Amendment 1 Item
+  // D): this test's ORIGINAL premise -- zero buttons anywhere in the
+  // Members section -- predates Item D's deliberate, narrow widening of A5
+  // (RosterSection's "UPDATED STRUCTURAL SAFETY BOUNDARY" doc comment,
+  // apps/console/src/components/ChannelsPanel.tsx). The Members roster now
+  // legitimately carries EXACTLY ONE control per AGENT (non-owner) member
+  // row -- a remove affordance (REMOVE_CHANNEL_MEMBER) -- while the owner
+  // row and the separate "Working now (agents)" presence section remain
+  // 100% control-free, matching A5's original rule exactly where it still
+  // applies. This is not a relaxation of T-11's spirit: it still proves the
+  // boundary is exactly what the packet specifies, not wider.
+  it('T-11 structural (updated boundary): the Members roster carries EXACTLY one remove control per agent member, zero for the owner row, zero links anywhere', () => {
     const sc = vi.fn(() => true);
     const { rerender, frame } = selectGeneral(sc);
     const members = membersFrame('chan-1', [
@@ -270,7 +281,13 @@ describe('ChannelsPanel — S4-Members (real LIST_CHANNEL_MEMBERS wire command)'
 
     const rosterHeading = screen.getByText('Members');
     const rosterList = rosterHeading.parentElement!.querySelector('ul')!;
-    expect(within(rosterList).queryAllByRole('button').length).toBe(0);
+    // Exactly one control: the agent row's remove button. The owner row
+    // (role='owner') never gets one -- the store itself independently
+    // refuses an owner-role removal regardless of what this UI renders, but
+    // the UI must not even offer the affordance for it.
+    const buttons = within(rosterList).queryAllByRole('button');
+    expect(buttons.length).toBe(1);
+    expect(buttons[0]).toHaveAccessibleName('Remove Botty');
     expect(within(rosterList).queryAllByRole('link').length).toBe(0);
   });
 });

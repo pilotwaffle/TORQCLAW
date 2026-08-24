@@ -295,6 +295,7 @@ export const AGENT_AUTOREPLY_MIGRATION_ID = '20260818_001_agent_autoreply_v1';
 export const AGENT_TURN_OUTPUT_MIGRATION_ID = '20260821_005_agent_turn_output_v1';
 export const AGENT_TURN_PERSONA_ENVELOPE_MIGRATION_ID = '20260821_006_agent_turn_persona_envelope_v1';
 export const CHANNEL_EXTERNAL_EXPORT_POLICY_MIGRATION_ID = '20260822_007_channel_external_export_policy_v1';
+export const AGENT_TURN_RESOLUTION_NOTE_MIGRATION_ID = '20260824_008_agent_turn_resolution_note_v1';
 
 export function runAgentAutoreplyMigration(db: Database.Database): void {
   const transaction = db.transaction(() => {
@@ -508,6 +509,49 @@ CREATE INDEX IF NOT EXISTS collab_channel_export_policy_audit_channel_created
     `);
     db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
       CHANNEL_EXTERNAL_EXPORT_POLICY_MIGRATION_ID,
+      new Date().toISOString(),
+    );
+  });
+  try {
+    db.exec('BEGIN EXCLUSIVE');
+    transaction();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+
+  runAgentTurnResolutionNoteMigration(db);
+}
+
+/**
+ * G1D N-1/B-6 (2026-08-24 channels-agent-UX packet) -- additive discriminator
+ * for WHY a turn resolved 'no_post'. Strictly additive: one nullable column,
+ * no change to any existing column, no change to the state machine's
+ * terminal states (still exactly 'completed' | 'no_post' | 'terminated').
+ * NULL means what it always meant -- legitimate chosen silence (A3-f),
+ * completely unchanged. A non-NULL value (currently only
+ * 'duplicate_suppressed') distinguishes the ONE new resolution path this
+ * slice adds: a candidate reply refused for being a near-duplicate of the
+ * agent's own recent post in the same channel, never left indistinguishable
+ * from silence the agent chose on its own terms (obligation 9's
+ * deletion-probe target -- deleting the WHERE resolution_note clause from a
+ * query that depends on the distinction must turn a passing assertion red).
+ */
+export function runAgentTurnResolutionNoteMigration(db: Database.Database): void {
+  const transaction = db.transaction(() => {
+    const existing = db.prepare('SELECT 1 FROM collab_schema_migrations WHERE id = ?')
+      .get(AGENT_TURN_RESOLUTION_NOTE_MIGRATION_ID);
+    if (existing) return;
+    const columns = new Set(
+      (db.prepare('PRAGMA table_info(collab_agent_turns)').all() as Array<{ name: string }>)
+        .map((column) => column.name),
+    );
+    if (!columns.has('resolution_note')) {
+      db.exec('ALTER TABLE collab_agent_turns ADD COLUMN resolution_note TEXT');
+    }
+    db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
+      AGENT_TURN_RESOLUTION_NOTE_MIGRATION_ID,
       new Date().toISOString(),
     );
   });

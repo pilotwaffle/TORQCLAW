@@ -416,6 +416,96 @@ export async function handleListChannelMembers(
   }
 }
 
+/**
+ * G1D channels-agent-UX packet (2026-08-24), Amendment 1 Item D + delta-G1R
+ * ND-1: a THIN, CALL-ONLY wrap of the EXISTING store.addChannelMember
+ * (packages/collab/src/store.ts:2037-2183) -- already keyed, idempotent,
+ * sequenced, with its own epoch bump, committed member_added event, and
+ * post-lock fanout. No business logic lives here or is duplicated from that
+ * function or assertChannelOwner (store.ts:3507) -- any divergence between
+ * this handler's behavior and the store's is a defect in the store call
+ * below, not a second implementation. Operator-seat entitlement is enforced
+ * ENTIRELY by authz.ts's named arms (both the non-operator explicit-deny
+ * switch and authorizeOperator's delegate-gated block) BEFORE server.ts's
+ * dispatch even reaches this function -- this handler performs no additional
+ * authority check of its own, matching handleSetChannelExternalExportPolicy's
+ * pattern immediately below (a mutation gated entirely by the wire-layer
+ * authorize() call, never by handler-local logic).
+ *
+ * Mirrors handleSetChannelExternalExportPolicy's error-mapping shape exactly:
+ * IDEMPOTENCY_CONFLICT / INVALID_REQUEST / COLLAB_NOT_FOUND are forwarded by
+ * code (COLLAB_NOT_FOUND covers validation 3's target-kind rejection, the
+ * owner-role-insert rejection, and a non-owner-caller's assertChannelOwner
+ * throw -- all byte-identical from the wire's perspective, matching the
+ * store's own T-2-style non-distinguishing design); CHANNEL_ARCHIVED maps to
+ * the CollabSurfaceError code; anything else is the generic COLLAB_UNAVAILABLE
+ * (A6/T-9 totality -- no store throw may escape this handler).
+ */
+export async function handleAddChannelMember(
+  sessionId: string,
+  principalId: string | null,
+  input: { channelId: string; agentPrincipalId: string; idempotencyKey: string },
+): Promise<CollabSurfaceError | null> {
+  if (principalId === null) return COLLAB_IDENTITY_REQUIRED;
+  const store = getStore();
+  if (!store) return { code: 'COLLAB_UNAVAILABLE' };
+  try {
+    const result = await store.addChannelMember(
+      callerFor(principalId),
+      { channelId: input.channelId, principalId: input.agentPrincipalId },
+      input.idempotencyKey,
+    );
+    publishOnly(sessionId, {
+      message: 'Channel member added',
+      metadata: { collabMemberAdded: true, ...result },
+    });
+    return null;
+  } catch (err: any) {
+    if (err?.code === 'IDEMPOTENCY_CONFLICT') return { code: 'COLLAB_IDEMPOTENCY_CONFLICT' };
+    if (err?.code === 'INVALID_REQUEST') return { code: 'COLLAB_INVALID_REQUEST' };
+    if (err?.code === 'COLLAB_NOT_FOUND') return { code: 'COLLAB_NOT_FOUND' };
+    if (err?.code === 'CHANNEL_ARCHIVED') return { code: 'COLLAB_CHANNEL_ARCHIVED' };
+    return { code: 'COLLAB_UNAVAILABLE' };
+  }
+}
+
+/**
+ * Sibling of handleAddChannelMember above -- same thin call-only wrap, this
+ * time of store.removeChannelMember (store.ts:2185-2305). Removal's eager
+ * `authorization_lost` close of the removed principal's own live
+ * subscription and the post-lock member_removed fanout are entirely the
+ * store's existing behavior (ND-2/T-1 pattern); this handler adds nothing
+ * beyond forwarding the call and mapping its throw taxonomy, identical in
+ * shape to handleAddChannelMember above.
+ */
+export async function handleRemoveChannelMember(
+  sessionId: string,
+  principalId: string | null,
+  input: { channelId: string; agentPrincipalId: string; idempotencyKey: string },
+): Promise<CollabSurfaceError | null> {
+  if (principalId === null) return COLLAB_IDENTITY_REQUIRED;
+  const store = getStore();
+  if (!store) return { code: 'COLLAB_UNAVAILABLE' };
+  try {
+    const result = await store.removeChannelMember(
+      callerFor(principalId),
+      { channelId: input.channelId, principalId: input.agentPrincipalId },
+      input.idempotencyKey,
+    );
+    publishOnly(sessionId, {
+      message: 'Channel member removed',
+      metadata: { collabMemberRemoved: true, ...result },
+    });
+    return null;
+  } catch (err: any) {
+    if (err?.code === 'IDEMPOTENCY_CONFLICT') return { code: 'COLLAB_IDEMPOTENCY_CONFLICT' };
+    if (err?.code === 'INVALID_REQUEST') return { code: 'COLLAB_INVALID_REQUEST' };
+    if (err?.code === 'COLLAB_NOT_FOUND') return { code: 'COLLAB_NOT_FOUND' };
+    if (err?.code === 'CHANNEL_ARCHIVED') return { code: 'COLLAB_CHANNEL_ARCHIVED' };
+    return { code: 'COLLAB_UNAVAILABLE' };
+  }
+}
+
 export async function handleSetChannelExternalExportPolicy(
   sessionId: string,
   principalId: string | null,

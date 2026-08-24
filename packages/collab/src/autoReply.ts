@@ -217,6 +217,15 @@ export function attachDispatchRequestId(
  * call sites plus `packages/collab/src/index.ts`'s export surface, none of
  * which this bounded correction is authorized to touch.
  *
+ * `note` (G1D N-1/B-6, 2026-08-24 channels-agent-UX packet) is likewise
+ * optional and additive: omitted, `resolution_note` is left NULL exactly as
+ * it always has been (chosen silence, A3-f, stays undistinguished-by-design
+ * from itself). When a caller resolves a turn 'no_post' specifically
+ * because the candidate reply was a suppressed near-duplicate of the
+ * agent's own recent post, it passes `note: 'duplicate_suppressed'` so the
+ * two 'no_post' causes are distinguishable in the DB (obligation 9) without
+ * changing the state machine's terminal states.
+ *
  * Returns the number of rows actually changed (0 or 1) so a caller on the
  * recovery path can assert real ownership instead of assuming success from
  * a void return -- the same discipline `commitAgentTurnOutput` already
@@ -224,25 +233,27 @@ export function attachDispatchRequestId(
  */
 export function resolveAgentTurn(
   db: AutoreplyDb,
-  params: { channelId: string; agentPrincipalId: string; channelSeq: number; state: Exclude<AgentTurnState, 'dispatched'>; nowIso: string; leaseToken?: string },
+  params: { channelId: string; agentPrincipalId: string; channelSeq: number; state: Exclude<AgentTurnState, 'dispatched'>; nowIso: string; leaseToken?: string; note?: string },
 ): number {
+  const note = params.note ?? null;
   const info = params.leaseToken !== undefined
     ? db.prepare(
-        `UPDATE collab_agent_turns SET state = ?, resolved_at = ?
+        `UPDATE collab_agent_turns SET state = ?, resolved_at = ?, resolution_note = ?
           WHERE channel_id = ? AND agent_principal_id = ? AND channel_seq = ? AND state = 'dispatched'
             AND recovery_lease_token IS ?`,
       ).run(
         params.state,
         params.nowIso,
+        note,
         params.channelId,
         params.agentPrincipalId,
         params.channelSeq,
         params.leaseToken,
       ) as { changes: number | bigint }
     : db.prepare(
-        `UPDATE collab_agent_turns SET state = ?, resolved_at = ?
+        `UPDATE collab_agent_turns SET state = ?, resolved_at = ?, resolution_note = ?
           WHERE channel_id = ? AND agent_principal_id = ? AND channel_seq = ? AND state = 'dispatched'`,
-      ).run(params.state, params.nowIso, params.channelId, params.agentPrincipalId, params.channelSeq) as {
+      ).run(params.state, params.nowIso, note, params.channelId, params.agentPrincipalId, params.channelSeq) as {
         changes: number | bigint;
       };
   return Number(info.changes);
