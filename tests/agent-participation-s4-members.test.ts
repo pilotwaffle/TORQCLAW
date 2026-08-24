@@ -206,6 +206,52 @@ describe('PRD-007 S4-Members — listChannelMembers (store-level, T-3/T-4/T-9)',
     expect(agentMember.since).toBeNull();
   });
 
+  it('B-5(b) negative fixture: an agent principal forged into an owner-role collab_members row reports kind="agent" (column-sourced), where the prior role-derived logic would have reported "human"', async () => {
+    const { store, operatorCaller, bootstrap } = fixture;
+    const channel = await store.createChannel(operatorCaller, { name: 'general' }, 'b5b-chan-1');
+    const { principalId: forgedAgentId } = await makeAgent(store, operatorCaller, 'Forged owner-row agent', 'b5b-forged-agent');
+
+    // Forge a membership row with role='owner' for an AGENT principal, directly via rawDb --
+    // bypassing every CollaborationStore write method's own invariant that a channel owner is
+    // always the operator principal (S1's bootstrap invariant). This is exactly the shape the
+    // prior role-derived `kind: row.role === 'owner' ? 'human' : 'agent'` mapping could never
+    // distinguish from a real human owner -- it would report 'human' for this row unconditionally.
+    const rawDb = store.rawDb;
+    const now = nowIso();
+    rawDb.prepare(
+      `INSERT INTO collab_members(channel_id, principal_id, role, state, joined_at)
+       VALUES (?, ?, 'owner', 'active', ?)`,
+    ).run(channel.channelId, forgedAgentId, now);
+
+    // Anti-vacuity: the forged principal really is kind='agent' at the principals-table level,
+    // and really does carry role='owner' in collab_members -- the two disagree, which is exactly
+    // the case a role-derivation could not detect.
+    const principalRow = rawDb.prepare('SELECT kind FROM principals WHERE id = ?').get(forgedAgentId) as { kind: string } | undefined;
+    expect(principalRow?.kind, 'forged principal must be a real agent-kind principal').toBe('agent');
+    const memberRow = rawDb.prepare('SELECT role FROM collab_members WHERE channel_id = ? AND principal_id = ?')
+      .get(channel.channelId, forgedAgentId) as { role: string } | undefined;
+    expect(memberRow?.role, 'forged membership row must carry role=owner').toBe('owner');
+
+    const result = await store.listChannelMembers(operatorCaller, { channelId: channel.channelId });
+    const forgedMember = result.members.find((m) => m.principalId === forgedAgentId);
+    expect(forgedMember, 'the forged owner-role row must still appear in the roster').toBeTruthy();
+    expect(forgedMember!.role, 'role is still read verbatim from collab_members').toBe('owner');
+    // THE ASSERTION: column-sourced kind ('agent', from principals.kind) where role-derived logic
+    // ('owner' => 'human') would have reported 'human'.
+    expect(
+      forgedMember!.kind,
+      'kind must be column-sourced (principals.kind=agent) even though role=owner -- a role-derived mapping would wrongly report "human" here',
+    ).toBe('agent');
+
+    // The wire/API kind value is never 'operator' -- confirm every returned member's kind is one
+    // of the two wire-legal values, including the real operator row.
+    for (const m of result.members) {
+      expect(['human', 'agent']).toContain(m.kind);
+    }
+    const realOperator = result.members.find((m) => m.principalId === bootstrap.operatorPrincipalId)!;
+    expect(realOperator.kind).toBe('human');
+  });
+
   it('T-9: a full LIST_CHANNEL_MEMBERS lifecycle writes ZERO rows to collab_events', async () => {
     const { store, operatorCaller, sqlite } = fixture;
     const channel = await store.createChannel(operatorCaller, { name: 'general' }, 'idem-chan-3');

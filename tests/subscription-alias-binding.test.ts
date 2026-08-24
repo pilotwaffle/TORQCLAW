@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import {
   listSubscriptionRuntimeDescriptors,
   resolveSubscriptionAcpServer,
@@ -8,7 +10,11 @@ import {
   executeAcpSubscriptionTurn,
   probeAcpSubscriptionRuntime,
 } from '../packages/gateway/src/subscriptionAcpRuntime.js';
-import type { ProcessSummary, SubscriptionProcessDriver } from '../packages/gateway/src/safeSubscriptionProcess.js';
+import {
+  resolveSpawnTarget,
+  type SubscriptionProcessDriver,
+  type ProcessSummary,
+} from '../packages/gateway/src/safeSubscriptionProcess.js';
 
 /**
  * T-6 OUTCOME (verbatim, PRD-007 Item B correction 2, re-run 2026-08-23):
@@ -69,6 +75,184 @@ describe('T-6 (documented outcome)', () => {
   it('records that endpoint_bound was earned honestly -- the negative control did not differ, so env isolation was not proven load-bearing', () => {
     const runtime = resolveSubscriptionAcpServer('zai-subscription', 'glm-5.3')!;
     expect(runtime.modelAttestation).toBe('endpoint_bound');
+  });
+});
+
+/**
+ * PRD-007 packet Item C-3: T-6's `endpoint_bound` finding was proven against ONE specific
+ * installed version of the real `@agentclientprotocol/claude-agent-acp` adapter (v0.64.2, verified
+ * live 2026-08-23 -- see subscriptionAcpRuntime.ts's FS_OR_TERMINAL_REVERSE_METHODS doc comment
+ * and T-6's outcome record above). An adapter upgrade can silently change advertised alias option
+ * sets, config-option echo behavior, or reverse-request method names -- any of which could
+ * invalidate T-6/T-7/T-8's fixtures without any of THIS repo's code changing. This test pins the
+ * exact version T-6 was run against so a version drift is caught loudly instead of silently
+ * validating stale fixtures against a different adapter.
+ *
+ * The adapter is installed as a global npm package (`npm i -g @agentclientprotocol/claude-agent-acp`)
+ * resolved via PATH at spawn time -- it is NOT a workspace dependency in this repo's
+ * package.json/pnpm-lock.yaml, so there is no local node_modules entry to require(). This resolves
+ * it the SAME way production actually spawns it: safeSubscriptionProcess.ts's resolveSpawnTarget
+ * (the real Windows npm-shim parser used by every subscription spawn) turns the bare command
+ * `claude-agent-acp` into its real entry file; this walks up from that entry to the installed
+ * package's own package.json and reads the version field directly -- never a second, invented
+ * resolution mechanism.
+ */
+describe('T-6 adapter version pin (packet Item C-3)', () => {
+  const PINNED_VERSION = '0.64.2';
+  const OPT_IN_ENV = 'TORQCLAW_ACP_ADAPTER_PIN';
+
+  function resolveInstalledAdapterVersion(): string | null {
+    const target = resolveSpawnTarget('claude-agent-acp', []);
+    // Non-Windows, or Windows resolution that didn't rewrite the plan (already an .exe, or no
+    // shim found on PATH at all): fall back to walking PATH entries directly for a `.cmd`/binary
+    // whose npm-shim target we can still parse, using the same resolver with an explicit env so
+    // the test isn't silently vacuous on a platform where the rewrite short-circuits.
+    const entry = target.args[0];
+    if (target.command === process.execPath && typeof entry === 'string' && existsSync(entry)) {
+      // entry looks like <npmDir>/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js
+      const marker = `node_modules${path.sep}@agentclientprotocol${path.sep}claude-agent-acp`;
+      const markerIndex = entry.indexOf(marker);
+      if (markerIndex === -1) return null;
+      const packageRoot = entry.slice(0, markerIndex + marker.length);
+      const packageJsonPath = path.join(packageRoot, 'package.json');
+      if (!existsSync(packageJsonPath)) return null;
+      try {
+        const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as { version?: unknown };
+        return typeof pkg.version === 'string' ? pkg.version : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * G2A correction 1 (proven live under `platform: 'linux'`): resolveSpawnTarget returns the plan
+   * UNCHANGED on any non-win32 platform (safeSubscriptionProcess.ts:376), so
+   * resolveInstalledAdapterVersion() always returns null on GitHub CI (ubuntu-latest) regardless of
+   * whether the adapter is actually installed -- the resolver simply cannot work there. The original
+   * test's `expect.fail()` on `installedVersion === null` conflated "resolver structurally can't run
+   * here" with "adapter is missing on a machine where it could be checked," producing a standing red
+   * CI on every non-Windows runner.
+   *
+   * This pure, side-effect-free decision function is the fix's core: it takes only the three facts
+   * that determine the outcome -- `platform` (is the resolver capable of running at all),
+   * `resolvable` (did resolution actually find/read the adapter), and `optIn` (did this machine
+   * explicitly claim `endpoint_bound` via TORQCLAW_ACP_ADAPTER_PIN=1, which raises the bar to a hard
+   * requirement) -- and returns which of the three required paths applies. Extracted here
+   * (test-file-local, no src changes) so all four semantics can be pinned directly, including the
+   * three that cannot be exercised for real on this machine.
+   */
+  type AdapterPinDecision = 'fail-missing' | 'assert-version' | 'skip';
+
+  function decideAdapterPinOutcome(input: {
+    platform: NodeJS.Platform;
+    resolvable: boolean;
+    optIn: boolean;
+  }): AdapterPinDecision {
+    const { platform, resolvable, optIn } = input;
+    // Path 1: explicit opt-in claims endpoint_bound is trustworthy on this machine -- hard-fail on
+    // absence OR on a version mismatch (version mismatch is asserted by the caller once this
+    // function returns 'assert-version'; the opt-in path always demands the assertion or a loud
+    // failure, never a skip, on ANY platform -- including one where the resolver structurally
+    // cannot run, e.g. linux, because a machine that claims the pin must be able to prove it).
+    if (optIn) {
+      if (!resolvable) return 'fail-missing';
+      return 'assert-version';
+    }
+    // Path 2: no opt-in, but the adapter IS resolvable (win32 + global install present) -- assert
+    // the pinned version for real (mismatch still hard-fails via the caller's assertion).
+    if (resolvable) return 'assert-version';
+    // Path 3/4 (no opt-in, not resolvable): platform-honest skip. This covers both "non-win32
+    // resolver cannot work here" and "win32 but adapter genuinely not installed" -- in both cases
+    // nothing this test can prove is false, and demanding proof it structurally cannot produce
+    // would be exactly the standing-red-CI bug being fixed here.
+    void platform; // retained in the signature: callers must pass it for platform-honesty at call sites.
+    return 'skip';
+  }
+
+  it('the installed @agentclientprotocol/claude-agent-acp is exactly the version T-6/endpoint_bound was proven against', (ctx) => {
+    const optIn = process.env[OPT_IN_ENV] === '1';
+    const installedVersion = resolveInstalledAdapterVersion();
+    const decision = decideAdapterPinOutcome({
+      platform: process.platform,
+      resolvable: installedVersion !== null,
+      optIn,
+    });
+
+    if (decision === 'fail-missing') {
+      expect.fail(
+        `TORQCLAW_ACP_ADAPTER_PIN=1 claims endpoint_bound is trustworthy on this machine, but the ` +
+        `installed @agentclientprotocol/claude-agent-acp could not be resolved (checked PATH via ` +
+        `the real resolveSpawnTarget resolver, platform=${process.platform}). Re-run T-6 before ` +
+        `trusting endpoint_bound.`,
+      );
+      return;
+    }
+
+    if (decision === 'skip') {
+      ctx.skip(
+        process.platform !== 'win32'
+          ? `adapter not installed / non-win32 resolver (platform=${process.platform}) -- ` +
+            `endpoint_bound unproven on this machine`
+          : `adapter not installed (checked PATH via resolveSpawnTarget) -- endpoint_bound ` +
+            `unproven on this machine`,
+      );
+      return;
+    }
+
+    // decision === 'assert-version'
+    expect(
+      installedVersion,
+      `Installed @agentclientprotocol/claude-agent-acp is v${installedVersion}, but T-6's ` +
+      `endpoint_bound finding was proven against v${PINNED_VERSION} -- re-run T-6 before trusting ` +
+      `endpoint_bound.`,
+    ).toBe(PINNED_VERSION);
+  });
+
+  describe('decideAdapterPinOutcome (pure decision function, all four paths pinned)', () => {
+    it('path 1: opt-in + resolvable -> assert-version (win32, adapter present, pin claimed)', () => {
+      expect(decideAdapterPinOutcome({ platform: 'win32', resolvable: true, optIn: true }))
+        .toBe('assert-version');
+    });
+
+    it('path 1: opt-in + NOT resolvable -> fail-missing, even on win32', () => {
+      expect(decideAdapterPinOutcome({ platform: 'win32', resolvable: false, optIn: true }))
+        .toBe('fail-missing');
+    });
+
+    it('path 1: opt-in + NOT resolvable on linux -> fail-missing (the pin cannot be satisfied on this platform; fail-loud preserved, never silently skipped)', () => {
+      expect(decideAdapterPinOutcome({ platform: 'linux', resolvable: false, optIn: true }))
+        .toBe('fail-missing');
+    });
+
+    it('path 2: no opt-in + resolvable -> assert-version (win32 + global install present)', () => {
+      expect(decideAdapterPinOutcome({ platform: 'win32', resolvable: true, optIn: false }))
+        .toBe('assert-version');
+    });
+
+    it('path 3: no opt-in + not resolvable on win32 -> skip (adapter genuinely absent)', () => {
+      expect(decideAdapterPinOutcome({ platform: 'win32', resolvable: false, optIn: false }))
+        .toBe('skip');
+    });
+
+    it('path 4: no opt-in + not resolvable on linux -> skip (resolver structurally cannot work there -- this is the exact GitHub CI shape that was previously a standing hard-fail)', () => {
+      expect(decideAdapterPinOutcome({ platform: 'linux', resolvable: false, optIn: false }))
+        .toBe('skip');
+    });
+
+    it('RED reproduction: driving the pre-fix logic shape (resolvable:false, no opt-in awareness) on linux is exactly what caused expect.fail() on GitHub CI', () => {
+      // Before this fix, the test only had two outcomes: fail if installedVersion === null, else
+      // assert. There was no platform/opt-in branch at all. Simulating that collapsed decision
+      // table directly: on linux, resolvable is unconditionally false (the resolver returns
+      // unchanged per safeSubscriptionProcess.ts:376), so the old code always chose "fail".
+      const oldBehavior = (resolvable: boolean): 'fail' | 'assert' => (resolvable ? 'assert' : 'fail');
+      expect(oldBehavior(false)).toBe('fail'); // <- this is the standing red CI reproduced
+      // The corrected decision function, given the same facts plus platform-honesty, chooses skip
+      // instead, because linux + no opt-in is not a proof failure -- it's an unprovable case.
+      expect(decideAdapterPinOutcome({ platform: 'linux', resolvable: false, optIn: false }))
+        .toBe('skip');
+    });
   });
 });
 

@@ -584,6 +584,13 @@ Symptom: `refresh_skill_trust` returns `revocationsAffectingInstalled` with an `
 | OQ-1 | Pilot publisher hosting: which static-HTTPS host serves the first real `trust-bundle.json` + envelopes (the PRD-001 §17 L449 question, still open)? | Operator | Before the P4-9 live pilot (the loopback-fixture pilot does not need it) |
 | OQ-2 | TTL ratification: are 24 h max bundle window, 72 h hard expiry, 2 min skew, 5 min restart regression the pilot values, or does the operator tighten them? (Defaults above are binding until re-ratified.) | Operator | Before flag-on in any real deployment |
 
+**OQ-1 / OQ-2 — DEFERRED by operator ruling 2026-08-23** (recorded in
+`docs/prd-reviews/G1D-FABLE-CLEANUP-DOCS-TRUTH-2026-08-23.md`): no pilot publisher has been
+chosen (none is currently in use), so OQ-1 does not block anything today. TTL re-ratification
+(OQ-2, the 30-day window) ships together with the first real publisher, not before. The flag
+posture is unchanged by this ruling — `TORQCLAW_REMOTE_SKILL_SOURCES` remains default OFF, and
+neither OQ is treated as resolved.
+
 Everything else PRD-001 §17 left open that touches this phase is decided in this document: Windows key storage (§13 — the L450 question, gated "Before Phase 3" but resolved here, O-18), rollback/revocation semantics (R-4/AC-4), pinned upgrades (§5.2/D-6), and the trust/revocation document format (§5.2).
 
 ---

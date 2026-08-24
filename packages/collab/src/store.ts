@@ -297,12 +297,18 @@ export interface ListChannelsResult {
 
 /**
  * PRD-007 S4-Members + S4 presence overlay (OQ-2, GRANTED 2026-08-23).
- * `kind` is derived from `role` -- the migration's principals table already
- * carries a real `kind` column ('operator'|'agent'), but
- * `collab_members.role` ('owner'|'agent') is a 1:1 image of it in practice
- * (a channel owner is always the operator principal, S1's bootstrap
- * invariant), so this avoids a second SELECT per row: 'owner' => 'human',
- * 'agent' => 'agent'.
+ *
+ * G1D packet B-5(b) (2026-08-23, defense-in-depth reversal of the earlier role-derivation
+ * shortcut): `kind` is column-sourced from `principals.kind` ('operator'|'agent'), read off the
+ * SAME row `listChannelMembers`'s JOIN already reaches for `display_name` -- not derived from
+ * `collab_members.role` ('owner'|'agent'). The prior comment here claimed role-derivation was
+ * safe because a channel owner is always the operator principal in practice; that is true of
+ * every legitimate write path, but it is not something the SELECT itself enforced, so a
+ * forged/legacy row where `role='owner'` did not coincide with `principals.kind='operator'`
+ * would have silently reported the wrong `kind` with no query-level guard against it. Reading the
+ * column costs nothing extra (same JOIN, one more selected field) and removes that gap entirely.
+ * `'operator'` is mapped to the wire value `'human'` explicitly; `'agent'` passes through
+ * unchanged. The wire/API `kind` value is never `'operator'` -- only `'human'` or `'agent'`.
  *
  * `working`/`since` are the operator-granted "working now" side-channel
  * (OQ-2 verbatim ruling, docs/PRD-TCLAW-AGENT-PARTICIPATION-007.md §9):
@@ -3180,7 +3186,7 @@ export class CollaborationStore {
       const rows = db
         .prepare(
           `SELECT m.principal_id as principal_id, m.role as role,
-                  p.display_name as display_name,
+                  p.display_name as display_name, p.kind as principal_kind,
                   (SELECT MAX(t.dispatched_at) FROM collab_agent_turns t
                     WHERE t.channel_id = m.channel_id
                       AND t.agent_principal_id = m.principal_id
@@ -3195,6 +3201,7 @@ export class CollaborationStore {
         principal_id: string;
         role: 'owner' | 'agent';
         display_name: string;
+        principal_kind: 'operator' | 'agent';
         dispatched_at: string | null;
       }>;
 
@@ -3202,9 +3209,11 @@ export class CollaborationStore {
         principalId: row.principal_id,
         displayName: row.display_name,
         role: row.role,
-        // See ChannelMemberEntry's doc comment: derived from role, not a
-        // second principals.kind SELECT.
-        kind: row.role === 'owner' ? 'human' : 'agent',
+        // See ChannelMemberEntry's doc comment (B-5(b)): column-sourced from
+        // principals.kind, not derived from collab_members.role. 'operator'
+        // is mapped to the wire value 'human' explicitly; 'agent' passes
+        // through unchanged. The wire value is never 'operator'.
+        kind: row.principal_kind === 'operator' ? 'human' : 'agent',
         working: row.dispatched_at !== null,
         since: row.dispatched_at,
       }));

@@ -915,6 +915,62 @@ def test_web_search_tool_registration_is_gated_by_env_flag(monkeypatch):
         importlib.reload(server_module)
 
 
+# T-7 (G1D-FABLE-CLEANUP-DOCS-TRUTH-2026-08-23, item 10): TRUTHY parity with
+# TS's collabSurface.ts:webSearchEnabled() -- {"1","true","yes","on"},
+# case-insensitive, after a .trim()-equivalent strip. Widen Python, never
+# narrow TS (G2A's direction). Each case re-imports the module fresh (the
+# gate runs at import time) and restores flag-off state afterward so this
+# test cannot leak registration state into a sibling test in the same
+# process, mirroring the finally-block discipline directly above.
+@pytest.mark.parametrize("raw_value", ["1", "true", "TRUE", "yes", "on", " 1 "])
+def test_web_search_flag_truthy_parity_enabled(monkeypatch, raw_value):
+    import importlib
+
+    monkeypatch.setenv("TORQCLAW_WEB_SEARCH_ENABLED", raw_value)
+    from mcp_wrapper import server as server_module
+    importlib.reload(server_module)
+    try:
+        tool_names = {t.name for t in asyncio.run(server_module.mcp.list_tools())}
+        assert "web_search" in tool_names, (
+            f"TORQCLAW_WEB_SEARCH_ENABLED={raw_value!r} must be treated as truthy "
+            "(TS parity: {'1','true','yes','on'} case-insensitive, trimmed)"
+        )
+    finally:
+        monkeypatch.delenv("TORQCLAW_WEB_SEARCH_ENABLED", raising=False)
+        importlib.reload(server_module)
+
+
+@pytest.mark.parametrize("raw_value", ["", "0", "false", "no", "off", "2", "nope"])
+def test_web_search_flag_truthy_parity_disabled(monkeypatch, raw_value):
+    import importlib
+
+    monkeypatch.setenv("TORQCLAW_WEB_SEARCH_ENABLED", raw_value)
+    from mcp_wrapper import server as server_module
+    importlib.reload(server_module)
+    try:
+        tool_names = {t.name for t in asyncio.run(server_module.mcp.list_tools())}
+        assert "web_search" not in tool_names, (
+            f"TORQCLAW_WEB_SEARCH_ENABLED={raw_value!r} must NOT be treated as truthy "
+            "(TS parity: only {'1','true','yes','on'} case-insensitive, trimmed, are truthy)"
+        )
+    finally:
+        monkeypatch.delenv("TORQCLAW_WEB_SEARCH_ENABLED", raising=False)
+        importlib.reload(server_module)
+
+
+def test_web_search_flag_truthy_parity_unset(monkeypatch):
+    import importlib
+
+    monkeypatch.delenv("TORQCLAW_WEB_SEARCH_ENABLED", raising=False)
+    from mcp_wrapper import server as server_module
+    importlib.reload(server_module)
+    try:
+        tool_names = {t.name for t in asyncio.run(server_module.mcp.list_tools())}
+        assert "web_search" not in tool_names
+    finally:
+        importlib.reload(server_module)
+
+
 def test_hermes_task_failed_detection_branch_raises_from_real_vendor_shape(monkeypatch):
     """CORRECTION 2: regression test for the detection branch itself
     (hermes_runner.py's `if isinstance(result, Mapping) and result.get(

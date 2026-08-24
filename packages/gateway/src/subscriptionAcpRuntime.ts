@@ -95,7 +95,17 @@ export function parseStrictAcpFrame(line: string): AcpFrame {
       // check or a filesystem/terminal tool -- it is not itself unsafe, so parsing does not throw
       // here. response() is the only caller with a connection to answer it, so it decides how
       // (deny permission / method-not-found for fs+terminal+anything else) -- see there for why.
-      if (!record(frame.params)) throw new Error('ACP_MALFORMED_FRAME');
+      //
+      // JSON-RPC 2.0 legally allows either a string or a number `id` on a request (never object,
+      // array, or null -- the spec reserves `null` for "id unknown", not for a real request id).
+      // `answerReverseRequest` echoes this value verbatim into the id field of its `-32601` reply
+      // (and into the allow/deny result id for session/request_permission), so a non-scalar id
+      // here would be echoed back onto the wire unvalidated. Failing closed on anything other than
+      // string|number keeps that echo inside the JSON-RPC contract in both directions.
+      if (
+        (typeof frame.id !== 'string' && typeof frame.id !== 'number')
+        || !record(frame.params)
+      ) throw new Error('ACP_MALFORMED_FRAME');
       return frame;
     }
     if (frame.method !== 'session/update' || !record(frame.params)) {
@@ -271,8 +281,11 @@ async function response(
       // Agent->client JSON-RPC REQUEST (session/request_permission, fs/*, terminal/*, or any other
       // method the adapter decides to ask). Always answered in place -- deny for permission,
       // method-not-found for everything else -- and the stream continues; the action requested is
-      // NEVER performed. Reported to the caller (as ignoredKinds, mirroring the benign
-      // session/update bookkeeping) so a live turn's evidence shows exactly what was denied.
+      // NEVER performed. Reported to the caller as an ignoredKinds count (mirroring the benign
+      // session/update bookkeeping), which executeAcpSubscriptionTurn returns and
+      // subscriptionAgentRuntime.ts/dispatch.ts thread onto the turn's RESULT telemetry (PRD-007
+      // packet Item C-1) -- so what was denied is now visible on the completed turn's evidence,
+      // not merely computed and discarded.
       const kind = await answerReverseRequest(connection, frame);
       onReverseRequest?.(kind);
       continue;
@@ -480,6 +493,14 @@ export async function executeAcpSubscriptionTurn(input: {
    * Sanitized counts of benign `session/update` kinds dropped during the prompt, PLUS any
    * agent->client reverse requests answered and denied during the prompt (kind names only --
    * `request_permission_denied`, `fs/read_text_file_denied`, `terminal/create_denied`, etc.).
+   *
+   * This return value alone does not put anything on the wire or in the event log -- it is
+   * threaded onward by callers: subscriptionAgentRuntime.ts's executeSubscriptionAgentTurn
+   * passes it through verbatim, and dispatch.ts's success-path telemetry object (PRD-007 packet
+   * Item C-1) is what actually lands it on the emitted RESULT frame / persisted event log. Before
+   * that dispatch.ts wiring existed, this field was computed correctly but silently dropped
+   * before reaching any turn's evidence -- do not assume "returned here" means "visible to an
+   * operator" without checking the caller chain still threads it through.
    */
   ignoredKinds: Record<string, number>;
 }> {
