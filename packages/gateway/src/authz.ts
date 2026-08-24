@@ -208,6 +208,11 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     case 'LIST_AGENTS':
     case 'LIST_AGENT_PROVIDERS':
     case 'CREATE_AGENT':
+    // G1D channels-agent-UX packet (2026-08-24) Item B(ii): local-agent
+    // autostart inherits the exact same seat-lattice ruling as
+    // CREATE_AGENT/UPDATE_AGENT_PROFILE above -- a non-operator seat gets
+    // no entitlement to this collab-surface mutation.
+    case 'SET_LOCAL_AGENT_AUTOSTART':
     case 'GET_CHANNEL_TIMELINE':
     // PRD-007 S4-Members: LIST_CHANNEL_MEMBERS inherits the exact same
     // seat-lattice ruling as LIST_CHANNELS/GET_CHANNEL_TIMELINE above -- a
@@ -253,6 +258,20 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     case 'CREATE_SCHEDULE':
     case 'SET_SCHEDULE_STATE':
     case 'LIST_SCHEDULES':
+    // G1D channels-agent-UX packet (2026-08-24), Amendment 1 Item D / delta-
+    // G1R ND-4: ADD_CHANNEL_MEMBER/REMOVE_CHANNEL_MEMBER are operator-seat-
+    // only, same authz class as the agent mutations above (CREATE_AGENT/
+    // UPDATE_AGENT_PROFILE/LIST_AGENTS/SET_LOCAL_AGENT_AUTOSTART). A channel
+    // seat is a transport identity (channel-http), not a collab surface
+    // credential holder, and gets no entitlement to mutate channel
+    // membership regardless of what the default: arm below would otherwise
+    // resolve to. Explicit named deny so the decision is legible and
+    // test-pinned (T-D5), matching every other arm in this switch. The
+    // 'node' seat is UNCHANGED -- both actions fall through the existing
+    // default deny below; the agentCollabWrite widening remains scoped to
+    // POST_CHANNEL_MESSAGE only.
+    case 'ADD_CHANNEL_MEMBER':
+    case 'REMOVE_CHANNEL_MEMBER':
       return DENY_NOT_PERMITTED;
     default:
       // Default deny for any future/unmapped action on a non-operator role.
@@ -313,6 +332,17 @@ function authorizeOperator(cmd: ClientCommand, ctx: AuthzContext): AuthzDecision
     cmd.action === 'CREATE_AGENT'
     || cmd.action === 'UPDATE_AGENT_PROFILE'
     || cmd.action === 'LIST_AGENTS'
+    || cmd.action === 'SET_LOCAL_AGENT_AUTOSTART'
+    // G1D channels-agent-UX packet (2026-08-24), Amendment 1 Item D / delta-
+    // G1R ND-4: ADD_CHANNEL_MEMBER/REMOVE_CHANNEL_MEMBER join the EXACT SAME
+    // operator + live-delegate authority gate as the agent-mutation commands
+    // above -- no new authority token, no parallel formula. The store's own
+    // assertChannelOwner (store.ts:3507) re-asserts channel ownership inside
+    // the transaction regardless (ND-1/ND-5: "surface AND store
+    // re-assertion"), so this surface-layer gate is defense in depth, not
+    // the sole enforcement point.
+    || cmd.action === 'ADD_CHANNEL_MEMBER'
+    || cmd.action === 'REMOVE_CHANNEL_MEMBER'
   ) {
     if (!surface) return DENY_AUTHORITY;
     if (surface.currentRole() !== 'operator') return DENY_SURFACE_NOT_OPERATOR;

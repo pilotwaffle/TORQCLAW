@@ -821,8 +821,40 @@ describe('Phase 4 protected semantic manifest', () => {
     // widening remains scoped to POST_CHANNEL_MESSAGE only. The operator
     // branch (authorizeOperator) is untouched. The protected approve
     // predicate and frozen Phase 4 seams above are unchanged.
+    // Authorized 2026-08-24 (G1D channels-agent-UX packet, Item B(ii)/N-3):
+    // SET_LOCAL_AGENT_AUTOSTART joins the existing CREATE_AGENT/
+    // UPDATE_AGENT_PROFILE/LIST_AGENTS operator + live-delegate authority
+    // gate (authorizeOperator), plus one explicit `case
+    // 'SET_LOCAL_AGENT_AUTOSTART':` arm added to the 'channel'-seat switch,
+    // grouped with the existing CREATE_AGENT/LIST_AGENT_PROVIDERS/
+    // LIST_AGENTS denies (identical seat-lattice reasoning: a channel-
+    // transport seat has no collab surface credential and gets no
+    // entitlement to this collab-surface mutation). The 'node'-seat branch
+    // is UNCHANGED -- SET_LOCAL_AGENT_AUTOSTART falls through the existing
+    // default deny; the agentCollabWrite widening remains scoped to
+    // POST_CHANNEL_MESSAGE only. The protected approve predicate and frozen
+    // Phase 4 seams above are unchanged.
+    // Authorized 2026-08-24 (G1D channels-agent-UX packet, Amendment 1 Item
+    // D / delta-G1R ND-4): ADD_CHANNEL_MEMBER/REMOVE_CHANNEL_MEMBER join the
+    // EXACT SAME operator + live-delegate authority gate as CREATE_AGENT/
+    // UPDATE_AGENT_PROFILE/LIST_AGENTS/SET_LOCAL_AGENT_AUTOSTART above
+    // (authorizeOperator) -- no new authority token, no parallel formula --
+    // plus one explicit `case 'ADD_CHANNEL_MEMBER':`/`case
+    // 'REMOVE_CHANNEL_MEMBER':` arm pair added to the 'channel'-seat switch,
+    // grouped with the existing agent-mutation denies (identical seat-
+    // lattice reasoning: a channel-transport seat has no collab surface
+    // credential and gets no entitlement to mutate channel membership). The
+    // 'node'-seat branch is UNCHANGED -- both actions fall through the
+    // existing default deny; the agentCollabWrite widening remains scoped to
+    // POST_CHANNEL_MESSAGE only. The store's own assertChannelOwner
+    // (store.ts:3507) re-asserts channel ownership inside the transaction
+    // regardless -- this surface-layer gate is defense in depth, not the
+    // sole enforcement point. The protected approve predicate and frozen
+    // Phase 4 seams above are unchanged. Verified via `git diff` that this
+    // pair of hunks is the sole new drift since the SET_LOCAL_AGENT_AUTOSTART
+    // authorization immediately above.
     const authzSha = createHash('sha256').update(authz).digest('hex');
-    expect(authzSha).toBe('e122a277c6900c3d6989dc33738b772d926f5d3eebaaa8a4f2c2c074a52ab87e');
+    expect(authzSha).toBe('206a9abf8f1870e96f7a86464d9f5bcade427ebd8c7eb93bab73726535f04a15');
     // The migration's own markers: the moved guard must not silently return,
     // and the relocation note must remain declared where it happened.
     expect(authz).not.toContain('export function checkResumeRole');

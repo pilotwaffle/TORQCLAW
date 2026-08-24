@@ -495,7 +495,7 @@ async function runAgentTurn(
   let contextText: string;
   let subscriptionContextText: string;
   try {
-    const ctx = await buildAnchorWindowContext(store, caller, channelId);
+    const ctx = await buildAnchorWindowContext(store, caller, channelId, agentPrincipalId);
     contextText = ctx.text;
     subscriptionContextText = ctx.subscriptionText;
   } catch (err: any) {
@@ -765,6 +765,63 @@ async function runAgentTurn(
   }
 
   const fallbackText = completedLocalFallbackText(task);
+  // G1D N-1/B-6 (2026-08-24 channels-agent-UX packet): the greeting-loop
+  // guard. Before ever committing a local-fallback post, check it against
+  // this agent's own recent posts in THIS channel for a near-duplicate
+  // (structural: normalized Jaccard word-set similarity, min-length floor
+  // exempting short acknowledgments -- same discipline as
+  // autoReplyContext.ts's collapseSelfRuns, inlined here rather than
+  // imported so this file's diff stays exactly the two hunks G1R's
+  // unfreeze authorized). Temperature-0 local inference makes a retry
+  // futile (the model would regenerate the identical text), so this never
+  // retries -- it suppresses once, loudly, and resolves the turn
+  // 'no_post' with a persisted discriminator distinguishing suppression
+  // from legitimate chosen silence (obligation 9).
+  if (fallbackText) {
+    const NEAR_DUP_MIN_LENGTH = 12;
+    const NEAR_DUP_SIMILARITY_THRESHOLD = 0.82;
+    const normalizeForDupCheck = (text: string): string =>
+      text.normalize('NFC').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').trim().replace(/\s+/g, ' ');
+    const isNearDuplicate = (candidate: string, recent: string): boolean => {
+      const a = normalizeForDupCheck(candidate);
+      const b = normalizeForDupCheck(recent);
+      if (a.length < NEAR_DUP_MIN_LENGTH || b.length < NEAR_DUP_MIN_LENGTH) return false;
+      if (a === b) return true;
+      const wordsA = new Set(a.split(' ').filter(Boolean));
+      const wordsB = new Set(b.split(' ').filter(Boolean));
+      if (wordsA.size === 0 || wordsB.size === 0) return false;
+      let intersection = 0;
+      for (const w of wordsA) if (wordsB.has(w)) intersection += 1;
+      const union = wordsA.size + wordsB.size - intersection;
+      return union > 0 && intersection / union >= NEAR_DUP_SIMILARITY_THRESHOLD;
+    };
+    const recentOwnPosts = db
+      .prepare(
+        `SELECT content_json AS contentJson FROM collab_events
+          WHERE channel_id = ? AND actor_principal_id = ? AND kind = 'message_posted'
+          ORDER BY channel_seq DESC LIMIT 10`,
+      )
+      .all(channelId, agentPrincipalId) as Array<{ contentJson: string }>;
+    const isDuplicate = recentOwnPosts.some((row) => {
+      try {
+        const parsed = JSON.parse(row.contentJson) as { text?: unknown };
+        return typeof parsed.text === 'string' && isNearDuplicate(fallbackText, parsed.text);
+      } catch {
+        return false;
+      }
+    });
+    if (isDuplicate) {
+      resolveAgentTurn(db, {
+        channelId, agentPrincipalId, channelSeq, state: 'no_post', nowIso: nowIso(),
+        leaseToken: recoveryLeaseToken, note: 'duplicate_suppressed',
+      });
+      console.error(
+        `[gateway] local agent fallback output suppressed as a near-duplicate of its own recent post - ` +
+        `agentPrincipalId=${agentPrincipalId} requestId=${request.id}`,
+      );
+      return;
+    }
+  }
   if (fallbackText) {
     try {
       const output = await store.commitAgentTurnFallbackOutput({

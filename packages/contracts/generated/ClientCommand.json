@@ -341,6 +341,35 @@
       "properties": {
         "action": {
           "type": "string",
+          "const": "SET_LOCAL_AGENT_AUTOSTART"
+        },
+        "agentPrincipalId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "autostart": {
+          "type": "boolean"
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "action",
+        "agentPrincipalId",
+        "autostart",
+        "idempotencyKey"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
           "const": "GET_RECEIPT"
         },
         "taskId": {
@@ -746,6 +775,64 @@
       "required": [
         "action",
         "channelId"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "ADD_CHANNEL_MEMBER"
+        },
+        "channelId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agentPrincipalId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "action",
+        "channelId",
+        "agentPrincipalId",
+        "idempotencyKey"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "const": "REMOVE_CHANNEL_MEMBER"
+        },
+        "channelId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agentPrincipalId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "action",
+        "channelId",
+        "agentPrincipalId",
+        "idempotencyKey"
       ],
       "additionalProperties": false
     }

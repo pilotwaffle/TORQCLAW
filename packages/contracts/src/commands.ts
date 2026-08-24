@@ -91,6 +91,21 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     idempotencyKey: z.uuid(),
   }),
   z.object({
+    // G1D channels-agent-UX packet (2026-08-24), Item B(ii): the one true
+    // missing writer -- a post-creation autostart toggle for LOCAL
+    // (ollama-local) agents only. Deliberately narrower than
+    // UPSERT_AGENT_RUNTIME_PROFILE: it carries no provider/adapter/model
+    // fields, so it can never be used to change what an agent runs, only
+    // whether an already-local agent is allowed to answer automatically.
+    // The server rejects this command outright for any non-ollama-local
+    // profile; subscription autostart moves only through
+    // UPDATE_AGENT_PROFILE's reconfirmExternalContext path.
+    action: z.literal('SET_LOCAL_AGENT_AUTOSTART'),
+    agentPrincipalId: z.uuid(),
+    autostart: z.boolean(),
+    idempotencyKey: z.uuid(),
+  }),
+  z.object({
     // TCLAW-4B: fetch one receipt (+ optionally its evidence events) by task.
     // taskId = gateway request_id, same field type as CANCEL_TASK.taskId.
     action: z.literal('GET_RECEIPT'),
@@ -336,6 +351,45 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
   z.object({
     action: z.literal('LIST_SCHEDULES'),
     channelId: z.string().min(1),
+  }),
+  z.object({
+    // G1D channels-agent-UX packet (2026-08-24), Amendment 1 Item D (curated
+    // channel membership) + delta-G1R disposition ND-1..ND-6: operator-seat-
+    // only, same authz class as the agent mutations above (CREATE_AGENT/
+    // UPDATE_AGENT_PROFILE/LIST_AGENTS/SET_LOCAL_AGENT_AUTOSTART) -- see
+    // authz.ts's authorizeOperator NAMED arm and the explicit 'channel'/'node'
+    // seat deny arm (ND-4). `agentPrincipalId` (not a bare `principalId`) is
+    // deliberate: this command can only ever target an AGENT principal, never
+    // a human/operator one -- the store's existing validation 3
+    // (addChannelMember, store.ts:2064-2074) rejects any target that is not
+    // kind='agent' owned by the channel's own operator, so a human/operator
+    // id submitted here is refused server-side (COLLAB_NOT_FOUND, D-5)
+    // regardless of what this contract's string type would otherwise admit.
+    // The collabSurface handler is a THIN, CALL-ONLY wrap of the EXISTING
+    // store.addChannelMember (store.ts:2037-2183, already keyed/idempotent/
+    // sequenced with epoch bump, committed member_added event, and post-lock
+    // fanout) -- ND-1: no new business logic lives outside that function or
+    // assertChannelOwner (store.ts:3507).
+    action: z.literal('ADD_CHANNEL_MEMBER'),
+    channelId: z.string().min(1),
+    agentPrincipalId: z.string().min(1),
+    idempotencyKey: z.uuid(),
+  }),
+  z.object({
+    // Sibling of ADD_CHANNEL_MEMBER above -- same operator-seat-only authz
+    // class, same agent-only target constraint, same thin call-only wrap
+    // (this time of store.removeChannelMember, store.ts:2185-2305). Removal
+    // eagerly closes the removed principal's own live subscription with
+    // `authorization_lost` (ND-2/T-1 pattern, existing store/coordinator
+    // behavior, not new for this command) and bumps membership_epoch; a
+    // re-add after remove starts a fresh epoch (D-3). Mid-turn removal is
+    // enforced in-transaction by the EXISTING store.ts:2653 dispatch guard
+    // (COLLAB_NOT_PERMITTED) -- this command adds no new dispatcher check
+    // (ND-2, T-D8: autoReplyDispatcher.ts stays at Builder P's two hunks).
+    action: z.literal('REMOVE_CHANNEL_MEMBER'),
+    channelId: z.string().min(1),
+    agentPrincipalId: z.string().min(1),
+    idempotencyKey: z.uuid(),
   }),
 ]).superRefine((command, ctx) => {
   if (
