@@ -90,20 +90,32 @@ export type AnchorWindowResult = {
 };
 
 /**
- * G1D N-1: collapse a MUTUALLY NEAR-IDENTICAL RUN of `selfPrincipalId`'s own
- * `message_posted` events down to the most recent one, replacing the
- * collapsed prefix of the run with a single synthetic elision marker in
- * place. This is a RUN collapse, not a global one -- it targets consecutive
- * self-repetition (the greeting-loop shape) and never touches a distinct
- * self-reply that happens not to be adjacent to another near-duplicate
- * (obligation 6b, "the amputation test"): two long, distinct self-authored
- * messages separated by someone else's message are never in the same run,
- * so neither is ever collapsed.
+ * G1D N-1, respecified by G1R Gate-1 REQUIRED CORRECTION (a) (channels-live-
+ * defects packet, 2026-08-24): collapse a MUTUALLY NEAR-IDENTICAL RUN of
+ * `selfPrincipalId`'s own `message_posted` events down to the most recent
+ * one, replacing the collapsed prefix of the run with a single synthetic
+ * elision marker in place -- but the per-actor "last kept self-post"
+ * reference now SURVIVES interleaving: another actor's message, or a
+ * non-message event, no longer resets it. Only a self-message that is NOT a
+ * near-duplicate of the surviving reference starts a fresh reference. This
+ * is what makes the collapse fire on the REAL live shape (operator and
+ * agent strictly alternate) rather than only on artificially-consecutive
+ * self-posts, which the original (pre-correction) run-reset-on-interleaving
+ * behavior never encountered live (G1D's D-B finding).
  *
- * "Mutually near-identical" (not "identical to the very first of the run")
- * means the run only continues while each next self-message is a
- * near-duplicate of the immediately preceding KEPT candidate -- a
- * conservative choice that never drifts across a topic change one
+ * Still never touches a distinct self-reply (obligation 6b, "the amputation
+ * test"): two long, distinct self-authored messages -- with anything at all
+ * in between -- are never collapsed into each other, because the predicate
+ * (`looksLikeNearDuplicateOfOwnRecent`) is unchanged and still compares
+ * against the immediately preceding KEPT candidate only, never a first-of-
+ * run or window-wide comparison (G1R F-2: a window-wide order-blind Jaccard
+ * collapse would silently destroy a genuine decision reversal -- explicitly
+ * rejected).
+ *
+ * "Mutually near-identical" (not "identical to the very first kept
+ * reference") means the reference only advances while each next self-
+ * message is a near-duplicate of the immediately preceding KEPT candidate --
+ * a conservative choice that never drifts across a topic change one
  * near-duplicate pair at a time.
  */
 function collapseSelfRuns<T extends TimelineEventObject>(
@@ -111,27 +123,46 @@ function collapseSelfRuns<T extends TimelineEventObject>(
   selfPrincipalId: string,
 ): Array<T | { elisionOf: T; collapsedCount: number }> {
   const out: Array<T | { elisionOf: T; collapsedCount: number }> = [];
-  let runStart = -1; // index into `out` of the current run's kept representative
+  // Index into `out` of the current per-actor "last kept self-post"
+  // reference. Unlike the pre-correction version, this is NEVER reset by an
+  // intervening other-actor message or non-message event -- only by pushing
+  // a genuinely new (non-collapsed) self-message, which becomes the new
+  // reference at its own position in `out`.
+  let lastSelfIndex = -1;
   for (const ev of events) {
     const isSelfMessage = ev.kind === 'message_posted'
       && ev.actorPrincipalId === selfPrincipalId
       && typeof ev.payload.text === 'string';
-    if (isSelfMessage && runStart !== -1) {
-      const prevEntry = out[runStart]!;
+    if (isSelfMessage && lastSelfIndex !== -1) {
+      const prevEntry = out[lastSelfIndex]!;
       const prevText = 'elisionOf' in prevEntry
         ? (prevEntry.elisionOf as T).payload.text as string
         : (prevEntry as T).payload.text as string;
       if (looksLikeNearDuplicateOfOwnRecent(ev.payload.text as string, prevText)) {
-        // Extend the run: replace the kept representative with THIS (more
-        // recent) event, tallying how many were collapsed under it.
+        // Extend the reference: THIS (more recent) event becomes the kept
+        // representative, tallying how many were collapsed under it. G2A
+        // B-1 fix: the elision entry must render at ITS OWN (current, most
+        // recent) position, not in place at the OLD reference's slot --
+        // once the reference survives interleaving, the old slot can be
+        // arbitrarily far back, and writing in place there would render a
+        // non-monotonic cursor order (the agent's newest reply appearing to
+        // precede operator messages it was actually posted after). Remove
+        // the stale entry and push the new one at the end, preserving
+        // event order otherwise (D-B / G1R delta (iii)).
         const priorCollapsed = 'elisionOf' in prevEntry ? prevEntry.collapsedCount : 0;
-        out[runStart] = { elisionOf: ev, collapsedCount: priorCollapsed + 1 };
+        out.splice(lastSelfIndex, 1);
+        out.push({ elisionOf: ev, collapsedCount: priorCollapsed + 1 });
+        lastSelfIndex = out.length - 1;
         continue;
       }
     }
-    // Not a continuation: start a fresh potential run at this event.
+    // Not a collapse: push this event as-is. If it is a self-message, it
+    // becomes the new "last kept self-post" reference; any OTHER event
+    // (another actor's message, or a non-message event) is pushed through
+    // untouched and leaves the existing reference exactly where it was --
+    // this is the correction: interleaving no longer erases the reference.
     out.push(ev);
-    runStart = isSelfMessage ? out.length - 1 : -1;
+    if (isSelfMessage) lastSelfIndex = out.length - 1;
   }
   return out;
 }
