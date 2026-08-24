@@ -403,7 +403,11 @@ export async function recoverStrandedScheduleRuns(graceSeconds = 30): Promise<nu
     }
     recovered += 1;
     try {
-      await runScheduledTurn(store, db, run.scheduleId, run.fireSeq, run.channelId, run.agentPrincipalId, null);
+      // NB-4 (G2A-OPUS48-CRON.md): pass the recovered run's OWN promptHint
+      // (now joined into findStrandedScheduleRuns) rather than `null` --
+      // a recovered run must not silently drop the operator's note on
+      // exactly the turn that already failed once.
+      await runScheduledTurn(store, db, run.scheduleId, run.fireSeq, run.channelId, run.agentPrincipalId, run.promptHint);
     } catch (err: any) {
       console.error(`[gateway] recovered scheduled turn failed unexpectedly (${err?.message ?? err})`);
     }

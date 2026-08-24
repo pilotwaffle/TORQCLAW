@@ -197,6 +197,73 @@ describe('CRON — collab primitives (dist artifact)', () => {
     }
   });
 
+  it('NB-4 (G2A-OPUS48-CRON.md): findStrandedScheduleRuns joins the OWNING schedule\'s promptHint, RED against the pre-fix SELECT that carried no promptHint column at all', () => {
+    // RED reproduced against unfixed source: the pre-fix SELECT in
+    // packages/collab/src/cron.ts had no `s.prompt_hint AS promptHint`
+    // projection and no JOIN to collab_agent_schedules, so `(row as any)
+    // .promptHint` was `undefined` for every stranded run -- silently
+    // dropping the operator's note on exactly the turn that already failed
+    // once (cronDispatcher.ts:406 previously hardcoded `null`). This test
+    // pins the fixed shape: a schedule created WITH a promptHint produces a
+    // stranded-run row that carries that SAME promptHint, and a schedule
+    // created WITHOUT one carries null (never undefined, never a stale
+    // value from a different schedule).
+    const dir = mkdtempSync(join(tmpdir(), 'torq-cron-nb4-'));
+    const dbPath = join(dir, 'collab.db');
+    const seeded = seedChannel(dbPath);
+    const db = new Database(dbPath);
+    try {
+      const hintedId = 'sched-hinted';
+      const bareId = 'sched-bare';
+      collab.createSchedule(db, {
+        id: hintedId, channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
+        createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: 'NB-4 operator note',
+        idempotencyKey: randomUUID(), nowIso: nowIso(),
+      });
+      collab.createSchedule(db, {
+        id: bareId, channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
+        createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null,
+        idempotencyKey: randomUUID(), nowIso: nowIso(),
+      });
+
+      // Manufacture a STRANDED row directly (claim + record-dispatched, then
+      // backdate fired_at past the grace window) -- isolates
+      // findStrandedScheduleRuns from tickSchedules/the dispatcher, per this
+      // describe block's "collab primitives" scope.
+      const past = new Date(Date.now() - 120_000).toISOString();
+      for (const scheduleId of [hintedId, bareId]) {
+        const fireSeq = collab.claimScheduleFire(db, { scheduleId, expectedFireSeq: 0, intervalSeconds: 60, nowIso: past })!;
+        expect(fireSeq, `claim must succeed for ${scheduleId}`).toBe(1);
+        const recorded = collab.recordScheduleRunDispatched(db, {
+          scheduleId, fireSeq, channelId: seeded.channelId, agentPrincipalId: seeded.agentId, nowIso: past,
+        });
+        expect(recorded).toBe(true);
+      }
+
+      const stranded = collab.findStrandedScheduleRuns(db, nowIso(), 30);
+      const hintedRun = stranded.find((r: any) => r.scheduleId === hintedId);
+      const bareRun = stranded.find((r: any) => r.scheduleId === bareId);
+      expect(hintedRun, 'the hinted schedule must be found stranded').toBeTruthy();
+      expect(bareRun, 'the bare schedule must be found stranded').toBeTruthy();
+      expect((hintedRun as any).promptHint, 'THE LOAD-BEARING ASSERTION: promptHint must be joined in, not dropped').toBe('NB-4 operator note');
+      expect((bareRun as any).promptHint).toBeNull();
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('NB-4: recoverStrandedScheduleRuns passes the stranded run\'s OWN promptHint, never a hardcoded null (source-level pin on cronDispatcher.ts)', () => {
+    // Structural pin, mirroring this file's own FRONTIER-fence structural
+    // test just above: the fixed call site must read `run.promptHint`, and
+    // must NOT pass a literal `null` for promptHint at that call.
+    const src = readFileSync(CRON_DISPATCHER_SRC, 'utf8');
+    const m = src.match(/await runScheduledTurn\(store, db, run\.scheduleId, run\.fireSeq, run\.channelId, run\.agentPrincipalId, ([^)]+)\);/);
+    expect(m, 'recoverStrandedScheduleRuns\' runScheduledTurn call site not found -- was it refactored?').toBeTruthy();
+    const promptHintArg = m![1].trim();
+    expect(promptHintArg, 'NB-4 REGRESSION: recoverStrandedScheduleRuns must pass run.promptHint, not a hardcoded null').toBe('run.promptHint');
+  });
+
   it('assertScheduleStillAuthorized: WAKE-TIME re-evaluation refuses on membership removal, STOP (both scopes), and inactive principal -- each with a POSITIVE CONTROL', () => {
     const dir = mkdtempSync(join(tmpdir(), 'torq-cron-wake-'));
     const dbPath = join(dir, 'collab.db');
@@ -307,6 +374,40 @@ describe('CRON — end-to-end (real dispatcher, real profile, committed rows)', 
   let script: string | null | 'REQUIRE_APPROVAL';
   let observedRefusals: string[] = [];
 
+  // Extracted so the NB-1 poison-router test (below) can temporarily install
+  // a CAPTURING override and then restore this exact standard one afterward
+  // -- every other test in this describe block depends on this override
+  // being installed, so NB-1 must put it back, not merely clear it to null.
+  function installStandardDispatchOverride(): void {
+    cronDispatcher.setCronDispatchForTest((req: any, _diag: any) => {
+      void (async () => {
+        events.taskStore.create(req, _diag);
+        try {
+          if (script === 'REQUIRE_APPROVAL') {
+            events.taskStore.complete(req.id, '', { blockedOn: 'collab__post_message' });
+            return;
+          }
+          if (script !== null) {
+            try {
+              await bridge.executeTool(
+                'collab__post_message',
+                { channelId: seeded.channelId, text: script },
+                req.effectiveProfile,
+                seeded.agentId,
+              );
+            } catch (toolErr: any) {
+              observedRefusals.push(String(toolErr?.message ?? toolErr));
+              throw toolErr;
+            }
+          }
+          events.taskStore.complete(req.id, 'ok', {});
+        } catch (err) {
+          events.taskStore.fail(req.id, String((err as any)?.message ?? err));
+        }
+      })();
+    });
+  }
+
   beforeAll(async () => {
     dataDir = mkdtempSync(join(tmpdir(), 'torq-cron-e2e-'));
     const pepper = Buffer.alloc(32, 0x61);
@@ -353,33 +454,7 @@ describe('CRON — end-to-end (real dispatcher, real profile, committed rows)', 
     // override stands in for "what a model decided to call", not for
     // dispatch.ts's own approval-branch logic (which is untouched real code
     // exercised elsewhere in this repo's C2/S0 suites).
-    cronDispatcher.setCronDispatchForTest((req: any, _diag: any) => {
-      void (async () => {
-        events.taskStore.create(req, _diag);
-        try {
-          if (script === 'REQUIRE_APPROVAL') {
-            events.taskStore.complete(req.id, '', { blockedOn: 'collab__post_message' });
-            return;
-          }
-          if (script !== null) {
-            try {
-              await bridge.executeTool(
-                'collab__post_message',
-                { channelId: seeded.channelId, text: script },
-                req.effectiveProfile,
-                seeded.agentId,
-              );
-            } catch (toolErr: any) {
-              observedRefusals.push(String(toolErr?.message ?? toolErr));
-              throw toolErr;
-            }
-          }
-          events.taskStore.complete(req.id, 'ok', {});
-        } catch (err) {
-          events.taskStore.fail(req.id, String((err as any)?.message ?? err));
-        }
-      })();
-    });
+    installStandardDispatchOverride();
   }, 60000);
 
   afterEach(() => {
@@ -440,6 +515,77 @@ describe('CRON — end-to-end (real dispatcher, real profile, committed rows)', 
   // DELTA from its own baseline, since they share seeded.channelId across
   // the whole describe block (see afterEach's schedule-stop comment for why
   // that sharing is safe for RUN state but not for a bare event count).
+
+  it('NB-1 (G2A-OPUS48-CRON.md): the FRONTIER fence survives a POISONED router -- behavioral, not source-text-only', async () => {
+    // The shipped structural test (CRON_DISPATCHER_SRC pattern match, above)
+    // pins the SOURCE TEXT but was flagged by G1R/G2A as unable to catch a
+    // regression that changed the override's semantics while keeping the
+    // literal string intact. This reproduces G2A's own verifier-owned probe
+    // as a PERMANENT test: monkey-patch router.evaluateRequest on the SAME
+    // module instance the built cronDispatcher.js imports (via the
+    // pnpm-workspace-linked @torqclaw/router dist) to always return
+    // tier:'FRONTIER', fire a real due schedule through tickSchedules(), and
+    // capture the diag object actually reaching the dispatch() seam.
+    //
+    // POSITIVE CONTROL: assert the poison is live (evaluateRequest really
+    // does return FRONTIER) so a router that silently ignored the patch
+    // cannot make this test pass vacuously.
+    const routerModule = await import(
+      pathToFileURL(join(REPO_ROOT, 'packages', 'router', 'dist', 'engine.js')).href
+    ) as any;
+    const originalEvaluateRequest = routerModule.router.evaluateRequest;
+
+    let observedDiagTier: string | null = null;
+    cronDispatcher.setCronDispatchForTest((req: any, diag: any) => {
+      observedDiagTier = diag.tier;
+      void (async () => {
+        events.taskStore.create(req, diag);
+        events.taskStore.complete(req.id, 'ok', {});
+      })();
+    });
+
+    try {
+      routerModule.router.evaluateRequest = () => ({
+        score: 1,
+        reason: 'NB-1 poison probe',
+        tier: 'FRONTIER',
+      });
+
+      // POSITIVE CONTROL: the poison is live on the exact instance cron uses.
+      const poisoned = routerModule.router.evaluateRequest({} as any);
+      expect(poisoned.tier, 'positive control: the router poison must be observably live').toBe('FRONTIER');
+
+      script = null;
+      const scheduleId = randomUUID();
+      const db = collabSurface.getCollabDbForAutoReply()!;
+      collab.createSchedule(db, {
+        id: scheduleId, channelId: seeded.channelId, agentPrincipalId: seeded.agentId,
+        createdByPrincipalId: seeded.operatorId, intervalSeconds: 60, promptHint: null,
+        idempotencyKey: randomUUID(), nowIso: new Date(Date.now() - 120_000).toISOString(),
+      });
+
+      const claimed = await cronDispatcher.tickSchedules();
+      expect(claimed, 'tickSchedules must claim the due schedule despite the poisoned router').toBe(1);
+
+      await waitForRunTerminal(scheduleId, 1);
+
+      expect(observedDiagTier, 'THE LOAD-BEARING ASSERTION: with the router forced to FRONTIER, the tier reaching the dispatch seam must still be OLLAMA_LOCAL -- the spread-then-override fence at cronDispatcher.ts must win').toBe('OLLAMA_LOCAL');
+      expect(observedDiagTier).not.toBe('FRONTIER');
+    } finally {
+      routerModule.router.evaluateRequest = originalEvaluateRequest;
+      // Verify the restore, not just perform it: prove the router instance
+      // is byte-identical to its pre-poison behavior before this test exits,
+      // so a later test in this file cannot silently inherit the poison.
+      const restored = routerModule.router.evaluateRequest === originalEvaluateRequest;
+      expect(restored, 'router.evaluateRequest must be restored to the original bound function').toBe(true);
+      // Every OTHER test in this describe block depends on the STANDARD
+      // capturing override (installed in beforeAll) being in place -- put it
+      // back rather than leaving this test's tier-capturing override
+      // installed, which would silently break every test that runs after
+      // this one in file order.
+      installStandardDispatchOverride();
+    }
+  }, 20000);
 
   it('a due schedule does NOT fire while STOPPED (channel scope) -- POSITIVE CONTROL: the SAME schedule fires once STOP is cleared', async () => {
     const baseline = messagePostedRows(seeded.collabDbPath, seeded.channelId).length;
@@ -660,12 +806,16 @@ describe('CRON — end-to-end (real dispatcher, real profile, committed rows)', 
     expect(messagePostedRows(seeded.collabDbPath, seeded.channelId).length).toBe(baseline);
   }, 20000);
 
-  it('FALSIFIABILITY: with dispatch() unreplaced (no override), tickSchedules on a due schedule still claims and DISPATCHES for real -- proving the earlier assertions exercised the real path, not a fixture', async () => {
-    // This does not remove the override (that would hang on a real Ollama
-    // call); instead it proves the CLAIM mechanism itself is real by
-    // showing a schedule with NO agent member (never legally claimable)
-    // produces zero claims -- the structural counterpart to A3-c's
-    // trigger-disabled probe.
+  it('CLAIM MECHANISM IS REAL: a schedule naming an agent with no live membership is claimed (watermark still advances) but then refused at wake, never silently skipped -- the structural counterpart to A3-c\'s trigger-disabled probe', async () => {
+    // NB-2 (G2A-OPUS48-CRON.md): this test was previously titled
+    // "FALSIFIABILITY: with dispatch() unreplaced (no override)...", which
+    // overclaimed -- its own comment admits the setCronDispatchForTest
+    // override stays in place throughout (removing it would hang on a real
+    // Ollama call). Renamed to describe what the assertions actually prove:
+    // the CLAIM mechanism is exercised for real (claimed=1, watermark
+    // discipline), and a stranger agent with no membership row is refused
+    // at WAKE-time authority, not admitted from a fixture that never really
+    // claims anything.
     const baseline = messagePostedRows(seeded.collabDbPath, seeded.channelId).length;
     const db = collabSurface.getCollabDbForAutoReply()!;
     const scheduleId = randomUUID();

@@ -386,6 +386,15 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
                   exactModelId: subscriptionResult.modelId,
                   costSource: 'unavailable',
                   cancelled: false,
+                  // PRD-007 packet Item C-1: ignoredKinds was computed end-to-end
+                  // (subscriptionAcpRuntime.ts -> subscriptionAgentRuntime.ts) but
+                  // dropped here, so it never reached the RESULT frame or the
+                  // event log despite doc comments implying it was surfaced as
+                  // evidence. Threading it into telemetry makes it real: the sole
+                  // consumer is `emit('RESULT', result.text, result.telemetry)`
+                  // below, so it is now visible on the emitted RESULT and
+                  // therefore in the persisted event log.
+                  ignoredKinds: subscriptionResult.ignoredKinds,
                 },
               };
             } catch (error) {

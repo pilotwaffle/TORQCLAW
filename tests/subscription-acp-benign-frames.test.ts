@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { resolveSubscriptionAcpServer } from '../packages/gateway/src/subscriptionRuntimeCatalog.js';
-import { executeAcpSubscriptionTurn } from '../packages/gateway/src/subscriptionAcpRuntime.js';
+import { executeAcpSubscriptionTurn, parseStrictAcpFrame } from '../packages/gateway/src/subscriptionAcpRuntime.js';
 import type { ProcessSummary, SubscriptionProcessDriver } from '../packages/gateway/src/safeSubscriptionProcess.js';
 
 /**
@@ -845,6 +845,96 @@ describe('subscription ACP runtime: agent->client reverse requests during a live
       if (handshake(frame, emit, sessionId)) return;
       if (frame.id === 'prompt') {
         emit({ jsonrpc: '2.0', id: 'bad-request', method: 'session/request_permission', params: 'not-an-object' });
+      }
+    });
+    const saved = process.env.GLM_API_KEY;
+    process.env.GLM_API_KEY = 'test-only';
+    try {
+      await expect(executeAcpSubscriptionTurn({
+        providerId: runtime.providerId, modelId: runtime.exactModelId,
+        runtimeFingerprint: runtime.runtimeFingerprint, prompt: 'hi', cwd: 'C:\\safe', driver,
+      })).rejects.toThrow('ACP_MALFORMED_FRAME');
+    } finally {
+      if (saved === undefined) delete process.env.GLM_API_KEY; else process.env.GLM_API_KEY = saved;
+    }
+  });
+
+  it('T-4: a reverse request method NOT in FS_OR_TERMINAL_REVERSE_METHODS produces exactly the key "unknown_request_denied" (never the adapter-supplied method string), and no field of the completed turn\'s result carries the method name', async () => {
+    const runtime = resolveSubscriptionAcpServer('zai-subscription', 'glm-5.3')!;
+    const sessionId = 'unknown-method-key-space-session';
+    const sentinelMethod = 'totally/unrecognized_method_xyz';
+    const { driver } = interactiveDriver((frame, emit) => {
+      if (handshake(frame, emit, sessionId)) return;
+      if (frame.id === 'prompt') {
+        emit({ jsonrpc: '2.0', id: 'unknown-request', method: sentinelMethod, params: { sessionId } });
+        emit(sessionUpdate(sessionId, {
+          sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'GLM53_OK' },
+        }));
+        emit({ jsonrpc: '2.0', id: 'prompt', result: { stopReason: 'end_turn' } });
+      }
+    });
+    const saved = process.env.GLM_API_KEY;
+    process.env.GLM_API_KEY = 'test-only';
+    try {
+      const result = await executeAcpSubscriptionTurn({
+        providerId: runtime.providerId, modelId: runtime.exactModelId,
+        runtimeFingerprint: runtime.runtimeFingerprint, prompt: 'hi', cwd: 'C:\\safe', driver,
+      });
+      // The key is the fixed sentinel 'unknown_request_denied' -- never the adapter's own
+      // method string -- so an adapter that invents new reverse-request method names can never
+      // grow ignoredKinds' key space (an unbounded key space fed by untrusted process input would
+      // itself be a mild DoS/telemetry-poisoning surface).
+      expect(Object.keys(result.ignoredKinds)).toEqual(['unknown_request_denied']);
+      expect(result.ignoredKinds[sentinelMethod]).toBeUndefined();
+      // No field anywhere in the turn's result (text, exactModelId, runtimeFingerprint, or any
+      // ignoredKinds key) contains the raw method string -- the only place it may legally appear
+      // is the JSON-RPC wire reply this runtime sends back to the child process, never in what
+      // reaches dispatch.ts's RESULT telemetry / receipt.
+      const serialized = JSON.stringify(result);
+      expect(serialized.includes(sentinelMethod)).toBe(false);
+    } finally {
+      if (saved === undefined) delete process.env.GLM_API_KEY; else process.env.GLM_API_KEY = saved;
+    }
+  });
+});
+
+describe('T-5: parseStrictAcpFrame requires a scalar (string|number) id on an agent->client reverse request', () => {
+  const baseRequest = (id: unknown) => JSON.stringify({
+    jsonrpc: '2.0', id, method: 'fs/read_text_file', params: { sessionId: 's', path: 'x' },
+  });
+
+  it('accepts a string id (the common case)', () => {
+    const frame = parseStrictAcpFrame(baseRequest('abc-123'));
+    expect(frame.id).toBe('abc-123');
+  });
+
+  it('accepts a number id (JSON-RPC 2.0 legally allows either scalar type)', () => {
+    const frame = parseStrictAcpFrame(baseRequest(42));
+    expect(frame.id).toBe(42);
+  });
+
+  it('rejects an object id with ACP_MALFORMED_FRAME', () => {
+    expect(() => parseStrictAcpFrame(baseRequest({ x: 1 }))).toThrow('ACP_MALFORMED_FRAME');
+  });
+
+  it('rejects an array id with ACP_MALFORMED_FRAME', () => {
+    expect(() => parseStrictAcpFrame(baseRequest([1, 2]))).toThrow('ACP_MALFORMED_FRAME');
+  });
+
+  it('rejects a null id with ACP_MALFORMED_FRAME (JSON-RPC reserves null for an unknown-id notification-like reply, not a real request)', () => {
+    expect(() => parseStrictAcpFrame(baseRequest(null))).toThrow('ACP_MALFORMED_FRAME');
+  });
+
+  it('a non-scalar id is never echoed into the -32601 reply -- the frame never reaches answerReverseRequest at all', async () => {
+    const runtime = resolveSubscriptionAcpServer('zai-subscription', 'glm-5.3')!;
+    const sessionId = 'object-id-reverse-request-session';
+    const { driver } = interactiveDriver((frame, emit) => {
+      if (handshake(frame, emit, sessionId)) return;
+      if (frame.id === 'prompt') {
+        emit({
+          jsonrpc: '2.0', id: { untrusted: 'shape' }, method: 'fs/read_text_file',
+          params: { sessionId, path: 'C:\\safe\\secret.txt' },
+        });
       }
     });
     const saved = process.env.GLM_API_KEY;

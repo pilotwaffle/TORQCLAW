@@ -290,7 +290,11 @@ async def submit_task(payload: dict) -> dict:
 
 
 # CLAUDE.md §6: network egress requires explicit operator approval; default off. P6 fail-closed otherwise.
-if os.environ.get("TORQCLAW_WEB_SEARCH_ENABLED") == "1":
+# TRUTHY parity with TS's collabSurface.ts:webSearchEnabled() (widen Python, never narrow TS,
+# per G2A's direction): same set {"1","true","yes","on"}, same (env ?? '').trim().toLowerCase()
+# normalization before the membership check.
+_WEB_SEARCH_TRUTHY = {"1", "true", "yes", "on"}
+if (os.environ.get("TORQCLAW_WEB_SEARCH_ENABLED") or "").strip().lower() in _WEB_SEARCH_TRUTHY:
     @mcp.tool()
     async def web_search(query: str, limit: int = 5) -> dict:
         """Keyless search via DDGS CLI, Python fallback, then SearXNG."""

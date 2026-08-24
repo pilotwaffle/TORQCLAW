@@ -30,14 +30,37 @@ fix the gateway side to honor it) or "tokens required always" (then fix the
 e2e to set matching `TORQCLAW_CHANNEL_SERVICE_TOKEN` / `CHANNEL_HTTP_TOKEN`).
 Do not relax the production guard (`requireProductionTokens`) to make it pass.
 
-## 2. `ops/doctor.mjs:62` — same legacy-token staleness (not CI-gated)
+**Update 2026-08-23 (docs-truth pass) — verified.** Token provisioning is
+**already present** in the e2e harness: `ops/e2e-channel.mjs:63` and `:68`
+pass `TORQCLAW_CHANNEL_SERVICE_TOKEN: CHANNEL_TOKEN` when launching the
+gateway and the http-channel process respectively. The operator's 2026-08-23
+ruling ("tokens-required-always") is recorded as **ratifying the conditional
+contract already in `ops/launcher-config.mjs:48-54`** (`requireEnabledChannelCredential`:
+a non-placeholder `TORQCLAW_CHANNEL_SERVICE_TOKEN` is required **if and only
+if** `TORQCLAW_HTTP_CHANNEL === '1'`) — **not** as authorizing an unconditional
+token requirement that would apply even when the HTTP channel is disabled.
+**The actual CI-red cause remains UNKNOWN/undiagnosed.** This item is
+explicitly NOT fixed by this docs-truth pass; the 502 symptom above still
+needs live diagnosis.
 
-The standalone CLI doctor connects with
+## 2. `ops/doctor.mjs:62` — same legacy-token staleness (not CI-gated) — **CLOSED 2026-08-23**
+
+~~The standalone CLI doctor connects with
 `token: process.env.TORQCLAW_GATEWAY_TOKEN || ''`. Against a production
 runtime (where that variable is forbidden and the server's root token is
 empty) it will always report gateway-down. Either give it the surface-
 credential path (read `<dataDir>/operator-credential.token` after bootstrap,
-or accept a `--credential` arg) or mark it dev-only in its banner.
+or accept a `--credential` arg) or mark it dev-only in its banner.~~
+
+**Verified 2026-08-23: already fixed.** `ops/doctor.mjs:75-95`
+(`resolveDoctorAuth`) ships the fail-loud credential path this item asked
+for: it tries `TORQCLAW_OPERATOR_CREDENTIAL`, then falls back to reading
+`<dataDir>/operator-credential.token` (`:81-88`), and only in production with
+neither present does it return `{ kind: 'problem', ... }` — which
+`ops/doctor.mjs:132-137` records as `record('gateway', 'fail', ...)`, an
+explicit non-degrading failure (comment: "A structural inability to
+authenticate is NOT a healthy gateway and is NOT a warning"), not a silent
+"gateway down" misreport. No degrade-to-OK fallback exists in this path.
 
 ## 3. PR dispositions (post-#47 merge)
 
@@ -59,6 +82,7 @@ or accept a `--credential` arg) or mark it dev-only in its banner.
 
 ## 4. Carried obligations already on record (pointers, not new work)
 
+- **CO-9 (`CollabError`-code throwing-getter, `docs/prd-reviews/G2A-OPUS-COLLAB-PRESENCE-UI-005-S1-REAUDIT.md:348`) — verified 2026-08-23, disposition unchanged: conditional-future, no reachable defect.** `CollabError.code` (`packages/collab/src/store.ts:110`) is a plain data property (`readonly code: CollabErrorCode`), not a throwing accessor; zero `get code()` accessors exist in `packages/collab/src/`. Revisit only if a non-`CollabError` throw source is introduced. The one owed edit is the A6(b) parenthetical noted in `docs/prd-reviews/G1R-OPUS-COLLAB-PRESENCE-UI-005-A6-T9.md` (see that file's NB-4).
 - `docs/prd-reviews/G2A-OPUS48-COLLAB-PRESENCE-UI-005-S3-S4-PASS3.md` — CO-S3-1
   (ERROR frames invisible to the console; gateway-wide envelope fix),
   NB-P3-1 (`awaitingConfirm` limbo), NB-RA-1/2.
@@ -87,3 +111,68 @@ or accept a `--credential` arg) or mark it dev-only in its banner.
   `approval.py` (two live sites). G2A's assessment is on record in session:
   option (a) with (d)'s discipline, SA-8 as a permanent RED-on-revert gate.
   SB2b is BLOCKED until ruled.
+
+## ESLint adoption (filed 2026-08-23)
+
+Filed per B-6 (G1D-FABLE-CLEANUP-DOCS-TRUTH-2026-08-23's resolution of G1R
+findings): item 9's original scope ("if ESLint config exists anywhere, wire
+`lint` tasks; if none exists, add a minimal flat-config ESLint... to the TS
+packages") was struck for this slice. `pnpm lint` was made honestly
+self-describing instead (exits 0, stdout states plainly that lint is not
+configured) — see `ops/lint-not-configured.mjs` and
+`tests/lint-gate-honesty.test.ts`. This entry is the scoped follow-up task
+for actually adopting ESLint, so the gap does not go unrecorded.
+
+**Packages in scope** (first-party TS workspace packages only — vendored
+`engines/hermes_kernel/vendor/hermes-agent` already has its own ESLint
+configs under `apps/desktop`, `web`, `ui-tui` and is explicitly OUT of
+scope; CLAUDE.md's "do not rewrite vendored upstream" applies):
+- `apps/console`
+- `packages/bridge`
+- `packages/collab`
+- `packages/contracts`
+- `packages/gateway`
+- `packages/inference`
+- `packages/router`
+- `packages/channel-http` (if present as a workspace package at adoption time)
+
+**Rule set — correctness-only, no stylistic churn.** The explicit intent
+(per B-6: "recommended rules, no stylistic churn; errors only for
+correctness classes") is to catch real defects, not to relitigate this
+repo's existing formatting. Minimum bar:
+- `@typescript-eslint/recommended` (type-aware correctness rules: no-floating-promises,
+  no-misused-promises, no-unnecessary-condition where practical) — NOT
+  `@typescript-eslint/recommended-requiring-type-checking`'s stylistic
+  siblings, and NOT `@typescript-eslint/stylistic`.
+  See docs/security/profile-conformance.md and CLAUDE.md §4 invariants for
+  the shapes a correctness lint pass should NOT be tempted to "fix" (e.g.
+  contract-validated frame handling, seq-cursor resume logic) without
+  understanding why they are written the way they are.
+- `eslint-plugin-import`'s `no-cycle` and `no-self-import` (this repo's
+  reachability/orphan-module discipline already checks structure at the
+  package level via `pnpm reachability`; a lint-level cycle check catches
+  the file-level case that gate does not).
+- No stylistic rule additions (no `prettier`/formatting-plugin wiring as part
+  of this task — a separate, explicitly-scoped follow-up if ever wanted).
+- No new runtime dependency; ESLint and its plugins are devDependencies only,
+  scoped to the packages listed above (or hoisted to the workspace root if
+  that is cheaper to maintain — implementer's call, but keep it OUT of
+  vendored `engines/hermes_kernel/vendor/hermes-agent`).
+
+**Findings owner:** the operator. This task's implementer wires the lint
+tooling and gets it running clean (or with a documented, explicitly-approved
+baseline suppression list) — it does NOT unilaterally "fix" every finding it
+surfaces. Findings that look like real bugs get reported to the operator
+for a ruling on priority and correct fix, per this repo's "no drive-by
+cleanup" discipline (CLAUDE.md §4, Change scoping) and the standing rule
+that Builder-tier work stays inside its approved scope.
+
+**Acceptance for the adoption task itself:** `pnpm lint` runs a REAL linter
+across the packages listed above and exits non-zero on an introduced
+correctness violation (proven with a throwaway RED case, e.g. an
+unreachable `no-floating-promises` violation, removed before commit); the
+root `lint` script is updated to invoke the real tool instead of
+`ops/lint-not-configured.mjs`; `tests/lint-gate-honesty.test.ts`'s
+"root package.json no longer routes lint through turbo" assertion is
+revisited (superseded, not deleted) once turbo is reintroduced as the
+task orchestrator, if that is the chosen wiring.

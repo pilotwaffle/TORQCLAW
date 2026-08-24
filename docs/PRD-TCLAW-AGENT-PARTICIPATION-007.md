@@ -1,6 +1,10 @@
 # PRD-TCLAW-AGENT-PARTICIPATION-007 — Agent Participation in Channels
 
-**Status:** v0.1 **DRAFT — pre-Gate-1.** Not reviewed by G1R. Not authorized for build.
+**Status:** ~~v0.1 DRAFT — pre-Gate-1. Not reviewed by G1R. Not authorized for build.~~
+**SUPERSEDED 2026-08-23 (docs-truth pass): v1.0 — S1–S7 SHIPPED.** Landed via PR #53
+(`master 4252a6a`) and PR #54 (`master 962d6bf`). Gate records for every slice are under
+`docs/prd-reviews/` (see §9/§12 annotations below for the per-item citations). The v0.1
+draft/pre-Gate-1 text above is retained for history, not as the current status.
 **Repo:** `E:\TorqClaw` · **Branch:** `phase1-server-owned-authority` · **HEAD:** `8c8e7c5`
 **Amends:** `docs/PRD-TCLAW-COLLAB-PRESENCE-UI-005.md` (v0.6). This PRD is **additive**: it
 weakens, reworks, and removes nothing in 005. Where 005 froze a rule, that rule is inherited
@@ -224,10 +228,10 @@ conditions; "unwired" means the code exists but has no production caller.**
 | 6 | Message text bound (16,384 UTF-8 bytes) | **EXISTS** | `store.ts:1428` → `text.ts` `normalizeMessageText` |
 | 7 | Idempotent posting by key | **EXISTS** | `store.ts:1438` `runKeyedCommand`; replay leaves `committedSeq` undefined (`:1494-1496`) |
 | 8 | Dense monotonic `channel_seq` | **EXISTS** | `store.ts:1458` `getMaxChannelSeq()+1` |
-| 9 | **Live push: `SubscriptionRegistry`** | **BUILT, UNWIRED** | `subscriptions.ts:391-394`; **zero production `register()` callers** — the only call is `store.ts:1608` inside `subscribeChannel` |
-| 10 | **`subscribeChannel` (the sink registrar)** | **BUILT, ZERO PRODUCTION CALLERS** | `store.ts:1579`. Repo-wide grep: referenced only by `collab/src/index.ts` (export barrel) and three test files (`fanout-revocation`, `rollback`, `slowconsumer-store`). **No gateway, console, ops, or channel-http caller.** |
-| 11 | `fanoutToChannel` invoked on post | **EXISTS but fans to an EMPTY SET** | `store.ts:1497`, guarded by `committedSeq !== undefined` (`:1496`). The registry it reads is `this.registry` (`store.ts:381`), constructed as `new SubscriptionRegistry()` when `env.registry` is absent (`store.ts:300`,`:360`). **With no `subscribeChannel` caller, `byChannel` is always empty in production — fanout runs and delivers to nobody.** |
-| 12 | **Departure signal on socket close** | **ABSENT** | `server.ts:676`: `socket.on('close', () => unsubscribe?.());` — **that is the entire handler.** No presence broadcast, no collab unsubscribe, no channel notification. |
+| 9 | **Live push: `SubscriptionRegistry`** | ~~BUILT, UNWIRED~~ **SHIPPED (S5, commit `7fb4ac1`)** | `subscriptions.ts:391-394`. **Verified 2026-08-23: now wired.** The wire-read path that opens a channel (`packages/gateway/src/server.ts:963-998`) is the production subscription point — `shouldSubscribe` registers a `DeliverySink` (`collabLiveSink`) via `subscribeChannel` when a connection reads a channel it is not already subscribed to. |
+| 10 | **`subscribeChannel` (the sink registrar)** | ~~BUILT, ZERO PRODUCTION CALLERS~~ **SHIPPED (S5, commit `7fb4ac1`)** | `store.ts:1579`. **Verified 2026-08-23:** `packages/gateway/src/server.ts:987` now passes `sink: collabLiveSink` into the timeline-read live-subscription path — a real, non-test production caller exists. |
+| 11 | `fanoutToChannel` invoked on post | **EXISTS and now fans to a POPULATED registry in production** | `store.ts:1497`, guarded by `committedSeq !== undefined` (`:1496`). **Verified 2026-08-23:** with row 9/10 wired, `byChannel` is populated by real connections, so fanout delivers live frames to subscribed sockets (S5 A5-a). |
+| 12 | **Departure signal on socket close** | ~~ABSENT~~ **SHIPPED (S5, commit `7fb4ac1`)** | **Verified 2026-08-23 — current text, not `server.ts:676`:** `packages/gateway/src/server.ts:1129-1141`. The `socket.on('close', ...)` handler now calls `closeCollabLiveSubscriptions()` in addition to `unsubscribe?.()`, deregistering any live collab subscription the closing connection held (S5's "highest-value defect-prevention item," §4 S5). |
 | 13 | Task truth for presence | **EXISTS** | `schema.sql:41` `session_id NOT NULL REFERENCES sessions(id)`; `:44` `state NOT NULL DEFAULT 'running'`; `sessions.principal_id` at `schema.sql:14` (nullable, no FK, **no index**) |
 | 14 | Task state is transactional (no TTL needed) | **EXISTS** | insert `events.ts:152` (does not name `state` ⇒ takes the DEFAULT); `state='completed'` `events.ts:160`; `state='failed'` `events.ts:174`; `storage.ts:316-318` |
 | 14a | **`tasks.state` value set is WIDER than the schema comment** | **VERIFIED — comment is stale** | There is **no CHECK constraint**. The `:44` comment says `running \| completed \| failed`, but `storage.ts:316-317` also writes **`cancelled`** and **`cancelled_uncertain`**, and **`cancel_requested`** is *read* as valid (`storage.ts:318`, `:445`) though **no writer was found**. **A presence query filtering `state='running'` is correct, but any query enumerating "terminal" states by listing them will be wrong.** Filter on `state='running'`, never on `NOT IN (...)`. |
@@ -444,7 +448,10 @@ way to end it.* Requirements:
   exposed as a tool, and no message content can lift it. (Otherwise the loop could un-stop
   itself, and §2 "a message is data, not a command" would be violated.)
 - STOP state must survive a gateway restart, or its non-persistence must be stated honestly
-  in the UI. **This is an open design point, not a settled one.**
+  in the UI. ~~**This is an open design point, not a settled one.**~~ **SUPERSEDED — see §9
+  OQ-3 (CLOSED 2026-08-22).** `84bfda3` persists STOP (global and per-channel) and demonstrated
+  it over a real booted gateway; `3cb29ad` (G1R) independently reproduced the probes. STOP
+  **does** survive restart. No UI non-persistence disclosure is owed.
 
 **Anti-storm requirements (NOT cost caps — these are correctness requirements).** Each must be
 mechanically enforced, not documented as guidance:
@@ -862,7 +869,7 @@ operator lands the WIP or explicitly authorizes co-editing.
 | U-3 | Buzz internals (60s/180s heartbeat, Redis key, Nostr event, `KIND_AGENT_TURN_METRIC` owner-scoping, issue #1743) | Supplied as prior research; **not re-verified against `E:\torq-Buzz` this session** | Used only as **design rationale**, never as an acceptance criterion. Safe as used. |
 | U-4 | Hermes `delegate_tool.py:981`/`:1250-1262` and `terminal_tool.py:1881-1885` line numbers | Supplied as prior research; I verified only the TorqClaw-side disabling (`hermes_runner.py:610`, default `"delegation"`) | The **load-bearing** half (delegation is off by default here) **is** verified |
 | U-5 | 005 §13 row 10 "server-side mention parsing does not exist" | Inherited from 005; not re-verified | Only supports a non-scope item |
-| U-6 | Whether STOP state survives a gateway restart | Design point, undecided | S3 must either persist it or state its non-persistence honestly in the UI |
+| ~~U-6~~ | ~~Whether STOP state survives a gateway restart~~ | **RESOLVED — verified YES** (§9 OQ-3, closed 2026-08-22; `84bfda3` + `3cb29ad`) | S3 persists STOP across restart; no non-persistence disclosure owed |
 | ~~U-7~~ | ~~`toolFilter.ts` mapping / `approvalPatterns` defaults~~ | **RESOLVED — verified** (§3.4) | Now cited; A2-d/A5-d are gradeable |
 
 ---
@@ -870,10 +877,16 @@ operator lands the WIP or explicitly authorizes co-editing.
 ## 9. Open questions for the operator (blocking where marked)
 
 - **OQ-1 (BLOCKING S1).** Where does an agent's collab credential live at rest, and what is
-  its lifetime — per-task ephemeral, or long-lived per agent principal? **Note the inherited
+  its lifetime — per-task ephemeral, or long-lived per agent principal? ~~**Note the inherited
   blocker:** the Windows Credential Manager `SecretStore` adapter is still the §19-owed stub,
   so in production the collab surface fails closed to `COLLAB_IDENTITY_REQUIRED` until a real
-  adapter lands. Dev/loopback credentials work today. **This PRD does not absorb that work.**
+  adapter lands. Dev/loopback credentials work today. **This PRD does not absorb that work.**~~
+  **PARTIALLY DISCHARGED 2026-08-23 — verified.** `FileSecretStore` (commit `9b544ee`)
+  replaced the throwing `WindowsCredentialManagerStore` stub as the production adapter:
+  `packages/gateway/src/collabIdentity.ts:104-107` (`getSecretStore()`) now instantiates
+  `new FileSecretStore(DATA_DIR)` by default, so the production fail-closed-to-inert blocker
+  described above no longer applies. A native OS-keyring (CredMan-native) adapter remains a
+  **deferred, owed improvement** (`collabIdentity.ts:36-39`), not a production blocker.
 - **OQ-2 — RULED 2026-08-23 (GRANTED, operator's own words).** Does the operator grant the **"working now"**
   side-channel as an **explicit entitlement** per §2a? It discloses that a principal is
   executing *something*, which exceeds channel-message entitlement.
@@ -894,32 +907,49 @@ operator lands the WIP or explicitly authorizes co-editing.
   "open design point" text in §4 S3 is therefore superseded: STOP **does** survive restart, and
   no UI non-persistence disclosure is owed. Re-verification on the final tree is A-S7-3 in
   `docs/prd-reviews/G1D-FABLE-PRD-007-S7-AND-T4-PACKET-2026-08-22.md`.
-- **F1 / F2 disposition (from `3cb29ad`, recorded 2026-08-22): FILED, NON-BLOCKING.**
-  F1 — the coalesced re-dispatch path bypasses `resolveEligibleAgents`' SQL self-reply guard
-  (narrow blind spot; every lap is loud). F2 — a deterministic policy failure re-dispatches
-  once more under a new PK before stopping (log-flood, not silent). Both sit on the
-  approval-is-consent-not-containment surface; neither can produce a silent post. They are
-  tracked here rather than fixed in S7 so the slice stays bounded; either may be pulled into
-  a later bounded correction without renewed Gate 1.
+- **F1 / F2 disposition (from `3cb29ad`, recorded 2026-08-22): ~~FILED, NON-BLOCKING.~~
+  RESOLVED ON MASTER — verified 2026-08-23.**
+  F1 — the coalesced re-dispatch path bypassed `resolveEligibleAgents`' SQL self-reply guard.
+  **Fixed:** `packages/gateway/src/autoReplyDispatcher.ts:385-421` applies the guard explicitly
+  on the coalesced path via `latestChannelSeqAuthor()` (`:463-476`, comment "G2A C-1, promoted
+  from G1R F1"): if the newest event's `actor_principal_id` equals the agent about to be
+  re-dispatched, the follow-up is skipped rather than dispatched as a self-reply.
+  F2 — a deterministic policy failure re-dispatched once more under a new PK before stopping.
+  **Fixed:** the same function's `dirty`-before-`failed` ordering (`:385-388`) means a follow-up
+  skipped because the turn `failed` is **dropped, not deferred** — there is no queue it falls
+  back into, so it cannot re-loop under a new PK (anti-storm mechanism 4, §4 S3).
+  **Residual, not yet closed by this slice:** the a3c structural-fix test's assertion 2 does not
+  yet extend coverage to the *coalesced* re-dispatch row specifically (it is closed by Builder
+  M's T-1 obligation this slice, tracked in
+  `docs/prd-reviews/G1D-FABLE-CLEANUP-DOCS-TRUTH-2026-08-23.md` item B-1, not yet independently
+  re-verified as part of this docs-truth pass).
 - **OQ-4.** Final flag naming (`TORQCLAW_AGENT_PARTICIPATION`, `TORQCLAW_AGENT_AUTOREPLY`) —
-  an operator decision, per the 005 precedent.
-- **OQ-5.** Does an agent take a turn on **every** qualifying message, or may it choose
-  silence based on content? §4 S3 A3-f specifies silence as valid; **whether that judgment is
-  the model's or a gateway-side rule is undecided.** (Model-side judgment is cheaper; a
-  gateway-side rule is more predictable.)
-- **OQ-6 (BLOCKING S2 — newly surfaced, was U-1).** The bridge admits **no in-process tool
-  provider** (§3.3, verified). Which path: (a) extend the bridge with an in-process transport
-  — a change to a security-critical package; (b) a local MCP server fronting the collab store,
-  which then needs its own credential path; or (c) direct injection into the LOCAL_EDGE loop,
-  **forfeiting `toolFilter`, capability classification, `approvalPatterns`, and path scoping —
-  not recommended.** **S2 cannot be estimated until this is ruled.**
-- **OQ-7 (SHOULD BLOCK S3).** Given A5-a2 — `grantedTools` is a **name** allowlist, not a
-  per-invocation grant, and the exact-action `admitTool` seam is a **no-op by default** — does
-  the operator accept that an auto-reply loop may re-invoke a once-approved write tool with
-  **new arguments** without re-prompting? **This is a pre-existing property that auto-reply
-  amplifies.** Options: accept as-is; require `TORQCLAW_COLLAB_ENABLED` (which activates the
-  real admission seam) as a **precondition** for `TORQCLAW_AGENT_AUTOREPLY`; or scope grants
-  per-turn. **Recommendation: do not ship S3 without ruling this.**
+  an operator decision, per the 005 precedent. **Status 2026-08-23: shipped as-named
+  (`TORQCLAW_AGENT_PARTICIPATION` / `TORQCLAW_AGENT_AUTOREPLY`, verified §3/§4 above and in
+  source). Operator ratification of these specific names is STILL OWED — do NOT mark this
+  question resolved; the names shipping is not the same as the operator having ratified them.**
+- **OQ-5 — RULED 2026-08-23 (operator, by delegation, recorded in
+  `docs/prd-reviews/G1D-FABLE-CLEANUP-DOCS-TRUTH-2026-08-23.md`).** Silence stays **model-side**
+  (§4 S3 A3-f): the judgment of whether to post is the model's, not a gateway rule. No
+  gateway-side silence rule is added. Observability is the existing `no_post` accounting —
+  no new telemetry surface is owed by this ruling.
+- **OQ-6 (BLOCKING S2 — newly surfaced, was U-1) — RESOLVED, option (a) shipped.** The bridge
+  admitted **no in-process tool provider** (§3.3, verified) at PRD-authoring time. **Verified
+  2026-08-23:** S2 (commit `d1abe09`, G2A-approved with conditions,
+  `docs/prd-reviews/G2A-OPUS48-AGENT-PARTICIPATION-S2.md`) built **option (a)** — it extended
+  the bridge's transport union with an `in-process` member (`packages/bridge/src/
+  serverConfig.ts`, confirmed by G2A's Probe C: widening the union without it breaks the
+  compile-time ternary at `:106`). Options (b) and (c) were not built.
+- **OQ-7 (SHOULD BLOCK S3) — RULED via the B-1 exact-action fence, commit `a676736`.** Given
+  A5-a2 — `grantedTools` is a **name** allowlist, not a per-invocation grant, and the
+  exact-action `admitTool` seam was previously a no-op by default — the operator's exposure was
+  closed by making the exact-action fence **not depend on a feature flag**: `a676736` ("fix(gateway):
+  S0 — the exact-action fence must not depend on a feature flag") removed the
+  `collabEnabled()`-gated short-circuit on the LOCAL_EDGE consumer side, matching the FRONTIER
+  fix already landed the same day. Verified by `tests/collab-c2-s0-flag-independent-fence.test.ts`
+  (exists on this tree). The re-invoke-with-new-arguments exposure this OQ raised is therefore
+  closed regardless of `TORQCLAW_COLLAB_ENABLED`'s value, rather than by any of the three options
+  originally proposed.
 
 ---
 

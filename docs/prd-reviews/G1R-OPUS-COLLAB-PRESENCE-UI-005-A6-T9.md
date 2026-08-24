@@ -540,6 +540,12 @@ In **T-9 p3**, append:
   One parenthetical in A6(b) — *"(the sole recorded exception is CO-9's throwing-`code`-getter,
   unreachable while every thrown value is a `CollabError` with a data-property `code`)"* — keeps the
   word "total" honest against a future literal-minded auditor.
+  **Status 2026-08-23 (docs-truth pass): recorded, not applied verbatim to the A6(b) criterion
+  text.** CO-9 is confirmed as the sole recorded exception to "total" (verified:
+  `packages/collab/src/store.ts:110`, `CollabError.code` is a data property, zero throwing
+  accessors in `packages/collab/src/`; see `docs/FOLLOWUPS-CI-E2E-GATES.md` §4). This note
+  stands as the citation for that exception until the parenthetical is folded into the A6(b)
+  definition itself.
 
 - **NB-5 — record that A6 mitigates, but does not close, a gateway-wide gap.** There is still **no
   `unhandledRejection` listener** anywhere in `packages/` or `ops/` (re-grepped at `b418e87`: zero

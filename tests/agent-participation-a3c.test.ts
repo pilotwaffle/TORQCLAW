@@ -489,6 +489,16 @@ describe('PRD-TCLAW-AGENT-PARTICIPATION-007 A3-c — two agents actually convers
         `no self-reply: turn for agent=${t.agentPrincipalId} seq=${t.channelSeq} must not be triggered by itself`,
       ).not.toBe(t.agentPrincipalId);
     }
+    // G1D packet Item T-1 (2026-08-23) non-vacuity note: in THIS scenario (two agents, one script
+    // entry each, both eligible directly off the human's single trigger via resolveEligibleAgents)
+    // no turn is actually triggered via the coalesced follow-up path -- confirmed by inspection,
+    // every turn's triggerEventId here is the human's own event id, never a `coalesced:` id. That
+    // is correct, not a gap: the coalesced path only fires when an agent's own prior turn was
+    // in-flight when a NEW trigger for the SAME agent arrived (dirty-flag coalescing), which this
+    // two-turn, one-reply-each script never produces. The loop above already covers every row this
+    // fixture produces with no filter (an actual coalesced row, were one present, would be checked
+    // identically) -- see tests/agent-participation-a3c-coalesced.test.ts for a scenario built
+    // specifically to force and assert the coalesced path itself.
   });
 
   it('ASSERTION 3 (mechanics) — idempotency: redundant delivery of an already-claimed trigger adds no new collab_agent_turns row', () => {

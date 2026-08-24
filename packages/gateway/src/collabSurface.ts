@@ -115,8 +115,10 @@ export function isAgentSurfaceCaller(authClass: string, binding: unknown): boole
  * per-call, never captured at import, for the same stale-module-constant
  * reason as every other flag in this file. Mirrors the Python twin's gate
  * (engines/hermes_kernel/mcp_wrapper/server.py's
- * `if os.environ.get("TORQCLAW_WEB_SEARCH_ENABLED") == "1"` for
- * hermes__web_search) so LOCAL_EDGE and FRONTIER agree on the same default.
+ * `if (os.environ.get("TORQCLAW_WEB_SEARCH_ENABLED") or "").strip().lower()
+ * in {"1","true","yes","on"}` for hermes__web_search) so LOCAL_EDGE and
+ * FRONTIER agree on the same default AND the same truthy set (item 10,
+ * G1D-FABLE-CLEANUP-DOCS-TRUTH-2026-08-23: widen Python, never narrow TS).
  */
 export function webSearchEnabled(): boolean {
   return TRUTHY.has((process.env.TORQCLAW_WEB_SEARCH_ENABLED ?? '').trim().toLowerCase());

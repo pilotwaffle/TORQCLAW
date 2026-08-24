@@ -1147,8 +1147,9 @@ await connectBridge(); // discover + namespace MCP servers before traffic
 // PB-1(a): CLAUDE.md §6 -- network egress requires explicit operator
 // approval; default off. This mirrors the Python twin's gate
 // (hermes__web_search in engines/hermes_kernel/mcp_wrapper/server.py, guarded
-// by `if os.environ.get("TORQCLAW_WEB_SEARCH_ENABLED") == "1"`) so LOCAL_EDGE
-// and FRONTIER agree on the same default. Read once at boot (webSearchEnabled(),
+// by `if (os.environ.get("TORQCLAW_WEB_SEARCH_ENABLED") or "").strip().lower()
+// in {"1","true","yes","on"}`) so LOCAL_EDGE and FRONTIER agree on the same
+// default AND the same truthy set. Read once at boot (webSearchEnabled(),
 // collabSurface.ts), same discipline as agentParticipationEnabled() just below:
 // tool REGISTRATION is boot-time-only, not something a live connection can
 // race against, since connectBridge() has already run and the listener has

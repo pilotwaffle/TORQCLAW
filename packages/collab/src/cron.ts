@@ -251,19 +251,28 @@ export function resolveScheduleRun(
 
 export type StrandedScheduleRun = {
   scheduleId: string; fireSeq: number; channelId: string; agentPrincipalId: string;
-  dispatchRequestId: string | null;
+  dispatchRequestId: string | null; promptHint: string | null;
 };
 
 /** Boot recovery: find every run still 'dispatched' past graceSeconds.
  *  Mirrors findStrandedAgentTurns exactly -- an explicit sweep over a
- *  durable row, never an inference from silence. */
+ *  durable row, never an inference from silence.
+ *
+ *  NB-4 (G2A-OPUS48-CRON.md): promptHint is joined in from the owning
+ *  collab_agent_schedules row so a recovered run can carry the SAME
+ *  operator-authored note the stranded fire would have had, instead of
+ *  recoverStrandedScheduleRuns silently passing `null` and running a
+ *  subtly different turn than the one that crashed. */
 export function findStrandedScheduleRuns(db: CronDb, nowIso: string, graceSeconds: number): StrandedScheduleRun[] {
   const cutoff = new Date(Date.parse(nowIso) - graceSeconds * 1000).toISOString();
   return db
     .prepare(
-      `SELECT schedule_id AS scheduleId, fire_seq AS fireSeq, channel_id AS channelId,
-              agent_principal_id AS agentPrincipalId, dispatch_request_id AS dispatchRequestId
-         FROM collab_agent_schedule_runs WHERE state = 'dispatched' AND fired_at <= ?`,
+      `SELECT r.schedule_id AS scheduleId, r.fire_seq AS fireSeq, r.channel_id AS channelId,
+              r.agent_principal_id AS agentPrincipalId, r.dispatch_request_id AS dispatchRequestId,
+              s.prompt_hint AS promptHint
+         FROM collab_agent_schedule_runs r
+         JOIN collab_agent_schedules s ON s.id = r.schedule_id
+         WHERE r.state = 'dispatched' AND r.fired_at <= ?`,
     )
     .all(cutoff) as StrandedScheduleRun[];
 }
