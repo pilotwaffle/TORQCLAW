@@ -2,7 +2,7 @@
 
 Single-file program state, updated only after meaningful progress with tests + independent verifier passing. Detailed history lives in `docs/prd-reviews/*` and the per-project memory index.
 
-_Last updated: 2026-08-25 (Trigger-marker slice: SHIPPED — merged 0a6c5a1 via PR #61, **AC-2 LIVE PASS: agent answered the marked newest message correctly ("Answer: 8", 17s)**; collapse fix PR #60; channels UX PR #59)_
+_Last updated: 2026-08-25 (master @ ac50e92: doctor provider-dial PR #64; CI credential fix + branch sync PR #63 — **first green CI since 08-20**; **Rooms Phase 0 merged e5dee38 via PR #62**; trigger-marker PR #61 with **AC-2 LIVE PASS ("Answer: 8", 17s)**; collapse fix PR #60; channels UX PR #59. Also live, non-repo: CLIProxyAPI primary restored + Startup-folder autostart — median turn 123.6s → ~5-40s)_
 
 ## SHIPPED 2026-08-25: Trigger-identity NEWEST MESSAGE marker — merged 0a6c5a1 via PR #61 (2383547 code + bcedc55 docs) — **AC-2 LIVE ACCEPTANCE PASSED**
 
@@ -12,7 +12,7 @@ _Last updated: 2026-08-25 (Trigger-marker slice: SHIPPED — merged 0a6c5a1 via 
 - **Residuals:** R-6 banner forgery (pre-existing unescaped-transcript class; real trigger holds terminal position) · R-7 quoting likelihood (persona layer) · R-8 busy-channel honest omission (follow-up = Buzz mechanic-#1 own-reply swap-in) · R-9 T-4 pin .match() first-occurrence latent · prior R-1/R-3/R-5 carried.
 - Process: five slices shipped this cycle (PRs #58-#61 + state commits); the gates caught real defects at every station tonight — G1D's false persona diagnosis, G1R's self-contradictory T-3, G2A's B-1 ordering regression, G1R's F-1 turn-identity conflation, and G2A's C-1 double evidence correction (against builder AND verifier).
 
-Follow-up queue: flaky-ticket collab-c2-flag-off-identity · Finding C dist-freshness harness guard · B-FOLLOWUP-2 subscription guard (G1R-shaped: extract + share) · Buzz parity checks (burst→one-reply; own-newest swap-in; session affinity) · Rooms lane rebases onto 0a6c5a1.
+Follow-up queue: flaky-ticket collab-c2-flag-off-identity · Finding C dist-freshness harness guard · B-FOLLOWUP-2 subscription guard (G1R-shaped: extract + share) · Buzz parity checks (burst→one-reply; own-newest swap-in; session affinity) · engine time-to-fail watchdog (~90s retry budget on a dead chain primary; gateway-side, gated). (Rooms rebase item REMOVED 2026-08-25: stale at birth — e72e26d was already based on 0a6c5a1 and merged as e5dee38 via PR #62.)
 
 ## SHIPPED 2026-08-24: Collapse live-defect fix — merged to origin/master aeeefe1 via PR #60 (commits cc1a9d2 code + df337b6 docs)
 
