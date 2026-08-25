@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import os from 'node:os';
+import path from 'node:path';
 import {
   listSubscriptionRuntimeDescriptors,
   resolveSubscriptionAcpServer,
@@ -233,17 +235,22 @@ describe('trusted subscription ACP catalog and protocol', () => {
     // so a caller repointing TORQCLAW_DATA_DIR via a custom source (as tests do, matching
     // storage.ts's pattern) would isolate CLAUDE_CONFIG_DIR but silently leave the spawn cwd
     // resolving against the real process.env root instead.
-    const customSource = { PATH: 'bin', GLM_API_KEY: 'glm-secret', TORQCLAW_DATA_DIR: 'C:\\custom-data-root' };
+    // A Windows-shaped literal root only round-trips through path.join() on win32 -- on the
+    // POSIX CI runner path.join() returns '/'-joined segments, so the equality assertions
+    // below failed there. Build the root with the HOST's own path semantics instead, and
+    // under os.tmpdir(), since buildSafeChildEnv() really does mkdirSync() the config dir.
+    const dataRoot = path.join(os.tmpdir(), 'torqclaw-custom-data-root');
+    const customSource = { PATH: 'bin', GLM_API_KEY: 'glm-secret', TORQCLAW_DATA_DIR: dataRoot };
     const env = buildSafeChildEnv(customSource, 'zai-anthropic-glm-5.3-v1');
     const configDir = zaiPrivateClaudeConfigDir(customSource);
     const spawnCwd = zaiPrivateSpawnCwd(customSource);
     expect(env.CLAUDE_CONFIG_DIR).toBe(configDir);
-    expect(configDir.startsWith('C:\\custom-data-root')).toBe(true);
-    expect(spawnCwd.startsWith('C:\\custom-data-root')).toBe(true);
+    expect(configDir.startsWith(dataRoot)).toBe(true);
+    expect(spawnCwd.startsWith(dataRoot)).toBe(true);
     // Both live under the identical data-dir root, diverging only in their leaf segment.
-    const root = 'C:\\custom-data-root\\subscription-runtimes\\zai-anthropic-glm-5.3-v1';
-    expect(configDir).toBe(`${root}\\claude-config`);
-    expect(spawnCwd).toBe(`${root}\\cwd`);
+    const root = path.join(dataRoot, 'subscription-runtimes', 'zai-anthropic-glm-5.3-v1');
+    expect(configDir).toBe(path.join(root, 'claude-config'));
+    expect(spawnCwd).toBe(path.join(root, 'cwd'));
   });
 
   it('fails Z.ai readiness before spawn when the gateway key is missing', async () => {

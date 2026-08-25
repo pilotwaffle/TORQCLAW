@@ -286,6 +286,12 @@ export async function runProductionE2E({
     });
     config = buildLauncherConfig(env, { production: true });
     const credential = bootstrapOperatorCredential(root, env, dataDir);
+    // page.tsx's operatorCredential() checks TORQCLAW_OPERATOR_CREDENTIAL
+    // first, before falling back to the on-disk token file. That file was
+    // just deleted above as single-use, so the env var is the only
+    // remaining supported way for the spawned console to authenticate —
+    // this is the production mechanism, not a test-only shortcut.
+    env.TORQCLAW_OPERATOR_CREDENTIAL = credential;
     stdoutTail = createTailBuffer();
     stderrTail = createTailBuffer();
     await portReservation.release();

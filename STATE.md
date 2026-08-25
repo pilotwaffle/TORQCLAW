@@ -2,7 +2,17 @@
 
 Single-file program state, updated only after meaningful progress with tests + independent verifier passing. Detailed history lives in `docs/prd-reviews/*` and the per-project memory index.
 
-_Last updated: 2026-08-24 (Collapse live-defect fix: SHIPPED — merged aeeefe1 via PR #60, live-proven; Channels agent-UX PR #59; Cleanup PR #58; PRD-007 PRs #53/#54)_
+_Last updated: 2026-08-25 (Trigger-marker slice: SHIPPED — merged 0a6c5a1 via PR #61, **AC-2 LIVE PASS: agent answered the marked newest message correctly ("Answer: 8", 17s)**; collapse fix PR #60; channels UX PR #59)_
+
+## SHIPPED 2026-08-25: Trigger-identity NEWEST MESSAGE marker — merged 0a6c5a1 via PR #61 (2383547 code + bcedc55 docs) — **AC-2 LIVE ACCEPTANCE PASSED**
+
+**The reply-quality gap is CLOSED with runtime proof:** post-restart live turn — novel question ("how many legs does a spider have?") → TORQ AI posted "**Answer: 8**" in 17s, turn completed, correct target. Root cause had been that the window render never named the triggering event: llama-class models answered the anchor block's stale instruction; torq-ai-v5 emitted nondeterministic boilerplate (bench: 3/3 models answer correctly once the trigger is repeated in a labeled terminal section — Buzz mechanic #3, `docs/BUZZ-MECHANICS-SURVEY-2026-08-24.md`).
+- **Design as gated:** marker carries TURN IDENTITY (claimed trigger seq threaded via one authorized dispatcher hunk at :498, matched by exact cursor in autoReplyContext) — G1R's F-1 killed the "newest in window" variant (racing/self/cross-agent misattribution). Fail-closed omission on every miss; renderEvent-produced (byte-identity by construction); exported banner literals; cron byte-identical.
+- **Gates:** G1R REJECT → v1.1 amendment → verify 7/7 PASS (collapsed-away hazard proven unreachable; stash integrity confirmed) → G2A APPROVE hash-bound with 10 own dist-level probes green incl. the direct racing-message proof (P7). **C-1 evidence corrections mandated and landed:** both prior packets misdescribed the collab-c2-flag-off-identity flake (builder "deterministic", verifier "4/4 green"); G2A measured ~1/3 pass on slice AND 0/3 on baseline — chronically flaky, causally independent → **separate flaky-test ticket recommended**.
+- **Residuals:** R-6 banner forgery (pre-existing unescaped-transcript class; real trigger holds terminal position) · R-7 quoting likelihood (persona layer) · R-8 busy-channel honest omission (follow-up = Buzz mechanic-#1 own-reply swap-in) · R-9 T-4 pin .match() first-occurrence latent · prior R-1/R-3/R-5 carried.
+- Process: five slices shipped this cycle (PRs #58-#61 + state commits); the gates caught real defects at every station tonight — G1D's false persona diagnosis, G1R's self-contradictory T-3, G2A's B-1 ordering regression, G1R's F-1 turn-identity conflation, and G2A's C-1 double evidence correction (against builder AND verifier).
+
+Follow-up queue: flaky-ticket collab-c2-flag-off-identity · Finding C dist-freshness harness guard · B-FOLLOWUP-2 subscription guard (G1R-shaped: extract + share) · Buzz parity checks (burst→one-reply; own-newest swap-in; session affinity) · Rooms lane rebases onto 0a6c5a1.
 
 ## SHIPPED 2026-08-24: Collapse live-defect fix — merged to origin/master aeeefe1 via PR #60 (commits cc1a9d2 code + df337b6 docs)
 
