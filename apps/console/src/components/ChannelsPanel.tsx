@@ -212,7 +212,7 @@
 // zero function-typed props and zero onClick/button/link — presence is
 // information, never a control.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { ClientCommand, GatewayEvent } from '@torqclaw/contracts';
 import { LiveDuration } from './LiveDuration';
 import { selectTurnStartMs, selectLivePhase } from './presence';
@@ -829,15 +829,413 @@ function systemEventDetail(kind: string, payload: Record<string, unknown>): stri
   return null;
 }
 
-export default function ChannelsPanel({
-  events,
-  sendCommand,
-  onClose,
-}: {
+export interface RoomListRow {
+  channelId: string;
+  name: string;
+  state: string;
+}
+
+export interface ParsedRoomList {
+  rows: RoomListRow[];
+  malformedRows: number;
+  duplicateIds: number;
+  resultClass: 'empty' | 'accepted' | 'partial' | 'all-suppressed';
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+/**
+ * Runtime boundary for the Phase 0 last-loaded Rooms list. Only name and
+ * state leave this parser as renderable fields. A duplicated id suppresses
+ * every row carrying that id, including an otherwise-valid sibling.
+ */
+export function parseRoomListRows(input: unknown[]): ParsedRoomList {
+  const idCounts = new Map<string, number>();
+  for (const candidate of input) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const channelId = (candidate as Record<string, unknown>).channelId;
+    if (isNonEmptyString(channelId)) {
+      idCounts.set(channelId, (idCounts.get(channelId) ?? 0) + 1);
+    }
+  }
+
+  const duplicateIds = Array.from(idCounts.values()).filter((count) => count > 1).length;
+  const rows: RoomListRow[] = [];
+  let malformedRows = 0;
+
+  for (const candidate of input) {
+    if (!candidate || typeof candidate !== 'object') {
+      malformedRows++;
+      continue;
+    }
+    const row = candidate as Record<string, unknown>;
+    if (!isNonEmptyString(row.channelId) || !isNonEmptyString(row.name) || !isNonEmptyString(row.state)) {
+      malformedRows++;
+      continue;
+    }
+    if ((idCounts.get(row.channelId) ?? 0) > 1) continue;
+    rows.push({ channelId: row.channelId, name: row.name, state: row.state });
+  }
+
+  const suppressed = malformedRows > 0 || duplicateIds > 0;
+  return {
+    rows,
+    malformedRows,
+    duplicateIds,
+    resultClass:
+      input.length === 0
+        ? 'empty'
+        : rows.length === 0
+          ? 'all-suppressed'
+          : suppressed
+            ? 'partial'
+            : 'accepted',
+  };
+}
+
+function selectLatestRoomListFrame(events: GatewayEvent[]): unknown[] | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]!;
+    if (event.type !== 'SYSTEM') continue;
+    const metadata = (event.metadata ?? {}) as Record<string, unknown>;
+    if (metadata.collabChannels === true && Array.isArray(metadata.channels)) {
+      return metadata.channels;
+    }
+  }
+  return null;
+}
+
+type RoomListPhase = 'pending' | 'idle' | 'send-failed' | 'timeout';
+type RoomListResult = ParsedRoomList['resultClass'] | 'not-loaded';
+
+interface RoomsState {
+  rows: RoomListRow[] | null;
+  malformedRows: number;
+  duplicateIds: number;
+  highlightedId: string | null;
+  connected: boolean;
+  stale: boolean;
+  phase: RoomListPhase;
+  lastCommand: 'not-sent' | 'sent' | 'send-failed';
+  lastResult: RoomListResult;
+}
+
+type RoomsAction =
+  | { type: 'connection'; connected: boolean; stale: boolean }
+  | { type: 'request' }
+  | { type: 'send-failed' }
+  | { type: 'timeout' }
+  | { type: 'list-received'; parsed: ParsedRoomList }
+  | { type: 'highlight'; channelId: string };
+
+function roomsReducer(state: RoomsState, action: RoomsAction): RoomsState {
+  switch (action.type) {
+    case 'connection':
+      return state.connected === action.connected && state.stale === action.stale
+        ? state
+        : { ...state, connected: action.connected, stale: action.stale };
+    case 'request':
+      return { ...state, phase: 'pending', lastCommand: 'sent' };
+    case 'send-failed':
+      return { ...state, phase: 'send-failed', lastCommand: 'send-failed' };
+    case 'timeout':
+      return state.phase === 'pending' ? { ...state, phase: 'timeout' } : state;
+    case 'list-received':
+      return {
+        ...state,
+        rows: action.parsed.rows,
+        malformedRows: action.parsed.malformedRows,
+        duplicateIds: action.parsed.duplicateIds,
+        phase: 'idle',
+        lastResult: action.parsed.resultClass,
+      };
+    case 'highlight':
+      return { ...state, highlightedId: action.channelId };
+  }
+}
+
+interface SharedChannelsPanelProps {
   events: GatewayEvent[];
   sendCommand: (command: ClientCommand) => boolean;
   onClose: () => void;
-}) {
+}
+
+interface LegacyChannelsPanelProps extends SharedChannelsPanelProps {
+  mode?: 'channels';
+}
+
+export interface RoomsPanelProps extends SharedChannelsPanelProps {
+  mode: 'rooms';
+  isConnected: boolean;
+  isStale: boolean;
+  onOpenAgents: () => void;
+  onOpenApprovals: () => void;
+  onOpenReceipts: () => void;
+  onOpenCost: () => void;
+  onOpenMemory: () => void;
+  onOpenTaskStream: () => void;
+}
+
+export type ChannelsPanelProps = LegacyChannelsPanelProps | RoomsPanelProps;
+
+const ROOM_LIST_TIMEOUT_MS = 5000;
+
+function RoomsPanel({
+  events,
+  sendCommand,
+  onClose,
+  isConnected,
+  isStale,
+  onOpenAgents,
+  onOpenApprovals,
+  onOpenReceipts,
+  onOpenCost,
+  onOpenMemory,
+  onOpenTaskStream,
+}: RoomsPanelProps) {
+  const latestRoomListFrame = useMemo(() => selectLatestRoomListFrame(events), [events]);
+  const [state, dispatch] = useReducer(roomsReducer, {
+    rows: null,
+    malformedRows: 0,
+    duplicateIds: 0,
+    highlightedId: null,
+    connected: isConnected,
+    stale: isStale,
+    phase: 'pending',
+    lastCommand: 'not-sent',
+    lastResult: 'not-loaded',
+  });
+  const listTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const requestList = () => {
+    if (listTimer.current) clearTimeout(listTimer.current);
+    dispatch({ type: 'request' });
+    const sent = sendCommand({ action: 'LIST_CHANNELS', limit: 50 });
+    if (!sent) {
+      listTimer.current = null;
+      dispatch({ type: 'send-failed' });
+      return;
+    }
+    listTimer.current = setTimeout(() => dispatch({ type: 'timeout' }), ROOM_LIST_TIMEOUT_MS);
+  };
+
+  useEffect(() => {
+    dispatch({ type: 'connection', connected: isConnected, stale: isStale });
+  }, [isConnected, isStale]);
+
+  useEffect(() => {
+    if (isConnected) requestList();
+    // Reconnect is the only automatic refresh boundary. It does not validate
+    // highlighted Room details or make a retained list authoritative.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isConnected]);
+
+  useEffect(() => {
+    if (latestRoomListFrame === null) return;
+    if (listTimer.current) {
+      clearTimeout(listTimer.current);
+      listTimer.current = null;
+    }
+    dispatch({ type: 'list-received', parsed: parseRoomListRows(latestRoomListFrame) });
+  }, [latestRoomListFrame]);
+
+  useEffect(() => () => {
+    if (listTimer.current) clearTimeout(listTimer.current);
+  }, []);
+
+  const highlightedRow = state.rows?.find((row) => row.channelId === state.highlightedId) ?? null;
+  const hasRows = state.rows !== null && state.rows.length > 0;
+  const isRefreshing = state.phase === 'pending' && state.lastCommand === 'sent';
+  const listStatus = !state.connected
+    ? hasRows
+      ? 'Disconnected. Showing the last loaded Rooms list; it may be stale.'
+      : 'Disconnected. Room list unavailable/incomplete.'
+    : state.stale
+      ? hasRows
+        ? 'Connection is stale. Showing the last loaded Rooms list.'
+        : 'Connection is stale. Room list unavailable/incomplete.'
+    : state.phase === 'send-failed'
+      ? hasRows
+        ? 'Refresh could not be sent. Showing the last loaded Rooms list.'
+        : 'Room list unavailable/incomplete.'
+      : state.phase === 'timeout'
+        ? hasRows
+          ? 'No response. Showing the last loaded Rooms list; it may be stale.'
+          : 'Room list unavailable/incomplete.'
+        : state.rows === null
+          ? 'Loading the last loaded Rooms list.'
+          : 'Last loaded Rooms list. Non-authoritative for current Room details.';
+
+  return (
+    <div className="absolute inset-0 z-20 flex flex-col overflow-hidden bg-bg/98 text-[13px] leading-[1.6] text-muted">
+      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-edge px-4 py-3">
+        <div className="min-w-0">
+          <h2 className="text-[13px] font-semibold text-ink">Rooms</h2>
+          <p className="truncate text-[10px] uppercase tracking-[0.08em] text-faint">
+            Last loaded list - non-authoritative
+          </p>
+        </div>
+        <button type="button" onClick={onClose} className="text-faint hover:text-ink" aria-label="Close Rooms panel">
+          close
+        </button>
+      </header>
+
+      <div className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto min-[760px]:grid-cols-[minmax(220px,0.8fr)_minmax(0,1.7fr)] min-[1120px]:grid-cols-[260px_minmax(0,1fr)_280px]">
+        <section className="border-b border-edge p-4 min-[760px]:border-b-0 min-[760px]:border-r" aria-labelledby="rooms-list-heading">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <h3 id="rooms-list-heading" className="text-[10px] font-bold uppercase tracking-[0.12em] text-muted">
+              Last loaded Rooms
+            </h3>
+            <button
+              type="button"
+              onClick={requestList}
+              disabled={!state.connected || isRefreshing}
+              className="text-[10px] text-faint hover:text-ink disabled:opacity-50"
+            >
+              {isRefreshing ? 'refreshing...' : 'refresh'}
+            </button>
+          </div>
+
+          <p className="mb-3 text-[10.5px] text-faint" role="status" aria-live="polite">{listStatus}</p>
+
+          {state.rows !== null && state.rows.length === 0 && state.lastResult === 'empty' && (
+            <div className="border-y border-dashed border-border-strong py-5 text-center">
+              <p className="text-[12px] text-muted">No Rooms loaded</p>
+              <p className="mt-1 text-[10.5px] text-faint">Room list unavailable/incomplete.</p>
+            </div>
+          )}
+
+          {state.rows !== null && state.rows.length === 0 && state.lastResult === 'all-suppressed' && (
+            <p className="border-y border-dashed border-border-strong py-5 text-center text-[10.5px] text-faint">
+              Room list unavailable/incomplete.
+            </p>
+          )}
+
+          {hasRows && (
+            <ul className="space-y-1" aria-label="Last loaded Rooms list">
+              {state.rows!.map((room) => (
+                <li key={room.channelId}>
+                  <button
+                    type="button"
+                    onClick={() => dispatch({ type: 'highlight', channelId: room.channelId })}
+                    aria-pressed={state.highlightedId === room.channelId}
+                    className={`w-full border-l-2 px-3 py-2 text-left transition-colors ${
+                      state.highlightedId === room.channelId
+                        ? 'border-torque bg-panel-2 text-ink'
+                        : 'border-transparent text-muted hover:bg-panel-2/60 hover:text-ink'
+                    }`}
+                  >
+                    <span className="block truncate text-[12px] font-medium">{room.name}</span>
+                    <span className="block truncate text-[10px] uppercase tracking-[0.08em] text-faint">{room.state}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {(state.malformedRows > 0 || state.duplicateIds > 0) && (
+            <p className="mt-3 text-[10px] text-faint" role="status">
+              Room list unavailable/incomplete. {state.malformedRows} malformed row{state.malformedRows === 1 ? '' : 's'} excluded
+              {state.duplicateIds > 0 && `; ${state.duplicateIds} duplicate Room row id${state.duplicateIds === 1 ? '' : 's'} suppressed`}.
+            </p>
+          )}
+        </section>
+
+        <main className="min-w-0 p-4 min-[1120px]:border-r min-[1120px]:border-edge">
+          <section className="border-b border-edge pb-4" aria-labelledby="room-context-heading">
+            <p className="text-[9px] font-bold uppercase tracking-[0.12em] text-faint">List highlight</p>
+            <h3 id="room-context-heading" className="mt-1 break-words text-[17px] font-semibold text-ink">
+              {highlightedRow?.name ?? 'No Room row highlighted'}
+            </h3>
+            {highlightedRow && (
+              <p className="mt-1 text-[10px] uppercase tracking-[0.08em] text-faint">List row state: {highlightedRow.state}</p>
+            )}
+            <p className="mt-3 text-[11px] text-muted">Selected Room details unavailable under the current wire.</p>
+            <p className="mt-1 text-[10.5px] text-faint">Objective and owner not recorded. Room budget is not enforced yet.</p>
+          </section>
+
+          <section className="border-b border-edge py-4" aria-labelledby="room-timeline-heading">
+            <h3 id="room-timeline-heading" className="text-[11px] font-semibold text-ink">Room timeline</h3>
+            <p className="mt-1 text-[10.5px] text-faint">Unavailable - not on wire for committed Room display.</p>
+          </section>
+
+          <section className="border-b border-edge py-4" aria-labelledby="room-activity-heading">
+            <h3 id="room-activity-heading" className="text-[11px] font-semibold text-ink">Room Activity Summary</h3>
+            <div className="mt-2 grid grid-cols-1 border-y border-edge min-[520px]:grid-cols-3">
+              {['Scheduled', 'Blocked', 'Complete'].map((label) => (
+                <div key={label} className="px-3 py-2 first:pl-0 min-[520px]:border-r min-[520px]:border-edge min-[520px]:last:border-r-0">
+                  <p className="text-[9px] font-bold uppercase tracking-[0.1em] text-faint">{label}</p>
+                  <p className="mt-1 text-[10.5px] text-muted">not on wire</p>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="pt-4" aria-labelledby="session-evidence-heading">
+            <h3 id="session-evidence-heading" className="text-[11px] font-semibold text-ink">Current-session evidence</h3>
+            <p className="mt-1 text-[10.5px] text-faint">Session-scoped. Room attribution not recorded.</p>
+            <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2">
+              <button type="button" onClick={onOpenTaskStream} className="text-[10.5px] underline decoration-edge underline-offset-4 hover:text-ink">Active, blocked, complete</button>
+              <button type="button" onClick={onOpenApprovals} className="text-[10.5px] underline decoration-edge underline-offset-4 hover:text-ink">Awaiting approval</button>
+              <button type="button" onClick={onOpenReceipts} className="text-[10.5px] underline decoration-edge underline-offset-4 hover:text-ink">Receipt state</button>
+            </div>
+          </section>
+        </main>
+
+        <aside className="border-t border-edge p-4 min-[760px]:col-span-2 min-[1120px]:col-span-1 min-[1120px]:border-t-0" aria-labelledby="room-controls-heading">
+          <h3 id="room-controls-heading" className="text-[10px] font-bold uppercase tracking-[0.12em] text-muted">Control Rail</h3>
+
+          <div className="mt-4 border-b border-edge pb-4">
+            <p className="text-[9px] font-bold uppercase tracking-[0.1em] text-faint">Assigned agents</p>
+            <p className="mt-1 text-[10.5px] text-muted">unknown/not loaded</p>
+            <button type="button" onClick={onOpenAgents} className="mt-2 text-[10.5px] underline decoration-edge underline-offset-4 hover:text-ink">Open Agents</button>
+          </div>
+
+          <div className="border-b border-edge py-4">
+            <p className="text-[9px] font-bold uppercase tracking-[0.1em] text-faint">Export policy</p>
+            <p className="mt-1 text-[10.5px] text-muted">not enforced at Room scope yet</p>
+          </div>
+
+          <div className="border-b border-edge py-4">
+            <p className="text-[9px] font-bold uppercase tracking-[0.1em] text-faint">Global surfaces</p>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <button type="button" onClick={onOpenApprovals} className="text-left text-[10.5px] hover:text-ink">Approvals</button>
+              <button type="button" onClick={onOpenReceipts} className="text-left text-[10.5px] hover:text-ink">Receipts</button>
+              <button type="button" onClick={onOpenCost} className="text-left text-[10.5px] hover:text-ink">Cost</button>
+              <button type="button" onClick={onOpenMemory} className="text-left text-[10.5px] hover:text-ink">Memory</button>
+              <button type="button" onClick={onOpenTaskStream} className="col-span-2 text-left text-[10.5px] hover:text-ink">Task Stream</button>
+            </div>
+          </div>
+
+          <details className="pt-4 text-[10px] text-faint">
+            <summary className="cursor-pointer hover:text-muted">Support diagnostics</summary>
+            <dl className="mt-2 space-y-1 break-words">
+              <div><dt className="inline">Flags: </dt><dd className="inline">collab=1, rooms=1</dd></div>
+              <div><dt className="inline">Highlighted list row id: </dt><dd className="inline">{highlightedRow?.channelId ?? 'none'}</dd></div>
+              <div><dt className="inline">List command/result: </dt><dd className="inline">{state.lastCommand} / {state.lastResult}</dd></div>
+              <div><dt className="inline">List connection: </dt><dd className="inline">{!state.connected ? 'disconnected' : state.stale ? 'connected/stale' : 'connected; freshness unproven'}</dd></div>
+              <div><dt className="inline">Selected reads: </dt><dd className="inline">timeline, members, agents, ACK disabled</dd></div>
+              <div><dt className="inline">Attribution: </dt><dd className="inline">session-scoped; Room attribution not recorded</dd></div>
+            </dl>
+          </details>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+export default function ChannelsPanel(props: ChannelsPanelProps) {
+  if (props.mode === 'rooms') return <RoomsPanel {...props} />;
+  return <LegacyChannelsPanel events={props.events} sendCommand={props.sendCommand} onClose={props.onClose} />;
+}
+
+function LegacyChannelsPanel({
+  events,
+  sendCommand,
+  onClose,
+}: SharedChannelsPanelProps) {
   // ── Channel list ──────────────────────────────────────────────────────
   const latestChannelList = useMemo(() => selectLatestChannelList(events), [events]);
   const [channels, setChannels] = useState<ChannelListEntry[] | null>(null);
