@@ -56,6 +56,7 @@ const ATTACHMENTS_ENABLED = process.env.NEXT_PUBLIC_ATTACHMENTS === '1';
 // ever dispatched (checked again at the render-branch call site below, not
 // just here).
 const COLLAB_UI_ENABLED = process.env.NEXT_PUBLIC_COLLAB_UI === '1';
+const ROOMS_UI_ENABLED = COLLAB_UI_ENABLED && process.env.NEXT_PUBLIC_ROOMS_UI === '1';
 
 type ExecutionMode = 'AUTO' | 'LOCAL_ONLY' | 'CLOUD_OK';
 // '' = no budget (falls to env default). 'free' = local-only, $0.
@@ -166,6 +167,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
   const [approvalsOpen, setApprovalsOpen] = useState(false);
   // PRD-UI-1 §1/§3: sidebar view switching.
   const [view, setView] = useState<'tasks' | 'approvals' | 'memory' | 'channels' | 'agents'>('tasks');
+  const roomsViewActive = ROOMS_UI_ENABLED && view === 'channels';
   // Stop-button UX: 'requested' once a cancel is sent (button shows "stopping…"),
   // 'failed' if the send was dropped so the user knows to retry. Cleared when the
   // next task starts.
@@ -632,12 +634,13 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
   // number sized for text that is no longer in the box.
   useEffect(() => { setEstimateNonce(null); }, [input]);
   useEffect(() => {
+    if (roomsViewActive) { setEstimateNonce(null); return; }
     const prompt = debouncedInput.trim();
     if (!prompt) { setEstimateNonce(null); return; }
     const nonce = crypto.randomUUID(); // fresh per settled draft
     const sent = sendCommand({ action: 'PREVIEW_ROUTE', previewOf: nonce, ...buildJudgment(prompt, controls) });
     if (sent) setEstimateNonce(nonce); // a dropped send never arms a lookup
-  }, [debouncedInput, controls, sendCommand]);
+  }, [debouncedInput, controls, sendCommand, roomsViewActive]);
   const estimateFrame = useMemo(
     () => selectLatestRoutePreview(events, estimateNonce),
     [events, estimateNonce],
@@ -712,12 +715,11 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
     sessionTotal !== null && sessionCap !== null && sessionCap > 0
       ? `${Math.min(100, (sessionTotal / sessionCap) * 100)}%`
       : '0%';
-
   return (
     <section className="flex h-screen flex-col bg-bg font-mono text-[13px] leading-[1.6] text-muted">
       {/* PRD-UI-1 §2 header: 52px, --panel, bottom hairline. */}
       <header className="flex h-[52px] shrink-0 items-center gap-3.5 border-b border-edge bg-panel px-3.5">
-        <div className="flex items-center gap-2.5">
+        <div className={`items-center gap-2.5 ${ROOMS_UI_ENABLED ? 'hidden min-[520px]:flex' : 'flex'}`}>
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden>
             <path d="M12 3 L20 7.5 V16.5 L12 21 L4 16.5 V7.5 Z" stroke="#FF9E40" strokeWidth="1.4" />
             <path d="M12 8 L12 13 M12 13 L8.5 15.5 M12 13 L15.5 15.5" stroke="#FF9E40" strokeWidth="1.6" strokeLinecap="round" />
@@ -727,6 +729,20 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
             TORQ<span className="text-torque">CLAW</span>
           </span>
         </div>
+        {ROOMS_UI_ENABLED && (
+          <button
+            type="button"
+            onClick={() => setView('channels')}
+            aria-label="Open Rooms"
+            aria-pressed={view === 'channels'}
+            title="Rooms"
+            className="grid h-8 w-8 shrink-0 place-items-center rounded border border-edge text-muted hover:border-torque/40 hover:text-torque min-[900px]:hidden"
+          >
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+              <path d="M8 10h8M8 14h5M21 12c0 4.4-4 8-9 8-1.3 0-2.5-.2-3.6-.6L3 21l1.7-4.3C3.6 15.5 3 13.8 3 12c0-4.4 4-8 9-8s9 3.6 9 8Z" />
+            </svg>
+          </button>
+        )}
         {/* PRD §2: fresh + connected -> CONNECTED (good, pulsing dot). Stale
             >30s OR disconnected -> the 'stale · reconnecting…' badge REPLACES
             the element entirely. The badge stays actionable (click forces a
@@ -776,7 +792,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
             }}
           />
         )}
-        <div className="ml-auto flex items-center gap-3">
+        <div className={`ml-auto items-center gap-3 ${ROOMS_UI_ENABLED ? 'hidden min-[820px]:flex' : 'flex'}`}>
           {/* PRD §2 session budget meter: sync dot (amber pulse when stale),
               SESSION BUDGET micro-label, 110x4 gradient meter, $X.XX / $Y.YY,
               refresh, synced M:SS. Climbs with REAL costSummary frames only;
@@ -866,7 +882,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
                   <svg className="h-[15px] w-[15px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
                     <path d="M8 10h8M8 14h5M21 12c0 4.4-4 8-9 8-1.3 0-2.5-.2-3.6-.6L3 21l1.7-4.3C3.6 15.5 3 13.8 3 12c0-4.4 4-8 9-8s9 3.6 9 8Z" />
                   </svg>
-                  Channels
+                  {ROOMS_UI_ENABLED ? 'Rooms' : 'Channels'}
                 </button>
               </>
             )}
@@ -895,12 +911,30 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
         {view === 'memory' && (
           <MemoryPanel events={events} sendCommand={sendCommand} onClose={() => setView('tasks')} />
         )}
-        {COLLAB_UI_ENABLED && view === 'channels' && isConnected && (
-          <ChannelsPanel events={events} sendCommand={sendCommand} onClose={() => setView('tasks')} />
+        {COLLAB_UI_ENABLED && view === 'channels' && (
+          ROOMS_UI_ENABLED ? (
+            <ChannelsPanel
+              mode="rooms"
+              events={events}
+              sendCommand={sendCommand}
+              isConnected={isConnected}
+              isStale={stale}
+              onClose={() => setView('tasks')}
+              onOpenAgents={() => setView('agents')}
+              onOpenApprovals={() => setView('approvals')}
+              onOpenReceipts={() => setReceiptsOpen(true)}
+              onOpenCost={() => setCostOpen(true)}
+              onOpenMemory={() => setView('memory')}
+              onOpenTaskStream={() => setView('tasks')}
+            />
+          ) : isConnected ? (
+            <ChannelsPanel events={events} sendCommand={sendCommand} onClose={() => setView('tasks')} />
+          ) : null
         )}
         {COLLAB_UI_ENABLED && view === 'agents' && isConnected && (
           <AgentsPanel events={events} sendCommand={sendCommand} onClose={() => setView('tasks')} />
         )}
+      {!roomsViewActive && (
       <div
         ref={scrollRef}
         className={`h-full overflow-y-auto px-4 pr-2 pt-7 ${view === 'tasks' ? '' : 'hidden'}`}
@@ -1027,6 +1061,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
         )}
       </div>
       </div>
+      )}
       {receiptsOpen && (
         <ReceiptsPanel
           events={events}
@@ -1048,7 +1083,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
         </div>
       </div>
 
-      {hint && !hintDismissed && (
+      {!roomsViewActive && hint && !hintDismissed && (
         <div className="mt-3 flex items-center gap-3 rounded border border-torque/40 bg-torque/10 px-3 py-2 text-[11px] text-torque">
           <span>This looks like it may contain {hint} — keep it on this machine?</span>
           <button
@@ -1066,7 +1101,11 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
         </div>
       )}
 
-      <form onSubmit={submit} className="border-t border-edge bg-panel px-4 pb-4 pt-3.5">
+      {!roomsViewActive && (
+      <form
+        onSubmit={submit}
+        className="border-t border-edge bg-panel px-4 pb-4 pt-3.5"
+      >
         <div className="mx-auto max-w-[860px]">
         {/* §6 composer box: panel-2 body, strong hairline, 10px radius, torque
             focus glow; drag-over flips to a dashed torque border. */}
@@ -1366,6 +1405,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
         </div>
         </div>
       </form>
+      )}
     </section>
   );
 }
