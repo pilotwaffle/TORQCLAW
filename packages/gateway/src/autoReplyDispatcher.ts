@@ -495,7 +495,7 @@ async function runAgentTurn(
   let contextText: string;
   let subscriptionContextText: string;
   try {
-    const ctx = await buildAnchorWindowContext(store, caller, channelId, agentPrincipalId);
+    const ctx = await buildAnchorWindowContext(store, caller, channelId, agentPrincipalId, claimed.identity.channelSeq);
     contextText = ctx.text;
     subscriptionContextText = ctx.subscriptionText;
   } catch (err: any) {
