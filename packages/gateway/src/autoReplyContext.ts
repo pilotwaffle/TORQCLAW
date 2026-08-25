@@ -26,6 +26,15 @@ export const ANCHOR_EVENT_COUNT = 10;
 export const WINDOW_EVENT_COUNT = 40;
 
 /**
+ * G1D v1.1 amendment / G1R F-1,F-3 (2026-08-24) -- the newest-message-marker
+ * micro-slice. These are the ONLY two literal banner strings; the repeated
+ * event line inside them is always produced by the same `renderEvent`
+ * function used for the RECENT window, never a parallel format string.
+ */
+export const NEWEST_MESSAGE_BANNER_OPEN = '--- NEWEST MESSAGE — this is the message you are responding to ---';
+export const NEWEST_MESSAGE_BANNER_CLOSE = '--- END NEWEST MESSAGE ---';
+
+/**
  * G1D N-1 (2026-08-24 channels-agent-UX packet) -- the narrow self-dedupe
  * rule. Below this length, two "replies" (e.g. "ack", "done", "on it") are
  * exempt from collapsing/suppression even if byte-identical: short
@@ -183,12 +192,30 @@ function collapseSelfRuns<T extends TimelineEventObject>(
  * collapseSelfRuns above) -- optional and additive: omitted (the cron path,
  * cronDispatcher.ts, calls this with no selfPrincipalId), behavior is
  * byte-identical to before this parameter existed.
+ *
+ * `triggerChannelSeq`, when supplied, identifies the event that AUTHORIZED
+ * this turn (the dispatcher's claimed `channelSeq`, autoReplyDispatcher.ts's
+ * `claimed.identity.channelSeq`) -- G1D v1.1 amendment / G1R F-1. If an event
+ * in the RECENT window has `Number(ev.cursor) === triggerChannelSeq`, is kind
+ * `message_posted`, and is NOT self-authored (`actorPrincipalId !==
+ * selfPrincipalId`), a labeled NEWEST MESSAGE section repeating that event
+ * (rendered by the SAME `renderEvent` used for the window, never a parallel
+ * format string) is appended after the RECENT block. On ANY miss -- cursor
+ * absent from the window, not a message_posted, self-authored, or the
+ * trigger having fallen out of the window under load (R-8, disclosed
+ * residual) -- the section is OMITTED ENTIRELY. There is no
+ * newest-message fallback of any kind: "use the newest message_posted
+ * instead" was the exact defect this amendment withdrew (G1R F-1), because a
+ * fresh timeline read at assembly time is a second, racing source of turn
+ * identity. Omitted (undefined) is byte-identical to before this parameter
+ * existed -- the cron path (cronDispatcher.ts) passes none.
  */
 export async function buildAnchorWindowContext(
   store: CollaborationStore,
   caller: CallerContext,
   channelId: string,
   selfPrincipalId?: string,
+  triggerChannelSeq?: number,
 ): Promise<AnchorWindowResult> {
   const anchorPage = await store.getChannelTimeline(caller, {
     channelId,
@@ -290,6 +317,34 @@ export async function buildAnchorWindowContext(
   if (windowLines.length > 0) {
     parts.push(`--- RECENT (last ${windowLines.length} event(s)) ---`);
     parts.push(...windowLines);
+  }
+
+  // G1D v1.1 amendment / G1R F-1,F-3,F-4 (2026-08-24): the newest-message
+  // marker. Gated strictly on `triggerChannelSeq !== undefined` -- the cron
+  // path (cronDispatcher.ts) passes none, so this section is automatically
+  // absent there (obligation 8 / F-4). The trigger event is looked up among
+  // the RECENT window's own RAW (pre-collapse) events -- `nonOverlapping`,
+  // not `windowCollapsed` -- because the window's collapse pass
+  // (collapseSelfRuns) only ever folds SELF-authored runs, and any event
+  // this marker is allowed to name is, by construction, non-self-authored;
+  // so a genuine match is always still present, unelided, in
+  // `nonOverlapping`. Fail closed on every miss: cursor not found in the
+  // RECENT window (including "fell out of the window", R-8), not a
+  // `message_posted`, or self-authored -- OMIT THE SECTION ENTIRELY, no
+  // fallback of any kind (this is what the withdrawn "use the newest
+  // message_posted" branch would have been).
+  if (triggerChannelSeq !== undefined) {
+    const triggerEvent = nonOverlapping.find((ev) => Number(ev.cursor) === triggerChannelSeq);
+    if (
+      triggerEvent
+      && triggerEvent.kind === 'message_posted'
+      && triggerEvent.actorPrincipalId !== selfPrincipalId
+    ) {
+      parts.push('');
+      parts.push(NEWEST_MESSAGE_BANNER_OPEN);
+      parts.push(renderEvent(triggerEvent));
+      parts.push(NEWEST_MESSAGE_BANNER_CLOSE);
+    }
   }
 
   const subscriptionParts: string[] = [];

@@ -558,4 +558,22 @@ describe('PRD-TCLAW G1D-FABLE-CHANNELS-AGENT-UX Item A — greeting loop self-de
     expect(args, 'the cron call site must pass exactly 3 args (no selfPrincipalId)').toEqual(['store', 'caller', 'channelId']);
     expect(typeof cronDispatcher).toBe('object'); // the module itself loaded fine
   }, 20000);
+
+  it('T-4 (newest-message-marker slice, G1R Gate-1) — dispatcher call-site pin: runAgentTurn passes claimed.identity.channelSeq as the 5th argument', async () => {
+    // Source-level pin (same house pattern as obligation 8's cron pin
+    // directly above): autoReplyDispatcher.ts's runAgentTurn call site must
+    // pass exactly (store, caller, channelId, agentPrincipalId,
+    // claimed.identity.channelSeq) -- five arguments, the trigger identity
+    // last -- so a future edit that dropped or changed the 5th argument
+    // shows up as a visible, reviewable diff here.
+    const { readFileSync } = await import('node:fs');
+    const dispatcherSourcePath = join(REPO_ROOT, 'packages', 'gateway', 'src', 'autoReplyDispatcher.ts');
+    const dispatcherSourceText = readFileSync(dispatcherSourcePath, 'utf8');
+    const callMatch = dispatcherSourceText.match(/buildAnchorWindowContext\(([^)]*)\)/);
+    expect(callMatch, 'autoReplyDispatcher.ts must call buildAnchorWindowContext').not.toBeNull();
+    const args = callMatch![1]!.split(',').map((s) => s.trim()).filter(Boolean);
+    expect(args, 'the dispatcher call site must pass exactly 5 args, trigger identity last').toEqual([
+      'store', 'caller', 'channelId', 'agentPrincipalId', 'claimed.identity.channelSeq',
+    ]);
+  });
 });
