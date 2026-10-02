@@ -2,8 +2,11 @@ import type { GatewayEvent } from '@torqclaw/contracts';
 
 export type RoomJobState = 'created' | 'cancelled';
 export type RoomJobLifecycleKind = 'created' | 'cancel_requested' | 'cancelled' | 'artifact_committed';
+export type RoomJobExecutionLifecycleKind = RoomJobLifecycleKind | 'attempt_started' | 'draft_committed' | 'review_committed' | 'execution_failed';
 export type RoomArtifactType = 'proposal' | 'decision_summary' | 'research_source' | 'independent_review';
 export type RoomArtifactProvenance = 'user_provided' | 'tool_observed' | 'model_assertion' | 'test_fixture';
+export type RoomJobAttemptState = 'queued' | 'draft_committed' | 'review_committed' | 'completed_internal' | 'cancelled' | 'validation_failed' | 'recovery_needed' | 'runtime_unavailable';
+export type RoomJobTerminalCode = 'cancelled' | 'validation_failed' | 'recovery_needed' | 'runtime_unavailable' | 'stage_failed';
 
 export interface RoomJobCapabilities {
   canCreate: boolean;
@@ -44,10 +47,52 @@ export interface RoomJobDetail extends RoomJobListEntry {
   artifacts: RoomJobArtifactMetadata[];
 }
 
+export interface RoomJobFactMetadata {
+  factId: string;
+  ordinal: number;
+  sha256: string;
+  createdAt: string;
+}
+
+export interface RoomJobExecutionCapabilities {
+  canAddFacts: boolean;
+  canStart: boolean;
+  runtime: 'ready' | 'unavailable' | 'unknown';
+}
+
+export interface RoomJobAttemptSummary {
+  state: RoomJobAttemptState;
+  terminalCode: RoomJobTerminalCode | null;
+  updatedAt: string;
+}
+
+export interface RoomJobExecutionDetail {
+  channelId: string;
+  job: Omit<RoomJobDetail, 'lifecycle'> & { lifecycle: Array<Omit<RoomJobLifecycleEntry, 'kind'> & { kind: RoomJobExecutionLifecycleKind }> };
+  execution: {
+    observedAt: string;
+    capabilities: RoomJobExecutionCapabilities;
+    facts?: RoomJobFactMetadata[];
+    latestAttempt: RoomJobAttemptSummary | null;
+  };
+}
+
+export interface RoomJobArtifactContent extends RoomJobArtifactMetadata {
+  channelId: string;
+  jobId: string;
+  artifactType: 'proposal' | 'decision_summary';
+  provenanceKind: 'model_assertion';
+  content: string;
+}
+
 export type RoomJobEnvelope =
   | { kind: 'created' | 'cancelled'; idempotencyKey: string; job: RoomJobListEntry }
   | { kind: 'list'; channelId: string; jobs: RoomJobListEntry[]; nextCursor: string; hasMore: boolean; capabilities: Pick<RoomJobCapabilities, 'canCreate'> }
   | { kind: 'detail'; job: RoomJobDetail };
+
+export type RoomJobExecutionEnvelope =
+  | { kind: 'execution_detail'; detail: RoomJobExecutionDetail }
+  | { kind: 'artifact'; artifact: RoomJobArtifactContent };
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -151,6 +196,94 @@ function parseArtifact(value: unknown): RoomJobArtifactMetadata | null {
   };
 }
 
+function parseExecutionLifecycle(value: unknown): RoomJobExecutionDetail['job']['lifecycle'][number] | null {
+  const candidate = record(value);
+  if (!candidate || !positiveInteger(candidate.jobSeq) ||
+      !['created', 'cancel_requested', 'cancelled', 'artifact_committed', 'attempt_started', 'draft_committed', 'review_committed', 'execution_failed'].includes(candidate.kind as string) ||
+      !roomJobState(candidate.state) || !positiveInteger(candidate.revision) || !timestamp(candidate.occurredAt)) return null;
+  if ((candidate.kind === 'cancelled' && candidate.state !== 'cancelled') ||
+      (candidate.kind !== 'cancelled' && candidate.state !== 'created')) return null;
+  return {
+    jobSeq: candidate.jobSeq,
+    kind: candidate.kind as RoomJobExecutionLifecycleKind,
+    state: candidate.state,
+    revision: candidate.revision,
+    occurredAt: candidate.occurredAt,
+  };
+}
+
+function parseFact(value: unknown): RoomJobFactMetadata | null {
+  const candidate = record(value);
+  if (!candidate || !uuid(candidate.factId) || !positiveInteger(candidate.ordinal) ||
+      !(typeof candidate.sha256 === 'string' && SHA256.test(candidate.sha256)) || !timestamp(candidate.createdAt)) return null;
+  return { factId: candidate.factId, ordinal: candidate.ordinal, sha256: candidate.sha256, createdAt: candidate.createdAt };
+}
+
+function parseExecutionCapabilities(value: unknown): RoomJobExecutionCapabilities | null {
+  const candidate = record(value);
+  if (!candidate || typeof candidate.canAddFacts !== 'boolean' || typeof candidate.canStart !== 'boolean' ||
+      !['ready', 'unavailable', 'unknown'].includes(candidate.runtime as string)) return null;
+  if (candidate.runtime !== 'ready' && candidate.canStart) return null;
+  return { canAddFacts: candidate.canAddFacts, canStart: candidate.canStart, runtime: candidate.runtime as RoomJobExecutionCapabilities['runtime'] };
+}
+
+function parseAttemptSummary(value: unknown): RoomJobAttemptSummary | null {
+  const candidate = record(value);
+  if (!candidate || !['queued', 'draft_committed', 'review_committed', 'completed_internal', 'cancelled', 'validation_failed', 'recovery_needed', 'runtime_unavailable'].includes(candidate.state as string) ||
+      !(candidate.terminalCode === null || ['cancelled', 'validation_failed', 'recovery_needed', 'runtime_unavailable', 'stage_failed'].includes(candidate.terminalCode as string)) ||
+      !timestamp(candidate.updatedAt)) return null;
+  return {
+    state: candidate.state as RoomJobAttemptState,
+    terminalCode: candidate.terminalCode as RoomJobTerminalCode | null,
+    updatedAt: candidate.updatedAt,
+  };
+}
+
+function parseExecutionDetail(value: unknown, channelId: string, executionValue: unknown): RoomJobExecutionDetail | null {
+  const candidate = record(value);
+  const job = parseRoomJobListEntry(candidate);
+  const execution = record(executionValue);
+  if (!candidate || !job || !execution || job.channelId !== channelId || !timestamp(execution.observedAt) ||
+      !Array.isArray(candidate.lifecycle) || !Array.isArray(candidate.artifacts)) return null;
+  const parsedCapabilities = parseExecutionCapabilities(execution.capabilities);
+  const parsedAttempt = execution.latestAttempt === null ? null : parseAttemptSummary(execution.latestAttempt);
+  if (!parsedCapabilities || (execution.latestAttempt !== null && !parsedAttempt)) return null;
+  let facts: RoomJobFactMetadata[] | undefined;
+  if (Object.hasOwn(execution, 'facts')) {
+    if (!Array.isArray(execution.facts)) return null;
+    const parsedFacts = execution.facts.map(parseFact);
+    if (parsedFacts.some((fact) => fact === null)) return null;
+    const ids = new Set<string>();
+    let previousOrdinal = 0;
+    for (const fact of parsedFacts as RoomJobFactMetadata[]) {
+      if (ids.has(fact.factId) || fact.ordinal <= previousOrdinal) return null;
+      ids.add(fact.factId);
+      previousOrdinal = fact.ordinal;
+    }
+    facts = parsedFacts as RoomJobFactMetadata[];
+  }
+  const lifecycle = candidate.lifecycle.map(parseExecutionLifecycle);
+  const artifacts = candidate.artifacts.map(parseArtifact);
+  if (lifecycle.some((entry) => entry === null) || artifacts.some((artifact) => artifact === null)) return null;
+  const sequence = new Set<number>();
+  const artifactIds = new Set<string>();
+  let previousSequence = 0;
+  for (const entry of lifecycle as RoomJobExecutionDetail['job']['lifecycle']) {
+    if (sequence.has(entry.jobSeq) || entry.jobSeq <= previousSequence) return null;
+    sequence.add(entry.jobSeq);
+    previousSequence = entry.jobSeq;
+  }
+  for (const artifact of artifacts as RoomJobArtifactMetadata[]) {
+    if (artifactIds.has(artifact.artifactId)) return null;
+    artifactIds.add(artifact.artifactId);
+  }
+  return {
+    channelId,
+    job: { ...job, lifecycle: lifecycle as RoomJobExecutionDetail['job']['lifecycle'], artifacts: artifacts as RoomJobArtifactMetadata[] },
+    execution: { observedAt: execution.observedAt, capabilities: parsedCapabilities, ...(facts ? { facts } : {}), latestAttempt: parsedAttempt },
+  };
+}
+
 export function parseRoomJobEnvelope(event: GatewayEvent): RoomJobEnvelope | null {
   if (event.type !== 'SYSTEM') return null;
   const metadata = record(event.metadata);
@@ -198,6 +331,57 @@ export function parseRoomJobEnvelope(event: GatewayEvent): RoomJobEnvelope | nul
     return { kind: 'detail', job: { ...job, lifecycle: lifecycle as RoomJobLifecycleEntry[], artifacts: artifacts as RoomJobArtifactMetadata[] } };
   }
   return null;
+}
+
+/**
+ * Deliberately separate from parseRoomJobEnvelope: default Room-job reads
+ * remain v1. The execution path may consume only the explicit v2 kinds.
+ */
+export function parseRoomJobExecutionEnvelope(event: GatewayEvent): RoomJobExecutionEnvelope | null {
+  if (event.type !== 'SYSTEM') return null;
+  const metadata = record(event.metadata);
+  const roomJob = record(metadata?.roomJob);
+  if (!roomJob || roomJob.version !== 2 || typeof roomJob.kind !== 'string') return null;
+  if (roomJob.kind === 'execution_detail') {
+    if (!nonEmptyString(roomJob.channelId)) return null;
+    const detail = parseExecutionDetail(roomJob.job, roomJob.channelId, roomJob.execution);
+    return detail ? { kind: 'execution_detail', detail } : null;
+  }
+  if (roomJob.kind === 'artifact') {
+    if (!nonEmptyString(roomJob.channelId) || !uuid(roomJob.jobId)) return null;
+    const candidate = record(roomJob.artifact);
+    const metadataArtifact = parseArtifact(candidate);
+    if (!candidate || !metadataArtifact ||
+        (metadataArtifact.artifactType !== 'proposal' && metadataArtifact.artifactType !== 'decision_summary') ||
+        metadataArtifact.provenanceKind !== 'model_assertion' ||
+        !nonEmptyString(candidate.content) || candidate.content !== candidate.content.normalize('NFC') ||
+        new TextEncoder().encode(candidate.content).length > 65_536) return null;
+    return {
+      kind: 'artifact',
+      artifact: {
+        ...metadataArtifact,
+        channelId: roomJob.channelId,
+        jobId: roomJob.jobId,
+        artifactType: metadataArtifact.artifactType,
+        provenanceKind: 'model_assertion',
+        content: candidate.content,
+      },
+    };
+  }
+  return null;
+}
+
+export function isCurrentRoomJobArtifact(detail: RoomJobExecutionDetail, artifact: RoomJobArtifactContent): boolean {
+  if (artifact.channelId !== detail.channelId || artifact.jobId !== detail.job.jobId) return false;
+  return detail.job.artifacts.some((metadata) =>
+    metadata.artifactId === artifact.artifactId &&
+    metadata.artifactType === artifact.artifactType &&
+    metadata.revision === artifact.revision &&
+    metadata.schemaVersion === artifact.schemaVersion &&
+    metadata.provenanceKind === artifact.provenanceKind &&
+    metadata.sha256 === artifact.sha256 &&
+    metadata.createdAt === artifact.createdAt,
+  );
 }
 
 export function visibleRoomJobDetail(detail: RoomJobDetail): RoomJobDetail {
