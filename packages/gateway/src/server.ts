@@ -50,7 +50,7 @@ import { sweepExpiredApprovals, sweepExpiredGrants } from './approvalWriter.js';
 import { rebuildDeliveryProjection } from './approvalDelivery.js';
 import { revokeInertGrants, admitToolCall } from './grantAdmission.js';
 import { decideApprovalC2 } from './c2Broker.js';
-import { collabSurfaceCommandsEnabled, agentParticipationEnabled, webSearchEnabled, isAgentSurfaceCaller, handleListChannels, handleListChannelMembers, handleSetChannelExternalExportPolicy, handleGetChannelTimeline, handlePostChannelMessage, handleAckChannelCursor, handleAddChannelMember, handleRemoveChannelMember, handleCreateRoomJob, handleGetRoomJob, handleListRoomJobs, handleCancelRoomJob, handleAddRoomJobFacts, handleStartRoomJob, setAutoReplyTrigger, getStore } from './collabSurface.js';
+import { collabSurfaceCommandsEnabled, agentParticipationEnabled, webSearchEnabled, isAgentSurfaceCaller, handleListChannels, handleListChannelMembers, handleSetChannelExternalExportPolicy, handleGetChannelTimeline, handlePostChannelMessage, handleAckChannelCursor, handleAddChannelMember, handleRemoveChannelMember, handleCreateRoomJob, handleGetRoomJob, handleGetRoomJobArtifact, handleListRoomJobs, handleCancelRoomJob, handleAddRoomJobFacts, handleStartRoomJob, setAutoReplyTrigger, getStore } from './collabSurface.js';
 import {
   handleCreateAgent,
   handleListAgentProviders,
@@ -1124,6 +1124,19 @@ app.get('/ws', { websocket: true }, (socket) => {
           cmd.data,
         );
         if (getRoomJobErr) sendErr(getRoomJobErr.code, getRoomJobErr.detail);
+        break;
+      }
+      case 'GET_ROOM_JOB_ARTIFACT': {
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        const getRoomJobArtifactErr = await handleGetRoomJobArtifact(
+          sid,
+          connectionAuth?.principalId ?? null,
+          cmd.data,
+        );
+        if (getRoomJobArtifactErr) sendErr(getRoomJobArtifactErr.code, getRoomJobArtifactErr.detail);
         break;
       }
       case 'CANCEL_ROOM_JOB': {

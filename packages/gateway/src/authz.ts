@@ -237,6 +237,7 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     // ordinary members or agent/node surfaces.
     case 'CREATE_ROOM_JOB':
     case 'GET_ROOM_JOB':
+    case 'GET_ROOM_JOB_ARTIFACT':
     case 'LIST_ROOM_JOBS':
     case 'CANCEL_ROOM_JOB':
     case 'ADD_ROOM_JOB_FACTS':

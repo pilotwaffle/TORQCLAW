@@ -67,6 +67,20 @@ describe('room-job coordinator', () => {
       .toEqual([{ state: 'terminal' }, { state: 'terminal' }]);
     expect(state.prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN ('tasks','run_receipts','tool_approvals','sessions','task_episodes')`).get())
       .toEqual({ n: 0 });
+    const proposalId = (collab.prepare(`SELECT artifact_id FROM room_artifact_revisions
+      WHERE job_id = ? AND artifact_type = 'proposal'`).get(job.job.jobId) as { artifact_id: string }).artifact_id;
+    const proposal = await store.getRoomJobArtifact(owner, {
+      channelId: room.channelId, jobId: job.job.jobId, artifactId: proposalId,
+    });
+    expect(proposal).toMatchObject({ artifactId: proposalId, artifactType: 'proposal', provenanceKind: 'model_assertion' });
+    expect(proposal.content).toContain('Client Proposal');
+    expect(proposal.content).not.toContain('Draft a proposal');
+    const fixtureArtifact = await store.appendRoomJobFixtureArtifactForTest(owner, {
+      channelId: room.channelId, jobId: job.job.jobId, artifactType: 'proposal', content: Buffer.from('fixture only'),
+    });
+    await expect(store.getRoomJobArtifact(owner, {
+      channelId: room.channelId, jobId: job.job.jobId, artifactId: fixtureArtifact.artifactId,
+    })).rejects.toMatchObject({ code: 'COLLAB_NOT_FOUND' });
     collab.close();
     state.close();
   });

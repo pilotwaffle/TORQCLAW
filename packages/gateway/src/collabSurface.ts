@@ -839,6 +839,26 @@ export async function handleGetRoomJob(
   }
 }
 
+export async function handleGetRoomJobArtifact(
+  sessionId: string,
+  principalId: string | null,
+  input: { channelId: string; jobId: string; artifactId: string },
+): Promise<CollabSurfaceError | null> {
+  if (principalId === null) return COLLAB_IDENTITY_REQUIRED;
+  const store = getStore();
+  if (!store) return { code: 'COLLAB_UNAVAILABLE' };
+  try {
+    const artifact = await store.getRoomJobArtifact(callerFor(principalId), input);
+    publishOnly(sessionId, {
+      message: 'Room job artifact loaded',
+      metadata: { roomJob: { version: 1, kind: 'artifact', artifact } },
+    });
+    return null;
+  } catch (err: any) {
+    return roomJobSurfaceError(err);
+  }
+}
+
 export async function handleCancelRoomJob(
   sessionId: string,
   principalId: string | null,

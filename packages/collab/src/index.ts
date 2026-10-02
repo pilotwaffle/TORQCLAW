@@ -116,6 +116,7 @@ export {
   type RoomJobListEntry,
   type RoomJobLifecycleEntry,
   type RoomArtifactMetadata,
+  type RoomArtifactContent,
   type RoomJobDetail,
   type CreateRoomJobResult,
   type ListRoomJobsResult,
