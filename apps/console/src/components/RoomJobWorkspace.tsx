@@ -19,6 +19,7 @@ export interface RoomJobWorkspaceProps {
   execution?: RoomJobExecutionDetail | null;
   executionArtifact?: RoomJobArtifactContent | null;
   executionArtifactStatus?: 'idle' | 'loading' | 'send-failed' | 'timeout' | 'unavailable';
+  executionMutationStatus?: 'idle' | 'facts-pending' | 'start-pending' | 'unconfirmed';
   executionActions?: RoomJobExecutionActions;
 }
 
@@ -55,7 +56,7 @@ function lifecycleLabel(kind: RoomJobDetail['lifecycle'][number]['kind']): strin
 export default function RoomJobWorkspace({
   roomName, jobs, selectedJobId, detail, listStatus, detailStatus, connected,
   stale, onSelectJob, onRefreshList, onRefreshDetail, execution, executionArtifact,
-  executionArtifactStatus, executionActions,
+  executionArtifactStatus, executionMutationStatus, executionActions,
 }: RoomJobWorkspaceProps) {
   const visibleDetail = useMemo(() => detail ? visibleRoomJobDetail(detail) : null, [detail]);
   const listMessage = !connected
@@ -122,7 +123,7 @@ export default function RoomJobWorkspace({
                 </div>
               ) : <p className="mt-2 text-[10.5px] text-faint">Job detail unknown/not loaded.</p>}
         {execution !== null && execution !== undefined && executionActions !== undefined && (
-          <RoomJobExecutionWorkspace detail={execution} artifact={executionArtifact ?? null} artifactStatus={executionArtifactStatus} actions={executionActions} />
+          <RoomJobExecutionWorkspace detail={execution} artifact={executionArtifact ?? null} artifactStatus={executionArtifactStatus} mutationStatus={executionMutationStatus} actions={executionActions} />
         )}
       </div>
 
@@ -202,7 +203,8 @@ export function RoomJobExecutionWorkspace({
   const [downloadStatus, setDownloadStatus] = useState<'idle' | 'downloaded' | 'failed'>('idle');
   const facts = factLines(factDraft);
   const mutationPending = mutationStatus === 'facts-pending' || mutationStatus === 'start-pending';
-  const canAddFacts = detail.execution.capabilities.canAddFacts && !mutationPending;
+  const canAddFacts = detail.execution.capabilities.canAddFacts;
+  const canSubmitFacts = canAddFacts && !mutationPending && validFacts(facts);
   const canStart = detail.execution.capabilities.canStart && selectedFactIds.length > 0 && !mutationPending;
   const readableArtifacts = detail.job.artifacts.filter((item) =>
     item.provenanceKind === 'model_assertion' && (item.artifactType === 'proposal' || item.artifactType === 'decision_summary'),
@@ -281,12 +283,12 @@ export function RoomJobExecutionWorkspace({
             <label className="block text-[10.5px] text-muted" htmlFor="room-job-facts">One plain-text fact per line</label>
             <textarea id="room-job-facts" value={factDraft} onChange={(event) => setFactDraft(event.target.value)} rows={4} className="w-full resize-y rounded border border-edge bg-panel-2 px-2 py-1.5 text-[11px] text-ink outline-none focus:border-torque" />
             <p className="text-[10px] text-faint">{facts.length} / 20 facts. Each line is checked locally for 1–16,384 UTF-8 bytes; gateway validation remains authoritative.</p>
-            <button type="button" onClick={submitFacts} disabled={!validFacts(facts)} className="rounded border border-torque/40 px-2 py-1 text-[10.5px] text-torque hover:bg-torque/10 disabled:opacity-50">Record facts</button>
+            <button type="button" onClick={submitFacts} disabled={!canSubmitFacts} className="rounded border border-torque/40 px-2 py-1 text-[10.5px] text-torque hover:bg-torque/10 disabled:opacity-50">Record facts</button>
           </div>}
           {detail.execution.facts.length === 0 ? <p className="mt-2 text-[10.5px] text-faint">No immutable fact metadata is available yet.</p> : (
             <fieldset className="mt-3 space-y-1">
               <legend className="text-[10.5px] text-muted">Select immutable facts for one local attempt</legend>
-              {detail.execution.facts.map((fact) => <label key={fact.factId} className="flex items-start gap-2 text-[10.5px] text-muted"><input type="checkbox" checked={selectedFactIds.includes(fact.factId)} onChange={() => toggleFact(fact.factId)} disabled={!detail.execution.capabilities.canStart} /><span>Fact {fact.ordinal} — sha256 {fact.sha256.slice(0, 12)}...</span></label>)}
+              {detail.execution.facts.map((fact) => <label key={fact.factId} className="flex items-start gap-2 text-[10.5px] text-muted"><input type="checkbox" checked={selectedFactIds.includes(fact.factId)} onChange={() => toggleFact(fact.factId)} disabled={!detail.execution.capabilities.canStart || mutationPending} /><span>Fact {fact.ordinal} - sha256 {fact.sha256.slice(0, 12)}...</span></label>)}
               <button type="button" onClick={() => actions.onStart(selectedFactIds)} disabled={!canStart} className="mt-2 rounded border border-torque/40 px-2 py-1 text-[10.5px] text-torque hover:bg-torque/10 disabled:opacity-50">Start local draft and configured review</button>
             </fieldset>
           )}

@@ -1057,6 +1057,14 @@ function RoomsPanel({
   const [jobDetailStatus, setJobDetailStatus] = useState<RoomJobLoadStatus>('unavailable');
   const [jobMutation, setJobMutation] = useState<{ channelId: string | null; status: RoomJobMutationStatus }>({ channelId: null, status: 'idle' });
 
+  const clearArtifactRequest = () => {
+    if (artifactTimer.current) clearTimeout(artifactTimer.current);
+    artifactTimer.current = null;
+    pendingArtifact.current = null;
+    setExecutionArtifact(null);
+    setArtifactStatus('unavailable');
+  };
+
   const requestList = () => {
     if (listTimer.current) clearTimeout(listTimer.current);
     dispatch({ type: 'request' });
@@ -1093,8 +1101,7 @@ function RoomsPanel({
     if (jobDetailTimer.current) clearTimeout(jobDetailTimer.current);
     pendingJobDetail.current = { channelId, jobId, generation: roomSelectionGeneration.current };
     setJobDetailStatus('loading');
-    setExecutionArtifact(null);
-    setArtifactStatus('unavailable');
+    clearArtifactRequest();
     const sent = sendCommand({ action: 'GET_ROOM_JOB', channelId, jobId, projection: 'execution_v2' });
     if (!sent) {
       pendingJobDetail.current = null;
@@ -1107,6 +1114,18 @@ function RoomsPanel({
         setJobDetailStatus('timeout');
       }
     }, ROOM_JOB_TIMEOUT_MS);
+  };
+
+  const reconcileUnconfirmedExecutionMutation = (idempotencyKey?: string) => {
+    const pending = pendingJobMutation.current;
+    if (!pending || (pending.kind !== 'facts_recorded' && pending.kind !== 'attempt_started') ||
+        (idempotencyKey !== undefined && pending.idempotencyKey !== idempotencyKey)) return;
+    if (jobMutationTimer.current) clearTimeout(jobMutationTimer.current);
+    pendingJobMutation.current = null;
+    setJobMutation({ channelId: pending.channelId, status: 'unconfirmed' });
+    if (state.connected && !state.stale && pending.channelId === highlightedRoomId && pending.jobId !== null && pending.jobId === selectedJobId) {
+      requestJobDetail(pending.channelId, pending.jobId);
+    }
   };
 
   useEffect(() => {
@@ -1146,7 +1165,7 @@ function RoomsPanel({
     roomSelectionGeneration.current++;
     pendingJobListRoom.current = null;
     pendingJobDetail.current = null;
-    pendingArtifact.current = null;
+    clearArtifactRequest();
     setJobList(null);
     setSelectedJobId(null);
     setJobDetail(null);
@@ -1168,6 +1187,14 @@ function RoomsPanel({
     if (selectedJobId) requestJobDetail(highlightedRoomId, selectedJobId);
     // Reconnect/freshness recovery is a selected read only; it never replays a
     // create/cancel mutation or derives a job from a channel hint.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.connected, state.stale]);
+
+  useEffect(() => {
+    if (state.connected && !state.stale) return;
+    reconcileUnconfirmedExecutionMutation();
+    // A disconnect is unconfirmed, never a failed write. The fresh reconnect
+    // effect above reconciles the current selected job with execution_v2.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.connected, state.stale]);
 
@@ -1259,6 +1286,7 @@ function RoomsPanel({
   const selectJob = (jobId: string) => {
     if (!highlightedRoomId || !jobList?.jobs.some((job) => job.jobId === jobId)) return;
     roomSelectionGeneration.current++;
+    clearArtifactRequest();
     setSelectedJobId(jobId);
     setJobDetail(null);
     setExecutionDetail(null);
@@ -1318,15 +1346,13 @@ function RoomsPanel({
     setJobMutation({ channelId: highlightedRoomId, status: 'facts-pending' });
     const sent = sendCommand({ action: 'ADD_ROOM_JOB_FACTS', channelId: highlightedRoomId, jobId: selectedJobId, facts, idempotencyKey });
     if (!sent) {
-      pendingJobMutation.current = null;
-      setJobMutation({ channelId: highlightedRoomId, status: 'unconfirmed' });
+      reconcileUnconfirmedExecutionMutation(idempotencyKey);
       return;
     }
     if (jobMutationTimer.current) clearTimeout(jobMutationTimer.current);
     jobMutationTimer.current = setTimeout(() => {
       if (pendingJobMutation.current?.idempotencyKey === idempotencyKey) {
-        pendingJobMutation.current = null;
-        setJobMutation({ channelId: highlightedRoomId, status: 'unconfirmed' });
+        reconcileUnconfirmedExecutionMutation(idempotencyKey);
       }
     }, ROOM_JOB_TIMEOUT_MS);
   };
@@ -1340,15 +1366,13 @@ function RoomsPanel({
     setJobMutation({ channelId: highlightedRoomId, status: 'start-pending' });
     const sent = sendCommand({ action: 'START_ROOM_JOB', channelId: highlightedRoomId, jobId: selectedJobId, factIds, idempotencyKey });
     if (!sent) {
-      pendingJobMutation.current = null;
-      setJobMutation({ channelId: highlightedRoomId, status: 'unconfirmed' });
+      reconcileUnconfirmedExecutionMutation(idempotencyKey);
       return;
     }
     if (jobMutationTimer.current) clearTimeout(jobMutationTimer.current);
     jobMutationTimer.current = setTimeout(() => {
       if (pendingJobMutation.current?.idempotencyKey === idempotencyKey) {
-        pendingJobMutation.current = null;
-        setJobMutation({ channelId: highlightedRoomId, status: 'unconfirmed' });
+        reconcileUnconfirmedExecutionMutation(idempotencyKey);
       }
     }, ROOM_JOB_TIMEOUT_MS);
   };
@@ -1506,6 +1530,9 @@ function RoomsPanel({
               execution={executionDetail?.channelId === highlightedRow.channelId && executionDetail.job.jobId === selectedJobId ? executionDetail : null}
               executionArtifact={executionArtifact}
               executionArtifactStatus={artifactStatus}
+              executionMutationStatus={jobMutation.channelId === highlightedRow.channelId &&
+                (jobMutation.status === 'facts-pending' || jobMutation.status === 'start-pending' || jobMutation.status === 'unconfirmed')
+                ? jobMutation.status : 'idle'}
               executionActions={{
                 onAddFacts: addFacts,
                 onStart: startExecution,
