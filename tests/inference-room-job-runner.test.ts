@@ -3,6 +3,7 @@ import {
   ROOM_JOB_COMPLETION_TOKEN_CAP,
   ROOM_JOB_RESPONSE_BYTE_CAP,
   RoomJobLocalRunError,
+  assertRoomJobLocalRuntimeReady,
   executeRoomJobLocal,
 } from '../packages/inference/src/ollama.js';
 
@@ -61,5 +62,15 @@ describe('server-only Room-job local runner', () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     })).rejects.toMatchObject({ code: 'runtime_unavailable' } satisfies Partial<RoomJobLocalRunError>);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes an unreadable readiness transport from confirmed unavailability', async () => {
+    const runtime = { host: 'http://127.0.0.1:11434', modelId: 'torq-local:latest', configurationIdentity: 'a'.repeat(64) };
+    await expect(assertRoomJobLocalRuntimeReady(runtime, {
+      fetchImpl: (async () => { throw new TypeError('connection refused'); }) as typeof fetch,
+    })).rejects.toMatchObject({ code: 'runtime_unknown' } satisfies Partial<RoomJobLocalRunError>);
+    await expect(assertRoomJobLocalRuntimeReady(runtime, {
+      fetchImpl: (async () => new Response(JSON.stringify({ models: [] }), { status: 200 })) as typeof fetch,
+    })).rejects.toMatchObject({ code: 'runtime_unavailable' } satisfies Partial<RoomJobLocalRunError>);
   });
 });

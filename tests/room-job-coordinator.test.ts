@@ -7,7 +7,7 @@ import { bootstrapOperator, nodeRandomSource, type BootstrapDb } from '../packag
 import { InMemorySecretStore } from '../packages/collab/src/secrets.js';
 import { DeterministicClock, DeterministicUuids } from '../packages/collab/src/harness.js';
 import { CollaborationStore, type CallerContext } from '../packages/collab/src/store.js';
-import { RoomJobSimulatedCrash, runRoomJobStage } from '../packages/gateway/src/roomJobExecution.js';
+import { ensureRoomJobExecutionStateSchema, reconcileRoomJobExecution, RoomJobSimulatedCrash, runRoomJobStage } from '../packages/gateway/src/roomJobExecution.js';
 
 function fixture() {
   const collab = new Database(':memory:');
@@ -89,6 +89,24 @@ describe('room-job coordinator', () => {
     expect(counter.calls).toBe(2);
     expect(collab.prepare(`SELECT state FROM room_job_outbox WHERE attempt_id = ? ORDER BY stage`).all(attempt.attempt.attemptId))
       .toEqual([{ state: 'acknowledged' }, { state: 'acknowledged' }]);
+    collab.close(); state.close();
+  });
+
+  it('boot reconciliation persists a claimed dispatch interruption to Room authority without replay', async () => {
+    const { collab, state, store, runtime, attempt } = await createStartedFixture('boot-recovery');
+    const admitted = await store.claimRoomJobInternalDispatch(attempt.attempt.attemptId, 'draft', runtime.configurationIdentity);
+    expect(admitted).not.toBeNull();
+    ensureRoomJobExecutionStateSchema(state);
+    state.prepare(`INSERT INTO room_job_execution_inbox(attempt_id, stage, request_id, input_hash, generation, configuration_identity, state, created_at, updated_at)
+      VALUES(?,?,?,?,?,?,'dispatch_started',?,?)`).run(attempt.attempt.attemptId, 'draft', 'boot-recovery-request', attempt.attempt.inputHash, attempt.attempt.generation, runtime.configurationIdentity, '2026-10-02T00:00:00.000Z', '2026-10-02T00:00:00.000Z');
+    let calls = 0;
+    await reconcileRoomJobExecution({ stateDb: state, store, runtime, fetchImpl: (async () => { calls += 1; throw new Error('must not run'); }) as typeof fetch });
+    expect(calls).toBe(0);
+    expect(collab.prepare(`SELECT state FROM room_job_outbox WHERE attempt_id = ? AND stage = 'draft'`).get(attempt.attempt.attemptId)).toEqual({ state: 'recovery_needed' });
+    expect(collab.prepare(`SELECT state, terminal_reason FROM room_job_attempts WHERE attempt_id = ?`).get(attempt.attempt.attemptId))
+      .toEqual({ state: 'recovery_needed', terminal_reason: 'dispatch_interrupted_uncertain' });
+    expect(state.prepare(`SELECT state FROM room_job_execution_inbox WHERE request_id = 'boot-recovery-request'`).get()).toEqual({ state: 'recovery_needed' });
+    expect(collab.prepare(`SELECT COUNT(*) AS n FROM room_job_events WHERE job_id = (SELECT job_id FROM room_job_attempts WHERE attempt_id = ?) AND kind = 'execution_failed'`).get(attempt.attempt.attemptId)).toEqual({ n: 1 });
     collab.close(); state.close();
   });
 
