@@ -853,8 +853,10 @@ describe('Phase 4 protected semantic manifest', () => {
     // Phase 4 seams above are unchanged. Verified via `git diff` that this
     // pair of hunks is the sole new drift since the SET_LOCAL_AGENT_AUTOSTART
     // authorization immediately above.
+    // 2026-10-02 G1R-CODEX-ROOM-JOB-DELTA: foundation 87758f8 adds only
+    // CREATE/GET/LIST/CANCEL_ROOM_JOB channel-seat deny arms and rationale.
     const authzSha = createHash('sha256').update(authz).digest('hex');
-    expect(authzSha).toBe('206a9abf8f1870e96f7a86464d9f5bcade427ebd8c7eb93bab73726535f04a15');
+    expect(authzSha).toBe('85feb4eb3f9dfccd24abfaa6d0b182966ebbb439e4394d0b316d61cf94f4cceb');
     // The migration's own markers: the moved guard must not silently return,
     // and the relocation note must remain declared where it happened.
     expect(authz).not.toContain('export function checkResumeRole');
