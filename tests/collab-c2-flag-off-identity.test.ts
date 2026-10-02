@@ -107,11 +107,30 @@ function scrubAll(frames: string[]): string[] {
       // substitutions stay narrow and field-anchored so they cannot hide
       // a real divergence in frame type, order, message, or metadata.
       .replace(/"classifierLatencyMs":[0-9.]+/g, '"classifierLatencyMs":<MS>')
+      // LOCAL_ONLY routing is selected by a hard user rule before this
+      // model-derived score, so separate live classifier runs may differ
+      // here without changing tier or approval behaviour. Presence, finite
+      // numeric type, and the contract range are checked before comparison.
+      .replace(/"classifierConfidence":[0-9.]+/g, '"classifierConfidence":<CONFIDENCE>')
       .replace(/"inferenceLatencyMs":[0-9.]+/g, '"inferenceLatencyMs":<MS>')
       .replace(/"elapsedMs":[0-9.]+/g, '"elapsedMs":<MS>')
       .replace(/"taskId":"[0-9a-f-]{36}"/g, '"taskId":"<TASK>"');
     return out;
   });
+}
+
+function assertBoundedClassifierConfidence(frames: string[]): void {
+  const routing = frames
+    .map((raw) => JSON.parse(raw) as { type?: unknown; metadata?: { classifierConfidence?: unknown } })
+    .filter((frame) => frame.type === 'ROUTING');
+  expect(routing.length, 'the transcript must include routing').toBeGreaterThan(0);
+  for (const frame of routing) {
+    const confidence = frame.metadata?.classifierConfidence;
+    expect(typeof confidence, 'classifier confidence is numeric').toBe('number');
+    expect(Number.isFinite(confidence as number), 'classifier confidence is finite').toBe(true);
+    expect(confidence as number, 'classifier confidence is bounded').toBeGreaterThanOrEqual(0);
+    expect(confidence as number, 'classifier confidence is bounded').toBeLessThanOrEqual(1);
+  }
 }
 
 function c2RowCounts(dataDir: string): Record<string, number> {
@@ -176,6 +195,8 @@ describe('SI-4 / A12 (C2) — flag-off identity across an approval transcript', 
     // proves nothing about the C2 seams.
     expect(off.approvalId, 'the transcript must reach a real approval').not.toBeNull();
     expect(on.approvalId).not.toBeNull();
+    assertBoundedClassifierConfidence(off.frames);
+    assertBoundedClassifierConfidence(on.frames);
 
     // (1) byte-identical wire transcript, frame for frame, in order
     expect(scrubAll(on.frames)).toEqual(scrubAll(off.frames));
