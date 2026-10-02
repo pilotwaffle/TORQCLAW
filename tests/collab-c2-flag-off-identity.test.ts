@@ -158,7 +158,7 @@ function approvalC2Columns(dataDir: string): Record<string, unknown>[] {
   return rows;
 }
 
-describe('SI-4 / A12 (C2) - flag-off identity across an approval transcript', () => {
+describe('SI-4 / A12 (C2) — flag-off identity across an approval transcript', () => {
   it('refuses missing, malformed, non-finite, and out-of-range classifier scores', () => {
     const frame = (confidence: string) =>
       `{\"type\":\"ROUTING\",\"metadata\":{\"classifierConfidence\":${confidence}}}`;
