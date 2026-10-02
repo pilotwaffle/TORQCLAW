@@ -28,7 +28,7 @@ import type { DeliverySink } from '@torqclaw/collab';
 import { buildCollabAgentMcpServer, COLLAB_AGENT_SERVER_ID, COLLAB_AGENT_TOOL_CAPABILITIES } from './collabAgentTools.js';
 import { describeSkillDecision } from './skillDecision.js';
 import { assertResolvedProfile, constrainTier } from './profileResolver.js';
-import { setCancelCheck, setToolAdmissionCheck } from '@torqclaw/inference';
+import { setCancelCheck, setToolAdmissionCheck, assertRoomJobLocalRuntimeReady, resolveRoomJobLocalRuntime, RoomJobLocalRunError } from '@torqclaw/inference';
 import { cancellations } from './cancellations.js';
 import { authorize, type Role } from './authz.js';
 import { db } from './storage.js';
@@ -67,6 +67,7 @@ import { getCollabDbForAutoReply } from './collabSurface.js';
 import { handleSetAutoreplyStop } from './autoReplyStopHandler.js';
 import { recoverStrandedScheduleRuns, tickSchedules } from './cronDispatcher.js';
 import { handleCreateSchedule, handleSetScheduleState, handleListSchedules } from './cronScheduleHandler.js';
+import { reconcileRoomJobExecution } from './roomJobExecution.js';
 
 /**
  * Re-minted requests built inside the C2 decision transaction, handed to
@@ -1445,6 +1446,27 @@ const cronTickTimer = setInterval(() => {
   });
 }, 15_000);
 cronTickTimer.unref();
+
+// Room jobs are default-off and never use generic dispatch. When explicitly
+// configured, bounded reconciliation admits pending outbox rows and marks
+// uncertain claimed rows recovery_needed rather than replaying a model call.
+async function reconcileConfiguredRoomJobs(): Promise<void> {
+  try {
+    const runtime = resolveRoomJobLocalRuntime();
+    await assertRoomJobLocalRuntimeReady(runtime);
+    const store = getStore();
+    if (!store) return;
+    await reconcileRoomJobExecution({ stateDb: db, store, runtime });
+  } catch (error) {
+    if (error instanceof RoomJobLocalRunError && error.code === 'runtime_unavailable') return;
+    console.error('[torqclaw] room-job reconciliation failed (continuing fail-closed):', error);
+  }
+}
+await reconcileConfiguredRoomJobs();
+const roomJobTickTimer = setInterval(() => {
+  reconcileConfiguredRoomJobs().catch(() => undefined);
+}, 60_000);
+roomJobTickTimer.unref();
 
 // Delivery-projection rebuild stays flag-gated: it is UI-delivery routing
 // for the collab approval surface, not part of the exact-action admission

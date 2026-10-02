@@ -208,6 +208,12 @@ export interface RoomJobLocalRunInput {
   quotedInput: string;
 }
 
+export interface RoomJobLocalRuntime {
+  host: string;
+  modelId: string;
+  configurationIdentity: string;
+}
+
 export interface RoomJobLocalRunResult {
   text: string;
   modelId: string;
@@ -219,6 +225,67 @@ export interface RoomJobLocalRunResult {
 export interface RoomJobLocalRunDeps {
   fetchImpl?: typeof fetch;
   now?: () => number;
+  /** Server-owned, loopback-validated runtime target only. */
+  host?: string;
+  /** Fixture-only shortening seam; production cannot exceed the fixed cap. */
+  timeoutMsForTest?: number;
+}
+
+/**
+ * Room execution is deliberately opt-in. Unlike generic local inference, a
+ * Room start must name a server-configured local target and may never inherit
+ * a browser/model choice. The resolved host is restricted to loopback so this
+ * narrow no-tools runner cannot become a generic network egress path.
+ */
+export function resolveRoomJobLocalRuntime(env: Record<string, string | undefined> = process.env): RoomJobLocalRuntime {
+  if (env.TORQCLAW_ROOM_JOBS_LOCAL_ENABLED !== '1') {
+    throw new RoomJobLocalRunError('runtime_unavailable', 'Room-job local execution is not enabled');
+  }
+  // Deliberately do not inherit the generic LOCAL_MODEL default: Room starts
+  // must bind an exact, operator-configured local tag rather than silently
+  // accepting a shorthand whose installed tag may differ.
+  const modelId = env.TORQCLAW_ROOM_JOBS_LOCAL_MODEL;
+  if (typeof modelId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(modelId) || /:cloud$/i.test(modelId)) {
+    throw new RoomJobLocalRunError('runtime_unavailable', 'Room-job local model is not configured');
+  }
+  let parsed: URL;
+  try { parsed = new URL(env.OLLAMA_HOST ?? OLLAMA_HOST); } catch {
+    throw new RoomJobLocalRunError('runtime_unavailable', 'Room-job local host is invalid');
+  }
+  const loopback = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+  if (parsed.protocol !== 'http:' || !loopback.has(parsed.hostname) || parsed.username || parsed.password
+    || (parsed.pathname !== '/' && parsed.pathname !== '') || parsed.search || parsed.hash) {
+    throw new RoomJobLocalRunError('runtime_unavailable', 'Room-job local host must be HTTP loopback');
+  }
+  const host = parsed.origin;
+  const configurationIdentity = createHash('sha256').update(JSON.stringify({
+    host, modelId, runnerRevision: 'room-job-local-runner-v1',
+    promptTemplateRevision: 'room-job-proposal-v1', validatorRevision: 'room-job-validator-v1',
+  }), 'utf8').digest('hex');
+  return { host, modelId, configurationIdentity };
+}
+
+/** Bounded readiness probe only; it never submits prompt text or invokes a model. */
+export async function assertRoomJobLocalRuntimeReady(
+  runtime: RoomJobLocalRuntime,
+  deps: Pick<RoomJobLocalRunDeps, 'fetchImpl'> = {},
+): Promise<void> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort('room-job runtime readiness timeout'), 2_000);
+  try {
+    let response: Response;
+    try {
+      response = await (deps.fetchImpl ?? fetch)(`${runtime.host}/api/tags`, { signal: controller.signal });
+    } catch {
+      throw new RoomJobLocalRunError('runtime_unavailable', 'Configured Room-job local runtime is unavailable');
+    }
+    if (!response.ok) throw new RoomJobLocalRunError('runtime_unavailable', 'Configured Room-job local runtime is unavailable');
+    const data = await response.json() as { models?: Array<{ name?: unknown; model?: unknown }> };
+    const found = Array.isArray(data.models) && data.models.some((model) => model.name === runtime.modelId || model.model === runtime.modelId);
+    if (!found) throw new RoomJobLocalRunError('runtime_unavailable', 'Configured Room-job local model is unavailable');
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function readResponseWithinLimit(
@@ -259,12 +326,16 @@ export async function executeRoomJobLocal(
   }
   const startedAt = (deps.now ?? (() => performance.now()))();
   const controller = new AbortController();
-  const deadline = setTimeout(() => controller.abort('room job stage timeout'), ROOM_JOB_STAGE_TIMEOUT_MS);
+  const timeoutMs = Math.min(
+    ROOM_JOB_STAGE_TIMEOUT_MS,
+    Math.max(0, deps.timeoutMsForTest ?? ROOM_JOB_STAGE_TIMEOUT_MS),
+  );
+  const deadline = setTimeout(() => controller.abort('room job stage timeout'), timeoutMs);
   const fetchImpl = deps.fetchImpl ?? fetch;
   try {
     let response: Response;
     try {
-      response = await fetchImpl(`${OLLAMA_HOST}/api/chat`, {
+      response = await fetchImpl(`${deps.host ?? OLLAMA_HOST}/api/chat`, {
         method: 'POST',
         signal: controller.signal,
         headers: { 'Content-Type': 'application/json' },
