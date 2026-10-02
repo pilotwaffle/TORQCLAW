@@ -198,6 +198,12 @@ export async function executeHermesTask(
   const binding: EngineTaskBinding = { taskId, client };
   engineTaskByRequest.set(req.id, binding);
 
+  // Every path after a successful submit must remove this exact binding.
+  // A poll/parser transport failure is otherwise a stale cancellation handle
+  // whose engine task may continue after dispatch has already unwound.
+  let terminalObserved = false;
+  try {
+
   // submit_task is asynchronous at the transport boundary. A cancellation
   // may arrive while it is in flight, before server.ts can find the mapping.
   // Once the task id exists, relay once and do not let this run emit RESULT.
@@ -247,10 +253,7 @@ export async function executeHermesTask(
     );
     if (spendMsg) emit('SYSTEM', spendMsg, { audience: 'operator' });
     if (breachMessage) {
-      await client.callTool({
-        name: 'cancel_task',
-        arguments: { task_id: taskId, reason: 'BUDGET_EXCEEDED' },
-      });
+      await relayCancellation(binding, 'BUDGET_EXCEEDED');
       throw new CircuitBreakerError(
         breachMessage,
         typeof status.telemetry?.costUsd === 'number' ? status.telemetry.costUsd : undefined,
@@ -262,7 +265,7 @@ export async function executeHermesTask(
     // dispatch registers the approval + emits the ONE terminal PENDING_APPROVAL
     // (same path as LOCAL_EDGE; invariant 7). Honors the grant on the re-run.
     if (status.state === 'completed' && status.telemetry?.blockedOn) {
-      engineTaskByRequest.delete(req.id);
+      terminalObserved = true;
       throw new ToolApprovalRequired(
         String(status.telemetry.blockedOn),
         status.telemetry.blockedArgs ?? {},
@@ -270,14 +273,14 @@ export async function executeHermesTask(
     }
 
     if (status.state === 'completed') {
-      engineTaskByRequest.delete(req.id);
+      terminalObserved = true;
       return {
         text: status.result ?? '',
         telemetry: { ...(status.telemetry ?? {}), inferenceLatencyMs: Date.now() - startedAt },
       };
     }
     if (status.state === 'failed') {
-      engineTaskByRequest.delete(req.id);
+      terminalObserved = true;
       if (status.telemetry?.cancelled === true) {
         const reason = (status.telemetry.normalizedFailure as Record<string, unknown> | undefined)?.code;
         throw new HermesCancelledError(
@@ -287,6 +290,17 @@ export async function executeHermesTask(
       }
       throw new Error(status.error ?? 'Hermes task failed');
     }
+  }
+  } catch (error) {
+    // A non-terminal exception after submit leaves provider state uncertain.
+    // Best-effort stop exactly once, but never mask the original poll/parser
+    // failure with the secondary cleanup result.
+    if (!terminalObserved && engineTaskByRequest.get(req.id) === binding) {
+      try { await relayCancellation(binding, 'GATEWAY_EXECUTION_FAILED'); } catch { /* preserve original error */ }
+    }
+    throw error;
+  } finally {
+    if (engineTaskByRequest.get(req.id) === binding) engineTaskByRequest.delete(req.id);
   }
 }
 
