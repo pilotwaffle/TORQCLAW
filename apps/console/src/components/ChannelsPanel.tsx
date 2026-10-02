@@ -13,8 +13,8 @@
 // (mirrors ApprovalHistoryPanel/ReceiptsPanel/MemoryPanel, none of which
 // re-check their own flag either).
 //
-// SAFETY: the ONLY sendCommand actions reachable from anywhere in this file
-// are LIST_CHANNELS (mount, manual refresh), GET_CHANNEL_TIMELINE (channel
+// SAFETY: in the legacy Channels surface, the ONLY sendCommand actions are
+// LIST_CHANNELS (mount, manual refresh), GET_CHANNEL_TIMELINE (channel
 // select, "Load more", hint-triggered re-read, reconnect re-read — the wire
 // pages forward only, see B-2 fix note at the button below),
 // POST_CHANNEL_MESSAGE (composer Send/retry — the ONLY CONTENT mutation in
@@ -25,7 +25,9 @@
 // component already receives (see the S5 doc block below). ChannelRow's
 // props are plain data (zero function-typed fields except PendingSendRow's
 // narrow onRetry) — mirrors ApprovalHistoryRow / ReplayEventRow's structural
-// boundary.
+// boundary. The separately gated Rooms surface below adds only its approved
+// v1 room-job list/detail/create/cancel commands; it neither reuses nor
+// broadens the legacy Channel command paths.
 //
 // ── S6: READ STATE (§4 S6 / A7) — read this before touching the ack logic
 // below. ─────────────────────────────────────────────────────────────────
@@ -216,6 +218,8 @@ import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { ClientCommand, GatewayEvent } from '@torqclaw/contracts';
 import { LiveDuration } from './LiveDuration';
 import { selectTurnStartMs, selectLivePhase } from './presence';
+import RoomJobWorkspace, { RoomJobControls } from './RoomJobWorkspace';
+import { parseRoomJobEnvelope, type RoomJobDetail, type RoomJobEnvelope, type RoomJobListEntry } from './roomJobView';
 
 const TIMEOUT_MS = 5000;
 
@@ -981,6 +985,21 @@ export interface RoomsPanelProps extends SharedChannelsPanelProps {
 export type ChannelsPanelProps = LegacyChannelsPanelProps | RoomsPanelProps;
 
 const ROOM_LIST_TIMEOUT_MS = 5000;
+const ROOM_JOB_TIMEOUT_MS = 5000;
+
+type RoomJobLoadStatus = 'idle' | 'loading' | 'send-failed' | 'timeout' | 'unavailable';
+
+interface RoomJobListView {
+  channelId: string;
+  jobs: RoomJobListEntry[];
+  nextCursor: string;
+  hasMore: boolean;
+  canCreate: boolean;
+}
+
+function newRoomJobIdempotencyKey(): string {
+  return crypto.randomUUID();
+}
 
 function RoomsPanel({
   events,
@@ -1008,6 +1027,29 @@ function RoomsPanel({
     lastResult: 'not-loaded',
   });
   const listTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const jobListTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const jobDetailTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const jobMutationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingJobListRoom = useRef<string | null>(null);
+  const pendingJobDetail = useRef<{ channelId: string; jobId: string } | null>(null);
+  const pendingJobMutation = useRef<{ kind: 'created' | 'cancelled'; idempotencyKey: string } | null>(null);
+  const handledJobFrameId = useRef<string | null>(null);
+  const lastRoomForJobs = useRef<string | null>(null);
+  const [jobList, setJobList] = useState<RoomJobListView | null>(null);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [jobDetail, setJobDetail] = useState<RoomJobDetail | null>(null);
+  const [jobListStatus, setJobListStatus] = useState<RoomJobLoadStatus>('unavailable');
+  const [jobDetailStatus, setJobDetailStatus] = useState<RoomJobLoadStatus>('unavailable');
+  const [jobMutationPending, setJobMutationPending] = useState(false);
+
+  const latestRoomJobFrame = useMemo(() => {
+    for (let index = events.length - 1; index >= 0; index--) {
+      const event = events[index]!;
+      const envelope = parseRoomJobEnvelope(event);
+      if (envelope) return { id: event.id, envelope };
+    }
+    return null;
+  }, [events]);
 
   const requestList = () => {
     if (listTimer.current) clearTimeout(listTimer.current);
@@ -1019,6 +1061,44 @@ function RoomsPanel({
       return;
     }
     listTimer.current = setTimeout(() => dispatch({ type: 'timeout' }), ROOM_LIST_TIMEOUT_MS);
+  };
+
+  const requestJobList = (channelId: string) => {
+    if (!state.connected || state.stale) return;
+    if (jobListTimer.current) clearTimeout(jobListTimer.current);
+    pendingJobListRoom.current = channelId;
+    setJobListStatus('loading');
+    const sent = sendCommand({ action: 'LIST_ROOM_JOBS', channelId, cursor: '0', limit: 20 });
+    if (!sent) {
+      pendingJobListRoom.current = null;
+      setJobListStatus('send-failed');
+      return;
+    }
+    jobListTimer.current = setTimeout(() => {
+      if (pendingJobListRoom.current === channelId) {
+        pendingJobListRoom.current = null;
+        setJobListStatus('timeout');
+      }
+    }, ROOM_JOB_TIMEOUT_MS);
+  };
+
+  const requestJobDetail = (channelId: string, jobId: string) => {
+    if (!state.connected || state.stale) return;
+    if (jobDetailTimer.current) clearTimeout(jobDetailTimer.current);
+    pendingJobDetail.current = { channelId, jobId };
+    setJobDetailStatus('loading');
+    const sent = sendCommand({ action: 'GET_ROOM_JOB', channelId, jobId });
+    if (!sent) {
+      pendingJobDetail.current = null;
+      setJobDetailStatus('send-failed');
+      return;
+    }
+    jobDetailTimer.current = setTimeout(() => {
+      if (pendingJobDetail.current?.channelId === channelId && pendingJobDetail.current.jobId === jobId) {
+        pendingJobDetail.current = null;
+        setJobDetailStatus('timeout');
+      }
+    }, ROOM_JOB_TIMEOUT_MS);
   };
 
   useEffect(() => {
@@ -1043,9 +1123,124 @@ function RoomsPanel({
 
   useEffect(() => () => {
     if (listTimer.current) clearTimeout(listTimer.current);
+    if (jobListTimer.current) clearTimeout(jobListTimer.current);
+    if (jobDetailTimer.current) clearTimeout(jobDetailTimer.current);
+    if (jobMutationTimer.current) clearTimeout(jobMutationTimer.current);
   }, []);
 
   const highlightedRow = state.rows?.find((row) => row.channelId === state.highlightedId) ?? null;
+  const highlightedRoomId = highlightedRow?.channelId ?? null;
+
+  useEffect(() => {
+    if (lastRoomForJobs.current === highlightedRoomId) return;
+    lastRoomForJobs.current = highlightedRoomId;
+    pendingJobListRoom.current = null;
+    pendingJobDetail.current = null;
+    setJobList(null);
+    setSelectedJobId(null);
+    setJobDetail(null);
+    setJobListStatus(highlightedRoomId ? 'unavailable' : 'unavailable');
+    setJobDetailStatus('unavailable');
+    if (highlightedRoomId && state.connected && !state.stale) requestJobList(highlightedRoomId);
+    // Job reads are selected-only. A row removed from the latest validated
+    // Rooms list has no highlightedRoomId, so this clears/disables job state
+    // and sends no more reads for that local highlight.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlightedRoomId]);
+
+  useEffect(() => {
+    if (!highlightedRoomId || !state.connected || state.stale) return;
+    requestJobList(highlightedRoomId);
+    // Reconnect/freshness recovery is a selected read only; it never replays a
+    // create/cancel mutation or derives a job from a channel hint.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.connected, state.stale]);
+
+  useEffect(() => {
+    if (!latestRoomJobFrame || handledJobFrameId.current === latestRoomJobFrame.id) return;
+    handledJobFrameId.current = latestRoomJobFrame.id;
+    const envelope: RoomJobEnvelope = latestRoomJobFrame.envelope;
+    if (envelope.kind === 'list') {
+      if (envelope.channelId !== highlightedRoomId || pendingJobListRoom.current !== highlightedRoomId) return;
+      if (jobListTimer.current) clearTimeout(jobListTimer.current);
+      pendingJobListRoom.current = null;
+      setJobList({
+        channelId: envelope.channelId,
+        jobs: envelope.jobs,
+        nextCursor: envelope.nextCursor,
+        hasMore: envelope.hasMore,
+        canCreate: envelope.capabilities.canCreate,
+      });
+      setJobListStatus('idle');
+      return;
+    }
+    if (envelope.kind === 'detail') {
+      if (envelope.job.channelId !== highlightedRoomId || envelope.job.jobId !== selectedJobId ||
+          pendingJobDetail.current?.channelId !== highlightedRoomId || pendingJobDetail.current.jobId !== selectedJobId) return;
+      if (jobDetailTimer.current) clearTimeout(jobDetailTimer.current);
+      pendingJobDetail.current = null;
+      setJobDetail(envelope.job);
+      setJobDetailStatus('idle');
+      return;
+    }
+    if (pendingJobMutation.current?.kind !== envelope.kind || pendingJobMutation.current.idempotencyKey !== envelope.idempotencyKey ||
+        envelope.job.channelId !== highlightedRoomId) return;
+    if (jobMutationTimer.current) clearTimeout(jobMutationTimer.current);
+    pendingJobMutation.current = null;
+    setJobMutationPending(false);
+    setJobList((current) => current && current.channelId === envelope.job.channelId
+      ? { ...current, jobs: [envelope.job, ...current.jobs.filter((job) => job.jobId !== envelope.job.jobId)] }
+      : current);
+    if (envelope.kind === 'cancelled' && selectedJobId === envelope.job.jobId) {
+      setJobDetail(null);
+      requestJobDetail(envelope.job.channelId, envelope.job.jobId);
+    }
+  }, [latestRoomJobFrame, highlightedRoomId, selectedJobId]);
+
+  const selectJob = (jobId: string) => {
+    if (!highlightedRoomId || !jobList?.jobs.some((job) => job.jobId === jobId)) return;
+    setSelectedJobId(jobId);
+    setJobDetail(null);
+    setJobDetailStatus('unavailable');
+    requestJobDetail(highlightedRoomId, jobId);
+  };
+
+  const createJob = (brief: string) => {
+    if (!highlightedRoomId || !jobList?.canCreate || !state.connected || state.stale || jobMutationPending) return;
+    const idempotencyKey = newRoomJobIdempotencyKey();
+    pendingJobMutation.current = { kind: 'created', idempotencyKey };
+    setJobMutationPending(true);
+    const sent = sendCommand({ action: 'CREATE_ROOM_JOB', channelId: highlightedRoomId, brief, idempotencyKey });
+    if (!sent) {
+      pendingJobMutation.current = null;
+      setJobMutationPending(false);
+      return;
+    }
+    if (jobMutationTimer.current) clearTimeout(jobMutationTimer.current);
+    jobMutationTimer.current = setTimeout(() => {
+      pendingJobMutation.current = null;
+      setJobMutationPending(false);
+    }, ROOM_JOB_TIMEOUT_MS);
+  };
+
+  const cancelJob = () => {
+    if (!highlightedRoomId || !jobDetail || !jobDetail.capabilities.canCancel || !state.connected || state.stale || jobMutationPending) return;
+    const idempotencyKey = newRoomJobIdempotencyKey();
+    pendingJobMutation.current = { kind: 'cancelled', idempotencyKey };
+    setJobMutationPending(true);
+    const sent = sendCommand({ action: 'CANCEL_ROOM_JOB', channelId: highlightedRoomId, jobId: jobDetail.jobId, expectedRevision: jobDetail.revision, idempotencyKey });
+    if (!sent) {
+      pendingJobMutation.current = null;
+      setJobMutationPending(false);
+      return;
+    }
+    if (jobMutationTimer.current) clearTimeout(jobMutationTimer.current);
+    jobMutationTimer.current = setTimeout(() => {
+      pendingJobMutation.current = null;
+      setJobMutationPending(false);
+    }, ROOM_JOB_TIMEOUT_MS);
+  };
+
   const hasRows = state.rows !== null && state.rows.length > 0;
   const isRefreshing = state.phase === 'pending' && state.lastCommand === 'sent';
   const listStatus = !state.connected
@@ -1161,6 +1356,22 @@ function RoomsPanel({
             <p className="mt-1 text-[10.5px] text-faint">Unavailable - not on wire for committed Room display.</p>
           </section>
 
+          {highlightedRow && (
+            <RoomJobWorkspace
+              roomName={highlightedRow.name}
+              jobs={jobList?.channelId === highlightedRow.channelId ? jobList.jobs : null}
+              selectedJobId={selectedJobId}
+              detail={jobDetail}
+              listStatus={jobListStatus}
+              detailStatus={jobDetailStatus}
+              connected={state.connected}
+              stale={state.stale}
+              onSelectJob={selectJob}
+              onRefreshList={() => requestJobList(highlightedRow.channelId)}
+              onRefreshDetail={() => selectedJobId && requestJobDetail(highlightedRow.channelId, selectedJobId)}
+            />
+          )}
+
           <section className="border-b border-edge py-4" aria-labelledby="room-activity-heading">
             <h3 id="room-activity-heading" className="text-[11px] font-semibold text-ink">Room Activity Summary</h3>
             <div className="mt-2 grid grid-cols-1 border-y border-edge min-[520px]:grid-cols-3">
@@ -1193,6 +1404,19 @@ function RoomsPanel({
             <button type="button" onClick={onOpenAgents} className="mt-2 text-[10.5px] underline decoration-edge underline-offset-4 hover:text-ink">Open Agents</button>
           </div>
 
+          {highlightedRow && (
+            <RoomJobControls
+              connected={state.connected}
+              stale={state.stale}
+              canCreate={jobList?.channelId === highlightedRow.channelId && jobListStatus === 'idle' && jobList?.canCreate === true}
+              canCancel={jobDetailStatus === 'idle' && jobDetail?.jobId === selectedJobId && jobDetail?.capabilities.canCancel === true}
+              selectedJobId={selectedJobId}
+              mutationPending={jobMutationPending}
+              onCreate={createJob}
+              onCancel={cancelJob}
+            />
+          )}
+
           <div className="border-b border-edge py-4">
             <p className="text-[9px] font-bold uppercase tracking-[0.1em] text-faint">Export policy</p>
             <p className="mt-1 text-[10.5px] text-muted">not enforced at Room scope yet</p>
@@ -1216,7 +1440,7 @@ function RoomsPanel({
               <div><dt className="inline">Highlighted list row id: </dt><dd className="inline">{highlightedRow?.channelId ?? 'none'}</dd></div>
               <div><dt className="inline">List command/result: </dt><dd className="inline">{state.lastCommand} / {state.lastResult}</dd></div>
               <div><dt className="inline">List connection: </dt><dd className="inline">{!state.connected ? 'disconnected' : state.stale ? 'connected/stale' : 'connected; freshness unproven'}</dd></div>
-              <div><dt className="inline">Selected reads: </dt><dd className="inline">timeline, members, agents, ACK disabled</dd></div>
+              <div><dt className="inline">Selected reads: </dt><dd className="inline">Room job list/detail only; timeline, members, agents, ACK disabled</dd></div>
               <div><dt className="inline">Attribution: </dt><dd className="inline">session-scoped; Room attribution not recorded</dd></div>
             </dl>
           </details>

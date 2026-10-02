@@ -42,6 +42,32 @@ function roomRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function roomJobListFrame(channelId: string, jobs: unknown[], canCreate = false): GatewayEvent {
+  return event({
+    metadata: { roomJob: { version: 1, kind: 'list', channelId, jobs, nextCursor: '0', hasMore: false, capabilities: { canCreate } } },
+  });
+}
+
+function roomJobRow(overrides: Record<string, unknown> = {}) {
+  return {
+    jobId: '00000000-0000-4000-8000-000000000011',
+    channelId: 'room-a',
+    state: 'created',
+    revision: 1,
+    createdAt: '2026-10-02T00:00:00.000Z',
+    cancelledAt: null,
+    briefByteLength: 18,
+    capabilities: { canCreate: true, canCancel: true },
+    ...overrides,
+  };
+}
+
+function roomJobDetailFrame(job: Record<string, unknown>): GatewayEvent {
+  return event({
+    metadata: { roomJob: { version: 1, kind: 'detail', job: { ...job, lifecycle: [{ jobSeq: 1, kind: 'created', state: 'created', revision: 1, occurredAt: '2026-10-02T00:00:00.000Z' }], artifacts: [] } } },
+  });
+}
+
 function roomProps(events: GatewayEvent[], sendCommand = vi.fn(() => true), isConnected = true, isStale = false) {
   return {
     mode: 'rooms' as const,
@@ -124,7 +150,7 @@ describe('ChannelsPanel Rooms mode', () => {
     expect(screen.getByText('unknown/not loaded')).toBeInTheDocument();
   });
 
-  it('local highlight and every Room-owned control preserve the LIST_CHANNELS-only dispatch trace', () => {
+  it('local highlight dispatches only selected Room-job reads and preserved global navigation', () => {
     const sendCommand = vi.fn(() => true);
     const props = roomProps(
       [listFrame([roomRow(), roomRow({ channelId: 'room-b', name: 'Release Beta' })])],
@@ -141,7 +167,7 @@ describe('ChannelsPanel Rooms mode', () => {
 
     const actions = sendCommand.mock.calls.map(([command]) => command.action);
     expect(actions.length).toBeGreaterThan(0);
-    expect(new Set(actions)).toEqual(new Set(['LIST_CHANNELS']));
+    expect(new Set(actions)).toEqual(new Set(['LIST_CHANNELS', 'LIST_ROOM_JOBS']));
     expect(props.onOpenAgents).toHaveBeenCalled();
     expect(props.onOpenApprovals).toHaveBeenCalled();
     expect(props.onOpenReceipts).toHaveBeenCalled();
@@ -178,6 +204,33 @@ describe('ChannelsPanel Rooms mode', () => {
     expect(sendCommand).not.toHaveBeenCalled();
     expect(props.onOpenReceipts).toHaveBeenCalledTimes(1);
     expect(props.onOpenTaskStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders only typed selected job evidence and gates controls on fresh capabilities', () => {
+    const sendCommand = vi.fn(() => true);
+    const roomList = listFrame([roomRow()]);
+    const props = roomProps([roomList], sendCommand);
+    const { rerender } = render(<ChannelsPanel {...props} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Incident Alpha/i }));
+    expect(sendCommand.mock.calls.map(([command]) => command.action)).toContain('LIST_ROOM_JOBS');
+
+    const job = roomJobRow();
+    rerender(<ChannelsPanel {...props} events={[roomList, roomJobListFrame('room-a', [job], true)]} />);
+    expect(screen.getByText(/Job 00000000-0000-4000-8000-000000000011/)).toBeInTheDocument();
+    expect(screen.queryByText('secret brief text')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Client brief'), { target: { value: 'A bounded client brief' } });
+    expect(screen.getByRole('button', { name: 'Create proposal job' })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('button', { name: /Job 00000000-0000-4000-8000-000000000011/ }));
+    expect(sendCommand.mock.calls.map(([command]) => command.action)).toContain('GET_ROOM_JOB');
+    rerender(<ChannelsPanel {...props} events={[roomList, roomJobListFrame('room-a', [job], true), roomJobDetailFrame(job)]} />);
+    expect(screen.getByText('Recorded - no live worker is wired.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /download|preview|safe export|retry|resume/i })).not.toBeInTheDocument();
+
+    rerender(<ChannelsPanel {...props} events={[roomList, roomJobListFrame('room-a', [job], true), roomJobDetailFrame(job)]} isStale />);
+    expect(screen.getByRole('button', { name: 'Create proposal job' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Cancel job' })).toBeDisabled();
   });
 
   it('renders neutral empty, malformed, duplicate, and all-suppressed states', () => {
