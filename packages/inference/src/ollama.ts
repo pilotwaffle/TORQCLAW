@@ -207,6 +207,12 @@ export interface RoomJobLocalRunInput {
   modelId: string;
   system: string;
   quotedInput: string;
+  /**
+   * Provider-enforced response shape. The Room-job coordinator supplies a
+   * stage-specific schema; semantic artifact validation remains authoritative
+   * after the provider returns.
+   */
+  format: Record<string, unknown>;
 }
 
 export interface RoomJobLocalRuntime {
@@ -260,8 +266,8 @@ export function resolveRoomJobLocalRuntime(env: Record<string, string | undefine
   }
   const host = parsed.origin;
   const configurationIdentity = createHash('sha256').update(JSON.stringify({
-    host, modelId, runnerRevision: 'room-job-local-runner-v1',
-    promptTemplateRevision: 'room-job-proposal-v1', validatorRevision: 'room-job-validator-v1',
+    host, modelId, runnerRevision: 'room-job-local-runner-v2',
+    promptTemplateRevision: 'room-job-proposal-v2', validatorRevision: 'room-job-validator-v1',
   }), 'utf8').digest('hex');
   return { host, modelId, configurationIdentity };
 }
@@ -351,6 +357,9 @@ export async function executeRoomJobLocal(
           // Own property, even while empty: generic helpers intentionally
           // omit it, which would re-enable task-mapped tool behavior.
           tools: [],
+          // Ollama constrains generation to this server-provided schema. This
+          // is not a replacement for the post-generation semantic validator.
+          format: input.format,
           stream: false,
           think: false,
           keep_alive: -1,

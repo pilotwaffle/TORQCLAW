@@ -48,19 +48,65 @@ function boundedFailure(error: unknown): Buffer {
   return Buffer.from(JSON.stringify({ code }), 'utf8');
 }
 
-function promptFor(run: RoomJobInternalRun): { system: string; quotedInput: string } {
+type RoomJobFormat = Record<string, unknown>;
+
+function strictObject(properties: Record<string, unknown>, required: string[]): RoomJobFormat {
+  return { type: 'object', properties, required, additionalProperties: false };
+}
+
+function factReferenceFormat(facts: Array<{ factId: string; sha256: string }>): RoomJobFormat {
+  const item = strictObject({ factId: { type: 'string' }, sha256: { type: 'string' } }, ['factId', 'sha256']);
+  const exactReferences = facts.map((fact) => strictObject({
+    factId: { type: 'string', enum: [fact.factId] },
+    sha256: { type: 'string', enum: [fact.sha256] },
+  }, ['factId', 'sha256']));
+  return {
+    type: 'array', minItems: facts.length, maxItems: facts.length,
+    // This blocks source-only fields such as fact.content and preserves each
+    // admitted id/hash pair. The semantic validator still enforces uniqueness.
+    items: exactReferences.length === 0 ? item : { oneOf: exactReferences },
+  };
+}
+
+function proposalFormat(facts: Array<{ factId: string; sha256: string }>): RoomJobFormat {
+  return strictObject({
+    title: { type: 'string', minLength: 1, maxLength: 180 },
+    body: { type: 'string', minLength: 1, maxLength: 60_000 },
+    facts: factReferenceFormat(facts),
+  }, ['title', 'body', 'facts']);
+}
+
+function reviewFormat(
+  facts: Array<{ factId: string; sha256: string }>,
+  proposal: { revision: number; sha256: string },
+): RoomJobFormat {
+  return strictObject({
+    verdict: { type: 'string', enum: ['acceptable', 'revise'] },
+    summary: { type: 'string', minLength: 1, maxLength: 60_000 },
+    proposal: strictObject({
+      revision: { type: 'integer', enum: [proposal.revision] },
+      sha256: { type: 'string', enum: [proposal.sha256] },
+    }, ['revision', 'sha256']),
+    facts: factReferenceFormat(facts),
+  }, ['verdict', 'summary', 'proposal', 'facts']);
+}
+
+function promptFor(run: RoomJobInternalRun): { system: string; quotedInput: string; format: RoomJobFormat } {
   const facts = run.facts.map((fact) => ({ factId: fact.factId, sha256: fact.sha256, content: fact.content.toString('utf8') }));
+  const factReferences = facts.map(({ factId, sha256 }) => ({ factId, sha256 }));
   if (run.stage === 'draft') {
     return {
-      system: 'Return JSON only. Draft a proposal from the quoted brief and supplied facts. Do not call tools. Exact schema: {"title":string,"body":string,"facts":[{"factId":string,"sha256":string}]}. Include every supplied fact exactly once.',
+      system: 'Return JSON only. Draft a proposal from the quoted brief and supplied facts. Do not call tools. Exact schema: {"title":string,"body":string,"facts":[{"factId":string,"sha256":string}]}. Input fact content is context only: output facts must contain exactly factId and sha256, never content. Include every supplied fact exactly once.',
       quotedInput: JSON.stringify({ brief: run.brief, facts }),
+      format: proposalFormat(factReferences),
     };
   }
   return {
-    system: 'Return JSON only. Perform a configured review of the quoted immutable proposal. Do not call tools. This is configured review, not independent verification. Exact schema: {"verdict":"acceptable"|"revise","summary":string,"proposal":{"revision":number,"sha256":string},"facts":[{"factId":string,"sha256":string}]}. Include every supplied fact exactly once.',
+    system: 'Return JSON only. Perform a configured review of the quoted immutable proposal. Do not call tools. This is configured review, not independent verification. Exact schema: {"verdict":"acceptable"|"revise","summary":string,"proposal":{"revision":number,"sha256":string},"facts":[{"factId":string,"sha256":string}]}. Input fact content is context only: output facts must contain exactly factId and sha256, never content. Include every supplied fact exactly once.',
     quotedInput: JSON.stringify({ proposal: {
       revision: run.proposal!.revision, sha256: run.proposal!.sha256, content: run.proposal!.content.toString('utf8'),
     }, facts }),
+    format: reviewFormat(factReferences, { revision: run.proposal!.revision, sha256: run.proposal!.sha256 }),
   };
 }
 
