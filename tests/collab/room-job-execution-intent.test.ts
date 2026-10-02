@@ -69,6 +69,14 @@ describe('room-job execution intent', () => {
     if (start.success) {
       expect(Object.keys(start.data).sort()).toEqual(['action', 'channelId', 'factIds', 'idempotencyKey', 'jobId']);
     }
+    const artifact = ClientCommandSchema.safeParse({
+      action: 'GET_ROOM_JOB_ARTIFACT', channelId: 'room', jobId: '00000000-0000-4000-8000-000000000001',
+      artifactId: '00000000-0000-4000-8000-000000000004', path: 'C:\\secret', includeFailureEvidence: true,
+    });
+    expect(artifact.success).toBe(true);
+    if (artifact.success) {
+      expect(Object.keys(artifact.data).sort()).toEqual(['action', 'artifactId', 'channelId', 'jobId']);
+    }
   });
 
   it('migrates losslessly, appends immutable facts, and produces one replay-safe draft outbox intent', async () => {

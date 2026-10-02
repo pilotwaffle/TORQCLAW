@@ -419,6 +419,11 @@ export interface RoomArtifactMetadata {
   createdAt: string;
 }
 
+/** Current-member projection of a validated internal artifact only. */
+export interface RoomArtifactContent extends RoomArtifactMetadata {
+  content: string;
+}
+
 export interface RoomJobDetail extends RoomJobListEntry {
   lifecycle: RoomJobLifecycleEntry[];
   artifacts: RoomArtifactMetadata[];
@@ -3482,6 +3487,40 @@ export class CollaborationStore {
           sha256: artifact.sha256,
           createdAt: artifact.created_at,
         })),
+      };
+    }));
+  }
+
+  /**
+   * Returns only canonical, validator-committed proposal/review content to a
+   * current Room member. Facts, failed output, state-db observations, paths,
+   * and arbitrary artifact BLOBs are deliberately not readable here.
+   */
+  async getRoomJobArtifact(
+    caller: CallerContext,
+    body: { channelId: string; jobId: string; artifactId: string },
+  ): Promise<RoomArtifactContent> {
+    return this.withReadOnly(() => this.runReadCommand(() => {
+      const db = this.env.db;
+      this.assertChannelVisible(db, caller, body.channelId);
+      const artifact = db.prepare(`SELECT a.artifact_id, a.artifact_type, a.revision, a.schema_version,
+          a.provenance_kind, a.sha256, a.created_at, a.content
+        FROM room_artifact_revisions a JOIN room_jobs j ON j.job_id = a.job_id
+        WHERE a.artifact_id = ? AND a.job_id = ? AND j.channel_id = ?
+          AND a.artifact_type IN ('proposal','decision_summary')
+          AND a.provenance_kind = 'model_assertion'`).get(body.artifactId, body.jobId, body.channelId) as
+            | { artifact_id: string; artifact_type: RoomArtifactType; revision: number; schema_version: number;
+                provenance_kind: RoomArtifactProvenanceKind; sha256: string; created_at: string; content: Buffer }
+            | undefined;
+      if (!artifact) throw notFound();
+      const content = artifact.content.toString('utf8');
+      if (Buffer.byteLength(content, 'utf8') !== artifact.content.length || content !== content.normalize('NFC')) {
+        throw new CollabError('INVALID_REQUEST', 'Room job artifact is not a valid text projection');
+      }
+      return {
+        artifactId: artifact.artifact_id, artifactType: artifact.artifact_type, revision: artifact.revision,
+        schemaVersion: artifact.schema_version, provenanceKind: artifact.provenance_kind,
+        sha256: artifact.sha256, createdAt: artifact.created_at, content,
       };
     }));
   }

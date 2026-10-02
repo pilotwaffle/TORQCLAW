@@ -251,6 +251,14 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     jobId: z.uuid(),
   }),
   z.object({
+    // Validated internal artifacts only. There is no path/blob selector,
+    // failure-evidence access, task/receipt binding, or delivery control.
+    action: z.literal('GET_ROOM_JOB_ARTIFACT'),
+    channelId: z.string().min(1),
+    jobId: z.uuid(),
+    artifactId: z.uuid(),
+  }),
+  z.object({
     action: z.literal('LIST_ROOM_JOBS'),
     channelId: z.string().min(1),
     cursor: z.string().regex(/^(0|[1-9][0-9]*)$/).default('0'),
