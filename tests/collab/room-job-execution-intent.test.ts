@@ -138,4 +138,50 @@ describe('room-job execution intent', () => {
     }, 'other-facts')).rejects.toMatchObject({ code: 'COLLAB_NOT_FOUND' } satisfies Partial<CollabError>);
     sqlite.close();
   });
+
+  it('projects a readiness transport failure as unknown through the real v2 handler', async () => {
+    const { sqlite, db, store, owner } = makeFixture('execution-v2-runtime-unknown');
+    const room = await store.createChannel(owner, { name: 'Runtime Room' }, 'channel-key');
+    const job = await store.createRoomJob(owner, { channelId: room.channelId, brief: 'Brief' }, 'job-key');
+    await store.appendRoomJobFacts(owner, { channelId: room.channelId, jobId: job.job.jobId, facts: ['Fact'] }, 'facts-key');
+    const surface = await import('../../packages/gateway/src/collabSurface.js');
+    const { sessionBus } = await import('../../packages/gateway/src/events.js');
+    const frames: Array<{ metadata?: unknown }> = [];
+    const sessionId = '00000000-0000-4000-8000-000000000071';
+    const unsubscribe = sessionBus.subscribe(sessionId, (event) => frames.push({ metadata: event.metadata }));
+    const previous = {
+      enabled: process.env.TORQCLAW_ROOM_JOBS_LOCAL_ENABLED,
+      model: process.env.TORQCLAW_ROOM_JOBS_LOCAL_MODEL,
+      host: process.env.OLLAMA_HOST,
+    };
+    surface.setCollabSurfaceStoreForTest(store);
+    surface.setCollabSurfaceKindLookupDbForTest(db);
+    process.env.TORQCLAW_ROOM_JOBS_LOCAL_ENABLED = '1';
+    process.env.TORQCLAW_ROOM_JOBS_LOCAL_MODEL = 'fixture-local';
+    process.env.OLLAMA_HOST = 'http://127.0.0.1:1';
+    try {
+      expect(await surface.handleGetRoomJob(sessionId, owner.principalId, {
+        channelId: room.channelId, jobId: job.job.jobId, projection: 'execution_v2',
+      })).toBeNull();
+      expect(frames.at(-1)?.metadata).toMatchObject({ roomJob: {
+        version: 2, kind: 'execution_detail', channelId: room.channelId,
+        execution: { capabilities: { runtime: 'unknown', canStart: false } },
+      } });
+      process.env.TORQCLAW_ROOM_JOBS_LOCAL_MODEL = 'fixture:cloud';
+      expect(await surface.handleGetRoomJob(sessionId, owner.principalId, {
+        channelId: room.channelId, jobId: job.job.jobId, projection: 'execution_v2',
+      })).toBeNull();
+      expect(frames.at(-1)?.metadata).toMatchObject({ roomJob: {
+        execution: { capabilities: { runtime: 'unavailable', canStart: false } },
+      } });
+    } finally {
+      unsubscribe();
+      surface.setCollabSurfaceStoreForTest(null);
+      surface.setCollabSurfaceKindLookupDbForTest(null);
+      if (previous.enabled === undefined) delete process.env.TORQCLAW_ROOM_JOBS_LOCAL_ENABLED; else process.env.TORQCLAW_ROOM_JOBS_LOCAL_ENABLED = previous.enabled;
+      if (previous.model === undefined) delete process.env.TORQCLAW_ROOM_JOBS_LOCAL_MODEL; else process.env.TORQCLAW_ROOM_JOBS_LOCAL_MODEL = previous.model;
+      if (previous.host === undefined) delete process.env.OLLAMA_HOST; else process.env.OLLAMA_HOST = previous.host;
+      sqlite.close();
+    }
+  });
 });
