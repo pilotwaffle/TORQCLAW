@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  cancelHermesTask,
   executeHermesTask,
   HermesCancelledError,
   type HermesTaskClient,
@@ -100,5 +101,30 @@ describe('Hermes cancellation submission race', () => {
       telemetry: { cancelled: true, cancellationUncertain: true },
     });
     expect(emit).not.toHaveBeenCalledWith('RESULT', 'must not publish', expect.anything());
+  });
+
+  it('stops once and removes the binding when a post-submit poll fails', async () => {
+    const pollFailure = new Error('status transport unavailable');
+    const client: HermesTaskClient = {
+      callTool: vi.fn(({ name }: { name: string }) => {
+        if (name === 'submit_task') return Promise.resolve(mcp({ task_id: 'engine-poll-failure' }));
+        if (name === 'get_task_status') return Promise.reject(pollFailure);
+        if (name === 'cancel_task') return Promise.resolve(mcp({ status: 'cancelled' }));
+        throw new Error(`unexpected tool ${name}`);
+      }),
+    };
+
+    await expect(executeHermesTask(request('poll-failure'), vi.fn(), {
+      client, sleep: noWait, pollIntervalMs: 0,
+    })).rejects.toBe(pollFailure);
+    expect(client.callTool).toHaveBeenCalledTimes(3);
+    expect(client.callTool).toHaveBeenLastCalledWith({
+      name: 'cancel_task', arguments: { task_id: 'engine-poll-failure', reason: 'GATEWAY_EXECUTION_FAILED' },
+    });
+
+    // The original failure cleaned up the mapping: a later cancellation must
+    // not reach this stale engine task or create a duplicate cancel relay.
+    await expect(cancelHermesTask('poll-failure', 'LATE_CANCEL')).resolves.toBe(false);
+    expect(client.callTool).toHaveBeenCalledTimes(3);
   });
 });
