@@ -95,7 +95,35 @@ export function evaluateSpend(
 
 /** request_id → engine task_id, so a CANCEL_TASK arriving on a different
  *  socket can reach the right engine task. Cleared when the poll loop ends. */
-const engineTaskByRequest = new Map<string, string>();
+/** The narrow portion of an MCP client the Hermes lifecycle needs. Exported
+ * only so lifecycle tests can use a deterministic in-memory client; production
+ * always obtains the registered Hermes client from the bridge registry. */
+export interface HermesTaskClient {
+  callTool(input: { name: string; arguments: Record<string, unknown> }): Promise<any>;
+}
+
+export interface HermesExecutionOptions {
+  /** Gateway-owned cancellation latch. It carries no authority by itself: the
+   * gateway still authorizes CANCEL_TASK before it can be set. */
+  signal?: AbortSignal;
+  /** Test seams for the real submit/poll lifecycle. */
+  client?: HermesTaskClient;
+  sleep?: (ms: number) => Promise<void>;
+  pollIntervalMs?: number;
+}
+
+type EngineCancellationStatus = 'cancelled' | 'noop' | 'unknown';
+type EngineTaskBinding = {
+  taskId: string;
+  client: HermesTaskClient;
+  /** One shared promise prevents concurrent observers from relaying two
+   * cancel_task calls for the same engine task. */
+  cancellation?: Promise<EngineCancellationStatus>;
+};
+
+/** A binding exists only after submit returns. The execution signal covers
+ * the pre-submit and in-flight windows where no task id existed yet. */
+const engineTaskByRequest = new Map<string, EngineTaskBinding>();
 
 function parseToolResult(result: any): any {
   const text = (result.content as any[])?.find((c) => c.type === 'text')?.text;
@@ -107,21 +135,75 @@ export interface HermesResult {
   telemetry: Record<string, unknown>;
 }
 
-/** submit_task / get_task_status — never an awaited hour-long MCP call.
+function cancellationStatus(result: any): EngineCancellationStatus {
+  const status = parseToolResult(result)?.status;
+  if (status === 'cancelled' || status === 'noop' || status === 'unknown') return status;
+  return 'unknown';
+}
+
+function relayCancellation(binding: EngineTaskBinding, reason: string): Promise<EngineCancellationStatus> {
+  if (!binding.cancellation) {
+    binding.cancellation = binding.client.callTool({
+      name: 'cancel_task',
+      arguments: { task_id: binding.taskId, reason },
+    }).then(cancellationStatus);
+  }
+  return binding.cancellation;
+}
+
+async function stopLatchedTask(requestId: string, binding: EngineTaskBinding): Promise<never> {
+  try {
+    const status = await relayCancellation(binding, 'USER_CANCELLED');
+    if (status === 'cancelled') {
+      throw new HermesCancelledError('Task cancelled: USER_CANCELLED');
+    }
+    // The engine accepted submission but was already unknown or terminal
+    // before its cancellation acknowledgement. Never publish RESULT for this
+    // race; terminalize it as honest cancellation uncertainty.
+    throw new HermesCancelledError('Task cancellation could not be confirmed', {
+      cancellationUncertain: true,
+    });
+  } catch (error) {
+    if (error instanceof HermesCancelledError) throw error;
+    throw new HermesCancelledError('Task cancellation could not be confirmed', {
+      cancellationUncertain: true,
+    });
+  } finally {
+    engineTaskByRequest.delete(requestId);
+  }
+}
+
+/** submit_task / get_task_status - never an awaited hour-long MCP call.
  *  Incremental events relay into the same session stream the UI watches. */
 export async function executeHermesTask(
   req: GatewayRequest,
   emit: Emitter,
+  options: HermesExecutionOptions = {},
 ): Promise<HermesResult> {
-  const client = getClient('hermes');
+  const client = options.client ?? getClient('hermes');
+  const sleepImpl = options.sleep ?? sleep;
+  const pollIntervalMs = options.pollIntervalMs ?? POLL_INTERVAL_MS;
   const startedAt = Date.now(); // for the P2.5 receipt's elapsedMs
+
+  // A cancellation that wins before submission has no provider work to
+  // relay. Do not create an engine task after the gateway accepted cancel.
+  if (options.signal?.aborted) {
+    throw new HermesCancelledError('Task cancelled before provider submission');
+  }
 
   const submit = parseToolResult(
     await client.callTool({ name: 'submit_task', arguments: { payload: req } }),
   );
   const taskId: string = submit.task_id;
-  engineTaskByRequest.set(req.id, taskId);
-  // audience:'operator' — kernel task ids are diagnostics; the console feed
+  const binding: EngineTaskBinding = { taskId, client };
+  engineTaskByRequest.set(req.id, binding);
+
+  // submit_task is asynchronous at the transport boundary. A cancellation
+  // may arrive while it is in flight, before server.ts can find the mapping.
+  // Once the task id exists, relay once and do not let this run emit RESULT.
+  if (options.signal?.aborted) await stopLatchedTask(req.id, binding);
+
+  // audience:'operator' - kernel task ids are diagnostics; the console feed
   // hides these rows (receipts/replay keep them).
   emit('SYSTEM', `Hermes kernel accepted task ${taskId}`, { audience: 'operator' });
 
@@ -132,13 +214,18 @@ export async function executeHermesTask(
 
   let cursor = 0;
   for (;;) {
-    await sleep(POLL_INTERVAL_MS);
+    await sleepImpl(pollIntervalMs);
+    if (options.signal?.aborted) await stopLatchedTask(req.id, binding);
     const status = parseToolResult(
       await client.callTool({
         name: 'get_task_status',
         arguments: { task_id: taskId, since: cursor },
       }),
     );
+
+    // Cancellation can win while the status poll is in flight. A completed
+    // poll is not permission to publish RESULT after that happened.
+    if (options.signal?.aborted) await stopLatchedTask(req.id, binding);
 
     for (const ev of status.events ?? []) {
       // Suppress the engine's raw PENDING_APPROVAL: it lacks the gateway-side
@@ -233,12 +320,8 @@ export async function getSkillDraft(queueId: string): Promise<{ skillMarkdown?: 
  *  task_id the bridge recorded at submit time. Returns false if the request
  *  isn't a tracked FRONTIER task (already finished, or LOCAL_EDGE). */
 export async function cancelHermesTask(requestId: string, reason: string): Promise<boolean> {
-  const engineTaskId = engineTaskByRequest.get(requestId);
-  if (!engineTaskId) return false;
-  const client = getClient('hermes');
-  await client.callTool({
-    name: 'cancel_task',
-    arguments: { task_id: engineTaskId, reason },
-  });
+  const binding = engineTaskByRequest.get(requestId);
+  if (!binding) return false;
+  await relayCancellation(binding, reason);
   return true;
 }

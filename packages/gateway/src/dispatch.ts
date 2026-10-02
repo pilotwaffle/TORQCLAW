@@ -417,7 +417,12 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
                 termination.complete(true);
               }
             })()
-          : await executeHermesTask(effectiveReq, emit);
+          : await executeHermesTask(effectiveReq, emit, {
+              // The gateway remains the cancellation authority. The bridge
+              // observes this latch across submit_task's in-flight window so
+              // a pre-mapping CANCEL_TASK cannot become a later success.
+              signal: cancellations.signal(req.id),
+            });
 
       // Subscription receipts are authoritative execution records, so the
       // complete/receipt boundary gets the same live binding check as spawn,
