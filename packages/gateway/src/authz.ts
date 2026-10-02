@@ -231,6 +231,14 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     // Explicit named deny so the decision is legible and pinned by a test
     // (T-3), matching every other arm in this switch.
     case 'POST_CHANNEL_MESSAGE':
+    // Room-job foundation commands remain operator-seat-only. The collab
+    // store independently enforces current Room owner/visibility, so this
+    // named deny is only the gateway-seat layer and must never be widened to
+    // ordinary members or agent/node surfaces.
+    case 'CREATE_ROOM_JOB':
+    case 'GET_ROOM_JOB':
+    case 'LIST_ROOM_JOBS':
+    case 'CANCEL_ROOM_JOB':
     // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S6: ACK_CHANNEL_CURSOR inherits the
     // exact same seat-lattice ruling as the S1 reads and the S3 mutation
     // above -- a channel seat is a transport identity (channel-http), not a

@@ -50,7 +50,7 @@ import { sweepExpiredApprovals, sweepExpiredGrants } from './approvalWriter.js';
 import { rebuildDeliveryProjection } from './approvalDelivery.js';
 import { revokeInertGrants, admitToolCall } from './grantAdmission.js';
 import { decideApprovalC2 } from './c2Broker.js';
-import { collabSurfaceCommandsEnabled, agentParticipationEnabled, webSearchEnabled, isAgentSurfaceCaller, handleListChannels, handleListChannelMembers, handleSetChannelExternalExportPolicy, handleGetChannelTimeline, handlePostChannelMessage, handleAckChannelCursor, handleAddChannelMember, handleRemoveChannelMember, setAutoReplyTrigger, getStore } from './collabSurface.js';
+import { collabSurfaceCommandsEnabled, agentParticipationEnabled, webSearchEnabled, isAgentSurfaceCaller, handleListChannels, handleListChannelMembers, handleSetChannelExternalExportPolicy, handleGetChannelTimeline, handlePostChannelMessage, handleAckChannelCursor, handleAddChannelMember, handleRemoveChannelMember, handleCreateRoomJob, handleGetRoomJob, handleListRoomJobs, handleCancelRoomJob, setAutoReplyTrigger, getStore } from './collabSurface.js';
 import {
   handleCreateAgent,
   handleListAgentProviders,
@@ -1084,6 +1084,58 @@ app.get('/ws', { websocket: true }, (socket) => {
           cmd.data.idempotencyKey,
         );
         if (postErr) sendErr(postErr.code, postErr.detail);
+        break;
+      }
+      case 'CREATE_ROOM_JOB': {
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        const createRoomJobErr = await handleCreateRoomJob(
+          sid,
+          connectionAuth?.principalId ?? null,
+          cmd.data,
+        );
+        if (createRoomJobErr) sendErr(createRoomJobErr.code, createRoomJobErr.detail);
+        break;
+      }
+      case 'LIST_ROOM_JOBS': {
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        const listRoomJobsErr = await handleListRoomJobs(
+          sid,
+          connectionAuth?.principalId ?? null,
+          cmd.data,
+        );
+        if (listRoomJobsErr) sendErr(listRoomJobsErr.code, listRoomJobsErr.detail);
+        break;
+      }
+      case 'GET_ROOM_JOB': {
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        const getRoomJobErr = await handleGetRoomJob(
+          sid,
+          connectionAuth?.principalId ?? null,
+          cmd.data,
+        );
+        if (getRoomJobErr) sendErr(getRoomJobErr.code, getRoomJobErr.detail);
+        break;
+      }
+      case 'CANCEL_ROOM_JOB': {
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        const cancelRoomJobErr = await handleCancelRoomJob(
+          sid,
+          connectionAuth?.principalId ?? null,
+          cmd.data,
+        );
+        if (cancelRoomJobErr) sendErr(cancelRoomJobErr.code, cancelRoomJobErr.detail);
         break;
       }
       case 'ACK_CHANNEL_CURSOR': {

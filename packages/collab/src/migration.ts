@@ -116,7 +116,9 @@ CREATE TABLE collab_events (
   actor_principal_id TEXT NOT NULL REFERENCES principals(id),
   kind TEXT NOT NULL CHECK(kind IN (
     'channel_created','member_added','member_removed',
-    'message_posted','channel_archived','channel_unarchived'
+    'message_posted','channel_archived','channel_unarchived',
+    'room_job_created','room_job_cancel_requested','room_job_cancelled',
+    'room_job_artifact_committed'
   )),
   content_json TEXT NOT NULL,
   created_at TEXT NOT NULL,
@@ -688,6 +690,124 @@ CREATE INDEX IF NOT EXISTS collab_agent_schedule_runs_state_fired
 
   try {
     db.exec('BEGIN EXCLUSIVE');
+    transaction();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/**
+ * Room-job foundation storage. This migration is intentionally collab.db-only:
+ * it establishes durable, Room-bound evidence but does not bind a job to a
+ * gateway task, approval, receipt, provider, filesystem path, or worker.
+ *
+ * The base collaboration migration's collab_events CHECK predates these
+ * constrained discovery events. Existing installations therefore need a
+ * lossless table rebuild; fresh installations receive the expanded CHECK from
+ * the base schema above. No row is interpreted or rewritten during the copy.
+ */
+export const ROOM_JOB_FOUNDATION_MIGRATION_ID = '20261002_001_room_job_foundation_v1';
+
+export function runRoomJobFoundationMigration(db: Database.Database): void {
+  const transaction = db.transaction(() => {
+    const existing = db.prepare('SELECT 1 FROM collab_schema_migrations WHERE id = ?')
+      .get(ROOM_JOB_FOUNDATION_MIGRATION_ID);
+    if (existing) return;
+
+    db.exec(`
+ALTER TABLE collab_events RENAME TO collab_events_pre_room_jobs;
+
+CREATE TABLE collab_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  schema_version INTEGER NOT NULL CHECK(schema_version=1),
+  channel_id TEXT NOT NULL REFERENCES collab_channels(id),
+  channel_seq INTEGER NOT NULL CHECK(channel_seq > 0),
+  actor_principal_id TEXT NOT NULL REFERENCES principals(id),
+  kind TEXT NOT NULL CHECK(kind IN (
+    'channel_created','member_added','member_removed',
+    'message_posted','channel_archived','channel_unarchived',
+    'room_job_created','room_job_cancel_requested','room_job_cancelled',
+    'room_job_artifact_committed'
+  )),
+  content_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(channel_id,channel_seq),
+  UNIQUE(channel_id,id)
+);
+
+INSERT INTO collab_events(
+  seq, id, schema_version, channel_id, channel_seq, actor_principal_id,
+  kind, content_json, created_at
+)
+SELECT
+  seq, id, schema_version, channel_id, channel_seq, actor_principal_id,
+  kind, content_json, created_at
+FROM collab_events_pre_room_jobs;
+
+DROP TABLE collab_events_pre_room_jobs;
+
+CREATE TABLE room_jobs (
+  job_id TEXT PRIMARY KEY,
+  channel_id TEXT NOT NULL REFERENCES collab_channels(id),
+  creator_principal_id TEXT NOT NULL REFERENCES principals(id),
+  brief TEXT NOT NULL,
+  brief_sha256 TEXT NOT NULL CHECK(length(brief_sha256) = 64),
+  state TEXT NOT NULL CHECK(state IN ('created','cancelled')),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  created_at TEXT NOT NULL,
+  cancel_requested_at TEXT,
+  cancelled_at TEXT
+);
+
+CREATE INDEX room_jobs_channel_created ON room_jobs(channel_id, created_at, job_id);
+
+CREATE TABLE room_job_events (
+  job_id TEXT NOT NULL REFERENCES room_jobs(job_id),
+  job_seq INTEGER NOT NULL CHECK(job_seq > 0),
+  event_id TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL CHECK(kind IN (
+    'created','cancel_requested','cancelled','artifact_committed'
+  )),
+  state TEXT NOT NULL CHECK(state IN ('created','cancelled')),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(job_id, job_seq)
+);
+
+CREATE TABLE room_artifact_revisions (
+  artifact_id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL REFERENCES room_jobs(job_id),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  artifact_type TEXT NOT NULL CHECK(artifact_type IN (
+    'proposal','decision_summary','research_source','independent_review'
+  )),
+  schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+  provenance_kind TEXT NOT NULL CHECK(provenance_kind IN (
+    'user_provided','tool_observed','model_assertion','test_fixture'
+  )),
+  provenance_json TEXT NOT NULL,
+  content BLOB NOT NULL CHECK(length(content) <= 65536),
+  sha256 TEXT NOT NULL CHECK(length(sha256) = 64),
+  created_at TEXT NOT NULL,
+  UNIQUE(job_id, revision),
+  UNIQUE(job_id, sha256)
+);
+
+CREATE INDEX room_artifact_revisions_job_created
+  ON room_artifact_revisions(job_id, created_at, artifact_id);
+    `);
+
+    db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
+      ROOM_JOB_FOUNDATION_MIGRATION_ID,
+      new Date().toISOString(),
+    );
+  });
+
+  db.exec('BEGIN EXCLUSIVE');
+  try {
     transaction();
     db.exec('COMMIT');
   } catch (error) {

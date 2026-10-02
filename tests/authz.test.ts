@@ -55,6 +55,18 @@ const previewRoute: ClientCommand = {
   executionMode: 'AUTO',
   useMemory: true,
 };
+const createRoomJob: ClientCommand = {
+  action: 'CREATE_ROOM_JOB', channelId: 'room-1', brief: 'brief',
+  idempotencyKey: '00000000-0000-4000-8000-000000000001',
+};
+const getRoomJob: ClientCommand = {
+  action: 'GET_ROOM_JOB', channelId: 'room-1', jobId: '00000000-0000-4000-8000-000000000002',
+};
+const listRoomJobs: ClientCommand = { action: 'LIST_ROOM_JOBS', channelId: 'room-1', cursor: '0', limit: 20 };
+const cancelRoomJob: ClientCommand = {
+  action: 'CANCEL_ROOM_JOB', channelId: 'room-1', jobId: '00000000-0000-4000-8000-000000000002',
+  expectedRevision: 1, idempotencyKey: '00000000-0000-4000-8000-000000000003',
+};
 
 const future = { action: 'SOME_FUTURE_ACTION' } as any as ClientCommand;
 
@@ -73,6 +85,10 @@ describe('authorize() — role-based command authorization', () => {
       ['PREVIEW_ROUTE', previewRoute],
       ['LIST_APPROVALS', listApprovals],
       ['GET_SAFE_EXPORT', getSafeExport],
+      ['CREATE_ROOM_JOB', createRoomJob],
+      ['GET_ROOM_JOB', getRoomJob],
+      ['LIST_ROOM_JOBS', listRoomJobs],
+      ['CANCEL_ROOM_JOB', cancelRoomJob],
     ])('%s -> deny', (_name, cmd) => {
       const d = authorize('channel', cmd, ctx);
       expect(d.ok).toBe(false);
@@ -123,6 +139,10 @@ describe('authorize() — role-based command authorization', () => {
       ['PREVIEW_ROUTE', previewRoute],
       ['LIST_APPROVALS', listApprovals],
       ['GET_SAFE_EXPORT', getSafeExport],
+      ['CREATE_ROOM_JOB', createRoomJob],
+      ['GET_ROOM_JOB', getRoomJob],
+      ['LIST_ROOM_JOBS', listRoomJobs],
+      ['CANCEL_ROOM_JOB', cancelRoomJob],
     ])('%s -> allow', (_name, cmd) => {
       expect(authorize('operator', cmd, ctx)).toEqual({ ok: true });
     });
@@ -155,6 +175,10 @@ describe('authorize() — role-based command authorization', () => {
       ['PREVIEW_ROUTE', previewRoute],
       ['LIST_APPROVALS', listApprovals],
       ['GET_SAFE_EXPORT', getSafeExport],
+      ['CREATE_ROOM_JOB', createRoomJob],
+      ['GET_ROOM_JOB', getRoomJob],
+      ['LIST_ROOM_JOBS', listRoomJobs],
+      ['CANCEL_ROOM_JOB', cancelRoomJob],
     ])('%s -> deny', (_name, cmd) => {
       const d = authorize('node', cmd, ctx);
       expect(d.ok).toBe(false);

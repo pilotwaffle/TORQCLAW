@@ -238,6 +238,33 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     cursor: z.string().regex(/^(0|[1-9][0-9]*)$/),
   }),
   z.object({
+    // Owner-authenticated, collab.db-only Room-job foundation. No task,
+    // upload, approval decision, provider call, or external delivery exists.
+    action: z.literal('CREATE_ROOM_JOB'),
+    channelId: z.string().min(1),
+    brief: z.string().min(1).max(16384),
+    idempotencyKey: z.uuid(),
+  }),
+  z.object({
+    action: z.literal('GET_ROOM_JOB'),
+    channelId: z.string().min(1),
+    jobId: z.uuid(),
+  }),
+  z.object({
+    action: z.literal('LIST_ROOM_JOBS'),
+    channelId: z.string().min(1),
+    cursor: z.string().regex(/^(0|[1-9][0-9]*)$/).default('0'),
+    limit: z.number().int().min(1).max(100).default(20),
+  }),
+  z.object({
+    // No-worker terminal cancellation; never calls CANCEL_TASK.
+    action: z.literal('CANCEL_ROOM_JOB'),
+    channelId: z.string().min(1),
+    jobId: z.uuid(),
+    expectedRevision: z.number().int().min(1),
+    idempotencyKey: z.uuid(),
+  }),
+  z.object({
     // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S3: human posting. Deliberately NO
     // author/principalId/surfaceId field -- the server ALWAYS stamps the
     // author from the connection's resolved collab principal (§2a), so
