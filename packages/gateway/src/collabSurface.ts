@@ -276,6 +276,15 @@ export function publishCollabSurface(
   publishOnly(sessionId, { message, metadata });
 }
 
+/** Total, non-disclosing translation shared by the room-job foundation paths. */
+function roomJobSurfaceError(err: any): CollabSurfaceError {
+  if (err?.code === 'COLLAB_NOT_FOUND') return { code: 'COLLAB_NOT_FOUND', detail: err.message };
+  if (err?.code === 'INVALID_REQUEST') return { code: 'COLLAB_INVALID_REQUEST', detail: err.message };
+  if (err?.code === 'CHANNEL_ARCHIVED') return { code: 'COLLAB_CHANNEL_ARCHIVED', detail: err.message };
+  if (err?.code === 'IDEMPOTENCY_CONFLICT') return { code: 'COLLAB_IDEMPOTENCY_CONFLICT', detail: err.message };
+  return { code: 'COLLAB_UNAVAILABLE' };
+}
+
 /**
  * S3 (CO-1 fix): `kind` is derived from the connection's own resolved
  * principal via a real DB read (collabIdentity.ts's getPrincipalKind),
@@ -757,6 +766,97 @@ export async function handlePostChannelMessage(
     // where err?.code is undefined and every branch above is skipped):
     // never leak internal detail, never let it escape as a rejection.
     return { code: 'COLLAB_UNAVAILABLE' };
+  }
+}
+
+/**
+ * Room-job foundation wire envelope. Versioned discriminators are intentionally
+ * explicit so a future UI may reject unrelated or malformed system frames
+ * rather than correlating by actor, text, timestamp, or channel event alone.
+ */
+export async function handleCreateRoomJob(
+  sessionId: string,
+  principalId: string | null,
+  input: { channelId: string; brief: string; idempotencyKey: string },
+): Promise<CollabSurfaceError | null> {
+  if (principalId === null) return COLLAB_IDENTITY_REQUIRED;
+  const store = getStore();
+  if (!store) return { code: 'COLLAB_UNAVAILABLE' };
+  try {
+    const result = await store.createRoomJob(callerFor(principalId), {
+      channelId: input.channelId, brief: input.brief,
+    }, input.idempotencyKey);
+    publishOnly(sessionId, {
+      message: 'Room job recorded',
+      metadata: { roomJob: { version: 1, kind: 'created', idempotencyKey: result.idempotencyKey, job: result.job } },
+    });
+    return null;
+  } catch (err: any) {
+    return roomJobSurfaceError(err);
+  }
+}
+
+export async function handleListRoomJobs(
+  sessionId: string,
+  principalId: string | null,
+  input: { channelId: string; cursor: string; limit: number },
+): Promise<CollabSurfaceError | null> {
+  if (principalId === null) return COLLAB_IDENTITY_REQUIRED;
+  const store = getStore();
+  if (!store) return { code: 'COLLAB_UNAVAILABLE' };
+  try {
+    const result = await store.listRoomJobs(callerFor(principalId), input);
+    publishOnly(sessionId, {
+      message: 'Room jobs listed',
+      metadata: { roomJob: { version: 1, kind: 'list', ...result } },
+    });
+    return null;
+  } catch (err: any) {
+    return roomJobSurfaceError(err);
+  }
+}
+
+export async function handleGetRoomJob(
+  sessionId: string,
+  principalId: string | null,
+  input: { channelId: string; jobId: string },
+): Promise<CollabSurfaceError | null> {
+  if (principalId === null) return COLLAB_IDENTITY_REQUIRED;
+  const store = getStore();
+  if (!store) return { code: 'COLLAB_UNAVAILABLE' };
+  try {
+    const job = await store.getRoomJob(callerFor(principalId), input);
+    publishOnly(sessionId, {
+      message: 'Room job loaded',
+      metadata: { roomJob: { version: 1, kind: 'detail', job } },
+    });
+    return null;
+  } catch (err: any) {
+    return roomJobSurfaceError(err);
+  }
+}
+
+export async function handleCancelRoomJob(
+  sessionId: string,
+  principalId: string | null,
+  input: { channelId: string; jobId: string; expectedRevision: number; idempotencyKey: string },
+): Promise<CollabSurfaceError | null> {
+  if (principalId === null) return COLLAB_IDENTITY_REQUIRED;
+  const store = getStore();
+  if (!store) return { code: 'COLLAB_UNAVAILABLE' };
+  try {
+    const job = await store.cancelRoomJob(callerFor(principalId), {
+      channelId: input.channelId,
+      jobId: input.jobId,
+      expectedRevision: input.expectedRevision,
+    }, input.idempotencyKey);
+    publishOnly(sessionId, {
+      message: 'Room job cancellation recorded',
+      metadata: { roomJob: { version: 1, kind: 'cancelled', idempotencyKey: input.idempotencyKey, job } },
+    });
+    return null;
+  } catch (err: any) {
+    return roomJobSurfaceError(err);
   }
 }
 

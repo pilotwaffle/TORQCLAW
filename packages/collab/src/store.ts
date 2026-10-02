@@ -364,6 +364,71 @@ export interface PostChannelMessageResult {
   occurredAt: string;
 }
 
+/**
+ * Deliberately small, server-authorized Room-job projection. It is evidence
+ * only: this foundation has no worker, task, approval, receipt, delivery, or
+ * public artifact-byte read path.
+ */
+export type RoomJobState = 'created' | 'cancelled';
+export type RoomJobLifecycleKind = 'created' | 'cancel_requested' | 'cancelled' | 'artifact_committed';
+export type RoomArtifactType = 'proposal' | 'decision_summary' | 'research_source' | 'independent_review';
+export type RoomArtifactProvenanceKind = 'user_provided' | 'tool_observed' | 'model_assertion' | 'test_fixture';
+
+export interface RoomJobCapabilities {
+  /** Server-computed from the current caller and current Room ownership. */
+  canCreate: boolean;
+  /** Server-computed for this job; gateway/store still re-check on mutation. */
+  canCancel: boolean;
+}
+
+export interface RoomJobListEntry {
+  jobId: string;
+  channelId: string;
+  state: RoomJobState;
+  revision: number;
+  createdAt: string;
+  cancelledAt: string | null;
+  /** Safe display fact only; stored brief text is intentionally not returned. */
+  briefByteLength: number;
+  capabilities: RoomJobCapabilities;
+}
+
+export interface RoomJobLifecycleEntry {
+  jobSeq: number;
+  kind: RoomJobLifecycleKind;
+  state: RoomJobState;
+  revision: number;
+  occurredAt: string;
+}
+
+export interface RoomArtifactMetadata {
+  artifactId: string;
+  artifactType: RoomArtifactType;
+  revision: number;
+  schemaVersion: number;
+  provenanceKind: RoomArtifactProvenanceKind;
+  sha256: string;
+  createdAt: string;
+}
+
+export interface RoomJobDetail extends RoomJobListEntry {
+  lifecycle: RoomJobLifecycleEntry[];
+  artifacts: RoomArtifactMetadata[];
+}
+
+export interface CreateRoomJobResult {
+  job: RoomJobListEntry;
+  idempotencyKey: string;
+}
+
+export interface ListRoomJobsResult {
+  channelId: string;
+  jobs: RoomJobListEntry[];
+  nextCursor: string;
+  hasMore: boolean;
+  capabilities: Pick<RoomJobCapabilities, 'canCreate'>;
+}
+
 export interface AgentTurnRuntimeSnapshot {
   providerAccountId: string;
   adapterId: string;
@@ -3210,6 +3275,274 @@ export class CollaborationStore {
   }
 
   /**
+   * Owner-only no-worker foundation creation. The persisted result deliberately
+   * excludes the brief: UI receives its byte length, never text that it could
+   * mistake for a completed proposal or reuse as a client-side authority.
+   */
+  async createRoomJob(
+    caller: CallerContext,
+    body: { channelId: string; brief: string },
+    idempotencyKey: string,
+  ): Promise<CreateRoomJobResult> {
+    const normalized = normalizeMessageText(body.brief);
+    if ('error' in normalized) throw new CollabError('INVALID_REQUEST', normalized.message);
+    const normalizedBody = { channelId: body.channelId, brief: normalized.text };
+    const committed: CommittedChannelEvent[] = [];
+
+    const result = await this.withReadThenSequencer(() => this.mutex.withLock(() =>
+      this.runKeyedCommand(
+        caller.principalId,
+        'CREATE_ROOM_JOB',
+        idempotencyKey,
+        normalizedBody,
+        (tx) => this.assertChannelOwner(tx, caller, normalizedBody.channelId),
+        (tx) => {
+          const channel = this.getChannelOrThrow(tx, normalizedBody.channelId);
+          if (channel.state === 'archived') {
+            throw new CollabError('CHANNEL_ARCHIVED', 'Channel is archived');
+          }
+          const jobId = this.env.uuids.next();
+          const createdAt = this.env.clock.next();
+          const briefSha256 = createHash('sha256').update(normalizedBody.brief, 'utf8').digest('hex');
+          tx.prepare(`INSERT INTO room_jobs(
+            job_id, channel_id, creator_principal_id, brief, brief_sha256,
+            state, revision, created_at, cancel_requested_at, cancelled_at
+          ) VALUES(?,?,?,?,?,'created',1,?,?,?)`).run(
+            jobId,
+            channel.id,
+            caller.principalId,
+            normalizedBody.brief,
+            briefSha256,
+            createdAt,
+            null,
+            null,
+          );
+
+          committed.push(this.appendRoomJobLifecycle(tx, {
+            channelId: channel.id,
+            jobId,
+            kind: 'created',
+            state: 'created',
+            revision: 1,
+            actorPrincipalId: caller.principalId,
+          }));
+
+          const job: RoomJobListEntry = {
+            jobId,
+            channelId: channel.id,
+            state: 'created',
+            revision: 1,
+            createdAt,
+            cancelledAt: null,
+            briefByteLength: Buffer.byteLength(normalizedBody.brief, 'utf8'),
+            capabilities: { canCreate: true, canCancel: true },
+          };
+          const result: CreateRoomJobResult = { job, idempotencyKey };
+          return { result, redacted: result };
+        },
+      ),
+    ));
+
+    for (const event of committed) await this.fanoutRoomJobEvent(event);
+    return result;
+  }
+
+  async listRoomJobs(
+    caller: CallerContext,
+    body: { channelId: string; cursor: string; limit: number },
+  ): Promise<ListRoomJobsResult> {
+    return this.withReadOnly(() => this.runReadCommand(() => {
+      if (body.limit < 1 || body.limit > 100) {
+        throw new CollabError('INVALID_REQUEST', 'limit must be between 1 and 100');
+      }
+      const cursor = this.parseCursor(body.cursor);
+      const db = this.env.db;
+      this.assertChannelVisible(db, caller, body.channelId);
+      const canCreate = this.callerOwnsChannel(db, caller, body.channelId);
+      const rows = db.prepare(`SELECT rowid AS row_cursor, job_id, channel_id, brief,
+          state, revision, created_at, cancelled_at
+        FROM room_jobs WHERE channel_id = ? AND rowid > ?
+        ORDER BY rowid ASC LIMIT ?`).all(body.channelId, cursor, body.limit + 1) as Array<{
+          row_cursor: number; job_id: string; channel_id: string; brief: string;
+          state: RoomJobState; revision: number; created_at: string; cancelled_at: string | null;
+        }>;
+      const page = rows.slice(0, body.limit);
+      const jobs = page.map((row) => this.toRoomJobListEntry(row, canCreate));
+      return {
+        channelId: body.channelId,
+        jobs,
+        nextCursor: page.length > 0 ? String(page[page.length - 1]!.row_cursor) : body.cursor,
+        hasMore: rows.length > page.length,
+        capabilities: { canCreate },
+      };
+    }));
+  }
+
+  async getRoomJob(
+    caller: CallerContext,
+    body: { channelId: string; jobId: string },
+  ): Promise<RoomJobDetail> {
+    return this.withReadOnly(() => this.runReadCommand(() => {
+      const db = this.env.db;
+      this.assertChannelVisible(db, caller, body.channelId);
+      const row = db.prepare(`SELECT job_id, channel_id, brief, state, revision, created_at, cancelled_at
+        FROM room_jobs WHERE job_id = ? AND channel_id = ?`).get(body.jobId, body.channelId) as {
+          job_id: string; channel_id: string; brief: string; state: RoomJobState; revision: number;
+          created_at: string; cancelled_at: string | null;
+        } | undefined;
+      if (!row) throw notFound();
+      const canCreate = this.callerOwnsChannel(db, caller, body.channelId);
+      const lifecycle = db.prepare(`SELECT job_seq, kind, state, revision, created_at
+          FROM room_job_events WHERE job_id = ? ORDER BY job_seq ASC`).all(row.job_id) as Array<{
+            job_seq: number; kind: RoomJobLifecycleKind; state: RoomJobState; revision: number; created_at: string;
+          }>;
+      const artifacts = db.prepare(`SELECT artifact_id, artifact_type, revision, schema_version,
+          provenance_kind, sha256, created_at FROM room_artifact_revisions
+          WHERE job_id = ? ORDER BY revision ASC`).all(row.job_id) as Array<{
+            artifact_id: string; artifact_type: RoomArtifactType; revision: number; schema_version: number;
+            provenance_kind: RoomArtifactProvenanceKind; sha256: string; created_at: string;
+          }>;
+      return {
+        ...this.toRoomJobListEntry(row, canCreate),
+        lifecycle: lifecycle.map((event) => ({
+          jobSeq: event.job_seq,
+          kind: event.kind,
+          state: event.state,
+          revision: event.revision,
+          occurredAt: event.created_at,
+        })),
+        artifacts: artifacts.map((artifact) => ({
+          artifactId: artifact.artifact_id,
+          artifactType: artifact.artifact_type,
+          revision: artifact.revision,
+          schemaVersion: artifact.schema_version,
+          provenanceKind: artifact.provenance_kind,
+          sha256: artifact.sha256,
+          createdAt: artifact.created_at,
+        })),
+      };
+    }));
+  }
+
+  /** Cancellation records evidence only; no unrelated task cancellation is attempted. */
+  async cancelRoomJob(
+    caller: CallerContext,
+    body: { channelId: string; jobId: string; expectedRevision: number },
+    idempotencyKey: string,
+  ): Promise<RoomJobListEntry> {
+    const committed: CommittedChannelEvent[] = [];
+    const result = await this.withReadThenSequencer(() => this.mutex.withLock(() =>
+      this.runKeyedCommand(
+        caller.principalId,
+        'CANCEL_ROOM_JOB',
+        idempotencyKey,
+        body,
+        (tx) => this.assertChannelOwner(tx, caller, body.channelId),
+        (tx) => {
+          const row = tx.prepare(`SELECT job_id, channel_id, brief, state, revision, created_at, cancelled_at
+            FROM room_jobs WHERE job_id = ? AND channel_id = ?`).get(body.jobId, body.channelId) as {
+              job_id: string; channel_id: string; brief: string; state: RoomJobState; revision: number;
+              created_at: string; cancelled_at: string | null;
+            } | undefined;
+          if (!row) throw notFound();
+          if (row.revision !== body.expectedRevision) {
+            throw new CollabError('INVALID_REQUEST', 'Room job revision is stale');
+          }
+          if (row.state === 'cancelled') {
+            const result = this.toRoomJobListEntry(row, true);
+            return { result, redacted: result };
+          }
+
+          const requestedAt = this.env.clock.next();
+          tx.prepare('UPDATE room_jobs SET cancel_requested_at = ? WHERE job_id = ?').run(requestedAt, row.job_id);
+          committed.push(this.appendRoomJobLifecycle(tx, {
+            channelId: row.channel_id,
+            jobId: row.job_id,
+            kind: 'cancel_requested',
+            state: 'created',
+            revision: row.revision,
+            actorPrincipalId: caller.principalId,
+          }));
+          const cancelledAt = this.env.clock.next();
+          const revision = row.revision + 1;
+          tx.prepare(`UPDATE room_jobs SET state = 'cancelled', revision = ?, cancelled_at = ?
+            WHERE job_id = ? AND state = 'created'`).run(revision, cancelledAt, row.job_id);
+          committed.push(this.appendRoomJobLifecycle(tx, {
+            channelId: row.channel_id,
+            jobId: row.job_id,
+            kind: 'cancelled',
+            state: 'cancelled',
+            revision,
+            actorPrincipalId: caller.principalId,
+          }));
+          const result: RoomJobListEntry = {
+            ...this.toRoomJobListEntry(row, true), state: 'cancelled', revision, cancelledAt,
+            capabilities: { canCreate: true, canCancel: false },
+          };
+          return { result, redacted: result };
+        },
+      ),
+    ));
+    for (const event of committed) await this.fanoutRoomJobEvent(event);
+    return result;
+  }
+
+  /**
+   * Test-only deterministic fixture seam. It is not exported through the
+   * gateway wire surface and must never be called by production execution.
+   */
+  async appendRoomJobFixtureArtifactForTest(
+    caller: CallerContext,
+    body: { channelId: string; jobId: string; artifactType: RoomArtifactType; content: Buffer },
+  ): Promise<RoomArtifactMetadata> {
+    if (body.content.length > 65536) throw new CollabError('INVALID_REQUEST', 'Artifact content exceeds 65536 bytes');
+    let committed: CommittedChannelEvent | undefined;
+    const result = await this.withReadThenSequencer(() => this.mutex.withLock(() =>
+      this.runNaturallyIdempotentCommand(caller.principalId, 'TEST_FIXTURE_ROOM_ARTIFACT', (tx) => {
+        this.assertChannelOwner(tx, caller, body.channelId);
+        const job = tx.prepare(`SELECT job_id, channel_id, state, revision FROM room_jobs
+          WHERE job_id = ? AND channel_id = ?`).get(body.jobId, body.channelId) as {
+            job_id: string; channel_id: string; state: RoomJobState; revision: number;
+          } | undefined;
+        if (!job) throw notFound();
+        if (job.state !== 'created') throw new CollabError('INVALID_REQUEST', 'Cannot add an artifact to a cancelled room job');
+        const revision = job.revision + 1;
+        const artifactId = this.env.uuids.next();
+        const createdAt = this.env.clock.next();
+        const sha256 = createHash('sha256').update(body.content).digest('hex');
+        tx.prepare(`INSERT INTO room_artifact_revisions(
+          artifact_id, job_id, revision, artifact_type, schema_version,
+          provenance_kind, provenance_json, content, sha256, created_at
+        ) VALUES(?,?,?,?,1,'test_fixture',?,?,?,?)`).run(
+          artifactId, job.job_id, revision, body.artifactType,
+          canonicalJson({ testOnly: true }), body.content, sha256, createdAt,
+        );
+        tx.prepare('UPDATE room_jobs SET revision = ? WHERE job_id = ?').run(revision, job.job_id);
+        committed = this.appendRoomJobLifecycle(tx, {
+          channelId: job.channel_id,
+          jobId: job.job_id,
+          kind: 'artifact_committed',
+          state: 'created',
+          revision,
+          actorPrincipalId: caller.principalId,
+          artifact: { artifactId, artifactType: body.artifactType, sha256 },
+        });
+        return {
+          artifactId,
+          artifactType: body.artifactType,
+          revision,
+          schemaVersion: 1,
+          provenanceKind: 'test_fixture' as const,
+          sha256,
+          createdAt,
+        };
+      }),
+    ));
+    if (committed) await this.fanoutRoomJobEvent(committed);
+    return result;
+  }
+
+  /**
    * LIST_CHANNEL_MEMBERS: read-path (PRD-007 S4-Members, G1D resolution
    * table item B-1; presence overlay per OQ-2, GRANTED 2026-08-23). No
    * sequencer mutex, no result row -- same discipline as getChannelTimeline
@@ -3614,6 +3947,90 @@ export class CollaborationStore {
       throw notFound();
     }
     return member;
+  }
+
+  /** A non-throwing counterpart for UI affordance data only. Mutations always re-check assertChannelOwner. */
+  private callerOwnsChannel(tx: BootstrapDb, caller: CallerContext, channelId: string): boolean {
+    const principal = tx.prepare('SELECT id, kind, status FROM principals WHERE id = ?').get(caller.principalId) as
+      | { id: string; kind: string; status: string }
+      | undefined;
+    const channel = tx.prepare('SELECT owner_principal_id FROM collab_channels WHERE id = ?').get(channelId) as
+      | { owner_principal_id: string }
+      | undefined;
+    return principal?.kind === 'operator'
+      && principal.status === 'active'
+      && channel?.owner_principal_id === principal.id;
+  }
+
+  private toRoomJobListEntry(
+    row: {
+      job_id: string; channel_id: string; brief: string; state: RoomJobState; revision: number;
+      created_at: string; cancelled_at: string | null;
+    },
+    canCreate: boolean,
+  ): RoomJobListEntry {
+    return {
+      jobId: row.job_id,
+      channelId: row.channel_id,
+      state: row.state,
+      revision: row.revision,
+      createdAt: row.created_at,
+      cancelledAt: row.cancelled_at,
+      briefByteLength: Buffer.byteLength(row.brief, 'utf8'),
+      capabilities: { canCreate, canCancel: canCreate && row.state === 'created' },
+    };
+  }
+
+  private appendRoomJobLifecycle(
+    tx: BootstrapDb,
+    input: {
+      channelId: string;
+      jobId: string;
+      kind: RoomJobLifecycleKind;
+      state: RoomJobState;
+      revision: number;
+      actorPrincipalId: string;
+      artifact?: { artifactId: string; artifactType: RoomArtifactType; sha256: string };
+    },
+  ): CommittedChannelEvent {
+    const eventId = this.env.uuids.next();
+    const occurredAt = this.env.clock.next();
+    const jobSeq = (tx.prepare('SELECT COALESCE(MAX(job_seq), 0) AS m FROM room_job_events WHERE job_id = ?')
+      .get(input.jobId) as { m: number }).m + 1;
+    tx.prepare(`INSERT INTO room_job_events(job_id, job_seq, event_id, kind, state, revision, created_at)
+      VALUES(?,?,?,?,?,?,?)`).run(
+      input.jobId, jobSeq, eventId, input.kind, input.state, input.revision, occurredAt,
+    );
+    const channelSeq = this.getMaxChannelSeq(tx, input.channelId) + 1;
+    const channelKind = `room_job_${input.kind}`;
+    const payload: Record<string, unknown> = {
+      jobId: input.jobId,
+      state: input.state,
+      revision: input.revision,
+      ...(input.artifact ?? {}),
+    };
+    tx.prepare(`INSERT INTO collab_events(
+      id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at
+    ) VALUES(?,?,?,?,?,?,?,?)`).run(
+      eventId, 1, input.channelId, channelSeq, input.actorPrincipalId, channelKind,
+      canonicalJson(payload), occurredAt,
+    );
+    return {
+      channelId: input.channelId,
+      channelSeq,
+      eventId,
+      kind: channelKind,
+      actorPrincipalId: input.actorPrincipalId,
+      occurredAt,
+      payload,
+    };
+  }
+
+  private async fanoutRoomJobEvent(event: CommittedChannelEvent): Promise<void> {
+    await fanoutToChannel(
+      { lock: this.lock, registry: this.registry, db: this.env.db, observability: this.observability, nowMs: this.nowMs },
+      event,
+    );
   }
 
   private getMaxChannelSeq(tx: BootstrapDb, channelId: string): number {

@@ -145,6 +145,9 @@ describe('C1 built-artifact enforcement (§5(c))', () => {
     expect(collabTables).toContain('surfaces');              // C1-1
     expect(collabTables).toContain('surface_credentials');   // C1-2
     expect(collabTables).toContain('collab_surface_audit');  // C1-6
+    expect(collabTables).toContain('room_jobs');
+    expect(collabTables).toContain('room_job_events');
+    expect(collabTables).toContain('room_artifact_revisions');
     const applied = (collab.prepare('SELECT id FROM collab_schema_migrations').all() as { id: string }[])
       .map((r) => r.id).sort();
     // PRD-TCLAW-AGENT-PARTICIPATION-007 S3: runCollaborationMigration now
@@ -184,6 +187,7 @@ describe('C1 built-artifact enforcement (§5(c))', () => {
       // and re-authorize deliberately on any future approved change; never
       // silently widen this to a subset/contains check.
       '20260824_008_agent_turn_resolution_note_v1',
+      '20261002_001_room_job_foundation_v1',
     ]);
     collab.close();
 
@@ -203,13 +207,11 @@ describe('C1 built-artifact enforcement (§5(c))', () => {
     // alongside the two C1 calls (same seam, same idempotency guarantee).
     // CRON slice (G1R Gate-1 §2A, 2026-08-18): 5, not 4 -- migrateCollabDb
     // now ALSO runs runAgentCronMigration, same seam, same guarantee.
-    // Authorized 2026-08-24 (G1D channels-agent-UX packet, Item A): 14, not
-    // 13 -- AGENT_TURN_RESOLUTION_NOTE_MIGRATION_ID joins the ledger, same
-    // idempotency guarantee (re-boot still applies it exactly once). See the
-    // matching authorization comment on the ordered-id array above.
-    expect((again.prepare('SELECT COUNT(*) AS n FROM collab_schema_migrations').get() as { n: number }).n).toBe(14);
+    // Room-job foundation joins the additive ledger as its fifteenth entry;
+    // a re-boot must preserve exactly one row, never duplicate it.
+    expect((again.prepare('SELECT COUNT(*) AS n FROM collab_schema_migrations').get() as { n: number }).n).toBe(15);
     again.close();
-    console.log('C1_ARTIFACT_SELF_MIGRATED collab=14 migrations, state=3 tables');
+    console.log('C1_ARTIFACT_SELF_MIGRATED collab=15 migrations, state=3 tables');
   }, 120000);
 
   it('the booted dist ACCEPTS a valid C1 surface and REFUSES revoked/expired/inert ones', async () => {

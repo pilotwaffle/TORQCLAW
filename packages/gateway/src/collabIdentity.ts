@@ -56,6 +56,7 @@ import {
   runSurfaceAuditMigration,
   runAgentAutoreplyMigration,
   runAgentCronMigration,
+  runRoomJobFoundationMigration,
   writeSurfaceAudit,
   type SecretStore,
   type BootstrapDb,
@@ -165,6 +166,11 @@ function migrateCollabDb(db: BootstrapDb): void {
     // exactly-two-row check (inside runSurfaceIdentityMigration, earlier in
     // this sequence) has already run.
     runAgentCronMigration(handle);
+    // Room-job foundation is deliberately last: it rebuilds only the
+    // collab_events CHECK for its constrained discovery kinds, then creates
+    // collab.db-only evidence tables. It does not migrate state.db or wire a
+    // worker, approval, receipt, artifact download, or delivery surface.
+    runRoomJobFoundationMigration(handle);
   } catch {
     /* fail closed: an unmigrated DB authenticates nobody */
   }
