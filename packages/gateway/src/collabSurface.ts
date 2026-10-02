@@ -860,6 +860,50 @@ export async function handleCancelRoomJob(
   }
 }
 
+export async function handleAddRoomJobFacts(
+  sessionId: string,
+  principalId: string | null,
+  input: { channelId: string; jobId: string; facts: string[]; idempotencyKey: string },
+): Promise<CollabSurfaceError | null> {
+  if (principalId === null) return COLLAB_IDENTITY_REQUIRED;
+  const store = getStore();
+  if (!store) return { code: 'COLLAB_UNAVAILABLE' };
+  try {
+    const result = await store.appendRoomJobFacts(callerFor(principalId), {
+      channelId: input.channelId, jobId: input.jobId, facts: input.facts,
+    }, input.idempotencyKey);
+    publishOnly(sessionId, {
+      message: 'Room job facts recorded',
+      metadata: { roomJob: { version: 1, kind: 'facts_recorded', idempotencyKey: result.idempotencyKey, facts: result.facts } },
+    });
+    return null;
+  } catch (err: any) {
+    return roomJobSurfaceError(err);
+  }
+}
+
+export async function handleStartRoomJob(
+  sessionId: string,
+  principalId: string | null,
+  input: { channelId: string; jobId: string; factIds: string[]; idempotencyKey: string },
+): Promise<CollabSurfaceError | null> {
+  if (principalId === null) return COLLAB_IDENTITY_REQUIRED;
+  const store = getStore();
+  if (!store) return { code: 'COLLAB_UNAVAILABLE' };
+  try {
+    const result = await store.startRoomJob(callerFor(principalId), {
+      channelId: input.channelId, jobId: input.jobId, factIds: input.factIds,
+    }, input.idempotencyKey);
+    publishOnly(sessionId, {
+      message: 'Room job execution intent recorded',
+      metadata: { roomJob: { version: 1, kind: 'attempt_started', idempotencyKey: result.idempotencyKey, attempt: result.attempt } },
+    });
+    return null;
+  } catch (err: any) {
+    return roomJobSurfaceError(err);
+  }
+}
+
 /**
  * ACK_CHANNEL_CURSOR handler body (PRD-TCLAW-COLLAB-PRESENCE-UI-005 S6).
  * Write path, but a naturally-idempotent one: store.ackChannelCursor

@@ -370,7 +370,15 @@ export interface PostChannelMessageResult {
  * public artifact-byte read path.
  */
 export type RoomJobState = 'created' | 'cancelled';
-export type RoomJobLifecycleKind = 'created' | 'cancel_requested' | 'cancelled' | 'artifact_committed';
+export type RoomJobLifecycleKind =
+  | 'created'
+  | 'cancel_requested'
+  | 'cancelled'
+  | 'artifact_committed'
+  | 'attempt_started'
+  | 'draft_committed'
+  | 'review_committed'
+  | 'execution_failed';
 export type RoomArtifactType = 'proposal' | 'decision_summary' | 'research_source' | 'independent_review';
 export type RoomArtifactProvenanceKind = 'user_provided' | 'tool_observed' | 'model_assertion' | 'test_fixture';
 
@@ -427,6 +435,35 @@ export interface ListRoomJobsResult {
   nextCursor: string;
   hasMore: boolean;
   capabilities: Pick<RoomJobCapabilities, 'canCreate'>;
+}
+
+/** Metadata only: fact bytes stay in the private Room-execution input store. */
+export interface RoomJobFactMetadata {
+  factId: string;
+  ordinal: number;
+  sha256: string;
+  createdAt: string;
+}
+
+export interface RoomJobAttemptMetadata {
+  attemptId: string;
+  generation: number;
+  inputHash: string;
+  configurationIdentity: string;
+  state: 'queued' | 'draft_committed' | 'review_committed' | 'completed_internal' | 'cancelled' | 'validation_failed' | 'recovery_needed' | 'runtime_unavailable';
+  terminalReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AppendRoomJobFactsResult {
+  facts: RoomJobFactMetadata[];
+  idempotencyKey: string;
+}
+
+export interface StartRoomJobResult {
+  attempt: RoomJobAttemptMetadata;
+  idempotencyKey: string;
 }
 
 export interface AgentTurnRuntimeSnapshot {
@@ -3467,6 +3504,22 @@ export class CollaborationStore {
           const revision = row.revision + 1;
           tx.prepare(`UPDATE room_jobs SET state = 'cancelled', revision = ?, cancelled_at = ?
             WHERE job_id = ? AND state = 'created'`).run(revision, cancelledAt, row.job_id);
+          // Execution is an optional additive migration during this rollout.
+          // When present, cancellation is also the generation fence for every
+          // future state-db admission and makes unclaimed work permanently
+          // inadmissible. Foundation-only databases retain their old behavior.
+          if (this.roomJobExecutionSchemaPresent(tx)) {
+            tx.prepare(`UPDATE room_jobs
+              SET execution_generation = execution_generation + 1
+              WHERE job_id = ?`).run(row.job_id);
+            tx.prepare(`UPDATE room_job_outbox
+              SET state = 'cancelled'
+              WHERE attempt_id IN (SELECT attempt_id FROM room_job_attempts WHERE job_id = ?)
+                AND state = 'pending'`).run(row.job_id);
+            tx.prepare(`UPDATE room_job_attempts
+              SET state = 'cancelled', terminal_reason = 'room_job_cancelled', updated_at = ?
+              WHERE job_id = ? AND state IN ('queued','draft_committed','review_committed')`).run(cancelledAt, row.job_id);
+          }
           committed.push(this.appendRoomJobLifecycle(tx, {
             channelId: row.channel_id,
             jobId: row.job_id,
@@ -3479,6 +3532,155 @@ export class CollaborationStore {
             ...this.toRoomJobListEntry(row, true), state: 'cancelled', revision, cancelledAt,
             capabilities: { canCreate: true, canCancel: false },
           };
+          return { result, redacted: result };
+        },
+      ),
+    ));
+    for (const event of committed) await this.fanoutRoomJobEvent(event);
+    return result;
+  }
+
+  /**
+   * Owner-provided source facts are immutable, bounded evidence. The bytes
+   * are intentionally not projected through Channel events or job reads;
+   * only their revision metadata can leave this store at this stage.
+   */
+  async appendRoomJobFacts(
+    caller: CallerContext,
+    body: { channelId: string; jobId: string; facts: string[] },
+    idempotencyKey: string,
+  ): Promise<AppendRoomJobFactsResult> {
+    if (body.facts.length < 1 || body.facts.length > 20) {
+      throw new CollabError('INVALID_REQUEST', 'facts must contain between 1 and 20 entries');
+    }
+    const normalizedFacts = body.facts.map((fact) => {
+      const normalized = normalizeMessageText(fact);
+      if ('error' in normalized) throw new CollabError('INVALID_REQUEST', normalized.message);
+      return normalized.text;
+    });
+    const normalizedBody = { channelId: body.channelId, jobId: body.jobId, facts: normalizedFacts };
+    return this.withReadThenSequencer(() => this.mutex.withLock(() =>
+      this.runKeyedCommand(
+        caller.principalId,
+        'ADD_ROOM_JOB_FACTS',
+        idempotencyKey,
+        normalizedBody,
+        (tx) => this.assertChannelOwner(tx, caller, normalizedBody.channelId),
+        (tx) => {
+          if (!this.roomJobExecutionSchemaPresent(tx)) {
+            throw new CollabError('INVALID_REQUEST', 'Room job execution storage is unavailable');
+          }
+          const job = tx.prepare(`SELECT job_id, state FROM room_jobs
+            WHERE job_id = ? AND channel_id = ?`).get(normalizedBody.jobId, normalizedBody.channelId) as
+              | { job_id: string; state: RoomJobState }
+              | undefined;
+          if (!job) throw notFound();
+          if (job.state !== 'created') throw new CollabError('INVALID_REQUEST', 'Cannot add facts to a cancelled room job');
+          const nextOrdinal = (tx.prepare(`SELECT COALESCE(MAX(ordinal), 0) AS ordinal
+            FROM room_job_fact_revisions WHERE job_id = ?`).get(job.job_id) as { ordinal: number }).ordinal + 1;
+          const now = this.env.clock.next();
+          const facts: RoomJobFactMetadata[] = normalizedFacts.map((content, index) => {
+            const factId = this.env.uuids.next();
+            const sha256 = createHash('sha256').update(content, 'utf8').digest('hex');
+            try {
+              tx.prepare(`INSERT INTO room_job_fact_revisions(
+                fact_id, job_id, ordinal, schema_version, provenance_kind, content, sha256, created_at
+              ) VALUES(?,?,?,1,'user_provided',?,?,?)`).run(
+                factId, job.job_id, nextOrdinal + index, Buffer.from(content, 'utf8'), sha256, now,
+              );
+            } catch (error) {
+              if (String(error).includes('room_job_fact_revisions.job_id, room_job_fact_revisions.sha256')) {
+                throw new CollabError('INVALID_REQUEST', 'Duplicate room job fact');
+              }
+              throw error;
+            }
+            return { factId, ordinal: nextOrdinal + index, sha256, createdAt: now };
+          });
+          const result: AppendRoomJobFactsResult = { facts, idempotencyKey };
+          return { result, redacted: result };
+        },
+      ),
+    ));
+  }
+
+  /**
+   * Creates one immutable collab-side execution intent. It does not invoke a
+   * provider or create a gateway task; the separately gated coordinator must
+   * still prove fresh runtime/owner/generation admission before state-db work.
+   */
+  async startRoomJob(
+    caller: CallerContext,
+    body: { channelId: string; jobId: string; factIds: string[] },
+    idempotencyKey: string,
+  ): Promise<StartRoomJobResult> {
+    if (body.factIds.length < 1 || body.factIds.length > 20 || new Set(body.factIds).size !== body.factIds.length) {
+      throw new CollabError('INVALID_REQUEST', 'factIds must contain 1 to 20 distinct fact ids');
+    }
+    const normalizedBody = { channelId: body.channelId, jobId: body.jobId, factIds: [...body.factIds] };
+    const committed: CommittedChannelEvent[] = [];
+    const result = await this.withReadThenSequencer(() => this.mutex.withLock(() =>
+      this.runKeyedCommand(
+        caller.principalId,
+        'START_ROOM_JOB',
+        idempotencyKey,
+        normalizedBody,
+        (tx) => this.assertChannelOwner(tx, caller, normalizedBody.channelId),
+        (tx) => {
+          if (!this.roomJobExecutionSchemaPresent(tx)) {
+            throw new CollabError('INVALID_REQUEST', 'Room job execution storage is unavailable');
+          }
+          const job = tx.prepare(`SELECT job_id, channel_id, creator_principal_id, brief_sha256, state, revision, execution_generation
+            FROM room_jobs WHERE job_id = ? AND channel_id = ?`).get(normalizedBody.jobId, normalizedBody.channelId) as
+              | { job_id: string; channel_id: string; creator_principal_id: string; brief_sha256: string; state: RoomJobState; revision: number; execution_generation: number }
+              | undefined;
+          if (!job) throw notFound();
+          if (job.state !== 'created') throw new CollabError('INVALID_REQUEST', 'Cannot start a cancelled room job');
+          const existing = tx.prepare(`SELECT attempt_id FROM room_job_attempts WHERE job_id = ? AND generation = ?`)
+            .get(job.job_id, job.execution_generation) as { attempt_id: string } | undefined;
+          if (existing) throw new CollabError('INVALID_REQUEST', 'Room job already has an attempt for the current generation');
+          const placeholders = normalizedBody.factIds.map(() => '?').join(',');
+          const facts = tx.prepare(`SELECT fact_id, ordinal, sha256 FROM room_job_fact_revisions
+            WHERE job_id = ? AND fact_id IN (${placeholders}) ORDER BY ordinal ASC`)
+            .all(job.job_id, ...normalizedBody.factIds) as Array<{ fact_id: string; ordinal: number; sha256: string }>;
+          if (facts.length !== normalizedBody.factIds.length) {
+            throw new CollabError('INVALID_REQUEST', 'Selected room job facts are unavailable');
+          }
+          const attemptId = this.env.uuids.next();
+          const now = this.env.clock.next();
+          const inputHash = createHash('sha256').update(canonicalJson({
+            briefSha256: job.brief_sha256,
+            facts: facts.map((fact) => ({ factId: fact.fact_id, ordinal: fact.ordinal, sha256: fact.sha256 })),
+          }), 'utf8').digest('hex');
+          // This identifies the checked-in no-tools runner/prompt/validator
+          // contract, never a client-chosen runtime target or served-model claim.
+          const configurationIdentity = createHash('sha256').update(canonicalJson({
+            runnerRevision: 'room-job-local-runner-v1',
+            promptTemplateRevision: 'room-job-proposal-v1',
+            validatorRevision: 'room-job-validator-v1',
+            targetClass: 'configured-local-only',
+          }), 'utf8').digest('hex');
+          tx.prepare(`INSERT INTO room_job_attempts(
+            attempt_id, job_id, owner_principal_id, generation, input_hash, configuration_identity,
+            state, terminal_reason, created_at, updated_at
+          ) VALUES(?,?,?,?,?,?,'queued',NULL,?,?)`).run(
+            attemptId, job.job_id, caller.principalId, job.execution_generation, inputHash, configurationIdentity, now, now,
+          );
+          const outboxId = this.env.uuids.next();
+          const payloadHash = createHash('sha256').update(canonicalJson({
+            attemptId, stage: 'draft', generation: job.execution_generation, inputHash,
+            facts: facts.map((fact) => ({ factId: fact.fact_id, sha256: fact.sha256 })),
+          }), 'utf8').digest('hex');
+          tx.prepare(`INSERT INTO room_job_outbox(outbox_id, attempt_id, stage, payload_hash, state, created_at, acknowledged_at)
+            VALUES(?,?, 'draft', ?, 'pending', ?, NULL)`).run(outboxId, attemptId, payloadHash, now);
+          const attempt: RoomJobAttemptMetadata = {
+            attemptId, generation: job.execution_generation, inputHash, configurationIdentity,
+            state: 'queued', terminalReason: null, createdAt: now, updatedAt: now,
+          };
+          committed.push(this.appendRoomJobLifecycle(tx, {
+            channelId: job.channel_id, jobId: job.job_id, kind: 'attempt_started', state: 'created',
+            revision: job.revision, actorPrincipalId: caller.principalId, attempt: { attemptId },
+          }));
+          const result: StartRoomJobResult = { attempt, idempotencyKey };
           return { result, redacted: result };
         },
       ),
@@ -3981,6 +4183,11 @@ export class CollaborationStore {
     };
   }
 
+  private roomJobExecutionSchemaPresent(tx: BootstrapDb): boolean {
+    return Boolean(tx.prepare(`SELECT 1 FROM sqlite_master
+      WHERE type = 'table' AND name = 'room_job_attempts'`).get());
+  }
+
   private appendRoomJobLifecycle(
     tx: BootstrapDb,
     input: {
@@ -3991,6 +4198,7 @@ export class CollaborationStore {
       revision: number;
       actorPrincipalId: string;
       artifact?: { artifactId: string; artifactType: RoomArtifactType; sha256: string };
+      attempt?: { attemptId: string };
     },
   ): CommittedChannelEvent {
     const eventId = this.env.uuids.next();
@@ -4008,6 +4216,7 @@ export class CollaborationStore {
       state: input.state,
       revision: input.revision,
       ...(input.artifact ?? {}),
+      ...(input.attempt ?? {}),
     };
     tx.prepare(`INSERT INTO collab_events(
       id, schema_version, channel_id, channel_seq, actor_principal_id, kind, content_json, created_at

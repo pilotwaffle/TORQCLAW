@@ -239,6 +239,8 @@ export function authorize(role: Role, cmd: ClientCommand, ctx: AuthzContext): Au
     case 'GET_ROOM_JOB':
     case 'LIST_ROOM_JOBS':
     case 'CANCEL_ROOM_JOB':
+    case 'ADD_ROOM_JOB_FACTS':
+    case 'START_ROOM_JOB':
     // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S6: ACK_CHANNEL_CURSOR inherits the
     // exact same seat-lattice ruling as the S1 reads and the S3 mutation
     // above -- a channel seat is a transport identity (channel-http), not a

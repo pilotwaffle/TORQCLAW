@@ -50,7 +50,7 @@ import { sweepExpiredApprovals, sweepExpiredGrants } from './approvalWriter.js';
 import { rebuildDeliveryProjection } from './approvalDelivery.js';
 import { revokeInertGrants, admitToolCall } from './grantAdmission.js';
 import { decideApprovalC2 } from './c2Broker.js';
-import { collabSurfaceCommandsEnabled, agentParticipationEnabled, webSearchEnabled, isAgentSurfaceCaller, handleListChannels, handleListChannelMembers, handleSetChannelExternalExportPolicy, handleGetChannelTimeline, handlePostChannelMessage, handleAckChannelCursor, handleAddChannelMember, handleRemoveChannelMember, handleCreateRoomJob, handleGetRoomJob, handleListRoomJobs, handleCancelRoomJob, setAutoReplyTrigger, getStore } from './collabSurface.js';
+import { collabSurfaceCommandsEnabled, agentParticipationEnabled, webSearchEnabled, isAgentSurfaceCaller, handleListChannels, handleListChannelMembers, handleSetChannelExternalExportPolicy, handleGetChannelTimeline, handlePostChannelMessage, handleAckChannelCursor, handleAddChannelMember, handleRemoveChannelMember, handleCreateRoomJob, handleGetRoomJob, handleListRoomJobs, handleCancelRoomJob, handleAddRoomJobFacts, handleStartRoomJob, setAutoReplyTrigger, getStore } from './collabSurface.js';
 import {
   handleCreateAgent,
   handleListAgentProviders,
@@ -1136,6 +1136,24 @@ app.get('/ws', { websocket: true }, (socket) => {
           cmd.data,
         );
         if (cancelRoomJobErr) sendErr(cancelRoomJobErr.code, cancelRoomJobErr.detail);
+        break;
+      }
+      case 'ADD_ROOM_JOB_FACTS': {
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        const addFactsErr = await handleAddRoomJobFacts(sid, connectionAuth?.principalId ?? null, cmd.data);
+        if (addFactsErr) sendErr(addFactsErr.code, addFactsErr.detail);
+        break;
+      }
+      case 'START_ROOM_JOB': {
+        if (!collabSurfaceCommandsEnabled()) {
+          sendErr('NOT_ENABLED', { action: cmd.data.action, reason: 'not enabled' });
+          break;
+        }
+        const startRoomJobErr = await handleStartRoomJob(sid, connectionAuth?.principalId ?? null, cmd.data);
+        if (startRoomJobErr) sendErr(startRoomJobErr.code, startRoomJobErr.detail);
         break;
       }
       case 'ACK_CHANNEL_CURSOR': {

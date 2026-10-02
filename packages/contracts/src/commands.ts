@@ -265,6 +265,24 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     idempotencyKey: z.uuid(),
   }),
   z.object({
+    // Immutable owner-provided inputs only. No path, attachment, model,
+    // tool, destination, or internal execution field can enter on this wire.
+    action: z.literal('ADD_ROOM_JOB_FACTS'),
+    channelId: z.string().min(1),
+    jobId: z.uuid(),
+    facts: z.array(z.string().min(1).max(16384)).min(1).max(20),
+    idempotencyKey: z.uuid(),
+  }),
+  z.object({
+    // Starts a collab-side durable intent only. The server, not this frame,
+    // owns runtime selection, owner admission, request IDs, and tool policy.
+    action: z.literal('START_ROOM_JOB'),
+    channelId: z.string().min(1),
+    jobId: z.uuid(),
+    factIds: z.array(z.uuid()).min(1).max(20),
+    idempotencyKey: z.uuid(),
+  }),
+  z.object({
     // PRD-TCLAW-COLLAB-PRESENCE-UI-005 S3: human posting. Deliberately NO
     // author/principalId/surfaceId field -- the server ALWAYS stamps the
     // author from the connection's resolved collab principal (§2a), so
