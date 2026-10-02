@@ -853,10 +853,12 @@ describe('Phase 4 protected semantic manifest', () => {
     // Phase 4 seams above are unchanged. Verified via `git diff` that this
     // pair of hunks is the sole new drift since the SET_LOCAL_AGENT_AUTOSTART
     // authorization immediately above.
-    // 2026-10-02 approved Room-job foundation/execution deltas add the
-    // operator-seat-only Room command deny arms above. This protected source
-    // manifest must be deliberately recomputed and reviewed for every such
-    // authorization change; it is intentionally not a subset assertion.
+    // 2026-10-02 approved Room-job foundation/execution deltas add only the
+    // CREATE_ROOM_JOB, GET_ROOM_JOB, LIST_ROOM_JOBS, CANCEL_ROOM_JOB,
+    // ADD_ROOM_JOB_FACTS, START_ROOM_JOB, and GET_ROOM_JOB_ARTIFACT
+    // operator-seat-only deny arms above. This protected source manifest must
+    // be deliberately recomputed and reviewed for every authorization change;
+    // it is intentionally not a subset assertion.
     const authzSha = createHash('sha256').update(authz).digest('hex');
     expect(authzSha).toBe('cf41465a33ecba00af1adf1fd498ba59df32c3e2c2907e43c65f362886f40ca6');
     // The migration's own markers: the moved guard must not silently return,

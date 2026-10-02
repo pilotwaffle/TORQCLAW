@@ -213,8 +213,8 @@ describe('C1 built-artifact enforcement (§5(c))', () => {
     // alongside the two C1 calls (same seam, same idempotency guarantee).
     // CRON slice (G1R Gate-1 §2A, 2026-08-18): 5, not 4 -- migrateCollabDb
     // now ALSO runs runAgentCronMigration, same seam, same guarantee.
-    // Room-job foundation joins the additive ledger as its fifteenth entry;
-    // a re-boot must preserve exactly one row, never duplicate it.
+    // The four Room-job migrations complete the additive 18-entry ledger;
+    // a re-boot must preserve exactly one row per migration, never duplicate.
     expect((again.prepare('SELECT COUNT(*) AS n FROM collab_schema_migrations').get() as { n: number }).n).toBe(18);
     again.close();
     console.log('C1_ARTIFACT_SELF_MIGRATED collab=18 migrations, state=3 tables');
