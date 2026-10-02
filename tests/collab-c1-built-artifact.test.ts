@@ -188,6 +188,12 @@ describe('C1 built-artifact enforcement (§5(c))', () => {
       // silently widen this to a subset/contains check.
       '20260824_008_agent_turn_resolution_note_v1',
       '20261002_001_room_job_foundation_v1',
+      // Room-job execution is deliberately additive and the built gateway
+      // must apply each ordered migration at boot. Keep this exact ledger:
+      // it catches a missing migration rather than merely asserting a count.
+      '20261002_002_room_job_execution_v1',
+      '20261002_003_room_job_execution_artifact_binding_v1',
+      '20261002_004_room_job_execution_claim_v1',
     ]);
     collab.close();
 
@@ -209,9 +215,9 @@ describe('C1 built-artifact enforcement (§5(c))', () => {
     // now ALSO runs runAgentCronMigration, same seam, same guarantee.
     // Room-job foundation joins the additive ledger as its fifteenth entry;
     // a re-boot must preserve exactly one row, never duplicate it.
-    expect((again.prepare('SELECT COUNT(*) AS n FROM collab_schema_migrations').get() as { n: number }).n).toBe(15);
+    expect((again.prepare('SELECT COUNT(*) AS n FROM collab_schema_migrations').get() as { n: number }).n).toBe(18);
     again.close();
-    console.log('C1_ARTIFACT_SELF_MIGRATED collab=15 migrations, state=3 tables');
+    console.log('C1_ARTIFACT_SELF_MIGRATED collab=18 migrations, state=3 tables');
   }, 120000);
 
   it('the booted dist ACCEPTS a valid C1 surface and REFUSES revoked/expired/inert ones', async () => {
