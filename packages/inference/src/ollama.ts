@@ -189,6 +189,7 @@ export const ROOM_JOB_STAGE_TIMEOUT_MS = 120_000;
 
 export type RoomJobLocalRunCode =
   | 'runtime_unavailable'
+  | 'runtime_unknown'
   | 'stage_timeout'
   | 'response_oversize'
   | 'tool_attempt_refused'
@@ -277,7 +278,9 @@ export async function assertRoomJobLocalRuntimeReady(
     try {
       response = await (deps.fetchImpl ?? fetch)(`${runtime.host}/api/tags`, { signal: controller.signal });
     } catch {
-      throw new RoomJobLocalRunError('runtime_unavailable', 'Configured Room-job local runtime is unavailable');
+      // Transport/read failure does not establish whether the configured
+      // runtime is absent; the public projection must say unknown.
+      throw new RoomJobLocalRunError('runtime_unknown', 'Configured Room-job local runtime readiness is unknown');
     }
     if (!response.ok) throw new RoomJobLocalRunError('runtime_unavailable', 'Configured Room-job local runtime is unavailable');
     const data = await response.json() as { models?: Array<{ name?: unknown; model?: unknown }> };

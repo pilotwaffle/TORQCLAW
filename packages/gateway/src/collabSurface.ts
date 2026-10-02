@@ -841,8 +841,11 @@ export async function handleGetRoomJob(
           await assertRoomJobLocalRuntimeReady(resolveRoomJobLocalRuntime());
           runtime = 'ready';
           canStart = true;
-        } catch {
-          runtime = 'unavailable';
+        } catch (error) {
+          const { RoomJobLocalRunError } = await import('@torqclaw/inference');
+          runtime = error instanceof RoomJobLocalRunError && error.code === 'runtime_unavailable'
+            ? 'unavailable'
+            : 'unknown';
         }
       }
       publishOnly(sessionId, {

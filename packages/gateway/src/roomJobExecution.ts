@@ -244,6 +244,15 @@ export async function reconcileRoomJobExecution(deps: RunRoomJobStageDeps, limit
   const stranded = deps.stateDb.prepare(`SELECT attempt_id, stage FROM room_job_execution_inbox
     WHERE state = 'dispatch_started' ORDER BY updated_at ASC LIMIT ?`).all(limit) as Array<{ attempt_id: string; stage: RoomJobStage }>;
   for (const row of stranded) {
+    // A state.db checkpoint is not Room authority. Persist the bounded
+    // uncertainty to collab.db first; if cancellation/revocation won in the
+    // meantime the idempotent writer simply declines and no provider is replayed.
+    const admitted = await deps.store.getRoomJobInternalRun(row.attempt_id, row.stage, { allowClaimed: true });
+    if (admitted) {
+      await deps.store.recordRoomJobInternalRecoveryNeeded({
+        attemptId: admitted.attemptId, stage: row.stage, generation: admitted.generation, inputHash: admitted.inputHash,
+      });
+    }
     deps.stateDb.prepare(`UPDATE room_job_execution_inbox SET state = 'recovery_needed', updated_at = ?
       WHERE attempt_id = ? AND stage = ? AND state = 'dispatch_started'`).run(now(), row.attempt_id, row.stage);
   }
