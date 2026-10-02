@@ -997,6 +997,55 @@ CREATE TABLE room_job_attempt_facts (
 }
 
 /**
+ * Durable provider-admission claim.  This is deliberately additive because
+ * 002/003 may already exist on an operator database.  A claim is owned by
+ * collab.db (the Room authority); the gateway-local inbox is only a bounded
+ * crash observation journal and is never the authority to start inference.
+ */
+export const ROOM_JOB_EXECUTION_CLAIM_MIGRATION_ID = '20261002_004_room_job_execution_claim_v1';
+
+export function runRoomJobExecutionClaimMigration(db: Database.Database): void {
+  const transaction = db.transaction(() => {
+    const existing = db.prepare('SELECT 1 FROM collab_schema_migrations WHERE id = ?')
+      .get(ROOM_JOB_EXECUTION_CLAIM_MIGRATION_ID);
+    if (existing) return;
+    db.exec(`
+ALTER TABLE room_job_outbox RENAME TO room_job_outbox_pre_claim;
+
+CREATE TABLE room_job_outbox (
+  outbox_id TEXT PRIMARY KEY,
+  attempt_id TEXT NOT NULL REFERENCES room_job_attempts(attempt_id),
+  stage TEXT NOT NULL CHECK(stage IN ('draft','review')),
+  payload_hash TEXT NOT NULL CHECK(length(payload_hash) = 64),
+  state TEXT NOT NULL CHECK(state IN ('pending','claimed','acknowledged','cancelled','recovery_needed','refused')),
+  created_at TEXT NOT NULL,
+  acknowledged_at TEXT,
+  UNIQUE(attempt_id, stage)
+);
+
+INSERT INTO room_job_outbox(outbox_id, attempt_id, stage, payload_hash, state, created_at, acknowledged_at)
+SELECT outbox_id, attempt_id, stage, payload_hash, state, created_at, acknowledged_at
+FROM room_job_outbox_pre_claim;
+
+DROP TABLE room_job_outbox_pre_claim;
+CREATE INDEX room_job_outbox_pending ON room_job_outbox(state, created_at);
+    `);
+    db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
+      ROOM_JOB_EXECUTION_CLAIM_MIGRATION_ID,
+      new Date().toISOString(),
+    );
+  });
+  db.exec('BEGIN EXCLUSIVE');
+  try {
+    transaction();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/**
  * Additive, secret-free execution metadata for agent principals.
  *
  * This deliberately remains separate from `principals`: identity and

@@ -6,6 +6,7 @@ export {
   runRoomJobFoundationMigration, ROOM_JOB_FOUNDATION_MIGRATION_ID,
   runRoomJobExecutionMigration, ROOM_JOB_EXECUTION_MIGRATION_ID,
   runRoomJobExecutionArtifactBindingMigration, ROOM_JOB_EXECUTION_ARTIFACT_BINDING_MIGRATION_ID,
+  runRoomJobExecutionClaimMigration, ROOM_JOB_EXECUTION_CLAIM_MIGRATION_ID,
   runAgentRuntimeProfileMigration, AGENT_RUNTIME_PROFILE_MIGRATION_ID,
   runAgentRuntimeExternalContextMigration, AGENT_RUNTIME_EXTERNAL_CONTEXT_MIGRATION_ID,
   runAgentPersonaMigration, AGENT_PERSONA_MIGRATION_ID,

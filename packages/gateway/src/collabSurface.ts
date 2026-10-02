@@ -822,12 +822,44 @@ export async function handleListRoomJobs(
 export async function handleGetRoomJob(
   sessionId: string,
   principalId: string | null,
-  input: { channelId: string; jobId: string },
+  input: { channelId: string; jobId: string; projection?: 'foundation_v1' | 'execution_v2' },
 ): Promise<CollabSurfaceError | null> {
   if (principalId === null) return COLLAB_IDENTITY_REQUIRED;
   const store = getStore();
   if (!store) return { code: 'COLLAB_UNAVAILABLE' };
   try {
+    if (input.projection === 'execution_v2') {
+      const detail = await store.getRoomJobExecutionDetail(callerFor(principalId), input);
+      let runtime: 'ready' | 'unavailable' | 'unknown' = 'unknown';
+      let canStart = false;
+      // A runtime probe is an owner-only start affordance, never a general
+      // Room health oracle.  If the immutable store preconditions are absent,
+      // this remains deliberately unknown and performs no transport request.
+      if (detail.execution.capabilities.canStart) {
+        try {
+          const { assertRoomJobLocalRuntimeReady, resolveRoomJobLocalRuntime } = await import('@torqclaw/inference');
+          await assertRoomJobLocalRuntimeReady(resolveRoomJobLocalRuntime());
+          runtime = 'ready';
+          canStart = true;
+        } catch {
+          runtime = 'unavailable';
+        }
+      }
+      publishOnly(sessionId, {
+        message: 'Room job execution loaded',
+        metadata: { roomJob: {
+          version: 2,
+          kind: 'execution_detail',
+          channelId: input.channelId,
+          job: detail.job,
+          execution: {
+            ...detail.execution,
+            capabilities: { canAddFacts: detail.execution.capabilities.canAddFacts, canStart, runtime },
+          },
+        } },
+      });
+      return null;
+    }
     const job = await store.getRoomJob(callerFor(principalId), input);
     publishOnly(sessionId, {
       message: 'Room job loaded',
@@ -851,7 +883,7 @@ export async function handleGetRoomJobArtifact(
     const artifact = await store.getRoomJobArtifact(callerFor(principalId), input);
     publishOnly(sessionId, {
       message: 'Room job artifact loaded',
-      metadata: { roomJob: { version: 1, kind: 'artifact', artifact } },
+      metadata: { roomJob: { version: 2, kind: 'artifact', channelId: input.channelId, jobId: input.jobId, artifact } },
     });
     return null;
   } catch (err: any) {
@@ -914,6 +946,9 @@ export async function handleStartRoomJob(
   const store = getStore();
   if (!store) return { code: 'COLLAB_UNAVAILABLE' };
   try {
+    // Prove current owner/lifecycle admission before even resolving or probing
+    // the local runner; a non-owner must not receive a runtime availability oracle.
+    await store.assertRoomJobStartAdmission(callerFor(principalId), input);
     const { assertRoomJobLocalRuntimeReady, resolveRoomJobLocalRuntime } = await import('@torqclaw/inference');
     const runtime = resolveRoomJobLocalRuntime();
     await assertRoomJobLocalRuntimeReady(runtime);

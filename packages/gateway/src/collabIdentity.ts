@@ -59,6 +59,7 @@ import {
   runRoomJobFoundationMigration,
   runRoomJobExecutionMigration,
   runRoomJobExecutionArtifactBindingMigration,
+  runRoomJobExecutionClaimMigration,
   writeSurfaceAudit,
   type SecretStore,
   type BootstrapDb,
@@ -178,6 +179,7 @@ function migrateCollabDb(db: BootstrapDb): void {
     // authority for this migration's owner/generation fences.
     runRoomJobExecutionMigration(handle);
     runRoomJobExecutionArtifactBindingMigration(handle);
+    runRoomJobExecutionClaimMigration(handle);
   } catch {
     /* fail closed: an unmigrated DB authenticates nobody */
   }

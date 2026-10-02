@@ -249,6 +249,8 @@ export const ClientCommandSchema = z.discriminatedUnion('action', [
     action: z.literal('GET_ROOM_JOB'),
     channelId: z.string().min(1),
     jobId: z.uuid(),
+    // Omitted/default remains the exact Phase-0 foundation detail request.
+    projection: z.enum(['foundation_v1', 'execution_v2']).optional(),
   }),
   z.object({
     // Validated internal artifacts only. There is no path/blob selector,

@@ -5,6 +5,7 @@ import {
   runRoomJobFoundationMigration,
   runRoomJobExecutionMigration,
   runRoomJobExecutionArtifactBindingMigration,
+  runRoomJobExecutionClaimMigration,
 } from '../../packages/collab/src/migration.js';
 import { bootstrapOperator, nodeRandomSource, type BootstrapDb } from '../../packages/collab/src/bootstrap.js';
 import { InMemorySecretStore } from '../../packages/collab/src/secrets.js';
@@ -18,6 +19,7 @@ function makeFixture(id: string) {
   runRoomJobFoundationMigration(sqlite);
   runRoomJobExecutionMigration(sqlite);
   runRoomJobExecutionArtifactBindingMigration(sqlite);
+  runRoomJobExecutionClaimMigration(sqlite);
   const db: BootstrapDb = {
     prepare: (sql: string) => sqlite.prepare(sql),
     exec: (sql: string) => sqlite.exec(sql),
@@ -44,7 +46,9 @@ describe('room-job execution intent', () => {
     runRoomJobExecutionMigration(sqlite);
     expect(sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'room_job_attempt_facts'`).get()).toBeUndefined();
     runRoomJobExecutionArtifactBindingMigration(sqlite);
+    runRoomJobExecutionClaimMigration(sqlite);
     runRoomJobExecutionArtifactBindingMigration(sqlite);
+    runRoomJobExecutionClaimMigration(sqlite);
     expect(sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'room_job_attempt_facts'`).get()).toEqual({ 1: 1 });
     sqlite.close();
   });

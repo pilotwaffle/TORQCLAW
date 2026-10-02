@@ -1,13 +1,13 @@
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import {
-  runCollaborationMigration, runRoomJobExecutionArtifactBindingMigration, runRoomJobExecutionMigration, runRoomJobFoundationMigration,
+  runCollaborationMigration, runRoomJobExecutionArtifactBindingMigration, runRoomJobExecutionClaimMigration, runRoomJobExecutionMigration, runRoomJobFoundationMigration,
 } from '../packages/collab/src/migration.js';
 import { bootstrapOperator, nodeRandomSource, type BootstrapDb } from '../packages/collab/src/bootstrap.js';
 import { InMemorySecretStore } from '../packages/collab/src/secrets.js';
 import { DeterministicClock, DeterministicUuids } from '../packages/collab/src/harness.js';
 import { CollaborationStore, type CallerContext } from '../packages/collab/src/store.js';
-import { runRoomJobStage } from '../packages/gateway/src/roomJobExecution.js';
+import { RoomJobSimulatedCrash, runRoomJobStage } from '../packages/gateway/src/roomJobExecution.js';
 
 function fixture() {
   const collab = new Database(':memory:');
@@ -15,6 +15,7 @@ function fixture() {
   runRoomJobFoundationMigration(collab);
   runRoomJobExecutionMigration(collab);
   runRoomJobExecutionArtifactBindingMigration(collab);
+  runRoomJobExecutionClaimMigration(collab);
   const db: BootstrapDb = {
     prepare: (sql) => collab.prepare(sql), exec: (sql) => collab.exec(sql), transaction: (fn) => collab.transaction(fn) as never,
   };
@@ -31,6 +32,66 @@ function fixture() {
 }
 
 describe('room-job coordinator', () => {
+  async function createStartedFixture(id: string) {
+    const value = fixture();
+    const room = await value.store.createChannel(value.owner, { name: 'Proposal Room' }, 'channel');
+    const job = await value.store.createRoomJob(value.owner, { channelId: room.channelId, brief: 'Draft a proposal' }, 'job');
+    const facts = await value.store.appendRoomJobFacts(value.owner, { channelId: room.channelId, jobId: job.job.jobId, facts: ['Client needs a concise scope'] }, 'facts');
+    const runtime = { host: 'http://127.0.0.1:11434', modelId: 'fixture-local', configurationIdentity: 'b'.repeat(64) };
+    const attempt = await value.store.startRoomJob(value.owner, {
+      channelId: room.channelId, jobId: job.job.jobId, factIds: [facts.facts[0]!.factId],
+    }, `start-${id}`, { configurationIdentity: runtime.configurationIdentity });
+    return { ...value, room, job, runtime, attempt };
+  }
+
+  function validFetch(counter: { calls: number }): typeof fetch {
+    return (async (_url: string | URL | Request, init?: RequestInit) => {
+      counter.calls += 1;
+      const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: string }> };
+      const quoted = JSON.parse(body.messages[1]!.content) as { facts: Array<{ factId: string; sha256: string }>; proposal?: { revision: number; sha256: string } };
+      const output = quoted.proposal
+        ? { verdict: 'acceptable', summary: 'Configured review recorded.', proposal: { revision: quoted.proposal.revision, sha256: quoted.proposal.sha256 }, facts: quoted.facts.map(({ factId, sha256 }) => ({ factId, sha256 })) }
+        : { title: 'Client Proposal', body: 'A bounded proposal body.', facts: quoted.facts.map(({ factId, sha256 }) => ({ factId, sha256 })) };
+      return new Response(JSON.stringify({ message: { content: JSON.stringify(output) }, eval_count: 9 }), { status: 200 });
+    }) as typeof fetch;
+  }
+
+  it('cancellation that wins before the final collab claim confirmation makes zero provider calls', async () => {
+    const { collab, state, store, owner, room, job, runtime, attempt } = await createStartedFixture('cancel-race');
+    const counter = { calls: 0 };
+    const result = await runRoomJobStage(attempt.attempt.attemptId, 'draft', {
+      stateDb: state, store, runtime, fetchImpl: validFetch(counter),
+      beforeProviderAdmissionForTest: async () => {
+        await store.cancelRoomJob(owner, { channelId: room.channelId, jobId: job.job.jobId, expectedRevision: 1 }, 'cancel-race');
+      },
+    });
+    expect(result.status).toBe('fenced');
+    expect(counter.calls).toBe(0);
+    expect(collab.prepare(`SELECT state FROM room_job_outbox WHERE attempt_id = ? AND stage = 'draft'`).get(attempt.attempt.attemptId))
+      .toEqual({ state: 'cancelled' });
+    expect(collab.prepare(`SELECT COUNT(*) AS n FROM room_artifact_revisions WHERE job_id = ?`).get(job.job.jobId)).toEqual({ n: 0 });
+    collab.close(); state.close();
+  });
+
+  it('reconciles a durable observed result after a crash without replaying its provider call', async () => {
+    const { collab, state, store, runtime, attempt } = await createStartedFixture('observed-recovery');
+    const counter = { calls: 0 };
+    await expect(runRoomJobStage(attempt.attempt.attemptId, 'draft', {
+      stateDb: state, store, runtime, fetchImpl: validFetch(counter),
+      afterResultObservedForTest: () => { throw new RoomJobSimulatedCrash('crash after observation'); },
+    })).rejects.toBeInstanceOf(RoomJobSimulatedCrash);
+    expect(counter.calls).toBe(1);
+    const recovered = await runRoomJobStage(attempt.attempt.attemptId, 'draft', {
+      stateDb: state, store, runtime, fetchImpl: validFetch(counter),
+    });
+    expect(recovered.status).toBe('committed');
+    // One draft request survived in state.db; only review runs after restart.
+    expect(counter.calls).toBe(2);
+    expect(collab.prepare(`SELECT state FROM room_job_outbox WHERE attempt_id = ? ORDER BY stage`).all(attempt.attempt.attemptId))
+      .toEqual([{ state: 'acknowledged' }, { state: 'acknowledged' }]);
+    collab.close(); state.close();
+  });
+
   it('commits validated draft and configured-review artifacts without generic gateway state', async () => {
     const { collab, state, store, owner } = fixture();
     const room = await store.createChannel(owner, { name: 'Proposal Room' }, 'channel');
