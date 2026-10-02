@@ -21,13 +21,17 @@ describe('server-only Room-job local runner', () => {
     modelId: 'torq-local:latest',
     system: 'Return JSON only.',
     quotedInput: '<brief>untrusted</brief>',
+    format: {
+      type: 'object', properties: { version: { type: 'integer' } }, required: ['version'], additionalProperties: false,
+    },
   };
 
-  it('serializes an explicit empty tools array and bounded completion option', async () => {
+  it('serializes an explicit empty tools array, strict response format, and bounded completion option', async () => {
     const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as { tools: unknown; options: { num_predict: number } };
+      const body = JSON.parse(String(init?.body)) as { tools: unknown; format: unknown; options: { num_predict: number } };
       expect(Object.hasOwn(body, 'tools')).toBe(true);
       expect(body.tools).toEqual([]);
+      expect(body.format).toEqual(input.format);
       expect(body.options.num_predict).toBe(ROOM_JOB_COMPLETION_TOKEN_CAP);
       return responseFromChunks([new TextEncoder().encode(JSON.stringify({
         message: { content: '{"version":1}' }, eval_count: 12,

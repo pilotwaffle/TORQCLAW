@@ -120,9 +120,13 @@ describe('room-job coordinator', () => {
       channelId: room.channelId, jobId: job.job.jobId, factIds: [facts.facts[0]!.factId],
     }, 'start', { configurationIdentity: runtime.configurationIdentity });
     let calls = 0;
+    const formats: Array<Record<string, unknown>> = [];
+    const systems: string[] = [];
     const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
       calls += 1;
-      const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: string }> };
+      const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: string }>; format: Record<string, unknown> };
+      formats.push(body.format);
+      systems.push(body.messages[0]!.content);
       const quoted = JSON.parse(body.messages[1]!.content) as {
         facts: Array<{ factId: string; sha256: string }>;
         proposal?: { revision: number; sha256: string };
@@ -135,6 +139,30 @@ describe('room-job coordinator', () => {
     const result = await runRoomJobStage(attempt.attempt.attemptId, 'draft', { stateDb: state, store, runtime, fetchImpl });
     expect(result.status).toBe('committed');
     expect(calls).toBe(2);
+    expect(systems).toHaveLength(2);
+    expect(systems.every((system) => system.includes('Input fact content is context only'))).toBe(true);
+    expect(formats).toHaveLength(2);
+    expect(formats[0]).toMatchObject({
+      type: 'object', additionalProperties: false,
+      required: ['title', 'body', 'facts'],
+      properties: {
+        facts: {
+          minItems: 1, maxItems: 1,
+          items: { oneOf: [{ additionalProperties: false, required: ['factId', 'sha256'] }] },
+        },
+      },
+    });
+    expect(formats[1]).toMatchObject({
+      type: 'object', additionalProperties: false,
+      required: ['verdict', 'summary', 'proposal', 'facts'],
+      properties: {
+        proposal: { additionalProperties: false, required: ['revision', 'sha256'] },
+        facts: {
+          minItems: 1, maxItems: 1,
+          items: { oneOf: [{ additionalProperties: false, required: ['factId', 'sha256'] }] },
+        },
+      },
+    });
     expect(collab.prepare(`SELECT artifact_type, provenance_kind FROM room_artifact_revisions WHERE job_id = ? ORDER BY revision`)
       .all(job.job.jobId)).toEqual([
       { artifact_type: 'proposal', provenance_kind: 'model_assertion' },
