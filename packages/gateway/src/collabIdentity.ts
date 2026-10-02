@@ -57,6 +57,7 @@ import {
   runAgentAutoreplyMigration,
   runAgentCronMigration,
   runRoomJobFoundationMigration,
+  runRoomJobExecutionMigration,
   writeSurfaceAudit,
   type SecretStore,
   type BootstrapDb,
@@ -171,6 +172,10 @@ function migrateCollabDb(db: BootstrapDb): void {
     // collab.db-only evidence tables. It does not migrate state.db or wire a
     // worker, approval, receipt, artifact download, or delivery surface.
     runRoomJobFoundationMigration(handle);
+    // Execution intent remains collab.db-only at this point. The state.db
+    // inbox/runner is started separately and never substitutes its own Room
+    // authority for this migration's owner/generation fences.
+    runRoomJobExecutionMigration(handle);
   } catch {
     /* fail closed: an unmigrated DB authenticates nobody */
   }

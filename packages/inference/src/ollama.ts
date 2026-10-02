@@ -176,6 +176,149 @@ async function callOllama(
   return res.json();
 }
 
+/**
+ * Server-only Room-job local execution. This intentionally does not reuse
+ * executeLocalEdge: that path discovers task-mapped tools and reports through
+ * ordinary gateway task/session plumbing. Room execution must serialize an
+ * explicit empty tools array at the provider boundary and fail closed on any
+ * tool-shaped response.
+ */
+export const ROOM_JOB_COMPLETION_TOKEN_CAP = 4_096;
+export const ROOM_JOB_RESPONSE_BYTE_CAP = 65_536;
+export const ROOM_JOB_STAGE_TIMEOUT_MS = 120_000;
+
+export type RoomJobLocalRunCode =
+  | 'runtime_unavailable'
+  | 'stage_timeout'
+  | 'response_oversize'
+  | 'tool_attempt_refused'
+  | 'provider_failed'
+  | 'invalid_response';
+
+export class RoomJobLocalRunError extends Error {
+  constructor(readonly code: RoomJobLocalRunCode, message: string) {
+    super(message);
+    this.name = 'RoomJobLocalRunError';
+  }
+}
+
+export interface RoomJobLocalRunInput {
+  modelId: string;
+  system: string;
+  quotedInput: string;
+}
+
+export interface RoomJobLocalRunResult {
+  text: string;
+  modelId: string;
+  responseBytes: number;
+  completionTokens: number | null;
+  elapsedMs: number;
+}
+
+export interface RoomJobLocalRunDeps {
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+}
+
+async function readResponseWithinLimit(
+  response: Response,
+  controller: AbortController,
+): Promise<{ text: string; bytes: number }> {
+  if (!response.body) throw new RoomJobLocalRunError('invalid_response', 'Local provider returned no response body');
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      bytes += next.value.byteLength;
+      if (bytes > ROOM_JOB_RESPONSE_BYTE_CAP) {
+        controller.abort('room job response exceeded byte cap');
+        throw new RoomJobLocalRunError('response_oversize', 'Local provider response exceeded 65536 bytes');
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* best-effort cleanup */ }
+  }
+  return { text: new TextDecoder().decode(Buffer.concat(chunks)), bytes };
+}
+
+/**
+ * Makes exactly one local provider invocation. There are deliberately no SDK
+ * retries, tool continuations, generic task events, or fallback engines.
+ */
+export async function executeRoomJobLocal(
+  input: RoomJobLocalRunInput,
+  deps: RoomJobLocalRunDeps = {},
+): Promise<RoomJobLocalRunResult> {
+  if (!input.modelId || /:cloud$/i.test(input.modelId)) {
+    throw new RoomJobLocalRunError('runtime_unavailable', 'Configured Room-job runtime is not local');
+  }
+  const startedAt = (deps.now ?? (() => performance.now()))();
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort('room job stage timeout'), ROOM_JOB_STAGE_TIMEOUT_MS);
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  try {
+    let response: Response;
+    try {
+      response = await fetchImpl(`${OLLAMA_HOST}/api/chat`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: input.modelId,
+          messages: [
+            { role: 'system', content: input.system },
+            { role: 'user', content: input.quotedInput },
+          ],
+          // Own property, even while empty: generic helpers intentionally
+          // omit it, which would re-enable task-mapped tool behavior.
+          tools: [],
+          stream: false,
+          think: false,
+          keep_alive: -1,
+          options: { num_predict: ROOM_JOB_COMPLETION_TOKEN_CAP },
+        }),
+      });
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new RoomJobLocalRunError('stage_timeout', 'Local Room-job stage timed out');
+      }
+      throw new RoomJobLocalRunError('runtime_unavailable', 'Configured local Room-job runtime is unavailable');
+    }
+    if (!response.ok) throw new RoomJobLocalRunError('provider_failed', `Local provider refused Room-job stage: ${response.status}`);
+    const raw = await readResponseWithinLimit(response, controller);
+    let data: {
+      message?: { content?: unknown; tool_calls?: unknown };
+      eval_count?: unknown;
+      tool_calls?: unknown;
+    };
+    try {
+      data = JSON.parse(raw.text) as typeof data;
+    } catch {
+      throw new RoomJobLocalRunError('invalid_response', 'Local provider response was not valid JSON');
+    }
+    if (data.tool_calls !== undefined || data.message?.tool_calls !== undefined) {
+      throw new RoomJobLocalRunError('tool_attempt_refused', 'Local provider attempted a tool call');
+    }
+    if (typeof data.message?.content !== 'string') {
+      throw new RoomJobLocalRunError('invalid_response', 'Local provider response had no text content');
+    }
+    return {
+      text: data.message.content,
+      modelId: input.modelId,
+      responseBytes: raw.bytes,
+      completionTokens: typeof data.eval_count === 'number' ? data.eval_count : null,
+      elapsedMs: (deps.now ?? (() => performance.now()))() - startedAt,
+    };
+  } finally {
+    clearTimeout(deadline);
+  }
+}
+
 /** Explicit local-device requests need a real tool call, even when the small
  * local model tries to answer with prose or invented code. Keep this narrow:
  * ordinary prompts remain model-selected, while an unmistakable browser or

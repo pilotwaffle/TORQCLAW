@@ -817,6 +817,150 @@ CREATE INDEX room_artifact_revisions_job_created
 }
 
 /**
+ * Bounded internal execution intent. This adds no provider, task, approval,
+ * receipt, or delivery authority: collab.db owns Room admission, immutable
+ * inputs, cancellation generation, and replay-safe outbox evidence only.
+ */
+export const ROOM_JOB_EXECUTION_MIGRATION_ID = '20261002_002_room_job_execution_v1';
+
+export function runRoomJobExecutionMigration(db: Database.Database): void {
+  const transaction = db.transaction(() => {
+    const existing = db.prepare('SELECT 1 FROM collab_schema_migrations WHERE id = ?')
+      .get(ROOM_JOB_EXECUTION_MIGRATION_ID);
+    if (existing) return;
+    const jobColumns = new Set(
+      (db.prepare('PRAGMA table_info(room_jobs)').all() as Array<{ name: string }>).map((column) => column.name),
+    );
+    if (!jobColumns.has('execution_generation')) {
+      db.exec('ALTER TABLE room_jobs ADD COLUMN execution_generation INTEGER NOT NULL DEFAULT 1 CHECK(execution_generation > 0)');
+    }
+    db.exec(`
+ALTER TABLE collab_events RENAME TO collab_events_pre_room_job_execution;
+
+CREATE TABLE collab_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  schema_version INTEGER NOT NULL CHECK(schema_version=1),
+  channel_id TEXT NOT NULL REFERENCES collab_channels(id),
+  channel_seq INTEGER NOT NULL CHECK(channel_seq > 0),
+  actor_principal_id TEXT NOT NULL REFERENCES principals(id),
+  kind TEXT NOT NULL CHECK(kind IN (
+    'channel_created','member_added','member_removed',
+    'message_posted','channel_archived','channel_unarchived',
+    'room_job_created','room_job_cancel_requested','room_job_cancelled',
+    'room_job_artifact_committed','room_job_attempt_started',
+    'room_job_draft_committed','room_job_review_committed',
+    'room_job_execution_failed'
+  )),
+  content_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(channel_id,channel_seq),
+  UNIQUE(channel_id,id)
+);
+
+INSERT INTO collab_events(
+  seq, id, schema_version, channel_id, channel_seq, actor_principal_id,
+  kind, content_json, created_at
+)
+SELECT seq, id, schema_version, channel_id, channel_seq, actor_principal_id,
+  kind, content_json, created_at
+FROM collab_events_pre_room_job_execution;
+
+DROP TABLE collab_events_pre_room_job_execution;
+
+ALTER TABLE room_job_events RENAME TO room_job_events_pre_execution;
+
+CREATE TABLE room_job_events (
+  job_id TEXT NOT NULL REFERENCES room_jobs(job_id),
+  job_seq INTEGER NOT NULL CHECK(job_seq > 0),
+  event_id TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL CHECK(kind IN (
+    'created','cancel_requested','cancelled','artifact_committed',
+    'attempt_started','draft_committed','review_committed','execution_failed'
+  )),
+  state TEXT NOT NULL CHECK(state IN ('created','cancelled')),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(job_id, job_seq)
+);
+
+INSERT INTO room_job_events(job_id, job_seq, event_id, kind, state, revision, created_at)
+SELECT job_id, job_seq, event_id, kind, state, revision, created_at
+FROM room_job_events_pre_execution;
+
+DROP TABLE room_job_events_pre_execution;
+
+CREATE TABLE room_job_fact_revisions (
+  fact_id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL REFERENCES room_jobs(job_id),
+  ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+  schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+  provenance_kind TEXT NOT NULL CHECK(provenance_kind = 'user_provided'),
+  content BLOB NOT NULL CHECK(length(content) <= 65536),
+  sha256 TEXT NOT NULL CHECK(length(sha256) = 64),
+  created_at TEXT NOT NULL,
+  UNIQUE(job_id, ordinal),
+  UNIQUE(job_id, sha256)
+);
+
+CREATE TABLE room_job_attempts (
+  attempt_id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL REFERENCES room_jobs(job_id),
+  owner_principal_id TEXT NOT NULL REFERENCES principals(id),
+  generation INTEGER NOT NULL CHECK(generation > 0),
+  input_hash TEXT NOT NULL CHECK(length(input_hash) = 64),
+  configuration_identity TEXT NOT NULL CHECK(length(configuration_identity) = 64),
+  state TEXT NOT NULL CHECK(state IN (
+    'queued','draft_committed','review_committed','completed_internal',
+    'cancelled','validation_failed','recovery_needed','runtime_unavailable'
+  )),
+  terminal_reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(job_id, generation)
+);
+
+CREATE TABLE room_job_outbox (
+  outbox_id TEXT PRIMARY KEY,
+  attempt_id TEXT NOT NULL REFERENCES room_job_attempts(attempt_id),
+  stage TEXT NOT NULL CHECK(stage IN ('draft','review')),
+  payload_hash TEXT NOT NULL CHECK(length(payload_hash) = 64),
+  state TEXT NOT NULL CHECK(state IN ('pending','acknowledged','cancelled','recovery_needed','refused')),
+  created_at TEXT NOT NULL,
+  acknowledged_at TEXT,
+  UNIQUE(attempt_id, stage)
+);
+
+CREATE INDEX room_job_outbox_pending ON room_job_outbox(state, created_at);
+
+CREATE TABLE room_job_execution_acks (
+  attempt_id TEXT NOT NULL REFERENCES room_job_attempts(attempt_id),
+  stage TEXT NOT NULL CHECK(stage IN ('draft','review')),
+  request_id TEXT NOT NULL UNIQUE,
+  generation INTEGER NOT NULL CHECK(generation > 0),
+  state TEXT NOT NULL CHECK(state IN ('admitted','dispatch_started','result_observed','recovery_needed','refused','terminal')),
+  observation_hash TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(attempt_id, stage)
+);
+    `);
+    db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
+      ROOM_JOB_EXECUTION_MIGRATION_ID,
+      new Date().toISOString(),
+    );
+  });
+  db.exec('BEGIN EXCLUSIVE');
+  try {
+    transaction();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/**
  * Additive, secret-free execution metadata for agent principals.
  *
  * This deliberately remains separate from `principals`: identity and
