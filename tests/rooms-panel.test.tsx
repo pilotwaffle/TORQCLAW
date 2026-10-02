@@ -233,6 +233,67 @@ describe('ChannelsPanel Rooms mode', () => {
     expect(screen.getByRole('button', { name: 'Cancel job' })).toBeDisabled();
   });
 
+  it('drains batched selected list/detail frames in order and ignores an unrelated later frame', () => {
+    const sendCommand = vi.fn(() => true);
+    const rooms = listFrame([roomRow(), roomRow({ channelId: 'room-b', name: 'Release Beta' })]);
+    const props = roomProps([rooms], sendCommand);
+    const { rerender } = render(<ChannelsPanel {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: /Incident Alpha/i }));
+    const job = roomJobRow();
+    const selectedList = roomJobListFrame('room-a', [job], true);
+    const unrelatedList = roomJobListFrame('room-b', [], false);
+
+    rerender(<ChannelsPanel {...props} events={[rooms, selectedList, unrelatedList]} />);
+    expect(screen.getByText(/Job 00000000-0000-4000-8000-000000000011/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Job 00000000-0000-4000-8000-000000000011/ }));
+    const selectedDetail = roomJobDetailFrame(job);
+    rerender(<ChannelsPanel {...props} events={[rooms, selectedList, selectedDetail, unrelatedList]} />);
+    expect(screen.getByText('Recorded - no live worker is wired.')).toBeInTheDocument();
+  });
+
+  it('shows typed create/cancel pending states and an unconfirmed refresh state on mutation send failure', () => {
+    const sendCommand = vi.fn((command: { action: string }) => command.action !== 'CREATE_ROOM_JOB' && command.action !== 'CANCEL_ROOM_JOB');
+    const rooms = listFrame([roomRow()]);
+    const props = roomProps([rooms], sendCommand);
+    const { rerender } = render(<ChannelsPanel {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: /Incident Alpha/i }));
+    const job = roomJobRow();
+    const jobs = roomJobListFrame('room-a', [job], true);
+    rerender(<ChannelsPanel {...props} events={[rooms, jobs]} />);
+    fireEvent.change(screen.getByLabelText('Client brief'), { target: { value: 'Brief' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create proposal job' }));
+    expect(screen.getByText('Request not confirmed.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh from the gateway.' })).toBeInTheDocument();
+    expect(screen.queryByText('Cancellation request pending confirmation.')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Job 00000000-0000-4000-8000-000000000011/ }));
+    rerender(<ChannelsPanel {...props} events={[rooms, jobs, roomJobDetailFrame(job)]} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel job' }));
+    expect(screen.getByText('Request not confirmed.')).toBeInTheDocument();
+    expect(sendCommand.mock.calls.map(([command]) => command.action)).toContain('CREATE_ROOM_JOB');
+    expect(sendCommand.mock.calls.map(([command]) => command.action)).toContain('CANCEL_ROOM_JOB');
+  });
+
+  it('keeps a timed-out create unconfirmed without creating a local job', () => {
+    vi.useFakeTimers();
+    try {
+      const sendCommand = vi.fn(() => true);
+      const rooms = listFrame([roomRow()]);
+      const props = roomProps([rooms], sendCommand);
+      const { rerender } = render(<ChannelsPanel {...props} />);
+      fireEvent.click(screen.getByRole('button', { name: /Incident Alpha/i }));
+      rerender(<ChannelsPanel {...props} events={[rooms, roomJobListFrame('room-a', [], true)]} />);
+      fireEvent.change(screen.getByLabelText('Client brief'), { target: { value: 'Brief' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Create proposal job' }));
+      expect(screen.getByText('Creation request pending confirmation.')).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(5000));
+      expect(screen.getByText('Request not confirmed.')).toBeInTheDocument();
+      expect(screen.getByText('No Room jobs recorded.')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('renders neutral empty, malformed, duplicate, and all-suppressed states', () => {
     const { rerender } = render(<ChannelsPanel {...roomProps([listFrame([])])} />);
     expect(screen.getByText('No Rooms loaded')).toBeInTheDocument();

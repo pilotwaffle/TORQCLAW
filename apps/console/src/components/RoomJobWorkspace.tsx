@@ -24,9 +24,10 @@ export interface RoomJobControlsProps {
   canCreate: boolean;
   canCancel: boolean;
   selectedJobId: string | null;
-  mutationPending: boolean;
+  mutationStatus: 'idle' | 'create-pending' | 'cancel-pending' | 'unconfirmed';
   onCreate: (brief: string) => void;
   onCancel: () => void;
+  onRefresh: () => void;
 }
 
 function byteLength(value: string): number {
@@ -114,10 +115,11 @@ export default function RoomJobWorkspace({
   );
 }
 
-export function RoomJobControls({ connected, stale, canCreate, canCancel, selectedJobId, mutationPending, onCreate, onCancel }: RoomJobControlsProps) {
+export function RoomJobControls({ connected, stale, canCreate, canCancel, selectedJobId, mutationStatus, onCreate, onCancel, onRefresh }: RoomJobControlsProps) {
   const [brief, setBrief] = useState('');
   const bytes = byteLength(brief);
   const controlsFresh = connected && !stale;
+  const mutationPending = mutationStatus === 'create-pending' || mutationStatus === 'cancel-pending';
   const canSubmit = controlsFresh && canCreate && !mutationPending && bytes >= 1 && bytes <= 16384;
   const canCancelNow = controlsFresh && canCancel && !mutationPending;
 
@@ -132,7 +134,10 @@ export function RoomJobControls({ connected, stale, canCreate, canCancel, select
           <button type="button" onClick={() => { onCreate(brief); setBrief(''); }} disabled={!canSubmit} className="rounded border border-torque/40 px-2 py-1 text-[10.5px] text-torque hover:bg-torque/10 disabled:opacity-50">Create proposal job</button>
         </div>
       ) : <p className="mt-2 text-[10.5px] text-faint">Job actions unavailable with the current Room capability.</p>}
-      {selectedJobId && <div className="mt-3"><button type="button" onClick={onCancel} disabled={!canCancelNow} className="rounded border border-bad/40 px-2 py-1 text-[10.5px] text-bad hover:bg-bad/10 disabled:opacity-50">Cancel job</button>{mutationPending && <p className="mt-1 text-[10px] text-faint" role="status">Cancellation request pending confirmation.</p>}</div>}
+      {selectedJobId && <div className="mt-3"><button type="button" onClick={onCancel} disabled={!canCancelNow} className="rounded border border-bad/40 px-2 py-1 text-[10.5px] text-bad hover:bg-bad/10 disabled:opacity-50">Cancel job</button></div>}
+      {mutationStatus === 'create-pending' && <p className="mt-2 text-[10px] text-faint" role="status">Creation request pending confirmation.</p>}
+      {mutationStatus === 'cancel-pending' && <p className="mt-2 text-[10px] text-faint" role="status">Cancellation request pending confirmation.</p>}
+      {mutationStatus === 'unconfirmed' && <p className="mt-2 text-[10px] text-faint" role="status">Request not confirmed. <button type="button" onClick={onRefresh} disabled={!controlsFresh} className="underline decoration-edge underline-offset-4 disabled:opacity-50">Refresh from the gateway.</button></p>}
     </div>
   );
 }
