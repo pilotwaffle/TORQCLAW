@@ -15,6 +15,8 @@ const job = {
   createdAt: '2026-10-02T00:00:00.000Z', cancelledAt: null, briefByteLength: 12,
   capabilities: { canCreate: true, canCancel: true },
 };
+const iso = '2026-10-02T00:00:00.000Z';
+const sha256 = 'a'.repeat(64);
 
 describe('Room Job UI runtime boundary', () => {
   it('accepts only the typed v1 list envelope and strips unapproved fields', () => {
@@ -36,7 +38,7 @@ describe('Room Job UI runtime boundary', () => {
       roomJob: {
         version: 1,
         kind: 'detail',
-        job: { ...job, lifecycle: [{ jobSeq: 1, kind: 'not-a-kind', state: 'created', revision: 1, occurredAt: 'now' }], artifacts: [] },
+        job: { ...job, lifecycle: [{ jobSeq: 1, kind: 'not-a-kind', state: 'created', revision: 1, occurredAt: iso }], artifacts: [] },
       },
     }))).toBeNull();
   });
@@ -45,15 +47,34 @@ describe('Room Job UI runtime boundary', () => {
     const visible = visibleRoomJobDetail({
       ...job,
       lifecycle: [
-        { jobSeq: 1, kind: 'created', state: 'created', revision: 1, occurredAt: 'first' },
-        { jobSeq: 2, kind: 'artifact_committed', state: 'created', revision: 2, occurredAt: 'fixture' },
+        { jobSeq: 1, kind: 'created', state: 'created', revision: 1, occurredAt: iso },
+        { jobSeq: 2, kind: 'artifact_committed', state: 'created', revision: 2, occurredAt: iso },
       ],
       artifacts: [{
         artifactId: '00000000-0000-4000-8000-000000000012', artifactType: 'proposal', revision: 2,
-        schemaVersion: 1, provenanceKind: 'test_fixture', sha256: 'abc', createdAt: 'fixture',
+        schemaVersion: 1, provenanceKind: 'test_fixture', sha256, createdAt: iso,
       }],
     });
     expect(visible.artifacts).toEqual([]);
-    expect(visible.lifecycle).toEqual([{ jobSeq: 1, kind: 'created', state: 'created', revision: 1, occurredAt: 'first' }]);
+    expect(visible.lifecycle).toEqual([{ jobSeq: 1, kind: 'created', state: 'created', revision: 1, occurredAt: iso }]);
+  });
+
+  it('fails closed on hostile IDs, timestamps, cursors, bounds, order, and duplicate artifact metadata', () => {
+    const detail = {
+      ...job,
+      lifecycle: [
+        { jobSeq: 2, kind: 'created', state: 'created', revision: 1, occurredAt: iso },
+        { jobSeq: 1, kind: 'artifact_committed', state: 'created', revision: 1, occurredAt: iso },
+      ],
+      artifacts: [
+        { artifactId: '00000000-0000-4000-8000-000000000012', artifactType: 'proposal', revision: 1, schemaVersion: 1, provenanceKind: 'user_provided', sha256, createdAt: iso },
+        { artifactId: '00000000-0000-4000-8000-000000000012', artifactType: 'proposal', revision: 2, schemaVersion: 1, provenanceKind: 'user_provided', sha256, createdAt: iso },
+      ],
+    };
+    expect(parseRoomJobEnvelope(event({ roomJob: { version: 1, kind: 'detail', job: detail } }))).toBeNull();
+    expect(parseRoomJobEnvelope(event({ roomJob: { version: 1, kind: 'list', channelId: 'room-a', jobs: [{ ...job, jobId: 'not-a-uuid' }], nextCursor: '0', hasMore: false, capabilities: { canCreate: true } } }))).toBeNull();
+    expect(parseRoomJobEnvelope(event({ roomJob: { version: 1, kind: 'list', channelId: 'room-a', jobs: [{ ...job, createdAt: 'not-a-time' }], nextCursor: '0', hasMore: false, capabilities: { canCreate: true } } }))).toBeNull();
+    expect(parseRoomJobEnvelope(event({ roomJob: { version: 1, kind: 'list', channelId: 'room-a', jobs: [{ ...job, briefByteLength: 16385 }], nextCursor: 'not-a-cursor', hasMore: false, capabilities: { canCreate: true } } }))).toBeNull();
+    expect(parseRoomJobEnvelope(event({ roomJob: { version: 1, kind: 'detail', job: { ...job, lifecycle: [], artifacts: [{ artifactId: '00000000-0000-4000-8000-000000000012', artifactType: 'proposal', revision: 1, schemaVersion: 1, provenanceKind: 'user_provided', sha256: 'bad', createdAt: iso }] } } }))).toBeNull();
   });
 });

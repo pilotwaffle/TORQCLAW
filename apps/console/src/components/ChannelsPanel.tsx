@@ -988,6 +988,7 @@ const ROOM_LIST_TIMEOUT_MS = 5000;
 const ROOM_JOB_TIMEOUT_MS = 5000;
 
 type RoomJobLoadStatus = 'idle' | 'loading' | 'send-failed' | 'timeout' | 'unavailable';
+type RoomJobMutationStatus = 'idle' | 'create-pending' | 'cancel-pending' | 'unconfirmed';
 
 interface RoomJobListView {
   channelId: string;
@@ -1030,26 +1031,18 @@ function RoomsPanel({
   const jobListTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const jobDetailTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const jobMutationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingJobListRoom = useRef<string | null>(null);
-  const pendingJobDetail = useRef<{ channelId: string; jobId: string } | null>(null);
-  const pendingJobMutation = useRef<{ kind: 'created' | 'cancelled'; idempotencyKey: string } | null>(null);
-  const handledJobFrameId = useRef<string | null>(null);
+  const roomSelectionGeneration = useRef(0);
+  const pendingJobListRoom = useRef<{ channelId: string; generation: number } | null>(null);
+  const pendingJobDetail = useRef<{ channelId: string; jobId: string; generation: number } | null>(null);
+  const pendingJobMutation = useRef<{ kind: 'created' | 'cancelled'; idempotencyKey: string; channelId: string; jobId: string | null } | null>(null);
+  const handledJobFrameIds = useRef(new Set<string>());
   const lastRoomForJobs = useRef<string | null>(null);
   const [jobList, setJobList] = useState<RoomJobListView | null>(null);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [jobDetail, setJobDetail] = useState<RoomJobDetail | null>(null);
   const [jobListStatus, setJobListStatus] = useState<RoomJobLoadStatus>('unavailable');
   const [jobDetailStatus, setJobDetailStatus] = useState<RoomJobLoadStatus>('unavailable');
-  const [jobMutationPending, setJobMutationPending] = useState(false);
-
-  const latestRoomJobFrame = useMemo(() => {
-    for (let index = events.length - 1; index >= 0; index--) {
-      const event = events[index]!;
-      const envelope = parseRoomJobEnvelope(event);
-      if (envelope) return { id: event.id, envelope };
-    }
-    return null;
-  }, [events]);
+  const [jobMutation, setJobMutation] = useState<{ channelId: string | null; status: RoomJobMutationStatus }>({ channelId: null, status: 'idle' });
 
   const requestList = () => {
     if (listTimer.current) clearTimeout(listTimer.current);
@@ -1066,7 +1059,7 @@ function RoomsPanel({
   const requestJobList = (channelId: string) => {
     if (!state.connected || state.stale) return;
     if (jobListTimer.current) clearTimeout(jobListTimer.current);
-    pendingJobListRoom.current = channelId;
+    pendingJobListRoom.current = { channelId, generation: roomSelectionGeneration.current };
     setJobListStatus('loading');
     const sent = sendCommand({ action: 'LIST_ROOM_JOBS', channelId, cursor: '0', limit: 20 });
     if (!sent) {
@@ -1075,7 +1068,7 @@ function RoomsPanel({
       return;
     }
     jobListTimer.current = setTimeout(() => {
-      if (pendingJobListRoom.current === channelId) {
+      if (pendingJobListRoom.current?.channelId === channelId && pendingJobListRoom.current.generation === roomSelectionGeneration.current) {
         pendingJobListRoom.current = null;
         setJobListStatus('timeout');
       }
@@ -1085,7 +1078,7 @@ function RoomsPanel({
   const requestJobDetail = (channelId: string, jobId: string) => {
     if (!state.connected || state.stale) return;
     if (jobDetailTimer.current) clearTimeout(jobDetailTimer.current);
-    pendingJobDetail.current = { channelId, jobId };
+    pendingJobDetail.current = { channelId, jobId, generation: roomSelectionGeneration.current };
     setJobDetailStatus('loading');
     const sent = sendCommand({ action: 'GET_ROOM_JOB', channelId, jobId });
     if (!sent) {
@@ -1094,7 +1087,7 @@ function RoomsPanel({
       return;
     }
     jobDetailTimer.current = setTimeout(() => {
-      if (pendingJobDetail.current?.channelId === channelId && pendingJobDetail.current.jobId === jobId) {
+      if (pendingJobDetail.current?.channelId === channelId && pendingJobDetail.current.jobId === jobId && pendingJobDetail.current.generation === roomSelectionGeneration.current) {
         pendingJobDetail.current = null;
         setJobDetailStatus('timeout');
       }
@@ -1134,6 +1127,7 @@ function RoomsPanel({
   useEffect(() => {
     if (lastRoomForJobs.current === highlightedRoomId) return;
     lastRoomForJobs.current = highlightedRoomId;
+    roomSelectionGeneration.current++;
     pendingJobListRoom.current = null;
     pendingJobDetail.current = null;
     setJobList(null);
@@ -1157,11 +1151,18 @@ function RoomsPanel({
   }, [state.connected, state.stale]);
 
   useEffect(() => {
-    if (!latestRoomJobFrame || handledJobFrameId.current === latestRoomJobFrame.id) return;
-    handledJobFrameId.current = latestRoomJobFrame.id;
-    const envelope: RoomJobEnvelope = latestRoomJobFrame.envelope;
+    const eventIds = new Set(events.map((event) => event.id));
+    for (const id of handledJobFrameIds.current) {
+      if (!eventIds.has(id)) handledJobFrameIds.current.delete(id);
+    }
+    for (const event of events) {
+      if (handledJobFrameIds.current.has(event.id)) continue;
+      handledJobFrameIds.current.add(event.id);
+      const envelope = parseRoomJobEnvelope(event);
+      if (!envelope) continue;
     if (envelope.kind === 'list') {
-      if (envelope.channelId !== highlightedRoomId || pendingJobListRoom.current !== highlightedRoomId) return;
+      const pending = pendingJobListRoom.current;
+      if (envelope.channelId !== highlightedRoomId || !pending || pending.channelId !== highlightedRoomId || pending.generation !== roomSelectionGeneration.current) continue;
       if (jobListTimer.current) clearTimeout(jobListTimer.current);
       pendingJobListRoom.current = null;
       setJobList({
@@ -1172,22 +1173,24 @@ function RoomsPanel({
         canCreate: envelope.capabilities.canCreate,
       });
       setJobListStatus('idle');
-      return;
+      continue;
     }
     if (envelope.kind === 'detail') {
       if (envelope.job.channelId !== highlightedRoomId || envelope.job.jobId !== selectedJobId ||
-          pendingJobDetail.current?.channelId !== highlightedRoomId || pendingJobDetail.current.jobId !== selectedJobId) return;
+          pendingJobDetail.current?.channelId !== highlightedRoomId || pendingJobDetail.current.jobId !== selectedJobId || pendingJobDetail.current.generation !== roomSelectionGeneration.current) continue;
       if (jobDetailTimer.current) clearTimeout(jobDetailTimer.current);
       pendingJobDetail.current = null;
       setJobDetail(envelope.job);
       setJobDetailStatus('idle');
-      return;
+      continue;
     }
-    if (pendingJobMutation.current?.kind !== envelope.kind || pendingJobMutation.current.idempotencyKey !== envelope.idempotencyKey ||
-        envelope.job.channelId !== highlightedRoomId) return;
+    const pendingMutation = pendingJobMutation.current;
+    if (pendingMutation?.kind !== envelope.kind || pendingMutation.idempotencyKey !== envelope.idempotencyKey ||
+        pendingMutation.channelId !== highlightedRoomId || envelope.job.channelId !== highlightedRoomId ||
+        (pendingMutation.jobId !== null && pendingMutation.jobId !== envelope.job.jobId)) continue;
     if (jobMutationTimer.current) clearTimeout(jobMutationTimer.current);
     pendingJobMutation.current = null;
-    setJobMutationPending(false);
+    setJobMutation({ channelId: envelope.job.channelId, status: 'idle' });
     setJobList((current) => current && current.channelId === envelope.job.channelId
       ? { ...current, jobs: [envelope.job, ...current.jobs.filter((job) => job.jobId !== envelope.job.jobId)] }
       : current);
@@ -1195,10 +1198,12 @@ function RoomsPanel({
       setJobDetail(null);
       requestJobDetail(envelope.job.channelId, envelope.job.jobId);
     }
-  }, [latestRoomJobFrame, highlightedRoomId, selectedJobId]);
+    }
+  }, [events, highlightedRoomId, selectedJobId]);
 
   const selectJob = (jobId: string) => {
     if (!highlightedRoomId || !jobList?.jobs.some((job) => job.jobId === jobId)) return;
+    roomSelectionGeneration.current++;
     setSelectedJobId(jobId);
     setJobDetail(null);
     setJobDetailStatus('unavailable');
@@ -1206,38 +1211,42 @@ function RoomsPanel({
   };
 
   const createJob = (brief: string) => {
-    if (!highlightedRoomId || !jobList?.canCreate || !state.connected || state.stale || jobMutationPending) return;
+    if (!highlightedRoomId || !jobList?.canCreate || !state.connected || state.stale || jobMutation.status === 'create-pending' || jobMutation.status === 'cancel-pending') return;
     const idempotencyKey = newRoomJobIdempotencyKey();
-    pendingJobMutation.current = { kind: 'created', idempotencyKey };
-    setJobMutationPending(true);
+    pendingJobMutation.current = { kind: 'created', idempotencyKey, channelId: highlightedRoomId, jobId: null };
+    setJobMutation({ channelId: highlightedRoomId, status: 'create-pending' });
     const sent = sendCommand({ action: 'CREATE_ROOM_JOB', channelId: highlightedRoomId, brief, idempotencyKey });
     if (!sent) {
       pendingJobMutation.current = null;
-      setJobMutationPending(false);
+      setJobMutation({ channelId: highlightedRoomId, status: 'unconfirmed' });
       return;
     }
     if (jobMutationTimer.current) clearTimeout(jobMutationTimer.current);
     jobMutationTimer.current = setTimeout(() => {
-      pendingJobMutation.current = null;
-      setJobMutationPending(false);
+      if (pendingJobMutation.current?.idempotencyKey === idempotencyKey) {
+        pendingJobMutation.current = null;
+        setJobMutation({ channelId: highlightedRoomId, status: 'unconfirmed' });
+      }
     }, ROOM_JOB_TIMEOUT_MS);
   };
 
   const cancelJob = () => {
-    if (!highlightedRoomId || !jobDetail || !jobDetail.capabilities.canCancel || !state.connected || state.stale || jobMutationPending) return;
+    if (!highlightedRoomId || !jobDetail || !jobDetail.capabilities.canCancel || !state.connected || state.stale || jobMutation.status === 'create-pending' || jobMutation.status === 'cancel-pending') return;
     const idempotencyKey = newRoomJobIdempotencyKey();
-    pendingJobMutation.current = { kind: 'cancelled', idempotencyKey };
-    setJobMutationPending(true);
+    pendingJobMutation.current = { kind: 'cancelled', idempotencyKey, channelId: highlightedRoomId, jobId: jobDetail.jobId };
+    setJobMutation({ channelId: highlightedRoomId, status: 'cancel-pending' });
     const sent = sendCommand({ action: 'CANCEL_ROOM_JOB', channelId: highlightedRoomId, jobId: jobDetail.jobId, expectedRevision: jobDetail.revision, idempotencyKey });
     if (!sent) {
       pendingJobMutation.current = null;
-      setJobMutationPending(false);
+      setJobMutation({ channelId: highlightedRoomId, status: 'unconfirmed' });
       return;
     }
     if (jobMutationTimer.current) clearTimeout(jobMutationTimer.current);
     jobMutationTimer.current = setTimeout(() => {
-      pendingJobMutation.current = null;
-      setJobMutationPending(false);
+      if (pendingJobMutation.current?.idempotencyKey === idempotencyKey) {
+        pendingJobMutation.current = null;
+        setJobMutation({ channelId: highlightedRoomId, status: 'unconfirmed' });
+      }
     }, ROOM_JOB_TIMEOUT_MS);
   };
 
@@ -1411,9 +1420,10 @@ function RoomsPanel({
               canCreate={jobList?.channelId === highlightedRow.channelId && jobListStatus === 'idle' && jobList?.canCreate === true}
               canCancel={jobDetailStatus === 'idle' && jobDetail?.jobId === selectedJobId && jobDetail?.capabilities.canCancel === true}
               selectedJobId={selectedJobId}
-              mutationPending={jobMutationPending}
+              mutationStatus={jobMutation.channelId === highlightedRow.channelId ? jobMutation.status : 'idle'}
               onCreate={createJob}
               onCancel={cancelJob}
+              onRefresh={() => requestJobList(highlightedRow.channelId)}
             />
           )}
 

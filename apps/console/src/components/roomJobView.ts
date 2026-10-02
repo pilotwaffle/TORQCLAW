@@ -59,6 +59,25 @@ function nonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SHA256 = /^[a-f0-9]{64}$/;
+const UNSIGNED_CURSOR = /^(0|[1-9][0-9]*)$/;
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+function uuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID.test(value);
+}
+
+function timestamp(value: unknown): value is string {
+  if (typeof value !== 'string' || !ISO_TIMESTAMP.test(value)) return false;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.valueOf()) && parsed.toISOString() === value;
+}
+
+function cursor(value: unknown): value is string {
+  return typeof value === 'string' && UNSIGNED_CURSOR.test(value);
+}
+
 function positiveInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
@@ -76,13 +95,16 @@ function capabilities(value: unknown, includeCancel: boolean): RoomJobCapabiliti
 
 export function parseRoomJobListEntry(value: unknown): RoomJobListEntry | null {
   const candidate = record(value);
-  if (!candidate || !nonEmptyString(candidate.jobId) || !nonEmptyString(candidate.channelId) ||
+  if (!candidate || !uuid(candidate.jobId) || !nonEmptyString(candidate.channelId) ||
       !roomJobState(candidate.state) || !positiveInteger(candidate.revision) ||
-      !nonEmptyString(candidate.createdAt) ||
-      !(candidate.cancelledAt === null || nonEmptyString(candidate.cancelledAt)) ||
-      !Number.isSafeInteger(candidate.briefByteLength) || (candidate.briefByteLength as number) < 0) return null;
+      !timestamp(candidate.createdAt) ||
+      !(candidate.cancelledAt === null || timestamp(candidate.cancelledAt)) ||
+      !Number.isSafeInteger(candidate.briefByteLength) || (candidate.briefByteLength as number) < 1 || (candidate.briefByteLength as number) > 16384) return null;
   const parsedCapabilities = capabilities(candidate.capabilities, true);
   if (!parsedCapabilities) return null;
+  if ((candidate.state === 'created' && candidate.cancelledAt !== null) ||
+      (candidate.state === 'cancelled' && candidate.cancelledAt === null) ||
+      (candidate.state === 'cancelled' && parsedCapabilities.canCancel)) return null;
   return {
     jobId: candidate.jobId,
     channelId: candidate.channelId,
@@ -99,7 +121,9 @@ function parseLifecycle(value: unknown): RoomJobLifecycleEntry | null {
   const candidate = record(value);
   if (!candidate || !positiveInteger(candidate.jobSeq) ||
       !['created', 'cancel_requested', 'cancelled', 'artifact_committed'].includes(candidate.kind as string) ||
-      !roomJobState(candidate.state) || !positiveInteger(candidate.revision) || !nonEmptyString(candidate.occurredAt)) return null;
+      !roomJobState(candidate.state) || !positiveInteger(candidate.revision) || !timestamp(candidate.occurredAt)) return null;
+  if ((candidate.kind === 'cancelled' && candidate.state !== 'cancelled') ||
+      (candidate.kind !== 'cancelled' && candidate.state !== 'created')) return null;
   return {
     jobSeq: candidate.jobSeq,
     kind: candidate.kind as RoomJobLifecycleKind,
@@ -111,11 +135,11 @@ function parseLifecycle(value: unknown): RoomJobLifecycleEntry | null {
 
 function parseArtifact(value: unknown): RoomJobArtifactMetadata | null {
   const candidate = record(value);
-  if (!candidate || !nonEmptyString(candidate.artifactId) ||
+  if (!candidate || !uuid(candidate.artifactId) ||
       !['proposal', 'decision_summary', 'research_source', 'independent_review'].includes(candidate.artifactType as string) ||
       !positiveInteger(candidate.revision) || candidate.schemaVersion !== 1 ||
       !['user_provided', 'tool_observed', 'model_assertion', 'test_fixture'].includes(candidate.provenanceKind as string) ||
-      !nonEmptyString(candidate.sha256) || !nonEmptyString(candidate.createdAt)) return null;
+      !(typeof candidate.sha256 === 'string' && SHA256.test(candidate.sha256)) || !timestamp(candidate.createdAt)) return null;
   return {
     artifactId: candidate.artifactId,
     artifactType: candidate.artifactType as RoomArtifactType,
@@ -135,13 +159,13 @@ export function parseRoomJobEnvelope(event: GatewayEvent): RoomJobEnvelope | nul
 
   if (roomJob.kind === 'created' || roomJob.kind === 'cancelled') {
     const job = parseRoomJobListEntry(roomJob.job);
-    return job && nonEmptyString(roomJob.idempotencyKey)
+    return job && uuid(roomJob.idempotencyKey)
       ? { kind: roomJob.kind, idempotencyKey: roomJob.idempotencyKey, job }
       : null;
   }
   if (roomJob.kind === 'list') {
     if (!nonEmptyString(roomJob.channelId) || !Array.isArray(roomJob.jobs) ||
-        !nonEmptyString(roomJob.nextCursor) || typeof roomJob.hasMore !== 'boolean') return null;
+        !cursor(roomJob.nextCursor) || typeof roomJob.hasMore !== 'boolean') return null;
     const listCapabilities = capabilities(roomJob.capabilities, false);
     const jobs = roomJob.jobs.map(parseRoomJobListEntry);
     if (!listCapabilities || jobs.some((job) => job === null)) return null;
@@ -160,9 +184,16 @@ export function parseRoomJobEnvelope(event: GatewayEvent): RoomJobEnvelope | nul
     const artifacts = detail.artifacts.map(parseArtifact);
     if (lifecycle.some((entry) => entry === null) || artifacts.some((artifact) => artifact === null)) return null;
     const sequence = new Set<number>();
+    const artifactIds = new Set<string>();
+    let previousSequence = 0;
     for (const entry of lifecycle as RoomJobLifecycleEntry[]) {
-      if (sequence.has(entry.jobSeq)) return null;
+      if (sequence.has(entry.jobSeq) || entry.jobSeq <= previousSequence) return null;
       sequence.add(entry.jobSeq);
+      previousSequence = entry.jobSeq;
+    }
+    for (const artifact of artifacts as RoomJobArtifactMetadata[]) {
+      if (artifactIds.has(artifact.artifactId)) return null;
+      artifactIds.add(artifact.artifactId);
     }
     return { kind: 'detail', job: { ...job, lifecycle: lifecycle as RoomJobLifecycleEntry[], artifacts: artifacts as RoomJobArtifactMetadata[] } };
   }
