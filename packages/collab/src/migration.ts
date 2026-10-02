@@ -961,6 +961,42 @@ CREATE TABLE room_job_execution_acks (
 }
 
 /**
+ * Artifact-stage binding is deliberately a new migration: 002 was a local
+ * checkpoint and may already be present in an operator's collab.db.
+ */
+export const ROOM_JOB_EXECUTION_ARTIFACT_BINDING_MIGRATION_ID = '20261002_003_room_job_execution_artifact_binding_v1';
+
+export function runRoomJobExecutionArtifactBindingMigration(db: Database.Database): void {
+  const transaction = db.transaction(() => {
+    const existing = db.prepare('SELECT 1 FROM collab_schema_migrations WHERE id = ?')
+      .get(ROOM_JOB_EXECUTION_ARTIFACT_BINDING_MIGRATION_ID);
+    if (existing) return;
+    db.exec(`
+CREATE TABLE room_job_attempt_facts (
+  attempt_id TEXT NOT NULL REFERENCES room_job_attempts(attempt_id),
+  fact_id TEXT NOT NULL REFERENCES room_job_fact_revisions(fact_id),
+  ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+  sha256 TEXT NOT NULL CHECK(length(sha256) = 64),
+  PRIMARY KEY(attempt_id, fact_id),
+  UNIQUE(attempt_id, ordinal)
+);
+    `);
+    db.prepare('INSERT INTO collab_schema_migrations(id, applied_at) VALUES(?, ?)').run(
+      ROOM_JOB_EXECUTION_ARTIFACT_BINDING_MIGRATION_ID,
+      new Date().toISOString(),
+    );
+  });
+  db.exec('BEGIN EXCLUSIVE');
+  try {
+    transaction();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/**
  * Additive, secret-free execution metadata for agent principals.
  *
  * This deliberately remains separate from `principals`: identity and

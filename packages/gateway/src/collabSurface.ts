@@ -278,6 +278,9 @@ export function publishCollabSurface(
 
 /** Total, non-disclosing translation shared by the room-job foundation paths. */
 function roomJobSurfaceError(err: any): CollabSurfaceError {
+  if (err?.code === 'runtime_unavailable') {
+    return { code: 'COLLAB_INVALID_REQUEST', detail: 'ROOM_JOB_RUNTIME_UNAVAILABLE' };
+  }
   if (err?.code === 'COLLAB_NOT_FOUND') return { code: 'COLLAB_NOT_FOUND', detail: err.message };
   if (err?.code === 'INVALID_REQUEST') return { code: 'COLLAB_INVALID_REQUEST', detail: err.message };
   if (err?.code === 'CHANNEL_ARCHIVED') return { code: 'COLLAB_CHANNEL_ARCHIVED', detail: err.message };
@@ -891,13 +894,20 @@ export async function handleStartRoomJob(
   const store = getStore();
   if (!store) return { code: 'COLLAB_UNAVAILABLE' };
   try {
+    const { assertRoomJobLocalRuntimeReady, resolveRoomJobLocalRuntime } = await import('@torqclaw/inference');
+    const runtime = resolveRoomJobLocalRuntime();
+    await assertRoomJobLocalRuntimeReady(runtime);
     const result = await store.startRoomJob(callerFor(principalId), {
       channelId: input.channelId, jobId: input.jobId, factIds: input.factIds,
-    }, input.idempotencyKey);
+    }, input.idempotencyKey, { configurationIdentity: runtime.configurationIdentity });
     publishOnly(sessionId, {
       message: 'Room job execution intent recorded',
       metadata: { roomJob: { version: 1, kind: 'attempt_started', idempotencyKey: result.idempotencyKey, attempt: result.attempt } },
     });
+    const [{ db: stateDb }, { runRoomJobStage }] = await Promise.all([
+      import('./storage.js'), import('./roomJobExecution.js'),
+    ]);
+    void runRoomJobStage(result.attempt.attemptId, 'draft', { stateDb, store, runtime }).catch(() => undefined);
     return null;
   } catch (err: any) {
     return roomJobSurfaceError(err);

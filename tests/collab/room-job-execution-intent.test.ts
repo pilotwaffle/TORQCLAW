@@ -4,6 +4,7 @@ import {
   runCollaborationMigration,
   runRoomJobFoundationMigration,
   runRoomJobExecutionMigration,
+  runRoomJobExecutionArtifactBindingMigration,
 } from '../../packages/collab/src/migration.js';
 import { bootstrapOperator, nodeRandomSource, type BootstrapDb } from '../../packages/collab/src/bootstrap.js';
 import { InMemorySecretStore } from '../../packages/collab/src/secrets.js';
@@ -16,6 +17,7 @@ function makeFixture(id: string) {
   runCollaborationMigration(sqlite);
   runRoomJobFoundationMigration(sqlite);
   runRoomJobExecutionMigration(sqlite);
+  runRoomJobExecutionArtifactBindingMigration(sqlite);
   const db: BootstrapDb = {
     prepare: (sql: string) => sqlite.prepare(sql),
     exec: (sql: string) => sqlite.exec(sql),
@@ -35,6 +37,18 @@ function makeFixture(id: string) {
 }
 
 describe('room-job execution intent', () => {
+  it('adds the artifact fact-binding migration after an already-applied execution-intent migration', () => {
+    const sqlite = new Database(':memory:');
+    runCollaborationMigration(sqlite);
+    runRoomJobFoundationMigration(sqlite);
+    runRoomJobExecutionMigration(sqlite);
+    expect(sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'room_job_attempt_facts'`).get()).toBeUndefined();
+    runRoomJobExecutionArtifactBindingMigration(sqlite);
+    runRoomJobExecutionArtifactBindingMigration(sqlite);
+    expect(sqlite.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'room_job_attempt_facts'`).get()).toEqual({ 1: 1 });
+    sqlite.close();
+  });
+
   it('admits facts/start without accepting any internal run, target, tool, or delivery fields', () => {
     const fact = ClientCommandSchema.safeParse({
       action: 'ADD_ROOM_JOB_FACTS', channelId: 'room', jobId: '00000000-0000-4000-8000-000000000001',
@@ -67,10 +81,10 @@ describe('room-job execution intent', () => {
     expect(facts.facts.map((fact) => fact.ordinal)).toEqual([1, 2]);
     const first = await store.startRoomJob(owner, {
       channelId: room.channelId, jobId: job.job.jobId, factIds: facts.facts.map((fact) => fact.factId),
-    }, 'start-key');
+    }, 'start-key', { configurationIdentity: 'a'.repeat(64) });
     const replay = await store.startRoomJob(owner, {
       channelId: room.channelId, jobId: job.job.jobId, factIds: facts.facts.map((fact) => fact.factId),
-    }, 'start-key');
+    }, 'start-key', { configurationIdentity: 'a'.repeat(64) });
     expect(replay).toEqual(first);
     expect(sqlite.prepare(`SELECT stage, state FROM room_job_outbox WHERE attempt_id = ?`)
       .all(first.attempt.attemptId)).toEqual([{ stage: 'draft', state: 'pending' }]);
@@ -95,7 +109,7 @@ describe('room-job execution intent', () => {
     }, 'facts-key');
     const started = await store.startRoomJob(owner, {
       channelId: room.channelId, jobId: job.job.jobId, factIds: [facts.facts[0]!.factId],
-    }, 'start-key');
+    }, 'start-key', { configurationIdentity: 'a'.repeat(64) });
     await store.cancelRoomJob(owner, {
       channelId: room.channelId, jobId: job.job.jobId, expectedRevision: 1,
     }, 'cancel-key');

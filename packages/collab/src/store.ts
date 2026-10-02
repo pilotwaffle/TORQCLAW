@@ -466,6 +466,31 @@ export interface StartRoomJobResult {
   idempotencyKey: string;
 }
 
+/** Server-only input for the gateway coordinator; never a wire projection. */
+export interface RoomJobInternalRun {
+  attemptId: string;
+  stage: 'draft' | 'review';
+  channelId: string;
+  ownerPrincipalId: string;
+  generation: number;
+  inputHash: string;
+  configurationIdentity: string;
+  brief: string;
+  facts: Array<{ factId: string; sha256: string; content: Buffer }>;
+  proposal?: { artifactId: string; revision: number; sha256: string; content: Buffer };
+}
+
+export interface CommitRoomJobInternalArtifactInput {
+  attemptId: string;
+  stage: 'draft' | 'review';
+  requestId: string;
+  generation: number;
+  inputHash: string;
+  configurationIdentity: string;
+  content: Buffer;
+  provenance: Record<string, unknown>;
+}
+
 export interface AgentTurnRuntimeSnapshot {
   providerAccountId: string;
   adapterId: string;
@@ -3612,9 +3637,13 @@ export class CollaborationStore {
     caller: CallerContext,
     body: { channelId: string; jobId: string; factIds: string[] },
     idempotencyKey: string,
+    execution: { configurationIdentity: string },
   ): Promise<StartRoomJobResult> {
     if (body.factIds.length < 1 || body.factIds.length > 20 || new Set(body.factIds).size !== body.factIds.length) {
       throw new CollabError('INVALID_REQUEST', 'factIds must contain 1 to 20 distinct fact ids');
+    }
+    if (!/^[a-f0-9]{64}$/.test(execution.configurationIdentity)) {
+      throw new CollabError('INVALID_REQUEST', 'Room job execution configuration is invalid');
     }
     const normalizedBody = { channelId: body.channelId, jobId: body.jobId, factIds: [...body.factIds] };
     const committed: CommittedChannelEvent[] = [];
@@ -3651,20 +3680,22 @@ export class CollaborationStore {
             briefSha256: job.brief_sha256,
             facts: facts.map((fact) => ({ factId: fact.fact_id, ordinal: fact.ordinal, sha256: fact.sha256 })),
           }), 'utf8').digest('hex');
-          // This identifies the checked-in no-tools runner/prompt/validator
-          // contract, never a client-chosen runtime target or served-model claim.
-          const configurationIdentity = createHash('sha256').update(canonicalJson({
-            runnerRevision: 'room-job-local-runner-v1',
-            promptTemplateRevision: 'room-job-proposal-v1',
-            validatorRevision: 'room-job-validator-v1',
-            targetClass: 'configured-local-only',
-          }), 'utf8').digest('hex');
+          // The gateway derives this from its fixed loopback target and exact
+          // runner/prompt/validator revisions before this mutation. It is
+          // never an input from the Room client.
+          const configurationIdentity = execution.configurationIdentity;
           tx.prepare(`INSERT INTO room_job_attempts(
             attempt_id, job_id, owner_principal_id, generation, input_hash, configuration_identity,
             state, terminal_reason, created_at, updated_at
           ) VALUES(?,?,?,?,?,?,'queued',NULL,?,?)`).run(
             attemptId, job.job_id, caller.principalId, job.execution_generation, inputHash, configurationIdentity, now, now,
           );
+          const insertAttemptFact = tx.prepare(`INSERT INTO room_job_attempt_facts(
+            attempt_id, fact_id, ordinal, sha256
+          ) VALUES(?,?,?,?)`);
+          for (const fact of facts) {
+            insertAttemptFact.run(attemptId, fact.fact_id, fact.ordinal, fact.sha256);
+          }
           const outboxId = this.env.uuids.next();
           const payloadHash = createHash('sha256').update(canonicalJson({
             attemptId, stage: 'draft', generation: job.execution_generation, inputHash,
@@ -3687,6 +3718,181 @@ export class CollaborationStore {
     ));
     for (const event of committed) await this.fanoutRoomJobEvent(event);
     return result;
+  }
+
+  /**
+   * Gateway-private re-admission read. It returns no row when a Room was
+   * cancelled, re-owned, archived, generation-fenced, or already handled.
+   * The coordinator repeats this read immediately before `dispatch_started`.
+   */
+  async getRoomJobInternalRun(attemptId: string, stage: 'draft' | 'review'): Promise<RoomJobInternalRun | null> {
+    return this.withReadOnly(() => this.runReadCommand(() => {
+      if (!this.roomJobExecutionSchemaPresent(this.env.db)) return null;
+      const row = this.env.db.prepare(`SELECT a.attempt_id, a.generation, a.input_hash, a.configuration_identity,
+          a.owner_principal_id, j.channel_id, j.brief, o.state AS outbox_state,
+          c.state AS channel_state, c.owner_principal_id AS channel_owner, p.status AS owner_status
+        FROM room_job_attempts a
+        JOIN room_jobs j ON j.job_id = a.job_id
+        JOIN room_job_outbox o ON o.attempt_id = a.attempt_id AND o.stage = ?
+        JOIN collab_channels c ON c.id = j.channel_id
+        JOIN principals p ON p.id = a.owner_principal_id
+        WHERE a.attempt_id = ? AND a.generation = j.execution_generation
+          AND j.state = 'created' AND c.state = 'active'
+          AND c.owner_principal_id = a.owner_principal_id AND p.kind = 'operator' AND p.status = 'active'
+          AND o.state = 'pending'`).get(stage, attemptId) as {
+            attempt_id: string; generation: number; input_hash: string; configuration_identity: string;
+            owner_principal_id: string; channel_id: string; brief: string; outbox_state: string;
+            channel_state: string; channel_owner: string; owner_status: string;
+          } | undefined;
+      if (!row) return null;
+      const facts = this.env.db.prepare(`SELECT f.fact_id, f.sha256, f.content
+        FROM room_job_attempt_facts af
+        JOIN room_job_fact_revisions f ON f.fact_id = af.fact_id
+        WHERE af.attempt_id = ? AND af.sha256 = f.sha256
+        ORDER BY af.ordinal ASC`).all(attemptId) as Array<{ fact_id: string; sha256: string; content: Buffer }>;
+      if (facts.length < 1) return null;
+      let proposal: RoomJobInternalRun['proposal'];
+      if (stage === 'review') {
+        const artifact = this.env.db.prepare(`SELECT artifact_id, revision, sha256, content
+          FROM room_artifact_revisions WHERE job_id = (
+            SELECT job_id FROM room_job_attempts WHERE attempt_id = ?
+          ) AND artifact_type = 'proposal' AND provenance_json LIKE ?
+          ORDER BY revision DESC LIMIT 1`).get(attemptId, `%${attemptId}%`) as
+            | { artifact_id: string; revision: number; sha256: string; content: Buffer }
+            | undefined;
+        if (!artifact) return null;
+        proposal = { artifactId: artifact.artifact_id, revision: artifact.revision, sha256: artifact.sha256, content: artifact.content };
+      }
+      return {
+        attemptId: row.attempt_id, stage, channelId: row.channel_id, ownerPrincipalId: row.owner_principal_id,
+        generation: row.generation, inputHash: row.input_hash, configurationIdentity: row.configuration_identity,
+        brief: row.brief,
+        facts: facts.map((fact) => ({ factId: fact.fact_id, sha256: fact.sha256, content: fact.content })), proposal,
+      };
+    }));
+  }
+
+  /** Server-only bounded reconciliation cursor: immutable IDs only, never prompt/artifact bytes. */
+  async listPendingRoomJobInternalRuns(limit = 20): Promise<Array<{ attemptId: string; stage: 'draft' | 'review' }>> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) return [];
+    return this.withReadOnly(() => this.runReadCommand(() => {
+      if (!this.roomJobExecutionSchemaPresent(this.env.db)) return [];
+      return this.env.db.prepare(`SELECT o.attempt_id, o.stage FROM room_job_outbox o
+        JOIN room_job_attempts a ON a.attempt_id = o.attempt_id
+        JOIN room_jobs j ON j.job_id = a.job_id
+        WHERE o.state = 'pending' AND a.generation = j.execution_generation AND j.state = 'created'
+        ORDER BY o.created_at ASC LIMIT ?`).all(limit).map((row) => ({
+          attemptId: (row as { attempt_id: string }).attempt_id,
+          stage: (row as { stage: 'draft' | 'review' }).stage,
+        }));
+    }));
+  }
+
+  /** Sole Room artifact writer for internal execution. Raw model text enters only after caller validation. */
+  async commitRoomJobInternalArtifact(input: CommitRoomJobInternalArtifactInput): Promise<RoomArtifactMetadata | null> {
+    if (input.content.length > 65_536) throw new CollabError('INVALID_REQUEST', 'Room job artifact exceeds byte limit');
+    const committed: CommittedChannelEvent[] = [];
+    const result = await this.withReadThenSequencer(() => this.mutex.withLock(() =>
+      this.runNaturallyIdempotentCommand('room-job-internal-committer', 'COMMIT_ROOM_JOB_INTERNAL_ARTIFACT', (tx) => {
+        if (!this.roomJobExecutionSchemaPresent(tx)) return null;
+        const row = tx.prepare(`SELECT a.job_id, a.owner_principal_id, a.generation, a.input_hash, a.configuration_identity,
+          j.channel_id, j.state AS job_state, j.revision, j.execution_generation,
+          c.state AS channel_state, c.owner_principal_id AS channel_owner, p.status AS owner_status,
+          o.state AS outbox_state
+          FROM room_job_attempts a
+          JOIN room_jobs j ON j.job_id = a.job_id
+          JOIN room_job_outbox o ON o.attempt_id = a.attempt_id AND o.stage = ?
+          JOIN collab_channels c ON c.id = j.channel_id
+          JOIN principals p ON p.id = a.owner_principal_id
+          WHERE a.attempt_id = ?`).get(input.stage, input.attemptId) as
+            | { job_id: string; owner_principal_id: string; generation: number; input_hash: string; configuration_identity: string;
+                channel_id: string; job_state: RoomJobState; revision: number; execution_generation: number;
+                channel_state: string; channel_owner: string; owner_status: string; outbox_state: string }
+            | undefined;
+        if (!row || row.job_state !== 'created' || row.channel_state !== 'active' || row.owner_status !== 'active'
+          || row.channel_owner !== row.owner_principal_id || row.generation !== row.execution_generation
+          || row.generation !== input.generation || row.input_hash !== input.inputHash
+          || row.configuration_identity !== input.configurationIdentity || row.outbox_state !== 'pending') return null;
+        const sha256 = createHash('sha256').update(input.content).digest('hex');
+        const artifactId = this.env.uuids.next();
+        const createdAt = this.env.clock.next();
+        const revision = row.revision + 1;
+        const artifactType: RoomArtifactType = input.stage === 'draft' ? 'proposal' : 'decision_summary';
+        tx.prepare(`INSERT INTO room_artifact_revisions(
+          artifact_id, job_id, revision, artifact_type, schema_version,
+          provenance_kind, provenance_json, content, sha256, created_at
+        ) VALUES(?,?,?,?,1,'model_assertion',?,?,?,?)`).run(
+          artifactId, row.job_id, revision, artifactType,
+          canonicalJson(input.provenance), input.content, sha256, createdAt,
+        );
+        tx.prepare('UPDATE room_jobs SET revision = ? WHERE job_id = ?').run(revision, row.job_id);
+        tx.prepare(`UPDATE room_job_outbox SET state = 'acknowledged', acknowledged_at = ?
+          WHERE attempt_id = ? AND stage = ? AND state = 'pending'`).run(createdAt, input.attemptId, input.stage);
+        const nextAttemptState = input.stage === 'draft' ? 'draft_committed' : 'completed_internal';
+        tx.prepare(`UPDATE room_job_attempts SET state = ?, updated_at = ? WHERE attempt_id = ?`).run(nextAttemptState, createdAt, input.attemptId);
+        tx.prepare(`INSERT INTO room_job_execution_acks(
+          attempt_id, stage, request_id, generation, state, observation_hash, created_at, updated_at
+        ) VALUES(?,?,?,?, 'terminal', ?, ?, ?)
+          ON CONFLICT(attempt_id, stage) DO UPDATE SET state = excluded.state, observation_hash = excluded.observation_hash, updated_at = excluded.updated_at`)
+          .run(input.attemptId, input.stage, input.requestId, input.generation, sha256, createdAt, createdAt);
+        if (input.stage === 'draft') {
+          const reviewOutboxId = this.env.uuids.next();
+          const reviewPayloadHash = createHash('sha256').update(canonicalJson({
+            attemptId: input.attemptId, stage: 'review', generation: input.generation, inputHash: input.inputHash,
+            proposal: { artifactId, revision, sha256 },
+          }), 'utf8').digest('hex');
+          tx.prepare(`INSERT INTO room_job_outbox(outbox_id, attempt_id, stage, payload_hash, state, created_at, acknowledged_at)
+            VALUES(?,?,'review',?,'pending',?,NULL)`).run(reviewOutboxId, input.attemptId, reviewPayloadHash, createdAt);
+        }
+        const kind: RoomJobLifecycleKind = input.stage === 'draft' ? 'draft_committed' : 'review_committed';
+        committed.push(this.appendRoomJobLifecycle(tx, {
+          channelId: row.channel_id, jobId: row.job_id, kind, state: 'created', revision,
+          actorPrincipalId: row.owner_principal_id, artifact: { artifactId, artifactType, sha256 }, attempt: { attemptId: input.attemptId },
+        }));
+        return { artifactId, artifactType, revision, schemaVersion: 1, provenanceKind: 'model_assertion' as const, sha256, createdAt };
+      }),
+    ));
+    for (const event of committed) await this.fanoutRoomJobEvent(event);
+    return result;
+  }
+
+  /** Records a bounded terminal failure without carrying provider output into Room evidence. */
+  async recordRoomJobInternalFailure(input: {
+    attemptId: string; stage: 'draft' | 'review'; generation: number; inputHash: string; reason: string;
+  }): Promise<boolean> {
+    const committed: CommittedChannelEvent[] = [];
+    const changed = await this.withReadThenSequencer(() => this.mutex.withLock(() =>
+      this.runNaturallyIdempotentCommand('room-job-internal-committer', 'RECORD_ROOM_JOB_INTERNAL_FAILURE', (tx) => {
+        if (!this.roomJobExecutionSchemaPresent(tx)) return false;
+        const row = tx.prepare(`SELECT a.job_id, a.owner_principal_id, a.generation, a.input_hash,
+          j.channel_id, j.state AS job_state, j.revision, j.execution_generation,
+          c.state AS channel_state, c.owner_principal_id AS channel_owner, p.status AS owner_status,
+          o.state AS outbox_state
+          FROM room_job_attempts a JOIN room_jobs j ON j.job_id = a.job_id
+          JOIN room_job_outbox o ON o.attempt_id = a.attempt_id AND o.stage = ?
+          JOIN collab_channels c ON c.id = j.channel_id JOIN principals p ON p.id = a.owner_principal_id
+          WHERE a.attempt_id = ?`).get(input.stage, input.attemptId) as
+            | { job_id: string; owner_principal_id: string; generation: number; input_hash: string; channel_id: string;
+                job_state: RoomJobState; revision: number; execution_generation: number; channel_state: string;
+                channel_owner: string; owner_status: string; outbox_state: string }
+            | undefined;
+        if (!row || row.job_state !== 'created' || row.channel_state !== 'active' || row.owner_status !== 'active'
+          || row.channel_owner !== row.owner_principal_id || row.generation !== row.execution_generation
+          || row.generation !== input.generation || row.input_hash !== input.inputHash || row.outbox_state !== 'pending') return false;
+        const at = this.env.clock.next();
+        tx.prepare(`UPDATE room_job_outbox SET state = 'refused', acknowledged_at = ?
+          WHERE attempt_id = ? AND stage = ? AND state = 'pending'`).run(at, input.attemptId, input.stage);
+        tx.prepare(`UPDATE room_job_attempts SET state = 'validation_failed', terminal_reason = ?, updated_at = ?
+          WHERE attempt_id = ?`).run(input.reason.slice(0, 80), at, input.attemptId);
+        committed.push(this.appendRoomJobLifecycle(tx, {
+          channelId: row.channel_id, jobId: row.job_id, kind: 'execution_failed', state: 'created',
+          revision: row.revision, actorPrincipalId: row.owner_principal_id, attempt: { attemptId: input.attemptId },
+        }));
+        return true;
+      }),
+    ));
+    for (const event of committed) await this.fanoutRoomJobEvent(event);
+    return changed;
   }
 
   /**

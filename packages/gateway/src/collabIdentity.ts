@@ -58,6 +58,7 @@ import {
   runAgentCronMigration,
   runRoomJobFoundationMigration,
   runRoomJobExecutionMigration,
+  runRoomJobExecutionArtifactBindingMigration,
   writeSurfaceAudit,
   type SecretStore,
   type BootstrapDb,
@@ -176,6 +177,7 @@ function migrateCollabDb(db: BootstrapDb): void {
     // inbox/runner is started separately and never substitutes its own Room
     // authority for this migration's owner/generation fences.
     runRoomJobExecutionMigration(handle);
+    runRoomJobExecutionArtifactBindingMigration(handle);
   } catch {
     /* fail closed: an unmigrated DB authenticates nobody */
   }
