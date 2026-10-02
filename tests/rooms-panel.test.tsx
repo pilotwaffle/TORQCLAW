@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import type { GatewayEvent } from '@torqclaw/contracts';
 import ChannelsPanel, { parseRoomListRows } from '../apps/console/src/components/ChannelsPanel.js';
@@ -9,6 +9,8 @@ afterEach(() => {
   cleanup();
   sessionStorage.clear();
   localStorage.clear();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 let eventId = 0;
@@ -66,6 +68,20 @@ function roomJobDetailFrame(job: Record<string, unknown>): GatewayEvent {
   return event({
     metadata: { roomJob: { version: 1, kind: 'detail', job: { ...job, lifecycle: [{ jobSeq: 1, kind: 'created', state: 'created', revision: 1, occurredAt: '2026-10-02T00:00:00.000Z' }], artifacts: [] } } },
   });
+}
+
+function roomJobExecutionDetailFrame(job: Record<string, unknown>, execution: Record<string, unknown>): GatewayEvent {
+  return event({
+    metadata: { roomJob: {
+      version: 2, kind: 'execution_detail', channelId: 'room-a',
+      job: { ...job, lifecycle: [{ jobSeq: 1, kind: 'attempt_started', state: 'created', revision: 1, occurredAt: '2026-10-02T00:00:00.000Z' }], artifacts: [] },
+      execution,
+    } },
+  });
+}
+
+function roomJobMutationFrame(kind: 'facts_recorded' | 'attempt_started', idempotencyKey: string): GatewayEvent {
+  return event({ metadata: { roomJob: { version: 1, kind, idempotencyKey } } });
 }
 
 function roomProps(events: GatewayEvent[], sendCommand = vi.fn(() => true), isConnected = true, isStale = false) {
@@ -231,6 +247,82 @@ describe('ChannelsPanel Rooms mode', () => {
     rerender(<ChannelsPanel {...props} events={[roomList, roomJobListFrame('room-a', [job], true), roomJobDetailFrame(job)]} isStale />);
     expect(screen.getByRole('button', { name: 'Create proposal job' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Cancel job' })).toBeDisabled();
+  });
+
+  it('runs the typed fixture journey through facts, local execution, verified preview, copy, and local download', async () => {
+    const helloSha256 = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
+    const buffer = Uint8Array.from(helloSha256.match(/../g)!.map((pair) => Number.parseInt(pair, 16))).buffer;
+    vi.stubGlobal('crypto', {
+      randomUUID: () => '00000000-0000-4000-8000-000000000099',
+      subtle: { digest: vi.fn(async () => buffer) },
+    });
+    const writeText = vi.fn(async () => undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:room-job'), revokeObjectURL: vi.fn() });
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    const sendCommand = vi.fn(() => true);
+    const rooms = listFrame([roomRow()]);
+    const props = roomProps([rooms], sendCommand);
+    const { rerender } = render(<ChannelsPanel {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: /Incident Alpha/i }));
+    const job = roomJobRow();
+    const jobs = roomJobListFrame('room-a', [job], true);
+    rerender(<ChannelsPanel {...props} events={[rooms, jobs]} />);
+    fireEvent.click(screen.getByRole('button', { name: /Job 00000000-0000-4000-8000-000000000011/ }));
+    expect(sendCommand.mock.calls.map(([command]) => command)).toContainEqual({ action: 'GET_ROOM_JOB', channelId: 'room-a', jobId: job.jobId, projection: 'execution_v2' });
+
+    const emptyExecution = roomJobExecutionDetailFrame(job, {
+      observedAt: '2026-10-02T00:00:00.000Z', capabilities: { canAddFacts: true, canStart: false, runtime: 'unknown' }, facts: [], latestAttempt: null,
+    });
+    rerender(<ChannelsPanel {...props} events={[rooms, jobs, emptyExecution]} />);
+    fireEvent.change(screen.getByLabelText('One plain-text fact per line'), { target: { value: 'Verified customer requirement' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Record facts' }));
+    const factsCommand = sendCommand.mock.calls.map(([command]) => command).find((command) => command.action === 'ADD_ROOM_JOB_FACTS');
+    expect(factsCommand).toEqual({
+      action: 'ADD_ROOM_JOB_FACTS', channelId: 'room-a', jobId: job.jobId,
+      facts: ['Verified customer requirement'], idempotencyKey: '00000000-0000-4000-8000-000000000099',
+    });
+    rerender(<ChannelsPanel {...props} events={[rooms, jobs, emptyExecution, roomJobMutationFrame('facts_recorded', '00000000-0000-4000-8000-000000000099')]} />);
+    expect(sendCommand.mock.calls.filter(([command]) => command.action === 'GET_ROOM_JOB').at(-1)?.[0]).toEqual({ action: 'GET_ROOM_JOB', channelId: 'room-a', jobId: job.jobId, projection: 'execution_v2' });
+
+    const fact = { factId: '00000000-0000-4000-8000-000000000013', ordinal: 1, sha256: 'a'.repeat(64), createdAt: '2026-10-02T00:00:00.000Z' };
+    const readyExecution = roomJobExecutionDetailFrame(job, {
+      observedAt: '2026-10-02T00:00:01.000Z', capabilities: { canAddFacts: true, canStart: true, runtime: 'ready' }, facts: [fact], latestAttempt: null,
+    });
+    rerender(<ChannelsPanel {...props} events={[rooms, jobs, emptyExecution, roomJobMutationFrame('facts_recorded', '00000000-0000-4000-8000-000000000099'), readyExecution]} />);
+    fireEvent.click(screen.getByRole('checkbox'));
+    fireEvent.click(screen.getByRole('button', { name: 'Start local draft and configured review' }));
+    expect(sendCommand.mock.calls.map(([command]) => command)).toContainEqual({
+      action: 'START_ROOM_JOB', channelId: 'room-a', jobId: job.jobId, factIds: [fact.factId], idempotencyKey: '00000000-0000-4000-8000-000000000099',
+    });
+
+    const proposal = { artifactId: '00000000-0000-4000-8000-000000000012', artifactType: 'proposal', revision: 2, schemaVersion: 1, provenanceKind: 'model_assertion', sha256: helloSha256, createdAt: '2026-10-02T00:00:02.000Z' };
+    const review = { artifactId: '00000000-0000-4000-8000-000000000014', artifactType: 'decision_summary', revision: 3, schemaVersion: 1, provenanceKind: 'model_assertion', sha256: helloSha256, createdAt: '2026-10-02T00:00:03.000Z' };
+    const completedExecution = event({ metadata: { roomJob: {
+      version: 2, kind: 'execution_detail', channelId: 'room-a',
+      job: { ...job, lifecycle: [{ jobSeq: 1, kind: 'attempt_started', state: 'created', revision: 1, occurredAt: '2026-10-02T00:00:00.000Z' }, { jobSeq: 2, kind: 'review_committed', state: 'created', revision: 3, occurredAt: '2026-10-02T00:00:03.000Z' }], artifacts: [proposal, review] },
+      execution: { observedAt: '2026-10-02T00:00:03.000Z', capabilities: { canAddFacts: false, canStart: false, runtime: 'unknown' }, facts: [fact], latestAttempt: { state: 'completed_internal', terminalCode: null, updatedAt: '2026-10-02T00:00:03.000Z' } },
+    } } });
+    rerender(<ChannelsPanel {...props} events={[rooms, jobs, emptyExecution, roomJobMutationFrame('facts_recorded', '00000000-0000-4000-8000-000000000099'), readyExecution, roomJobMutationFrame('attempt_started', '00000000-0000-4000-8000-000000000099'), completedExecution]} />);
+    expect(screen.getByText(/Validated proposal and configured review recorded/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open validated proposal revision 2' }));
+    expect(sendCommand.mock.calls.map(([command]) => command)).toContainEqual({ action: 'GET_ROOM_JOB_ARTIFACT', channelId: 'room-a', jobId: job.jobId, artifactId: proposal.artifactId });
+    const artifact = event({ metadata: { roomJob: { version: 2, kind: 'artifact', channelId: 'room-a', jobId: job.jobId, artifact: { ...proposal, content: 'hello' } } } });
+    rerender(<ChannelsPanel {...props} events={[rooms, jobs, emptyExecution, roomJobMutationFrame('facts_recorded', '00000000-0000-4000-8000-000000000099'), readyExecution, roomJobMutationFrame('attempt_started', '00000000-0000-4000-8000-000000000099'), completedExecution, artifact]} />);
+    await waitFor(() => expect(screen.getByText('hello')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Copy locally' }));
+    expect(writeText).toHaveBeenCalledWith('hello');
+    fireEvent.click(screen.getByRole('button', { name: 'Download local JSON' }));
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+    expect(anchorClick).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel job' }));
+    expect(sendCommand.mock.calls.map(([command]) => command)).toContainEqual({
+      action: 'CANCEL_ROOM_JOB', channelId: 'room-a', jobId: job.jobId, expectedRevision: 1,
+      idempotencyKey: '00000000-0000-4000-8000-000000000099',
+    });
+    rerender(<ChannelsPanel {...props} events={[rooms, jobs, emptyExecution, roomJobMutationFrame('facts_recorded', '00000000-0000-4000-8000-000000000099'), readyExecution, roomJobMutationFrame('attempt_started', '00000000-0000-4000-8000-000000000099'), completedExecution, artifact, event({ metadata: { roomJob: { version: 1, kind: 'cancelled', idempotencyKey: '00000000-0000-4000-8000-000000000099', job: { ...job, state: 'cancelled', revision: 4, cancelledAt: '2026-10-02T00:00:04.000Z', capabilities: { canCreate: true, canCancel: false } } } } })]} />);
+    expect(sendCommand.mock.calls.filter(([command]) => command.action === 'GET_ROOM_JOB').at(-1)?.[0]).toEqual({ action: 'GET_ROOM_JOB', channelId: 'room-a', jobId: job.jobId, projection: 'execution_v2' });
   });
 
   it('drains batched selected list/detail frames in order and ignores an unrelated later frame', () => {
@@ -408,6 +500,28 @@ describe('ChannelsPanel Rooms mode', () => {
     expect(sendCommand).toHaveBeenCalledTimes(2);
     expect(sendCommand.mock.calls.map(([command]) => command.action)).toEqual(['LIST_CHANNELS', 'LIST_CHANNELS']);
     expect(screen.getByText('Selected Room details unavailable under the current wire.')).toBeInTheDocument();
+  });
+
+  it('refreshes the selected execution_v2 detail after reconnect without replaying a mutation', () => {
+    const sendCommand = vi.fn(() => true);
+    const rooms = listFrame([roomRow()]);
+    const props = roomProps([rooms], sendCommand);
+    const { rerender } = render(<ChannelsPanel {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: /Incident Alpha/i }));
+    const job = roomJobRow();
+    const jobs = roomJobListFrame('room-a', [job], true);
+    rerender(<ChannelsPanel {...props} events={[rooms, jobs]} />);
+    fireEvent.click(screen.getByRole('button', { name: /Job 00000000-0000-4000-8000-000000000011/ }));
+    sendCommand.mockClear();
+
+    rerender(<ChannelsPanel {...props} events={[rooms, jobs]} isConnected={false} />);
+    rerender(<ChannelsPanel {...props} events={[rooms, jobs]} isConnected />);
+
+    expect(sendCommand.mock.calls.map(([command]) => command)).toEqual([
+      { action: 'LIST_CHANNELS', limit: 50 },
+      { action: 'LIST_ROOM_JOBS', channelId: 'room-a', cursor: '0', limit: 20 },
+      { action: 'GET_ROOM_JOB', channelId: 'room-a', jobId: job.jobId, projection: 'execution_v2' },
+    ]);
   });
 
   it('labels the list surface stale without promoting retained rows to current details', () => {

@@ -35,7 +35,7 @@ export interface RoomJobControlsProps {
   canCreate: boolean;
   canCancel: boolean;
   selectedJobId: string | null;
-  mutationStatus: 'idle' | 'create-pending' | 'cancel-pending' | 'unconfirmed';
+  mutationStatus: 'idle' | 'create-pending' | 'cancel-pending' | 'facts-pending' | 'start-pending' | 'unconfirmed';
   onCreate: (brief: string) => void;
   onCancel: () => void;
   onRefresh: () => void;
@@ -119,11 +119,11 @@ export default function RoomJobWorkspace({
                     )}
                   </div>
                   {(execution === null || execution === undefined) && <p className="text-[10px] text-faint">Preview and download unavailable under this foundation contract.</p>}
-                  {execution !== null && execution !== undefined && executionActions !== undefined && (
-                    <RoomJobExecutionWorkspace detail={execution} artifact={executionArtifact ?? null} artifactStatus={executionArtifactStatus} actions={executionActions} />
-                  )}
                 </div>
               ) : <p className="mt-2 text-[10.5px] text-faint">Job detail unknown/not loaded.</p>}
+        {execution !== null && execution !== undefined && executionActions !== undefined && (
+          <RoomJobExecutionWorkspace detail={execution} artifact={executionArtifact ?? null} artifactStatus={executionArtifactStatus} actions={executionActions} />
+        )}
       </div>
 
     </section>
@@ -134,7 +134,7 @@ export function RoomJobControls({ connected, stale, canCreate, canCancel, select
   const [brief, setBrief] = useState('');
   const bytes = byteLength(brief);
   const controlsFresh = connected && !stale;
-  const mutationPending = mutationStatus === 'create-pending' || mutationStatus === 'cancel-pending';
+  const mutationPending = mutationStatus === 'create-pending' || mutationStatus === 'cancel-pending' || mutationStatus === 'facts-pending' || mutationStatus === 'start-pending';
   const canSubmit = controlsFresh && canCreate && !mutationPending && bytes >= 1 && bytes <= 16384;
   const canCancelNow = controlsFresh && canCancel && !mutationPending;
 
@@ -187,11 +187,12 @@ async function contentSha256(content: string): Promise<string | null> {
 }
 
 export function RoomJobExecutionWorkspace({
-  detail, artifact, artifactStatus = 'idle', actions,
+  detail, artifact, artifactStatus = 'idle', mutationStatus = 'idle', actions,
 }: {
   detail: RoomJobExecutionDetail;
   artifact: RoomJobArtifactContent | null;
   artifactStatus?: 'idle' | 'loading' | 'send-failed' | 'timeout' | 'unavailable';
+  mutationStatus?: 'idle' | 'facts-pending' | 'start-pending' | 'unconfirmed';
   actions: RoomJobExecutionActions;
 }) {
   const [factDraft, setFactDraft] = useState('');
@@ -200,8 +201,9 @@ export function RoomJobExecutionWorkspace({
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
   const [downloadStatus, setDownloadStatus] = useState<'idle' | 'downloaded' | 'failed'>('idle');
   const facts = factLines(factDraft);
-  const canAddFacts = detail.execution.capabilities.canAddFacts;
-  const canStart = detail.execution.capabilities.canStart && selectedFactIds.length > 0;
+  const mutationPending = mutationStatus === 'facts-pending' || mutationStatus === 'start-pending';
+  const canAddFacts = detail.execution.capabilities.canAddFacts && !mutationPending;
+  const canStart = detail.execution.capabilities.canStart && selectedFactIds.length > 0 && !mutationPending;
   const readableArtifacts = detail.job.artifacts.filter((item) =>
     item.provenanceKind === 'model_assertion' && (item.artifactType === 'proposal' || item.artifactType === 'decision_summary'),
   );
@@ -268,6 +270,9 @@ export function RoomJobExecutionWorkspace({
         <button type="button" onClick={actions.onRefresh} className="text-[10px] underline decoration-edge underline-offset-4 hover:text-ink">refresh execution</button>
       </div>
       <p className="mt-2 text-[10px] text-faint">Runtime: {detail.execution.capabilities.runtime}. Observed by the server at {detail.execution.observedAt}.</p>
+      {mutationStatus === 'facts-pending' && <p className="mt-2 text-[10px] text-faint" role="status">Facts request pending confirmation.</p>}
+      {mutationStatus === 'start-pending' && <p className="mt-2 text-[10px] text-faint" role="status">Start request pending confirmation.</p>}
+      {mutationStatus === 'unconfirmed' && <p className="mt-2 text-[10px] text-faint" role="status">Request not confirmed. Refresh execution from the gateway.</p>}
 
       {detail.execution.facts !== undefined && (
         <div className="mt-4 border-t border-edge pt-3">
