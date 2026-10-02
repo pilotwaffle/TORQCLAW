@@ -429,6 +429,19 @@ export interface RoomJobDetail extends RoomJobListEntry {
   artifacts: RoomArtifactMetadata[];
 }
 
+export type RoomJobPublicAttemptState = RoomJobAttemptMetadata['state'];
+export type RoomJobPublicTerminalCode = 'cancelled' | 'validation_failed' | 'recovery_needed' | 'runtime_unavailable' | 'stage_failed';
+export interface RoomJobExecutionDetail {
+  job: RoomJobDetail;
+  execution: {
+    observedAt: string;
+    /** Runtime is filled only by the gateway's bounded local probe. */
+    capabilities: { canAddFacts: boolean; canStart: boolean };
+    facts?: RoomJobFactMetadata[];
+    latestAttempt: null | { state: RoomJobPublicAttemptState; terminalCode: RoomJobPublicTerminalCode | null; updatedAt: string };
+  };
+}
+
 export interface CreateRoomJobResult {
   job: RoomJobListEntry;
   idempotencyKey: string;
@@ -3492,6 +3505,56 @@ export class CollaborationStore {
   }
 
   /**
+   * Opt-in execution supplement.  It repeats visibility at read time and
+   * exposes no fact bytes, request/generation identity, or state-db evidence.
+   * Runtime readiness is intentionally resolved by the gateway after owner
+   * admission, because only the gateway owns the loopback runner boundary.
+   */
+  async getRoomJobExecutionDetail(
+    caller: CallerContext,
+    body: { channelId: string; jobId: string },
+  ): Promise<RoomJobExecutionDetail> {
+    const job = await this.getRoomJob(caller, body);
+    return this.withReadOnly(() => this.runReadCommand(() => {
+      const db = this.env.db;
+      this.assertChannelVisible(db, caller, body.channelId);
+      const owner = this.callerOwnsChannel(db, caller, body.channelId);
+      const row = db.prepare(`SELECT j.state, j.execution_generation,
+          (SELECT COUNT(*) FROM room_job_fact_revisions f WHERE f.job_id = j.job_id) AS fact_count,
+          (SELECT COUNT(*) FROM room_job_attempts a WHERE a.job_id = j.job_id AND a.generation = j.execution_generation) AS current_attempts
+        FROM room_jobs j WHERE j.job_id = ? AND j.channel_id = ?`).get(body.jobId, body.channelId) as
+          | { state: RoomJobState; execution_generation: number; fact_count: number; current_attempts: number }
+          | undefined;
+      if (!row) throw notFound();
+      const schemaReady = this.roomJobExecutionSchemaPresent(db);
+      const mutable = owner && schemaReady && row.state === 'created';
+      const facts = owner ? db.prepare(`SELECT fact_id, ordinal, sha256, created_at FROM room_job_fact_revisions
+        WHERE job_id = ? ORDER BY ordinal ASC`).all(body.jobId).map((fact) => {
+          const item = fact as { fact_id: string; ordinal: number; sha256: string; created_at: string };
+          return { factId: item.fact_id, ordinal: item.ordinal, sha256: item.sha256, createdAt: item.created_at };
+        }) : undefined;
+      const attempt = schemaReady ? db.prepare(`SELECT state, terminal_reason, updated_at FROM room_job_attempts
+        WHERE job_id = ? AND generation = ? LIMIT 1`).get(body.jobId, row.execution_generation) as
+          | { state: RoomJobPublicAttemptState; terminal_reason: string | null; updated_at: string }
+          | undefined : undefined;
+      const terminalCode: RoomJobPublicTerminalCode | null = attempt?.terminal_reason === 'room_job_cancelled' ? 'cancelled'
+        : attempt?.state === 'validation_failed' ? 'validation_failed'
+          : attempt?.state === 'recovery_needed' ? 'recovery_needed'
+            : attempt?.state === 'runtime_unavailable' ? 'runtime_unavailable'
+              : attempt?.terminal_reason === 'stage_failed' ? 'stage_failed' : null;
+      return {
+        job,
+        execution: {
+          observedAt: new Date().toISOString(),
+          capabilities: { canAddFacts: mutable, canStart: mutable && row.fact_count > 0 && row.current_attempts === 0 },
+          ...(facts ? { facts } : {}),
+          latestAttempt: attempt ? { state: attempt.state, terminalCode, updatedAt: attempt.updated_at } : null,
+        },
+      };
+    }));
+  }
+
+  /**
    * Returns only canonical, validator-committed proposal/review content to a
    * current Room member. Facts, failed output, state-db observations, paths,
    * and arbitrary artifact BLOBs are deliberately not readable here.
@@ -3513,6 +3576,13 @@ export class CollaborationStore {
                 provenance_kind: RoomArtifactProvenanceKind; sha256: string; created_at: string; content: Buffer }
             | undefined;
       if (!artifact) throw notFound();
+      // SQLite is a trusted local persistence boundary in this release; the
+      // application exposes no update/delete writer for committed revisions.
+      // Still verify the recorded digest before projecting bytes so corruption
+      // or an out-of-band mutation can never inherit old provenance metadata.
+      if (createHash('sha256').update(artifact.content).digest('hex') !== artifact.sha256) {
+        throw new CollabError('INVALID_REQUEST', 'Room job artifact integrity check failed');
+      }
       const content = artifact.content.toString('utf8');
       if (Buffer.byteLength(content, 'utf8') !== artifact.content.length || content !== content.normalize('NFC')) {
         throw new CollabError('INVALID_REQUEST', 'Room job artifact is not a valid text projection');
@@ -3579,7 +3649,7 @@ export class CollaborationStore {
             tx.prepare(`UPDATE room_job_outbox
               SET state = 'cancelled'
               WHERE attempt_id IN (SELECT attempt_id FROM room_job_attempts WHERE job_id = ?)
-                AND state = 'pending'`).run(row.job_id);
+                AND state IN ('pending','claimed')`).run(row.job_id);
             tx.prepare(`UPDATE room_job_attempts
               SET state = 'cancelled', terminal_reason = 'room_job_cancelled', updated_at = ?
               WHERE job_id = ? AND state IN ('queued','draft_committed','review_committed')`).run(cancelledAt, row.job_id);
@@ -3692,7 +3762,7 @@ export class CollaborationStore {
         'START_ROOM_JOB',
         idempotencyKey,
         normalizedBody,
-        (tx) => this.assertChannelOwner(tx, caller, normalizedBody.channelId),
+        (tx) => this.assertRoomJobStartAdmissionInTx(tx, caller, normalizedBody.channelId, normalizedBody.jobId),
         (tx) => {
           if (!this.roomJobExecutionSchemaPresent(tx)) {
             throw new CollabError('INVALID_REQUEST', 'Room job execution storage is unavailable');
@@ -3760,11 +3830,97 @@ export class CollaborationStore {
   }
 
   /**
+   * Read-only, non-disclosing owner/lifecycle admission for START_ROOM_JOB.
+   * Gateway calls this before probing the local runner, then startRoomJob
+   * repeats the identical predicate inside its keyed write transaction.
+   */
+  async assertRoomJobStartAdmission(
+    caller: CallerContext,
+    body: { channelId: string; jobId: string },
+  ): Promise<void> {
+    return this.withReadOnly(() => this.runReadCommand(() => {
+      this.assertRoomJobStartAdmissionInTx(this.env.db, caller, body.channelId, body.jobId);
+    }));
+  }
+
+  /**
+   * Atomically changes only a still-current pending outbox row to `claimed`.
+   * Cancellation/revocation/archival before this transaction wins and no
+   * provider call is admitted.  A second confirmation occurs immediately
+   * before the synchronous fetch invocation in the coordinator.
+   */
+  async claimRoomJobInternalDispatch(
+    attemptId: string,
+    stage: 'draft' | 'review',
+    configurationIdentity: string,
+  ): Promise<RoomJobInternalRun | null> {
+    const claimed = await this.withReadThenSequencer(() => this.mutex.withLock(() =>
+      this.runNaturallyIdempotentCommand('room-job-internal-committer', 'CLAIM_ROOM_JOB_INTERNAL_DISPATCH', (tx) => {
+        if (!this.roomJobExecutionSchemaPresent(tx)) return false;
+        const row = tx.prepare(`SELECT a.owner_principal_id, a.generation, a.configuration_identity,
+          j.state AS job_state, j.execution_generation, c.state AS channel_state,
+          c.owner_principal_id AS channel_owner, p.kind AS owner_kind, p.status AS owner_status,
+          o.state AS outbox_state
+          FROM room_job_attempts a JOIN room_jobs j ON j.job_id = a.job_id
+          JOIN room_job_outbox o ON o.attempt_id = a.attempt_id AND o.stage = ?
+          JOIN collab_channels c ON c.id = j.channel_id JOIN principals p ON p.id = a.owner_principal_id
+          WHERE a.attempt_id = ?`).get(stage, attemptId) as
+            | { owner_principal_id: string; generation: number; configuration_identity: string; job_state: RoomJobState;
+                execution_generation: number; channel_state: string; channel_owner: string; owner_kind: string;
+                owner_status: string; outbox_state: string }
+            | undefined;
+        if (!row || row.configuration_identity !== configurationIdentity || row.job_state !== 'created'
+          || row.channel_state !== 'active' || row.owner_kind !== 'operator' || row.owner_status !== 'active'
+          || row.channel_owner !== row.owner_principal_id || row.generation !== row.execution_generation
+          || row.outbox_state !== 'pending') return false;
+        const update = tx.prepare(`UPDATE room_job_outbox SET state = 'claimed'
+          WHERE attempt_id = ? AND stage = ? AND state = 'pending'`).run(attemptId, stage) as { changes: number };
+        return update.changes === 1;
+      }),
+    ));
+    if (!claimed) return null;
+    return this.getRoomJobInternalRun(attemptId, stage, { allowClaimed: true });
+  }
+
+  /** The final collab-side fence, immediately before invoking the local model. */
+  async confirmRoomJobInternalDispatchClaim(
+    attemptId: string,
+    stage: 'draft' | 'review',
+    generation: number,
+    configurationIdentity: string,
+  ): Promise<boolean> {
+    return this.withReadThenSequencer(() => this.mutex.withLock(() =>
+      this.runNaturallyIdempotentCommand('room-job-internal-committer', 'CONFIRM_ROOM_JOB_INTERNAL_DISPATCH_CLAIM', (tx) => {
+        if (!this.roomJobExecutionSchemaPresent(tx)) return false;
+        const row = tx.prepare(`SELECT a.owner_principal_id, a.generation, a.configuration_identity,
+          j.state AS job_state, j.execution_generation, c.state AS channel_state,
+          c.owner_principal_id AS channel_owner, p.kind AS owner_kind, p.status AS owner_status, o.state AS outbox_state
+          FROM room_job_attempts a JOIN room_jobs j ON j.job_id = a.job_id
+          JOIN room_job_outbox o ON o.attempt_id = a.attempt_id AND o.stage = ?
+          JOIN collab_channels c ON c.id = j.channel_id JOIN principals p ON p.id = a.owner_principal_id
+          WHERE a.attempt_id = ?`).get(stage, attemptId) as
+            | { owner_principal_id: string; generation: number; configuration_identity: string; job_state: RoomJobState;
+                execution_generation: number; channel_state: string; channel_owner: string; owner_kind: string;
+                owner_status: string; outbox_state: string }
+            | undefined;
+        return Boolean(row && row.generation === generation && row.configuration_identity === configurationIdentity
+          && row.job_state === 'created' && row.channel_state === 'active' && row.owner_kind === 'operator'
+          && row.owner_status === 'active' && row.channel_owner === row.owner_principal_id
+          && row.generation === row.execution_generation && row.outbox_state === 'claimed');
+      }),
+    ));
+  }
+
+  /**
    * Gateway-private re-admission read. It returns no row when a Room was
    * cancelled, re-owned, archived, generation-fenced, or already handled.
    * The coordinator repeats this read immediately before `dispatch_started`.
    */
-  async getRoomJobInternalRun(attemptId: string, stage: 'draft' | 'review'): Promise<RoomJobInternalRun | null> {
+  async getRoomJobInternalRun(
+    attemptId: string,
+    stage: 'draft' | 'review',
+    options: { allowClaimed?: boolean } = {},
+  ): Promise<RoomJobInternalRun | null> {
     return this.withReadOnly(() => this.runReadCommand(() => {
       if (!this.roomJobExecutionSchemaPresent(this.env.db)) return null;
       const row = this.env.db.prepare(`SELECT a.attempt_id, a.generation, a.input_hash, a.configuration_identity,
@@ -3778,7 +3934,7 @@ export class CollaborationStore {
         WHERE a.attempt_id = ? AND a.generation = j.execution_generation
           AND j.state = 'created' AND c.state = 'active'
           AND c.owner_principal_id = a.owner_principal_id AND p.kind = 'operator' AND p.status = 'active'
-          AND o.state = 'pending'`).get(stage, attemptId) as {
+          AND o.state IN ('pending'${options.allowClaimed ? ",'claimed'" : ''})`).get(stage, attemptId) as {
             attempt_id: string; generation: number; input_hash: string; configuration_identity: string;
             owner_principal_id: string; channel_id: string; brief: string; outbox_state: string;
             channel_state: string; channel_owner: string; owner_status: string;
@@ -3851,7 +4007,7 @@ export class CollaborationStore {
         if (!row || row.job_state !== 'created' || row.channel_state !== 'active' || row.owner_status !== 'active'
           || row.channel_owner !== row.owner_principal_id || row.generation !== row.execution_generation
           || row.generation !== input.generation || row.input_hash !== input.inputHash
-          || row.configuration_identity !== input.configurationIdentity || row.outbox_state !== 'pending') return null;
+          || row.configuration_identity !== input.configurationIdentity || row.outbox_state !== 'claimed') return null;
         const sha256 = createHash('sha256').update(input.content).digest('hex');
         const artifactId = this.env.uuids.next();
         const createdAt = this.env.clock.next();
@@ -3866,7 +4022,7 @@ export class CollaborationStore {
         );
         tx.prepare('UPDATE room_jobs SET revision = ? WHERE job_id = ?').run(revision, row.job_id);
         tx.prepare(`UPDATE room_job_outbox SET state = 'acknowledged', acknowledged_at = ?
-          WHERE attempt_id = ? AND stage = ? AND state = 'pending'`).run(createdAt, input.attemptId, input.stage);
+          WHERE attempt_id = ? AND stage = ? AND state = 'claimed'`).run(createdAt, input.attemptId, input.stage);
         const nextAttemptState = input.stage === 'draft' ? 'draft_committed' : 'completed_internal';
         tx.prepare(`UPDATE room_job_attempts SET state = ?, updated_at = ? WHERE attempt_id = ?`).run(nextAttemptState, createdAt, input.attemptId);
         tx.prepare(`INSERT INTO room_job_execution_acks(
@@ -3917,10 +4073,10 @@ export class CollaborationStore {
             | undefined;
         if (!row || row.job_state !== 'created' || row.channel_state !== 'active' || row.owner_status !== 'active'
           || row.channel_owner !== row.owner_principal_id || row.generation !== row.execution_generation
-          || row.generation !== input.generation || row.input_hash !== input.inputHash || row.outbox_state !== 'pending') return false;
+          || row.generation !== input.generation || row.input_hash !== input.inputHash || row.outbox_state !== 'claimed') return false;
         const at = this.env.clock.next();
         tx.prepare(`UPDATE room_job_outbox SET state = 'refused', acknowledged_at = ?
-          WHERE attempt_id = ? AND stage = ? AND state = 'pending'`).run(at, input.attemptId, input.stage);
+          WHERE attempt_id = ? AND stage = ? AND state = 'claimed'`).run(at, input.attemptId, input.stage);
         tx.prepare(`UPDATE room_job_attempts SET state = 'validation_failed', terminal_reason = ?, updated_at = ?
           WHERE attempt_id = ?`).run(input.reason.slice(0, 80), at, input.attemptId);
         committed.push(this.appendRoomJobLifecycle(tx, {
@@ -3932,6 +4088,55 @@ export class CollaborationStore {
     ));
     for (const event of committed) await this.fanoutRoomJobEvent(event);
     return changed;
+  }
+
+  /**
+   * A dispatch checkpoint survived but its response did not.  Never replay
+   * inference: terminalize the Room-side outbox as bounded uncertainty.
+   */
+  async recordRoomJobInternalRecoveryNeeded(input: {
+    attemptId: string; stage: 'draft' | 'review'; generation: number; inputHash: string;
+  }): Promise<boolean> {
+    const committed: CommittedChannelEvent[] = [];
+    const changed = await this.withReadThenSequencer(() => this.mutex.withLock(() =>
+      this.runNaturallyIdempotentCommand('room-job-internal-committer', 'RECORD_ROOM_JOB_INTERNAL_RECOVERY_NEEDED', (tx) => {
+        if (!this.roomJobExecutionSchemaPresent(tx)) return false;
+        const row = tx.prepare(`SELECT a.job_id, a.owner_principal_id, a.generation, a.input_hash,
+          j.channel_id, j.state AS job_state, j.revision, j.execution_generation,
+          c.state AS channel_state, c.owner_principal_id AS channel_owner, p.status AS owner_status,
+          o.state AS outbox_state
+          FROM room_job_attempts a JOIN room_jobs j ON j.job_id = a.job_id
+          JOIN room_job_outbox o ON o.attempt_id = a.attempt_id AND o.stage = ?
+          JOIN collab_channels c ON c.id = j.channel_id JOIN principals p ON p.id = a.owner_principal_id
+          WHERE a.attempt_id = ?`).get(input.stage, input.attemptId) as
+            | { job_id: string; owner_principal_id: string; generation: number; input_hash: string; channel_id: string;
+                job_state: RoomJobState; revision: number; execution_generation: number; channel_state: string;
+                channel_owner: string; owner_status: string; outbox_state: string }
+            | undefined;
+        if (!row || row.job_state !== 'created' || row.channel_state !== 'active' || row.owner_status !== 'active'
+          || row.channel_owner !== row.owner_principal_id || row.generation !== row.execution_generation
+          || row.generation !== input.generation || row.input_hash !== input.inputHash || row.outbox_state !== 'claimed') return false;
+        const at = this.env.clock.next();
+        tx.prepare(`UPDATE room_job_outbox SET state = 'recovery_needed', acknowledged_at = ?
+          WHERE attempt_id = ? AND stage = ? AND state = 'claimed'`).run(at, input.attemptId, input.stage);
+        tx.prepare(`UPDATE room_job_attempts SET state = 'recovery_needed', terminal_reason = 'dispatch_interrupted_uncertain', updated_at = ?
+          WHERE attempt_id = ?`).run(at, input.attemptId);
+        committed.push(this.appendRoomJobLifecycle(tx, {
+          channelId: row.channel_id, jobId: row.job_id, kind: 'execution_failed', state: 'created',
+          revision: row.revision, actorPrincipalId: row.owner_principal_id, attempt: { attemptId: input.attemptId },
+        }));
+        return true;
+      }),
+    ));
+    for (const event of committed) await this.fanoutRoomJobEvent(event);
+    return changed;
+  }
+
+  /** True only when a prior artifact commit durably acknowledged this stage. */
+  async hasRoomJobInternalTerminalAck(attemptId: string, stage: 'draft' | 'review'): Promise<boolean> {
+    return this.withReadOnly(() => this.runReadCommand(() => Boolean(this.env.db.prepare(
+      `SELECT 1 FROM room_job_execution_acks WHERE attempt_id = ? AND stage = ? AND state = 'terminal'`,
+    ).get(attemptId, stage))));
   }
 
   /**
@@ -4371,6 +4576,24 @@ export class CollaborationStore {
       throw notFound();
     }
     return channel;
+  }
+
+  /** Shared read/write admission predicate for the pre-runtime START gate. */
+  private assertRoomJobStartAdmissionInTx(
+    tx: BootstrapDb,
+    caller: CallerContext,
+    channelId: string,
+    jobId: string,
+  ): void {
+    const channel = this.assertChannelOwner(tx, caller, channelId);
+    if (channel.state !== 'active') throw new CollabError('CHANNEL_ARCHIVED', 'Channel is archived');
+    const member = tx.prepare(`SELECT state FROM collab_members WHERE channel_id = ? AND principal_id = ?`)
+      .get(channelId, caller.principalId) as { state: string } | undefined;
+    if (!member || member.state !== 'active') throw notFound();
+    const job = tx.prepare(`SELECT state FROM room_jobs WHERE job_id = ? AND channel_id = ?`)
+      .get(jobId, channelId) as { state: RoomJobState } | undefined;
+    if (!job) throw notFound();
+    if (job.state !== 'created') throw new CollabError('INVALID_REQUEST', 'Cannot start a cancelled room job');
   }
 
   /**
