@@ -158,7 +158,21 @@ function approvalC2Columns(dataDir: string): Record<string, unknown>[] {
   return rows;
 }
 
-describe('SI-4 / A12 (C2) — flag-off identity across an approval transcript', () => {
+describe('SI-4 / A12 (C2) - flag-off identity across an approval transcript', () => {
+  it('refuses missing, malformed, non-finite, and out-of-range classifier scores', () => {
+    const frame = (confidence: string) =>
+      `{\"type\":\"ROUTING\",\"metadata\":{\"classifierConfidence\":${confidence}}}`;
+
+    expect(() => assertBoundedClassifierConfidence([])).toThrow();
+    expect(() => assertBoundedClassifierConfidence([frame('null')])).toThrow();
+    expect(() => assertBoundedClassifierConfidence([frame('"0.5"')])).toThrow();
+    // JSON.parse accepts this exponent as Infinity, so this guards the
+    // finite-value assertion rather than only its serialized shape.
+    expect(() => assertBoundedClassifierConfidence([frame('1e999')])).toThrow();
+    expect(() => assertBoundedClassifierConfidence([frame('-0.01')])).toThrow();
+    expect(() => assertBoundedClassifierConfidence([frame('1.01')])).toThrow();
+  });
+
   // D-3: BOTH decisions are exercised. An earlier version tested REJECT
   // only, which is the half of the decision space where the claim is
   // cheapest to satisfy -- APPROVE is the leg that dispatches a whole
