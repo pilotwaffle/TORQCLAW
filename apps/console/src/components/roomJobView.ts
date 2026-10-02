@@ -94,6 +94,9 @@ export type RoomJobExecutionEnvelope =
   | { kind: 'execution_detail'; detail: RoomJobExecutionDetail }
   | { kind: 'artifact'; artifact: RoomJobArtifactContent };
 
+/** Mutation confirmations deliberately expose only their exact UUID key. */
+export type RoomJobExecutionMutationEnvelope = { kind: 'facts_recorded' | 'attempt_started'; idempotencyKey: string };
+
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -369,6 +372,15 @@ export function parseRoomJobExecutionEnvelope(event: GatewayEvent): RoomJobExecu
     };
   }
   return null;
+}
+
+export function parseRoomJobExecutionMutationEnvelope(event: GatewayEvent): RoomJobExecutionMutationEnvelope | null {
+  if (event.type !== 'SYSTEM') return null;
+  const metadata = record(event.metadata);
+  const roomJob = record(metadata?.roomJob);
+  if (!roomJob || roomJob.version !== 1 ||
+      (roomJob.kind !== 'facts_recorded' && roomJob.kind !== 'attempt_started') || !uuid(roomJob.idempotencyKey)) return null;
+  return { kind: roomJob.kind, idempotencyKey: roomJob.idempotencyKey };
 }
 
 export function isCurrentRoomJobArtifact(detail: RoomJobExecutionDetail, artifact: RoomJobArtifactContent): boolean {
