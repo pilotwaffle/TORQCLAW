@@ -564,6 +564,20 @@ export async function ensureGatewayBuild(options: GatewayBuildOptions = {}): Pro
         buildError = error;
         buildFinishedAtMs = Date.now();
       }
+      if (!buildError) {
+        // Publish the atomic receipt WHILE this worker still owns the build
+        // lock.  Releasing first leaves a gap in which a queued worker can
+        // acquire the lock, observe the old/missing receipt, and launch a
+        // second forced build against the shared dist tree.  The build child
+        // has exited before this point, so its output is settled; the receipt
+        // hashes that settled output and `renameSync` makes it visible in one
+        // step to the next lock owner.
+        //
+        // Receipt publication is deliberately best-effort.  If it fails, we
+        // still release the lock and the next caller rebuilds rather than
+        // trusting unproved artifacts (the fail-closed direction).
+        try { writeBuildReceipt(); } catch { /* fail-closed: next caller rebuilds */ }
+      }
       try {
         releasedAtMs = releaseBuildLock(handle);
       } catch (cleanupError) {
@@ -572,13 +586,6 @@ export async function ensureGatewayBuild(options: GatewayBuildOptions = {}): Pro
       }
       if (buildError) throw buildError;
       if (options.testReceiptPath) writeReceipt(options.testReceiptPath, handle, buildStartedAtMs, buildFinishedAtMs, releasedAtMs);
-      // Record what this build produced, so sibling workers can verify
-      // freshness by CONTENT instead of by mtime ordering. Written after the
-      // lock is released and after dist is fully on disk, so the hashes
-      // describe a settled tree. A failure to write the receipt must not fail
-      // the build: the only consequence is that the next worker rebuilds --
-      // the fail-closed direction.
-      try { writeBuildReceipt(); } catch { /* fail-closed: next caller rebuilds */ }
     })();
   }
   try {
