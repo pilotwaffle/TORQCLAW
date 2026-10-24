@@ -102,6 +102,30 @@ describe('shared FastMCP contract', () => {
     expect(result.observations[0]?.telemetry).toMatchObject({ engineUsed: 'hermes:fake' });
   });
 
+  it('accepts multi-kilobyte terminal result text while keeping an upper bound', async () => {
+    const forecastSizedText = 'x'.repeat(3_109);
+    await expect(pollObservations(active, 0, 9_000, {
+      async callTool() {
+        return jsonResult({
+          status: 'TERMINAL', cursor: 1, terminal: true, terminalCommitted: true,
+          terminalOutcome: 'completed',
+          observations: [{ kind: 'result', dispatchAttempted: true, text: forecastSizedText }],
+        });
+      },
+    })).resolves.toMatchObject({ observations: [{ text: forecastSizedText }] });
+
+    const oversizedText = 'x'.repeat(64_001);
+    await expect(pollObservations(active, 0, 9_000, {
+      async callTool() {
+        return jsonResult({
+          status: 'TERMINAL', cursor: 1, terminal: true, terminalCommitted: true,
+          terminalOutcome: 'completed',
+          observations: [{ kind: 'result', dispatchAttempted: true, text: oversizedText }],
+        });
+      },
+    })).rejects.toThrow('result text is invalid');
+  });
+
   it('accepts only a marker that matches the committed terminal observation', async () => {
     await expect(pollObservations(active, 0, 9_000, {
       async callTool() {

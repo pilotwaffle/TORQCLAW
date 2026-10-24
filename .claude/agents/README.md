@@ -7,15 +7,18 @@ product through `.torq/launch/*` watcher scripts and hardcoded
 specs from and write verdicts into the wrong product. What is ported here is the
 *discipline*, re-pathed to `E:\TorqClaw`.
 
-## Roles and model assignments (operator-set, 2026-08-09)
+## Roles and model assignments (operator-set 2026-08-09; model map reconciled to `CLAUDE.md` §2, operator-updated 2026-08-12)
 
-| Role | Model | Responsibility |
-|---|---|---|
-| **G1D / planner / router** | Fable-5 | Orchestrate. Scope the ticket, route work, hold the sequence. Does not implement. |
-| **G1R / reviewer** | Opus 4.7 | Independent review when design, architecture, risk, or **security** is involved. Reviews the SPEC before the Builder spends compute. |
-| **Builder** | Sonnet 5 | Implement the spec precisely. Does not design or approve. |
-| **G2A / final verifier** | Opus 4.8 | Grade high-impact changes against **files, tests, build output, git state, and acceptance criteria**. Sole authority to authorize a push. |
-| **Cheap verification** | Haiku / fast | Checklist grading, log triage, scope sanity checks. **Never** sole final authority for risky code, merges, security, production, or architecture. |
+> Authoritative source for the role/model map is TORQCLAW `CLAUDE.md` §2. This table mirrors it. Supersession (2026-08-12): G1R moved from **Opus 4.7** to **Opus 5**; historical gate records referencing 4.7 are not retroactively invalidated.
+
+| Role | Model | Model ID | Responsibility |
+|---|---|---|---|
+| **G1D / planner / router** | Fable-5 | `claude-fable-5` | Orchestrate. Scope the ticket, route work, hold the sequence. Does not implement. |
+| **G1R / reviewer** | Opus 5 | `claude-opus-5` | Independent review when design, architecture, risk, or **security** is involved. Reviews the SPEC before the Builder spends compute. |
+| **Builder** | Sonnet 5 | `claude-sonnet-5` | Implement the spec precisely. Does not design or approve. |
+| **RB / alternate debug worker** | GLM-5.2 | (if available) | Scout, triage, debug, propose. **Never** final authority. Code touching routing, approval gates, cost enforcement, secrets, production config, or path scoping must be reviewed by Opus 4.8 (G2A). |
+| **G2A / final verifier** | Opus 4.8 | `claude-opus-4-8` | Grade high-impact changes against **files, tests, build output, git state, and acceptance criteria**. Sole authority to authorize a push. |
+| **Cheap verification** | Haiku 4.5 / fast | `claude-haiku-4-5` | Checklist grading, log triage, scope sanity checks. **Never** sole final authority for risky code, merges, security, production, or architecture. |
 | **Memory-writer** | — | Updates `STATE.md` / `MEMORY.md` **only after** meaningful progress, tests pass, and verifier/G2A passes. |
 
 ## Hard rules

@@ -9,7 +9,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "E:\\Python\\Scripts\\graphify.EXE hook-guard search"
+            "command": "\"E:\\Python\\Scripts\\graphify.EXE\" hook-guard search"
           }
         ]
       },
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "E:\\Python\\Scripts\\graphify.EXE hook-guard read"
+            "command": "\"E:\\Python\\Scripts\\graphify.EXE\" hook-guard read"
           }
         ]
       }

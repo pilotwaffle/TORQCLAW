@@ -64,6 +64,8 @@ export class ResilienceEnvelopeError extends Error {
   }
 }
 
+const RESULT_TEXT_MAX_CHARS = 64_000;
+
 export interface AdmitResponse {
   status: 'ADMITTED' | 'EXISTING' | 'REJECTED';
   activeTuple?: ResilienceActiveTuple;
@@ -212,7 +214,7 @@ function normalizeObservation(value: unknown, operation: ResilienceToolName): No
     out.failure = parsed.data;
   }
   if (raw.text !== undefined) {
-    if (typeof raw.text !== 'string' || raw.text.length > 2_000) throw new ResilienceEnvelopeError(operation, 'result text is invalid');
+    if (typeof raw.text !== 'string' || raw.text.length > RESULT_TEXT_MAX_CHARS) throw new ResilienceEnvelopeError(operation, 'result text is invalid');
     out.text = raw.text;
   }
   if (raw.telemetry !== undefined) {

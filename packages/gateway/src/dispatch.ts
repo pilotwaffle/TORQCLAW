@@ -733,7 +733,14 @@ async function dispatchFailover(req: GatewayRequest, diag: RouterDiagnostics): P
     const failure = typed?.failure ?? { failureClass: 'terminal', code: 'failover_failed', retryable: false };
     const telemetry = { failoverEnabled: true, budgetSource, normalizedFailure: failure, dispatchAttempted: typed?.dispatchAttempted ?? false, terminalOutcome: typed?.terminalOutcome ?? 'terminal', ...(typed?.telemetry ?? {}) };
     taskStore.fail(req.id, `FAILOVER: ${failure.code}`, telemetry);
-    emit('ERROR', `Execution failed: failover ${failure.code}.`, { failoverEnabled: true, normalizedFailure: failure, terminalOutcome: telemetry.terminalOutcome });
+    emit('ERROR', `Execution failed: failover ${failure.code}.`, {
+      failoverEnabled: true,
+      normalizedFailure: failure,
+      terminalOutcome: telemetry.terminalOutcome,
+      recovery: ['RETRY', 'COPY_DIAGNOSTIC'],
+      prompt: req.payload.prompt,
+      sideEffectNote: failureSideEffectNote(diag.tier, false),
+    });
     projectReceiptSafely(req.id);
   } finally {
     cancellations.clear(req.id);

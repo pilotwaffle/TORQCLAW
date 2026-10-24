@@ -1022,6 +1022,27 @@ export interface SafeExportLike {
   evidence?: { startSeq?: number | null; endSeq?: number | null } | null;
   errorClass?: string | null;
   error?: string | null;
+  failoverEnabled?: boolean | null;
+  finalProviderId?: string | null;
+  terminalUncertainty?: boolean | null;
+  providerAttempts?: Array<{
+    epoch?: number | null;
+    attemptId?: string | null;
+    providerId?: string | null;
+    modelId?: string | null;
+    startedAtMs?: number | null;
+    endedAtMs?: number | null;
+    normalizedFailure?: { failureClass?: string | null; code?: string | null; source?: string | null } | null;
+    dispatchAttempted?: boolean | null;
+    transitionDecision?: string | null;
+    terminalOutcome?: string | null;
+    cost?: {
+      reservedMicroUsd?: number | null;
+      actualMicroUsd?: number | null;
+      known?: boolean | null;
+      source?: string | null;
+    } | null;
+  }> | null;
   redactionReport?: {
     redactorVersion?: number | null;
     patternsHit?: Record<string, number> | null;
@@ -1309,6 +1330,37 @@ export function renderSafeExportMarkdown(e: SafeExportLike): string {
   lines.push('');
 
   // ── Error ───────────────────────────────────────────────────────────
+  if (e.failoverEnabled === true) {
+    lines.push('## Failover');
+    lines.push('');
+    lines.push('| field | value |');
+    lines.push('| --- | --- |');
+    lines.push('| enabled | yes |');
+    lines.push(`| final provider | ${mdOrNotRecorded(e.finalProviderId)} |`);
+    lines.push(`| terminal uncertainty | ${mdYesNo(e.terminalUncertainty)} |`);
+    lines.push('');
+
+    const attempts = e.providerAttempts ?? [];
+    if (attempts.length > 0) {
+      lines.push('| epoch | provider | model | dispatch attempted | transition | outcome | failure | cost |');
+      lines.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
+      for (const attempt of attempts) {
+        const failure = attempt.normalizedFailure
+          ? `${mdOrNotRecorded(attempt.normalizedFailure.failureClass)}:${mdOrNotRecorded(attempt.normalizedFailure.code)}`
+          : 'none';
+        const cost = attempt.cost
+          ? `reserved=${mdNum(attempt.cost.reservedMicroUsd)}, actual=${mdNum(attempt.cost.actualMicroUsd)}, known=${mdYesNo(attempt.cost.known)}, source=${mdOrNotRecorded(attempt.cost.source)}`
+          : 'not recorded';
+        lines.push(
+          `| ${mdNum(attempt.epoch)} | ${mdOrNotRecorded(attempt.providerId)} | ${mdOrNotRecorded(attempt.modelId)} | ${mdYesNo(attempt.dispatchAttempted)} | ${mdOrNotRecorded(attempt.transitionDecision)} | ${mdOrNotRecorded(attempt.terminalOutcome)} | ${failure} | ${cost} |`,
+        );
+      }
+    } else {
+      lines.push('provider attempts: none recorded');
+    }
+    lines.push('');
+  }
+
   lines.push('## Error');
   lines.push('');
   lines.push(`error class: ${e.errorClass ? escInline(e.errorClass) : 'none'}`);
