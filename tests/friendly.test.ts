@@ -1467,6 +1467,43 @@ describe('renderSafeExportMarkdown', () => {
     expect(out).toContain('events seq 1–2 — event bodies are not part of this export.');
   });
 
+  it('renders failover provider attempts when the safe export includes them', () => {
+    const e: SafeExportLike = {
+      ...minimalSafeExport,
+      exportVersion: 2,
+      failoverEnabled: true,
+      finalProviderId: 'glm-fallback',
+      terminalUncertainty: false,
+      providerAttempts: [
+        {
+          epoch: 0,
+          providerId: 'kimi-sub-primary',
+          modelId: 'kimi-k2.7-code',
+          dispatchAttempted: false,
+          transitionDecision: 'transitioned',
+          terminalOutcome: null,
+          normalizedFailure: { failureClass: 'retryable', code: 'connection', source: 'engine' },
+          cost: { reservedMicroUsd: 500000, actualMicroUsd: null, known: false, source: 'unavailable' },
+        },
+        {
+          epoch: 1,
+          providerId: 'glm-fallback',
+          modelId: 'glm-5.3',
+          dispatchAttempted: true,
+          transitionDecision: null,
+          terminalOutcome: 'completed',
+          normalizedFailure: null,
+          cost: { reservedMicroUsd: 500000, actualMicroUsd: null, known: false, source: 'unavailable' },
+        },
+      ],
+    };
+    const out = renderSafeExportMarkdown(e);
+    expect(out).toContain('## Failover');
+    expect(out).toContain('| final provider | glm-fallback |');
+    expect(out).toContain('| 0 | kimi-sub-primary | kimi-k2.7-code | no | transitioned | not recorded | retryable:connection | reserved=500000, actual=not recorded, known=no, source=unavailable |');
+    expect(out).toContain('| 1 | glm-fallback | glm-5.3 | yes | not recorded | completed | none | reserved=500000, actual=not recorded, known=no, source=unavailable |');
+  });
+
   it('Overclaim pin: no "sanitized"/"secure"/"guaranteed"/"clean" claim words appear anywhere in the Markdown', () => {
     const out = renderSafeExportMarkdown(minimalSafeExport);
     expect(out).not.toMatch(/\bsanitized\b/i);

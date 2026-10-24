@@ -251,6 +251,11 @@ Before reporting completion:
 - Check for regressions in routing, approval gates, cost enforcement, privacy behavior, session resume, and receipts.
 - Review the diff for accidental edits.
 - Confirm every completion claim against actual file diffs, command output, logs, or tests.
+- Add token accounting to each seat packet before final signoff:
+  - Seat runtime model id.
+  - Input tokens, output tokens, and total tokens.
+  - Provider cost in USD if available, otherwise `cost usd: unavailable`.
+  - If metrics are unavailable, include a clear `token usage unavailable` note with source and reason.
 
 **Pre-merge deletion audit (learned 2026-08-09, GS-COORD):** before merging a long-lived branch, verify it is rebased onto the current base. An unrebased merge deleted 4,769 lines including whole test files. Check `git diff --stat` against the target branch and confirm the deletion count is zero or explained.
 
