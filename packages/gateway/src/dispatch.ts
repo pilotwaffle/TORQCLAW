@@ -44,6 +44,13 @@ import {
   subscriptionAgentExecutionEnabled,
 } from './subscriptionExecutionAdmission.js';
 
+// Privacy routing excludes private tasks from failover.ts startup recovery.
+function markSensitive(req: GatewayRequest, telemetry: unknown): unknown {
+  return req.constraints.containsSensitiveData
+    ? { ...(telemetry as Record<string, unknown> ?? {}), sensitive: true }
+    : telemetry;
+}
+
 function subscriptionExecutionTarget(req: GatewayRequest) {
   const target = req.payload.subscriptionExecutionTarget;
   return target ?? null;
@@ -447,12 +454,12 @@ function dispatchLegacy(req: GatewayRequest, diag: RouterDiagnostics): void {
       // completed subscription task before this projection attempt returns.
       safeMaterializeReceipt(req.id);
       // Cancelled tasks (and budget-broken ones) must not poison memory.
-      if (!result.telemetry?.cancelled) {
+      if (!result.telemetry?.cancelled && !req.constraints.containsSensitiveData) {
         sessions.storeEpisode(
           req.id, req.sessionId, req.payload.taskType, req.payload.prompt, result.text,
         );
       }
-      emit('RESULT', result.text, result.telemetry);
+      emit('RESULT', result.text, markSensitive(req, result.telemetry));
       // P2.5 receipt: a compact, honest summary from REAL telemetry only.
       // toolsUsed is reconstructed console-side from TOOL_CALL events.
       emit('SYSTEM', 'Done', { receipt: buildReceipt(diag.tier, result.telemetry, effectiveReq) });
@@ -727,8 +734,8 @@ async function dispatchFailover(req: GatewayRequest, diag: RouterDiagnostics): P
     const result = await runFailoverTask(effectiveReq, diag, { emit });
     const telemetry: Record<string, unknown> = { ...(result.telemetry ?? {}), budgetSource, failoverEnabled: true };
     taskStore.complete(req.id, result.text, telemetry);
-    if (!telemetry.cancelled) sessions.storeEpisode(req.id, req.sessionId, req.payload.taskType, req.payload.prompt, result.text);
-    emit('RESULT', result.text, telemetry);
+    if (!telemetry.cancelled && !req.constraints.containsSensitiveData) sessions.storeEpisode(req.id, req.sessionId, req.payload.taskType, req.payload.prompt, result.text);
+    emit('RESULT', result.text, markSensitive(req, telemetry));
     emit('SYSTEM', 'Done', { receipt: { tier: diag.tier, failoverEnabled: true } });
     projectReceiptSafely(req.id);
     const cost = typeof telemetry.costUsd === 'number' ? telemetry.costUsd : undefined;
@@ -736,7 +743,19 @@ async function dispatchFailover(req: GatewayRequest, diag: RouterDiagnostics): P
   } catch (error: unknown) {
     const typed = error instanceof (await import('./failover.js')).FailoverTerminalError ? error as import('./failover.js').FailoverTerminalError : null;
     const failure = typed?.failure ?? { failureClass: 'terminal', code: 'failover_failed', retryable: false };
-    const telemetry = { failoverEnabled: true, budgetSource, normalizedFailure: failure, dispatchAttempted: typed?.dispatchAttempted ?? false, terminalOutcome: typed?.terminalOutcome ?? 'terminal', ...(typed?.telemetry ?? {}) };
+    const telemetry: Record<string, unknown> = { failoverEnabled: true, budgetSource, normalizedFailure: failure, dispatchAttempted: typed?.dispatchAttempted ?? false, terminalOutcome: typed?.terminalOutcome ?? 'terminal', ...(typed?.telemetry ?? {}) };
+    if (failure.code === 'approval_blocked') {
+      const tool = typeof telemetry.blockedOn === 'string' ? telemetry.blockedOn : 'a write tool';
+      taskStore.fail(req.id, `BLOCKED_FRONTIER_TOOL: ${tool}`, telemetry);
+      emit('ERROR',
+        `This cloud task tried to use ${tool}, which cannot be granted on the cloud tier. Resend with "This machine only" to approve it locally.`,
+        { failoverEnabled: true, normalizedFailure: failure, terminalOutcome: telemetry.terminalOutcome,
+          ...(typeof telemetry.blockedOn === 'string' ? { blockedOn: tool } : {}),
+          recovery: ['RETRY_LOCAL', 'COPY_DIAGNOSTIC'], prompt: req.payload.prompt,
+          sideEffectNote: 'Nothing was written \u2014 the tool was blocked before it ran.' });
+      projectReceiptSafely(req.id);
+      return;
+    }
     taskStore.fail(req.id, `FAILOVER: ${failure.code}`, telemetry);
     emit('ERROR', `Execution failed: failover ${failure.code}.`, {
       failoverEnabled: true,

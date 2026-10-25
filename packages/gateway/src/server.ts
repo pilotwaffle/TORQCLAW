@@ -544,7 +544,8 @@ app.get('/ws', { websocket: true }, (socket) => {
     switch (cmd.data.action) {
       case 'SUBMIT_PROMPT': {
         const emit = makeEmitter(sid, null, null);
-        emit('USER_PROMPT', cmd.data.prompt); // feeds getContextWindow Tier 1
+        // Private turns are marked so non-private callers cannot recall them.
+        emit('USER_PROMPT', cmd.data.prompt, cmd.data.sensitive === true ? { sensitive: true } : undefined); // feeds getContextWindow Tier 1
 
          // S2: authz denies SUBMIT_PROMPT outright for role 'node' (the only
          // seat an agent's own connection can hold — authz.ts), so

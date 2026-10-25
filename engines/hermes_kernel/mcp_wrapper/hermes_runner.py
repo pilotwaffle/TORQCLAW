@@ -810,6 +810,8 @@ def run_hermes_sync(task_id: str, payload: dict) -> dict:
         if blocked:
             telemetry["blockedOn"] = blocked["toolName"]
             telemetry["blockedArgs"] = blocked["args"]
+            if "blockedReason" in blocked:
+                telemetry["blockedReason"] = blocked["blockedReason"]
         return {"result": result.get("final_response", ""), "telemetry": telemetry}
     finally:
         # Order-independent cleanup. A flat sequence here is fragile in exactly

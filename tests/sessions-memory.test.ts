@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 // before it loads. Set it at module top, then a plain import binds to a temp DB.
 process.env.TORQCLAW_DATA_DIR = mkdtempSync(join(tmpdir(), 'torq-mem-'));
 const { sessions } = await import('../packages/gateway/src/sessions.js');
+const { makeEmitter } = await import('../packages/gateway/src/events.js');
 
 const newSession = () =>
   sessions.resolve(
@@ -15,6 +16,39 @@ const newSession = () =>
   ).sessionId;
 
 describe('P4.5 memory controls (sessions)', () => {
+  it('private_prompt_and_result_excluded_from_context_window', () => {
+    const sid = newSession();
+    const emit = makeEmitter(sid, null, null);
+    emit('USER_PROMPT', 'PRIVATE-PROMPT-MARKER', { sensitive: true });
+    emit('RESULT', 'PRIVATE-RESULT-MARKER', { sensitive: true });
+    emit('USER_PROMPT', 'PUBLIC-PROMPT-MARKER');
+    emit('RESULT', 'PUBLIC-RESULT-MARKER', { engineUsed: 'test' });
+    for (const context of [sessions.getContextWindow(sid, 'x'), sessions.getContextWindow(sid, 'x', { includeSensitive: false })]) {
+      expect.soft(context).not.toContain('PRIVATE-PROMPT-MARKER');
+      expect.soft(context).not.toContain('PRIVATE-RESULT-MARKER');
+      expect(context).toContain('PUBLIC-PROMPT-MARKER');
+      expect(context).toContain('PUBLIC-RESULT-MARKER');
+    }
+    const privateContext = sessions.getContextWindow(sid, 'x', { includeSensitive: true });
+    for (const marker of ['PRIVATE-PROMPT-MARKER', 'PRIVATE-RESULT-MARKER', 'PUBLIC-PROMPT-MARKER', 'PUBLIC-RESULT-MARKER']) {
+      expect(privateContext).toContain(marker);
+    }
+  });
+
+  it('non_private_task_still_stores_and_recalls', () => {
+    const sid = newSession();
+    const emit = makeEmitter(sid, null, null);
+    emit('USER_PROMPT', 'public conversation prompt');
+    emit('RESULT', 'public conversation result', { engineUsed: 'test' });
+    sessions.storeEpisode('public-memory-preservation', sid, 'SUMMARIZATION', 'publicepisodicmarker', 'public episode result');
+    expect(sessions.showEpisodes(sid)).toHaveLength(1);
+    const context = sessions.getContextWindow(sid, 'publicepisodicmarker');
+    expect(context).toContain('public conversation prompt');
+    expect(context).toContain('public conversation result');
+    expect(context).toContain('public episode result');
+    expect(sessions.getContextWindow(sid, 'publicepisodicmarker', { includeSensitive: true })).toBe(context);
+  });
+
   it('SHOW lists stored episodes; FORGET_SESSION removes them', () => {
     const sid = newSession();
     sessions.storeEpisode('r1', sid, 'SUMMARIZATION', 'p1', 'res1');
