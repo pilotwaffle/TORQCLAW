@@ -451,6 +451,11 @@ export function isBusyNeutralEvent(ev: GatewayEvent): boolean {
   return ev.type === 'SYSTEM';
 }
 
+/** A console-local control error is display-only, never a dispatch terminal. */
+export function isLocalControlErrorEvent(ev: GatewayEvent): boolean {
+  return ev.type === 'ERROR' && (ev.metadata as Record<string, unknown> | null)?.gatewayControlError === true;
+}
+
 /** Redesign 3/7: per-task stream grouping. PURE — events in, ordered items
  *  out, no React. Every event carrying a requestId joins that task's group
  *  (a card); events without one stay loose and render exactly as before.

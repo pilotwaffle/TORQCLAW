@@ -18,6 +18,26 @@ export type GatewayControlError = {
   detail?: unknown;
 };
 
+function safeJson(value: unknown): string {
+  try {
+    const json = JSON.stringify(value);
+    return json === undefined ? '[unserializable detail]' : json.slice(0, 300);
+  } catch {
+    return '[unserializable detail]';
+  }
+}
+
+export function buildControlErrorEvent(error: GatewayControlError, sessionId: string, nowIso: string, id: string): GatewayEvent {
+  const detail = error.detail;
+  const detailText = detail === undefined ? '' : `: ${typeof detail === 'string' ? detail : safeJson(detail)}`;
+  return GatewayEventSchema.parse({
+    id, requestId: null, sessionId, tier: null, type: 'ERROR',
+    message: `Gateway rejected the command (${error.code})${detailText}`,
+    metadata: { gatewayControlError: true, code: error.code, ...(detail === undefined ? {} : { detail }) },
+    timestamp: nowIso,
+  });
+}
+
 export function classifyGatewayFrame(raw: unknown):
   | { kind: 'event'; event: GatewayEvent }
   | { kind: 'control-error'; error: GatewayControlError; disconnect: false }
@@ -88,6 +108,12 @@ export function useGatewayStream(url: string, credential: string) {
       const parsed = classifyGatewayFrame(raw);
       if (parsed.kind === 'control-error') {
         console.warn('Gateway command rejected', parsed.error.code, parsed.error.detail);
+        const stored = GatewayEventSchema.shape.sessionId.safeParse(sessionStorage.getItem(SESSION_KEY));
+        const local = buildControlErrorEvent(
+          parsed.error, stored.success ? stored.data : '00000000-0000-4000-8000-000000000000',
+          new Date().toISOString(), crypto.randomUUID(),
+        );
+        setEvents((prev) => [...prev.slice(-(MAX_EVENTS - 1)), local]);
         return;
       }
       if (parsed.kind === 'invalid') {
