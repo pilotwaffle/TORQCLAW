@@ -70,7 +70,22 @@ describe('TorqTerminal — connection element (PRD §2)', () => {
     expect(screen.queryByText(/stale · reconnecting/)).not.toBeInTheDocument();
   });
 
-  it('stale >30s -> the badge REPLACES CONNECTED and stays actionable', () => {
+  // A connected idle socket is not reconnecting; the old copy asserted a reconnect that was not happening.
+  it('idle_connected_socket_is_not_labelled_reconnecting', () => {
+    vi.useFakeTimers();
+    stream.events = [ev({ type: 'RESULT', requestId: 'r1' })];
+    vi.setSystemTime(BASE + STALE_AFTER_MS + 5_000);
+    render(<TorqTerminal />);
+
+    expect(screen.queryByText('CONNECTED')).not.toBeInTheDocument();
+    const badge = screen.getByText('idle 30 s+').closest('button')!;
+    fireEvent.click(badge);
+    expect(stream.reconnect).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('RECONNECTING…')).not.toBeInTheDocument();
+    expect(screen.queryByText(/stale · reconnecting/)).not.toBeInTheDocument();
+  });
+
+  it('busy_connected_stale_shows_stale_not_reconnecting', () => {
     vi.useFakeTimers();
     stream.events = [
       ev({ type: 'TIER_SELECTED', requestId: 'r1', tier: 'OLLAMA_LOCAL', message: 'routed' }),
@@ -80,9 +95,10 @@ describe('TorqTerminal — connection element (PRD §2)', () => {
     render(<TorqTerminal />);
 
     expect(screen.queryByText('CONNECTED')).not.toBeInTheDocument();
-    const badge = screen.getByText(/stale · reconnecting/).closest('button')!;
+    const badge = screen.getByText('stale 30 s+').closest('button')!;
     fireEvent.click(badge);
     expect(stream.reconnect).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('RECONNECTING…')).not.toBeInTheDocument();
   });
 
   it('disconnected -> the badge replaces CONNECTED (error state, no green lie)', () => {

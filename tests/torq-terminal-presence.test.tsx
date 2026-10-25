@@ -74,7 +74,8 @@ describe('TorqTerminal — staleness affordance + presence card', () => {
 
       render(<TorqTerminal />);
 
-      const badge = screen.getByText(/stale · reconnecting/).closest('button');
+      // The socket is still connected; the old copy claimed a reconnect that was not happening.
+      const badge = screen.getByText('stale 30 s+').closest('button');
       expect(badge).not.toBeNull(); // an action, not decoration
 
       act(() => {

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GatewayEvent, ClientCommand, RouterDiagnostics } from '@torqclaw/contracts';
 import { useGatewayStream } from './useGatewayStream';
-import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isPanelSystemFrame, isOperatorOnlyEvent, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, groupStreamIntoTasks, derivePreflightEstimate, approvalTierFromGate, attachmentKind, type SafeExportFrameLike, type TaskGroup, type PreflightEstimate, type AttachmentKind } from './friendly';
+import { friendlyMessage, tierLabel, TYPE_LABELS, privacyHint, lineDiff, canRenderAction, formatLockState, formatRouteExplanation, formatBlockedAlternatives, formatProfile, selectActiveRouteDiag, selectLatestRoutePreview, isBusyNeutralEvent, isLocalControlErrorEvent, isPanelSystemFrame, isOperatorOnlyEvent, formatGateFacts, selectSafeExportViewByTaskId, renderSafeExportMarkdown, groupStreamIntoTasks, derivePreflightEstimate, approvalTierFromGate, attachmentKind, type SafeExportFrameLike, type TaskGroup, type PreflightEstimate, type AttachmentKind } from './friendly';
 import { selectTurnStartMs, selectLastSyncedMs, isStale, selectCostSummaryMeta, selectLivePhase, isPhaseStuck, STALE_AFTER_MS } from './presence';
 import { LiveDuration, formatElapsed } from './LiveDuration';
 import { LivenessChip } from './LivenessChip';
@@ -123,6 +123,14 @@ function buildJudgment(prompt: string, c: Controls): {
   };
 }
 
+export function customBudgetProblem(c: Controls): string | null {
+  if (c.budget !== 'custom') return null;
+  const value = Number(c.customBudget);
+  return Number.isFinite(value) && value > 0
+    ? null
+    : 'budget must be greater than $0 — use "Free (local only)" for a no-spend task';
+}
+
 /** Translate the budget/mode controls into the SUBMIT_PROMPT fields. */
 function buildSubmit(prompt: string, c: Controls): Extract<ClientCommand, { action: 'SUBMIT_PROMPT' }> {
   return { action: 'SUBMIT_PROMPT', ...buildJudgment(prompt, c), attachmentIds: [] };
@@ -157,6 +165,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
   const [controls, setControls] = useState<Controls>(DEFAULT_CONTROLS);
   const [hintDismissed, setHintDismissed] = useState(false);
   const [decided, setDecided] = useState<Record<string, 'APPROVE' | 'REJECT'>>({});
+  const [decisionSendFailed, setDecisionSendFailed] = useState<Record<string, true>>({});
   // TCLAW-4B-2: console receipt panel — overlay over the live scroll region.
   const [receiptsOpen, setReceiptsOpen] = useState(false);
   // TCLAW-1B: Cost Control Center panel — same overlay pattern, read-only.
@@ -175,6 +184,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
   // Redesign 7/7: composer attachments (flag-gated; see ATTACHMENTS_ENABLED).
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [attachmentGateNote, setAttachmentGateNote] = useState(false);
+  const [budgetGateNote, setBudgetGateNote] = useState<string | null>(null);
   // §6: drag-over visual state for the composer box (flag-gated drop target).
   const [dragging, setDragging] = useState(false);
   // §6: REAL ↑/↓ prompt history over prompts submitted this mount — the kbd
@@ -293,7 +303,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
     for (let i = events.length - 1; i >= 0; i--) {
       const e = events[i];
       if (!e) continue;
-      if (isBusyNeutralEvent(e)) continue;
+      if (isBusyNeutralEvent(e) || isLocalControlErrorEvent(e)) continue;
       last = e;
       break;
     }
@@ -434,6 +444,8 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
     e.preventDefault();
     const prompt = input.trim();
     if (!prompt) return;
+    const problem = customBudgetProblem(controls);
+    if (problem) { setBudgetGateNote(problem); return; }
     if (ATTACHMENTS_ENABLED && attachments.length > 0) {
       // KERNEL GAP: no upload command exists — never send fake attachmentIds,
       // and never silently submit without the files the operator attached.
@@ -441,6 +453,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
       return;
     }
     sendCommand(buildSubmit(prompt, controls));
+    setBudgetGateNote(null);
     setPromptHistory((h) => [...h, prompt]); // §6 ↑ history ring
     historyIdx.current = null;
     setInput('');
@@ -448,11 +461,15 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
   };
 
   const resendLocal = (prompt: string) => {
+    const problem = customBudgetProblem(controls);
+    if (problem) { setBudgetGateNote(problem); return; }
     sendCommand(buildSubmit(prompt, { ...controls, mode: 'LOCAL_ONLY', budget: controls.budget === '' ? 'free' : controls.budget }));
   };
 
   // Slow local hardware fallback: resend forcing the cloud tier.
   const resendCloud = (prompt: string) => {
+    const problem = customBudgetProblem(controls);
+    if (problem) { setBudgetGateNote(problem); return; }
     sendCommand(buildSubmit(prompt, { ...controls, mode: 'CLOUD_OK', budget: controls.budget === 'free' ? '' : controls.budget }));
   };
 
@@ -566,21 +583,33 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
 
   // P4: approve a skill, optionally with edited markdown.
   const decideSkill = (queueId: string, decision: 'APPROVE' | 'REJECT', editedMarkdown?: string) => {
-    sendCommand(
+    const sent = sendCommand(
       editedMarkdown !== undefined && decision === 'APPROVE'
         ? { action: 'APPROVE_SKILL', queueId, decision, editedMarkdown }
         : { action: 'APPROVE_SKILL', queueId, decision },
     );
-    setDecided((d) => ({ ...d, [queueId]: decision }));
+    if (sent) {
+      setDecided((d) => ({ ...d, [queueId]: decision }));
+      setDecisionSendFailed((f) => { const next = { ...f }; delete next[queueId]; return next; });
+    } else {
+      setDecisionSendFailed((f) => ({ ...f, [queueId]: true }));
+    }
   };
 
   const decideTool = (approvalId: string, decision: 'APPROVE' | 'REJECT') => {
-    sendCommand({ action: 'APPROVE_TOOL', approvalId, decision });
-    setDecided((d) => ({ ...d, [approvalId]: decision }));
+    const sent = sendCommand({ action: 'APPROVE_TOOL', approvalId, decision });
+    if (sent) {
+      setDecided((d) => ({ ...d, [approvalId]: decision }));
+      setDecisionSendFailed((f) => { const next = { ...f }; delete next[approvalId]; return next; });
+    } else {
+      setDecisionSendFailed((f) => ({ ...f, [approvalId]: true }));
+    }
   };
 
-  const set = <K extends keyof Controls>(k: K, v: Controls[K]) =>
+  const set = <K extends keyof Controls>(k: K, v: Controls[K]) => {
+    if (k === 'budget' || k === 'customBudget') setBudgetGateNote(null);
     setControls((c) => ({ ...c, [k]: v }));
+  };
 
   // TCLAW-2D-2: snapshot the latest matching preview frame (write-on-present
   // — mirrors the 2C chip discipline). Clears the timeout timer once a real
@@ -743,10 +772,9 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
             </svg>
           </button>
         )}
-        {/* PRD §2: fresh + connected -> CONNECTED (good, pulsing dot). Stale
-            >30s OR disconnected -> the 'stale · reconnecting…' badge REPLACES
-            the element entirely. The badge stays actionable (click forces a
-            reconnect) so the dead-WS affordance survives the restyle. */}
+        {/* Fresh + connected -> CONNECTED. Only a disconnected socket is
+            reconnecting; a quiet connected socket is idle or stale.
+            Every button state still offers a forced reconnect. */}
         {isConnected && !stale ? (
           <span className="flex items-center gap-2 text-[10px] font-semibold tracking-[0.16em] text-good">
             <span className="h-[7px] w-[7px] animate-pulse rounded-full bg-good shadow-[0_0_8px_var(--good)]" aria-hidden />
@@ -768,11 +796,11 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
           <button
             type="button"
             onClick={reconnect}
-            title="force reconnect"
+            title="no events for 30 s+ — click to force reconnect"
             className="flex items-center gap-2 rounded border border-torque/40 bg-torque/10 px-2 py-0.5 text-[10px] font-semibold tracking-[0.16em] text-torque"
           >
             <span className="h-[7px] w-[7px] animate-pulse rounded-full bg-torque" aria-hidden />
-            stale · reconnecting…
+            {busy ? 'stale 30 s+' : 'idle 30 s+'}
           </button>
         )}
         {/* Global liveness chip (redesign 2/7, polish in PRD §5): visible on
@@ -956,6 +984,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
                 key={ev.id}
                 event={ev}
                 decided={decided}
+                decisionSendFailed={decisionSendFailed}
                 toolsByRequest={toolsByRequest}
                 draftsByQueue={draftsByQueue}
                 onDecideSkill={decideSkill}
@@ -991,6 +1020,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
                   : null
               }
               decided={decided}
+              decisionSendFailed={decisionSendFailed}
               toolsByRequest={toolsByRequest}
               draftsByQueue={draftsByQueue}
               onDecideSkill={decideSkill}
@@ -1229,7 +1259,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
               type="button"
               onClick={cycleMode}
               disabled={controls.budget === 'free'}
-              title="where this task may run — click to cycle auto → local → cloud"
+              title={controls.budget !== 'free' && effectiveMode === 'CLOUD_OK' ? 'cloud permitted; the router still decides' : 'where this task may run — click to cycle auto → local → cloud'}
               className={`${CCHIP} hover:border-border-strong hover:text-ink disabled:opacity-60`}
             >
               <span
@@ -1238,7 +1268,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
                 }`}
                 aria-hidden
               />
-              route: {controls.budget === 'free' ? 'local (free)' : effectiveMode === 'LOCAL_ONLY' ? 'local' : effectiveMode === 'CLOUD_OK' ? 'cloud' : 'auto'} ▾
+              route: {controls.budget === 'free' ? 'local (free)' : effectiveMode === 'LOCAL_ONLY' ? 'local' : effectiveMode === 'CLOUD_OK' ? 'cloud ok' : 'auto'} ▾
             </button>
             <button
               type="button"
@@ -1364,11 +1394,13 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
               type="number" min="0" max="100" step="0.25"
               value={controls.customBudget}
               onChange={(e) => set('customBudget', e.target.value)}
+              onInvalid={() => setBudgetGateNote(customBudgetProblem(controls))}
               placeholder="USD"
               aria-label="Custom budget in USD"
               className="w-16 rounded border border-border-strong bg-panel-2 px-1.5 py-0.5 text-muted"
             />
           )}
+          {budgetGateNote && <span role="alert" className="text-[10px] text-torque">{budgetGateNote}</span>}
           {/* §6: mode select + memory checkbox replaced by the in-box route
               and memory chips — one control surface each. */}
           <label className="flex cursor-pointer items-center gap-1.5" title="Prefer a fast answer">
@@ -1553,7 +1585,7 @@ interface CardWorking {
 }
 
 function TaskCard({
-  group, working = null, decided, toolsByRequest, draftsByQueue, onDecideSkill, onGetDraft,
+  group, working = null, decided, decisionSendFailed, toolsByRequest, draftsByQueue, onDecideSkill, onGetDraft,
   onDecideTool, onResendLocal, onResendCloud, onRetry, onCopyDiagnostic,
   safeExportViewByTaskId, safeExportChipPhase, safeExportChipCopied,
   onGetSafeExportChip, onCopySafeExportChip, budgetLine,
@@ -1561,6 +1593,7 @@ function TaskCard({
   group: TaskGroup;
   working?: CardWorking | null;
   decided: Record<string, 'APPROVE' | 'REJECT'>;
+  decisionSendFailed: Record<string, true>;
   toolsByRequest: Record<string, string[]>;
   draftsByQueue: Record<string, string>;
   onDecideSkill: (queueId: string, decision: 'APPROVE' | 'REJECT', editedMarkdown?: string) => void;
@@ -1585,6 +1618,7 @@ function TaskCard({
     event: ev,
     hideTimestamp: true,
     decided,
+    decisionSendFailed,
     toolsByRequest,
     draftsByQueue,
     onDecideSkill,
@@ -1739,7 +1773,7 @@ function TaskCard({
 }
 
 function EventRow({
-  event, decided, toolsByRequest, draftsByQueue, onDecideSkill, onGetDraft,
+  event, decided, decisionSendFailed, toolsByRequest, draftsByQueue, onDecideSkill, onGetDraft,
   onDecideTool, onResendLocal, onResendCloud, onRetry, onCopyDiagnostic,
   safeExportFrame, safeExportChipPhase, safeExportChipCopied, onGetSafeExportChip, onCopySafeExportChip,
   hideTimestamp = false,
@@ -1747,6 +1781,7 @@ function EventRow({
 }: {
   event: GatewayEvent;
   decided: Record<string, 'APPROVE' | 'REJECT'>;
+  decisionSendFailed: Record<string, true>;
   toolsByRequest: Record<string, string[]>;
   draftsByQueue: Record<string, string>;
   onDecideSkill: (queueId: string, decision: 'APPROVE' | 'REJECT', editedMarkdown?: string) => void;
@@ -1881,6 +1916,11 @@ function EventRow({
           />
         )}
 
+        {cardId && decisionSendFailed[cardId] && !decision && (
+          <span className="text-[10px] text-torque">
+            couldn't send — connection may be reconnecting; try again
+          </span>
+        )}
         {decision && (
           /* §7: the decision flip carries its outcome color. */
           <span
