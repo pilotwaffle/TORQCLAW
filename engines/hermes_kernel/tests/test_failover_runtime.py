@@ -4,8 +4,31 @@ import inspect
 import sqlite3
 import threading
 
+import pytest
+
 from mcp_wrapper import approval_hook, failover_runtime, task_store
-from mcp_wrapper.attempt_ledger import AttemptLedger, CorruptLedger
+from mcp_wrapper.attempt_ledger import AttemptLedger, CorruptLedger, LedgerError
+
+
+def test_safe_telemetry_passes_blockedOn_and_drops_blockedArgs():
+    result = failover_runtime._safe_telemetry({
+        "blockedOn": "write_file", "blockedArgs": {"path": "x"},
+        "costUsd": 0.0, "costSource": "exact", "blockedReason": "approval_required",
+    })
+    assert "blockedArgs" not in result
+    assert "blockedReason" not in result
+    for value in ("", "x" * 129, 7, None, "write_file\n", "write\x00file", "tool with spaces"):
+        assert "blockedOn" not in failover_runtime._safe_telemetry({"blockedOn": value})
+    assert result == {"blockedOn": "write_file", "costUsd": 0.0, "costSource": "exact"}
+
+
+def test_ledger_rejects_approval_blocked_under_side_effect_uncertainty():
+    with pytest.raises(LedgerError):
+        AttemptLedger.normalize_observation({
+            "failureClass": "side_effect_uncertainty", "code": "approval_blocked", "retryable": False,
+        })
+    expected = {"failureClass": "terminal", "code": "approval_blocked", "retryable": False}
+    assert AttemptLedger.normalize_observation(expected) == expected
 
 
 def make_plan(task_id: str, deadline: int = 20_000_000) -> dict:

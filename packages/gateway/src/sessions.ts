@@ -107,14 +107,21 @@ export const sessions = {
    *   Tier 2 — FTS5-recalled summaries of relevant past episodes.
    * One indexed query + one sub-ms FTS5 match; no LLM in the hot path.
    */
-  getContextWindow(sessionId: string, currentPrompt: string): string {
-    const recent = db.prepare(
+  getContextWindow(sessionId: string, currentPrompt: string, opts: { includeSensitive?: boolean } = {}): string {
+    const recent = (opts.includeSensitive === true ? db.prepare(
       `SELECT type, message FROM (
          SELECT seq, type, message FROM events
          WHERE session_id = ? AND type IN ('USER_PROMPT', 'RESULT')
          ORDER BY seq DESC LIMIT 10
        ) ORDER BY seq ASC`,
-    ).all(sessionId) as Array<{ type: string; message: string }>;
+    ) : db.prepare(
+      `SELECT type, message FROM (
+         SELECT seq, type, message FROM events
+         WHERE session_id = ? AND type IN ('USER_PROMPT', 'RESULT')
+           AND (metadata IS NULL OR json_extract(metadata, '$.sensitive') IS NOT 1)
+         ORDER BY seq DESC LIMIT 10
+       ) ORDER BY seq ASC`,
+    )).all(sessionId) as Array<{ type: string; message: string }>;
 
     let budget = TOTAL_CONTEXT_CHAR_BUDGET;
     const shortTerm: string[] = [];

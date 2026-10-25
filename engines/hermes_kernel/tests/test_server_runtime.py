@@ -774,15 +774,9 @@ def test_hermes_task_failed_shapes_without_failure_reason_still_fail_closed(
     }
 
 
-def test_approval_blocked_resilience_observation_is_side_effect_uncertainty(monkeypatch, tmp_path):
-    """T-A5: the existing approval-blocked branch (server.py, PENDING_APPROVAL
-    -> task_store.fail with failureClass "side_effect_uncertainty") must
-    surface, via the real resilience poll path, as failureClass
-    "side_effect_uncertainty" with terminalOutcome "cancelled_uncertain" --
-    not as a completed result and not as an ordinary failed/failed outcome.
-    RED before this suite existed: this path had no direct regression test
-    proving _terminal_observation's cancelled_uncertain branch was reachable
-    end-to-end from run_hermes_loop."""
+def test_approval_blocked_resilience_observation_is_terminal_approval_blocked(monkeypatch, tmp_path):
+    """T-A5: pre_tool_call blocks before execution, so no side effect is
+    uncertain. The old pin described the PRD D2 defect, not an invariant."""
     monkeypatch.setenv("TORQCLAW_PROVIDER_FAILOVER_ENABLED", "1")
     monkeypatch.setenv("TORQCLAW_DATA_DIR", str(tmp_path))
     monkeypatch.setattr("mcp_wrapper.hermes_runner.hermes_available", lambda: (True, None))
@@ -791,6 +785,7 @@ def test_approval_blocked_resilience_observation_is_side_effect_uncertainty(monk
         lambda task_id, payload: {
             "result": "",
             "telemetry": {"blockedOn": "write_file", "blockedArgs": {"path": "x"},
+                          "blockedReason": "approval_required",
                           "costUsd": 0.0, "costSource": "exact"},
         },
     )
@@ -817,12 +812,79 @@ def test_approval_blocked_resilience_observation_is_side_effect_uncertainty(monk
     page = asyncio.run(run_once())
     observation = page["observations"][0]
     assert observation["kind"] != "result"
-    assert observation["failure"]["failureClass"] == "side_effect_uncertainty"
-    # code is "uncertain", not "approval_blocked": attempt_ledger's
-    # _SAFE_FAILURE_CODES only allowlists {"dispatch_attempted", "uncertain"}
-    # under side_effect_uncertainty (attempt_ledger.py is out of scope).
-    assert observation["failure"]["code"] == "uncertain"
-    assert page["terminalOutcome"] == "cancelled_uncertain"
+    assert (observation["failure"]["failureClass"], observation["failure"]["code"],
+            page["terminalOutcome"], observation["telemetry"].get("blockedOn")) == (
+        "terminal", "approval_blocked", "failed", "write_file",
+    )
+    assert "blockedArgs" not in observation["telemetry"]
+
+
+def test_resilience_fence_rejection_is_not_reclassified_as_approval_blocked(monkeypatch, tmp_path):
+    from mcp_wrapper import approval_hook, hermes_runner
+
+    monkeypatch.setenv("STUB_KEY", "test-only-placeholder")
+    monkeypatch.setenv("TORQCLAW_PROVIDER_FAILOVER_ENABLED", "1")
+    monkeypatch.setenv("TORQCLAW_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(hermes_runner, "hermes_available", lambda: (True, None))
+    monkeypatch.setattr(approval_hook, "register", lambda: True)
+    monkeypatch.setattr(hermes_runner, "_snapshot_account_usage_usd", lambda **_: None)
+    monkeypatch.setattr(hermes_runner, "get_spend_usd", lambda *_: (0.0, "exact"))
+    blocks = []
+
+    class FakeAgent:
+        def __init__(self, **_kwargs):
+            self._skill_nudge_interval = 5
+
+        def run_conversation(self, prompt, system_message=None, task_id=None):
+            directive = approval_hook.pre_tool_call("write_file", {"path": "x"}, task_id)
+            assert directive["action"] == "block"
+            blocks.append(dict(approval_hook.was_blocked(task_id)))
+            return {"final_response": "blocked", "messages": []}
+
+        def interrupt(self, _reason):
+            return None
+
+    monkeypatch.setattr(hermes_runner, "AIAgent", FakeAgent)
+    failover_runtime.reset_for_tests()
+
+    async def run_once(rejected):
+        monkeypatch.setattr(failover_runtime, "authorize_tool_forward",
+                            lambda *_: {"status": "REJECTED" if rejected else "FORWARDED"})
+        task_id = "s1-block-" + str(time.time_ns())
+        deadline = int(time.time() * 1000) + 20_000
+        plan = _plan(task_id, deadline)
+        admitted = await server.resilience_admit_frontier(task_id, plan, deadline, ["primary", "fallback"])
+        active = admitted["activeTuple"]
+        submitted = await server.resilience_submit_attempt(
+            _gateway_request(task_id, "needs approval"), plan, active,
+            _provider("primary"), deadline, task_id + ":submit",
+        )
+        assert submitted["status"] == "SUBMITTED"
+        for _ in range(100):
+            page = await server.resilience_poll_observations(active, 0, deadline)
+            if page["status"] == "TERMINAL":
+                return page
+            await asyncio.sleep(0.01)
+        raise AssertionError("blocked task never reached terminal")
+
+    fence = asyncio.run(run_once(True))
+    failure = fence["observations"][0]
+    assert failure["failure"] == {
+        "failureClass": "side_effect_uncertainty", "code": "uncertain", "retryable": False,
+    }
+    assert fence["terminalOutcome"] == "cancelled_uncertain"
+    assert "blockedOn" not in failure["telemetry"]
+    approval = asyncio.run(run_once(False))
+    failure = approval["observations"][0]
+    assert (blocks[-1].get("blockedReason"), failure["failure"]["failureClass"],
+            failure["failure"]["code"], approval["terminalOutcome"]) == (
+        "approval_required", "terminal", "approval_blocked", "failed",
+    )
+    assert blocks[0]["blockedReason"] == "resilience_rejected"
+    assert failure["telemetry"]["blockedOn"] == "write_file"
+    assert "blockedReason" not in failure["telemetry"]
+    assert "blockedArgs" not in failure["telemetry"]
+    failover_runtime.reset_for_tests()
 
 
 def test_hermes_task_failed_terminal_is_exactly_one_failure_observation(monkeypatch):

@@ -6,6 +6,7 @@ with Tailscale or set HERMES_ENGINE_TOKEN and a reverse proxy — never bare
 0.0.0.0 (the OpenClaw exposed-default-port incident class)."""
 import asyncio
 import os
+import re
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -132,44 +133,43 @@ async def run_hermes_loop(task_id: str, payload: dict) -> None:
             # run_conversation is synchronous — never block the event loop.
             out = await asyncio.to_thread(run_hermes_sync, task_id, payload)
             tele = out.get("telemetry", {})
-            # Per-tool approval block (FRONTIER): a write-capable tool was hit
-            # without a grant. End as 'blocked' so the gateway emits the single
-            # terminal PENDING_APPROVAL and the operator can Allow once (re-run).
             blocked_on = tele.get("blockedOn")
-            if blocked_on:
-                task_store.emit(
-                    task_id, "PENDING_APPROVAL",
-                    f"Tool {blocked_on} requires approval",
-                    {"toolName": blocked_on, "args": tele.get("blockedArgs", {})},
-                )
-                if resilience_task:
-                    # B-3: the failure dict must be wrapped under
-                    # "normalizedFailure" -- failover_runtime.py's
-                    # _terminal_observation reads telemetry.get(
-                    # "normalizedFailure"), not the telemetry dict itself.
-                    # An unwrapped dict here silently fell through
-                    # failover_runtime._failure()'s default and surfaced as
-                    # failureClass "terminal"/"engine_failure" instead of
-                    # "side_effect_uncertainty" (which the gateway maps to
-                    # the "cancelled_uncertain" outcome, never a hard fail).
-                    #
-                    # code is "uncertain", not the more descriptive
-                    # "approval_blocked": attempt_ledger._SAFE_FAILURE_CODES
-                    # only allowlists {"dispatch_attempted", "uncertain"}
-                    # under "side_effect_uncertainty" (attempt_ledger.py is
-                    # out of scope here -- no new ledger codes may be added
-                    # per B-4). "approval_blocked" would raise LedgerError
-                    # inside AttemptLedger._failure() and fall back to the
-                    # unrelated terminal/engine_failure default, which is
-                    # the same symptom the unwrap fix above addresses.
+            blocked_reason = tele.get("blockedReason")
+            if blocked_on is not None or blocked_reason is not None:
+                valid_tool = isinstance(blocked_on, str) and re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}", blocked_on,
+                ) is not None
+                if resilience_task and blocked_reason == "resilience_rejected":
                     task_store.fail(task_id, "normalized_failure", {
                         "normalizedFailure": {
                             "failureClass": "side_effect_uncertainty",
                             "code": "uncertain", "retryable": False,
                         },
                     })
+                elif not valid_tool or (resilience_task and blocked_reason != "approval_required"):
+                    task_store.fail(task_id, "normalized_failure", {
+                        "normalizedFailure": {
+                            "failureClass": "terminal",
+                            "code": "malformed_response", "retryable": False,
+                        },
+                    })
                 else:
-                    task_store.complete(task_id, "", {"blockedOn": blocked_on})
+                    task_store.emit(
+                        task_id, "PENDING_APPROVAL",
+                        f"Tool {blocked_on} requires approval",
+                        {"toolName": blocked_on, "args": tele.get("blockedArgs", {})},
+                    )
+                    if resilience_task:
+                        # attempt_ledger.py allowlists approval_blocked under terminal.
+                        task_store.fail(task_id, "normalized_failure", {
+                            "normalizedFailure": {
+                                "failureClass": "terminal",
+                                "code": "approval_blocked", "retryable": False,
+                            },
+                            "blockedOn": blocked_on,
+                        })
+                    else:
+                        task_store.complete(task_id, "", {"blockedOn": blocked_on})
                 return
             # null cost = breaker is blind; say so once, never report 0.00.
             if tele.get("costUsd") is None:

@@ -10,6 +10,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,7 +25,7 @@ _ledger_path: Path | None = None
 _run_lock = threading.Lock()
 _started_attempts: set[str] = set()
 
-_TELEMETRY_KEYS = {"costUsd", "costSource", "inferenceLatencyMs", "iterations", "cancelled", "engineUsed"}
+_TELEMETRY_KEYS = {"costUsd", "costSource", "inferenceLatencyMs", "iterations", "cancelled", "engineUsed", "blockedOn"}
 _COST_SOURCES = {"exact", "account_delta", "unavailable"}
 _FAILURE_SOURCES = {"engine", "gateway", "recovery"}
 _FAILURE_CODES = {"connection", "dns", "http_408", "http_429", "http_5xx", "pre_dispatch_timeout"}
@@ -286,6 +287,8 @@ def _safe_telemetry(value: Any) -> dict[str, Any]:
         elif key == "costSource" and candidate in {"exact", "account_delta", "unavailable"}:
             result[key] = candidate
         elif key == "engineUsed" and isinstance(candidate, str) and 0 < len(candidate) <= 128:
+            result[key] = candidate
+        elif key == "blockedOn" and isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}", candidate):
             result[key] = candidate
     return result
 

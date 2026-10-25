@@ -434,7 +434,10 @@ export async function runFailoverTask(
         if (attempt.terminalCommitted !== true || attempt.terminalOutcome !== terminalOutcome) {
           await finalizeExact(bridge, run.active, failure, failureSource, terminalOutcome, `${req.id}:${run.active.attemptId}:terminal-finalize`, options.client);
         }
-        throw new FailoverTerminalError(failure, attempt.dispatchAttempted, terminalOutcome, { failover: true });
+        throw new FailoverTerminalError(failure, attempt.dispatchAttempted, terminalOutcome, {
+          failover: true,
+          ...(typeof observation.telemetry?.blockedOn === 'string' ? { blockedOn: observation.telemetry.blockedOn } : {}),
+        });
       }
       const successorExists = transitionCount === 0 && run.active.epoch + 1 < chain.providers.length;
       const successorProviderId = successorExists ? chain.providers[run.active.epoch + 1]!.id : '';

@@ -87,7 +87,7 @@ def pre_tool_call(tool_name: str, args=None, task_id: str = "", **_kw):
             with _lock:
                 c = _ctx.get(task_id)
                 if c is not None and c["blocked"] is None:
-                    c["blocked"] = {"toolName": tool_name, "args": {}}
+                    c["blocked"] = {"toolName": tool_name, "args": {}, "blockedReason": "resilience_rejected"}
                     emit = c["emit"]
                 else:
                     emit = None
@@ -104,6 +104,8 @@ def pre_tool_call(tool_name: str, args=None, task_id: str = "", **_kw):
         # Record the FIRST block only — fail-fast, one approval per blocked run.
         if c["blocked"] is None:
             c["blocked"] = {"toolName": tool_name, "args": args or {}}
+            if c["resilience_active"]:
+                c["blocked"]["blockedReason"] = "approval_required"
             emit = c["emit"]
         else:
             emit = None

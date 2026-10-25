@@ -28,7 +28,7 @@ export async function enrichCommand(
 ): Promise<GatewayRequest> {
   // P4.5: useMemory=false skips recall entirely — no past context assembled.
   const useMemory = cmd.useMemory ?? true;
-  const history = useMemory ? sessions.getContextWindow(sessionId, cmd.prompt) : '';
+  const history = useMemory ? sessions.getContextWindow(sessionId, cmd.prompt, { includeSensitive: cmd.sensitive === true }) : '';
   const contextSize = estimateTokens(cmd.prompt) + estimateTokens(history);
 
   const cls = await classifyTaskType(cmd.prompt); // never throws

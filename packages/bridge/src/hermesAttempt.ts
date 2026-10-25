@@ -220,7 +220,7 @@ function normalizeObservation(value: unknown, operation: ResilienceToolName): No
   if (raw.telemetry !== undefined) {
     if (raw.telemetry === null || typeof raw.telemetry !== 'object' || Array.isArray(raw.telemetry)) throw new ResilienceEnvelopeError(operation, 'telemetry is invalid');
     const telemetry = raw.telemetry as Record<string, unknown>;
-    const allowedTelemetry = ['costUsd', 'costSource', 'inferenceLatencyMs', 'iterations', 'cancelled', 'engineUsed'];
+    const allowedTelemetry = ['costUsd', 'costSource', 'inferenceLatencyMs', 'iterations', 'cancelled', 'engineUsed', 'blockedOn'];
     if (Object.keys(telemetry).some((key) => !allowedTelemetry.includes(key))) throw new ResilienceEnvelopeError(operation, 'telemetry is not normalized');
     if (telemetry.costUsd !== undefined && typeof telemetry.costUsd !== 'number') throw new ResilienceEnvelopeError(operation, 'costUsd is invalid');
     if (telemetry.costSource !== undefined && !['exact', 'account_delta', 'unavailable'].includes(String(telemetry.costSource))) throw new ResilienceEnvelopeError(operation, 'costSource is invalid');
@@ -228,6 +228,7 @@ function normalizeObservation(value: unknown, operation: ResilienceToolName): No
     if (telemetry.iterations !== undefined && !Number.isSafeInteger(telemetry.iterations)) throw new ResilienceEnvelopeError(operation, 'iterations is invalid');
     if (telemetry.cancelled !== undefined && typeof telemetry.cancelled !== 'boolean') throw new ResilienceEnvelopeError(operation, 'cancelled is invalid');
     if (telemetry.engineUsed !== undefined && (typeof telemetry.engineUsed !== 'string' || telemetry.engineUsed.length === 0 || telemetry.engineUsed.length > 128)) throw new ResilienceEnvelopeError(operation, 'engineUsed is invalid');
+    if (telemetry.blockedOn !== undefined && (typeof telemetry.blockedOn !== 'string' || telemetry.blockedOn.match(/^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/)?.[0] !== telemetry.blockedOn)) throw new ResilienceEnvelopeError(operation, 'blockedOn is invalid');
     out.telemetry = { ...telemetry };
   }
   if (raw.providerId !== undefined) {
