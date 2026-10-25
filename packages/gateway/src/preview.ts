@@ -1,5 +1,6 @@
 import { publishOnly } from './events.js';
 import { enrichCommand } from './enrich.js';
+import type { Classification } from './classifier.js';
 import { router } from '@torqclaw/router';
 import { GatewayRequestSchema, type ClientCommand } from '@torqclaw/contracts';
 import { assertResolvedProfile, constrainTier } from './profileResolver.js';
@@ -45,6 +46,7 @@ export async function handlePreviewRoute(sessionId: string, cmd: PreviewCmd): Pr
     // Adapter: enrichCommand takes the SUBMIT_PROMPT-shaped command. Built
     // explicitly (never spread cmd verbatim) so previewOf never leaks into a
     // GatewayRequest and attachmentIds is always [].
+    let classification: Classification | undefined;
     const request = await enrichCommand(
       {
         action: 'SUBMIT_PROMPT' as const,
@@ -58,6 +60,8 @@ export async function handlePreviewRoute(sessionId: string, cmd: PreviewCmd): Pr
       },
       sessionId,
       'torq-console',
+      undefined,
+      { onClassified: (cls) => { classification = cls; } },
     );
      GatewayRequestSchema.parse(request); // fail loud on our own contract bug
      assertResolvedProfile(request);
@@ -78,7 +82,10 @@ export async function handlePreviewRoute(sessionId: string, cmd: PreviewCmd): Pr
         taskType: request.payload.taskType,
         requiredTools: request.payload.requiredTools,
         contextSize: request.payload.contextSize,
-        enrichment: request.enrichment,      // scalars only: classifierUsed/confidence/latency/estimatedTokens/memoryUsed
+        enrichment: request.enrichment,      // scalars only: classifierUsed/confidence/latency/estimatedTokens/memoryUsed; reason is a sibling
+        ...(classification?.fallbackReason
+          ? { classifierFallbackReason: classification.fallbackReason }
+          : {}),
         prompt: cmd.prompt,                  // display echo only — NOT the staleness key
       },
     });

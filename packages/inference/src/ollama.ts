@@ -72,6 +72,11 @@ function requiresNativeChat(modelId: string): boolean {
 }
 
 const MAX_ITERATIONS = 5;
+const PROSE_RETRY_PROMPT =
+  'That was not a tool call. Answer the question directly in plain prose, without tools.';
+const RAW_TOOL_CALL_REFUSAL =
+  "I don't have the tools needed to complete that request on the local model. " +
+  'Try switching to Cloud mode, or ask something the local model can answer directly.';
 const MAX_TOOL_RESULT_CHARS = 6_000; // ~1.5k tokens; raw file reads must not nuke the window
 const INFERENCE_TIMEOUT_MS = 120_000;
 const TORQ_AI_V5_CONTEXT_TOKENS = 8_192;
@@ -538,19 +543,25 @@ export async function executeLocalEdge(
       content:
         'You are TORQCLAW running on a local model. Be concise and concrete.\n\n' +
         'RULES:\n' +
-        '1. You can ONLY act through the tools listed below. You have no other ' +
+        '1. FIRST decide whether the request needs a tool. If you can answer it from your own ' +
+        'knowledge without current or externally verified data - for example, a stable fact, an ' +
+        'explanation, arithmetic, writing, or summarizing text ' +
+        'the user already gave you - answer directly in plain prose. Do not call a tool, do not ' +
+        'mention tools, and do not write JSON. Use a tool only when the request needs real external ' +
+        'data or a real action (files, web, terminal, apps).\n' +
+        '2. You can ONLY act through the tools listed below. You have no other ' +
         'abilities — no internet, no memory, no file access except via these tools.\n' +
-        '2. To use a tool, emit a real function call. NEVER write tool output, ' +
+        '3. To use a tool, emit a real function call. NEVER write tool output, ' +
         'JSON results, status objects, or queue messages yourself — that is ' +
         'fabrication. Wait for the actual tool result.\n' +
-        '3. If no tool can do what the user asks, say so plainly. Do not pretend.\n' +
-        '4. Answer only from real tool results or your own knowledge — never invent data.\n' +
-        '5. NEVER write a line like "Tool output:" or "Tool result:" followed by ' +
+        '4. If no tool can do what the user asks, say so plainly. Do not pretend.\n' +
+        '5. Answer only from real tool results or your own knowledge — never invent data.\n' +
+        '6. NEVER write a line like "Tool output:" or "Tool result:" followed by ' +
         'made-up content, and never quote file contents, code, or data you have ' +
         'not actually received from a real tool result. If you have not received ' +
         'a tool result, you do not know what it would say.\n\n' +
         (requestedTools.length
-          ? `6. This request requires real tool calls in this order: ${requestedTools.join(' -> ')}. Do not answer until they run.\n\n`
+          ? `7. This request requires real tool calls in this order: ${requestedTools.join(' -> ')}. Do not answer until they run.\n\n`
           : '') +
         `AVAILABLE TOOLS:\n${toolList}` +
         (context ? `\n\n${context}` : ''),
@@ -593,6 +604,7 @@ export async function executeLocalEdge(
   }
 
   let iterations = 0;
+  let proseRetried = false;
   let toolCallCount = 0;
 
   while (iterations < MAX_ITERATIONS) {
@@ -634,11 +646,36 @@ export async function executeLocalEdge(
       // honest fallback rather than returning fabricated JSON to the user.
       const content = message.content ?? '';
       if (looksLikeRawToolCall(content)) {
-        return finish(
-          "I don't have the tools needed to complete that request on the local model. " +
-          'Try switching to Cloud mode, or ask something the local model can answer directly.',
-          start, iterations, toolCallCount,
-        );
+        // L1(b): one bounded corrective turn for a plain question. Never for an
+        // explicit device workflow (requestedTools) - that must not become prose.
+        if (!proseRetried && requestedTools.length === 0) {
+          proseRetried = true;
+          if (isCancelled(req.id)) {
+            return finalizeCancelled(
+              messages, start, iterations, toolCallCount, emit, modelId, deterministicManagedAgent,
+            );
+          }
+          messages.push({ role: 'user', content: PROSE_RETRY_PROMPT });
+          iterations++;
+          const retry = await callOllama(
+            messages, undefined, signal, undefined, modelId, deterministicManagedAgent,
+          );
+          router.markLocalModelWarm();
+          const retryMessage = retry.choices?.[0]?.message;
+          const retryContent: string = retryMessage?.content ?? '';
+          const retryHasToolCalls =
+            Array.isArray(retryMessage?.tool_calls) && retryMessage.tool_calls.length > 0;
+          if (retryMessage) messages.push(retryMessage);
+          if (
+            !retryHasToolCalls &&
+            retryContent.trim() !== '' &&
+            !looksLikeRawToolCall(retryContent) &&
+            !looksLikeFabricatedToolRun(retryContent)
+          ) {
+            return finish(retryContent, start, iterations, toolCallCount);
+          }
+        }
+        return finish(RAW_TOOL_CALL_REFUSAL, start, iterations, toolCallCount);
       }
       // Stronger guard: the model narrated FAKE tool execution (invented
       // "Tool output:" blocks + embedded tool-call JSON) instead of really
