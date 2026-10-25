@@ -583,6 +583,7 @@ export function approvalTierFromGate(gate: unknown): ApprovalTier {
 export interface PreflightEstimate {
   route: 'local' | 'cloud';
   label: string;
+  classifierNote?: string;
   /** The kernel's estimated token count, when present (cloud sizing). */
   estimatedTokens: number | null;
 }
@@ -593,8 +594,20 @@ export function derivePreflightEstimate(frame: GatewayEvent | null): PreflightEs
   if (meta.routePreview !== true || meta.dropped) return null;
   const diag = meta.diagnostics as { tier?: string } | null | undefined;
   if (!diag || typeof diag.tier !== 'string') return null;
+  const enrichment = meta.enrichment as Record<string, unknown> | undefined;
+  const method = enrichment?.classifierUsed;
+  let classifierNote: string | undefined;
+  if (typeof method === 'string' && method !== 'LOCAL_LLM') {
+    const reason = typeof meta.classifierFallbackReason === 'string'
+      ? meta.classifierFallbackReason : 'reason unknown';
+    const latency = enrichment?.classifierLatencyMs;
+    classifierNote = typeof latency === 'number' && Number.isFinite(latency)
+      ? `classifier fell back (${reason}, ${Math.round(latency)} ms)`
+      : `classifier fell back (${reason})`;
+  }
+  const note = classifierNote !== undefined ? { classifierNote } : {};
   if (diag.tier === 'OLLAMA_LOCAL') {
-    return { route: 'local', label: '$0.00 · local', estimatedTokens: null };
+    return { route: 'local', label: '$0.00 · local', estimatedTokens: null, ...note };
   }
   const est = (meta.enrichment as Record<string, any> | undefined)?.estimatedTokens;
   const tokens = typeof est === 'number' && Number.isFinite(est) ? est : null;
@@ -602,6 +615,7 @@ export function derivePreflightEstimate(frame: GatewayEvent | null): PreflightEs
     route: 'cloud',
     label: tokens !== null ? `~${tokens.toLocaleString('en-US')} tokens · cloud` : 'cloud route',
     estimatedTokens: tokens,
+    ...note,
   };
 }
 

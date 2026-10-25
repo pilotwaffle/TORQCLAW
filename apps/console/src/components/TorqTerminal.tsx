@@ -1294,6 +1294,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
                   construction (local = free), token figures for cloud. */}
               {estimate && !previewState && (
                 <span
+                  title={estimate.classifierNote}
                   className={`inline-flex animate-task-enter items-center gap-1.5 rounded border px-2 py-[3px] text-[9.5px] font-semibold uppercase tracking-[0.1em] tabular-nums ${
                     estimate.route === 'local'
                       ? 'border-good/30 bg-good/[.12] text-good'

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ClientCommand, GatewayRequest } from '@torqclaw/contracts';
-import { classifyTaskType } from './classifier.js';
+import { classifyTaskType, type Classification } from './classifier.js';
 import { sessions } from './sessions.js';
 import { predictTools, resolveAgentReachRouting } from '@torqclaw/bridge';
 import { resolveProfile } from './profileResolver.js';
@@ -25,6 +25,7 @@ export async function enrichCommand(
   // its stated precondition ("a task bound to agent principal P") without
   // requiring S3's trigger mechanism to exist first.
   callerCollabPrincipalId?: string,
+  diagnostics?: { onClassified?: (cls: Classification) => void },
 ): Promise<GatewayRequest> {
   // P4.5: useMemory=false skips recall entirely — no past context assembled.
   const useMemory = cmd.useMemory ?? true;
@@ -32,6 +33,7 @@ export async function enrichCommand(
   const contextSize = estimateTokens(cmd.prompt) + estimateTokens(history);
 
   const cls = await classifyTaskType(cmd.prompt); // never throws
+  diagnostics?.onClassified?.(cls);
   // Resolve policy before selecting tools. The resulting snapshot is carried
   // on the gateway-owned request and is re-checked by the bridge at dispatch.
   const effectiveProfile = resolveProfile({ taskType: cls.taskType }).profile;
