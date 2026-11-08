@@ -668,7 +668,10 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
     if (!prompt) { setEstimateNonce(null); return; }
     const nonce = crypto.randomUUID(); // fresh per settled draft
     const sent = sendCommand({ action: 'PREVIEW_ROUTE', previewOf: nonce, ...buildJudgment(prompt, controls) });
-    if (sent) setEstimateNonce(nonce); // a dropped send never arms a lookup
+    // T-TCLAW-LOCAL-LANE-01-S2: re-arm or DISARM on every attempt — a failed
+    // replacement send (e.g. after a controls change) must not leave the
+    // previous estimate armed for the wrong controls.
+    setEstimateNonce(sent ? nonce : null);
   }, [debouncedInput, controls, sendCommand, roomsViewActive]);
   const estimateFrame = useMemo(
     () => selectLatestRoutePreview(events, estimateNonce),
@@ -724,6 +727,29 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
   const simulateRoute = () => {
     const prompt = input.trim();
     if (!prompt) return; // belt-and-braces with the disabled attr
+    // T-TCLAW-LOCAL-LANE-01-S2: an automatic estimate for THIS draft + controls
+    // is armed (estimateNonce is cleared on any input change and re-armed or
+    // cleared on every re-estimate attempt). Adopt its nonce instead of racing
+    // a second PREVIEW_ROUTE into the gateway's single-flight latch. An estimate
+    // whose frame already came back `dropped` is NOT adoptable (PRD amendment
+    // 1): fall through to the own-send path below so the panel can recover.
+    const estimateMeta = estimateFrame ? ((estimateFrame.metadata ?? {}) as Record<string, any>) : null;
+    if (estimateNonce !== null && !(estimateMeta && estimateMeta.dropped)) {
+      if (previewTimer.current) { clearTimeout(previewTimer.current); previewTimer.current = null; }
+      setPreviewNonce(estimateNonce);
+      if (estimateMeta) {
+        // Frame already landed: resolve now. The frame-to-state effect cannot
+        // re-fire for a repeat click because previewNonce does not change.
+        setPreviewState({ kind: 'result', meta: estimateMeta });
+        return; // resolved: no timer to arm
+      }
+      setPreviewState({ kind: 'pending' });
+      previewTimer.current = setTimeout(
+        () => setPreviewState((s) => (s?.kind === 'pending' ? { kind: 'timeout' } : s)),
+        5000,
+      );
+      return;
+    }
     const nonce = crypto.randomUUID(); // fresh PER CLICK — edit-back-race safety
     const sent = sendCommand({ action: 'PREVIEW_ROUTE', ...buildJudgment(prompt, controls), previewOf: nonce });
     if (previewTimer.current) clearTimeout(previewTimer.current);
