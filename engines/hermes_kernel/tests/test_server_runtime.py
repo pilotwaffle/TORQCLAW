@@ -819,6 +819,50 @@ def test_approval_blocked_resilience_observation_is_terminal_approval_blocked(mo
     assert "blockedArgs" not in observation["telemetry"]
 
 
+def test_resilience_block_without_blocked_reason_is_terminal_malformed_response(monkeypatch, tmp_path):
+    monkeypatch.setenv("TORQCLAW_PROVIDER_FAILOVER_ENABLED", "1")
+    monkeypatch.setenv("TORQCLAW_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr("mcp_wrapper.hermes_runner.hermes_available", lambda: (True, None))
+    monkeypatch.setattr(
+        "mcp_wrapper.hermes_runner.run_hermes_sync",
+        lambda task_id, payload: {
+            "result": "",
+            "telemetry": {"blockedOn": "write_file", "blockedArgs": {"path": "x"},
+                          "costUsd": 0.0, "costSource": "exact"},
+        },
+    )
+    failover_runtime.reset_for_tests()
+    task_id = "ll1-malformed-" + str(time.time_ns())
+    deadline = int(time.time() * 1000) + 20_000
+    plan = _plan(task_id, deadline)
+    request = _gateway_request(task_id, "needs approval")
+
+    async def run_once():
+        admitted = await server.resilience_admit_frontier(task_id, plan, deadline, ["primary", "fallback"])
+        active = admitted["activeTuple"]
+        submitted = await server.resilience_submit_attempt(
+            request, plan, active, _provider("primary"), deadline, task_id + ":submit",
+        )
+        assert submitted["status"] == "SUBMITTED"
+        for _ in range(100):
+            page = await server.resilience_poll_observations(active, 0, deadline)
+            if page["status"] == "TERMINAL":
+                return page
+            await asyncio.sleep(0.01)
+        raise AssertionError("malformed-response task never reached a terminal observation")
+
+    page = asyncio.run(run_once())
+    observation = page["observations"][0]
+    assert observation["kind"] == "failure"
+    assert observation["failure"] == {
+        "failureClass": "terminal", "code": "malformed_response", "retryable": False,
+    }
+    assert page["terminalOutcome"] == "failed"
+    assert "blockedReason" not in observation["telemetry"]
+    assert "blockedArgs" not in observation["telemetry"]
+    assert "blockedOn" not in observation["telemetry"]
+
+
 def test_resilience_fence_rejection_is_not_reclassified_as_approval_blocked(monkeypatch, tmp_path):
     from mcp_wrapper import approval_hook, hermes_runner
 

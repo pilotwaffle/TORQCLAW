@@ -128,6 +128,21 @@ it('failover_blocked_tool_emits_terminal_error_with_blockedOn', async () => {
   } finally { unsubscribe(); }
 });
 
+it('valid_blockedOn_passes_normalizeObservation', async () => {
+  const active = { taskId: 'task', attemptId: 'attempt', epoch: 0 };
+  function client(telemetry: unknown): ResilienceClient {
+    return { callTool: async () => ({ content: [{ type: 'text', text: JSON.stringify({
+      status: 'OBSERVATIONS', cursor: 1,
+      observations: [{ kind: 'failure', dispatchAttempted: true, telemetry,
+        failure: { failureClass: 'terminal', code: 'approval_blocked', retryable: false } }],
+    }) }] }) };
+  }
+  for (const blockedOn of ['write_file', 'mcp:fs/write.v2', 'a' + 'b'.repeat(127)]) {
+    const result = await pollObservations(active, 0, Date.now() + 10000, client({ blockedOn }));
+    expect(result.observations[0].telemetry.blockedOn).toBe(blockedOn);
+  }
+});
+
 it('failover_observation_rejects_unapproved_blocked_tool_telemetry', async () => {
   const active = { taskId: 'task', attemptId: 'attempt', epoch: 0 };
   function client(telemetry: unknown): ResilienceClient {

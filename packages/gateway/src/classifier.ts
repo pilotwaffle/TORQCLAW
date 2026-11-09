@@ -29,11 +29,28 @@ Examples:
 "refactor the ws handler to support backpressure" -> {"taskType":"COMPLEX_CODING","confidence":0.93}
 "what's the weather" -> {"taskType":"ROUTINE_AUTOMATION","confidence":0.85}`;
 
+export type ClassifierFallbackReason = 'timeout' | 'unreachable' | 'bad_response';
 export interface Classification {
   taskType: TaskType;
   confidence: number;
   method: 'LOCAL_LLM' | 'KEYWORD_FALLBACK' | 'DEFAULT';
   latencyMs: number;
+  /** Present only when method !== 'LOCAL_LLM': why the local classifier was not used. */
+  fallbackReason?: ClassifierFallbackReason;
+}
+
+const DEFAULT_CLASSIFIER_TIMEOUT_MS = 1500;
+const MIN_CLASSIFIER_TIMEOUT_MS = 250;
+/** Read per call so tests and operators can change it without a restart. */
+export function classifierTimeoutMs(): number {
+  const raw = process.env.TORQCLAW_CLASSIFIER_TIMEOUT_MS;
+  const n = raw === undefined || raw.trim() === '' ? Number.NaN : Number(raw);
+  if (!Number.isFinite(n)) return DEFAULT_CLASSIFIER_TIMEOUT_MS;
+  return Math.max(MIN_CLASSIFIER_TIMEOUT_MS, Math.floor(n));
+}
+function isTimeoutError(err: unknown): boolean {
+  const name = typeof err === 'object' && err !== null ? (err as { name?: unknown }).name : undefined;
+  return name === 'TimeoutError' || name === 'AbortError';
 }
 
 /** Never throws. The enrichment step must never be what blocks a request. */
@@ -44,10 +61,13 @@ export async function classifyTaskType(prompt: string): Promise<Classification> 
 }
 
 async function classifyTaskTypeRaw(prompt: string, start: number): Promise<Classification> {
+  // Phase-tracked reason: 'unreachable' until a response arrives, then
+  // 'bad_response' for anything wrong with what arrived; a timeout overrides both.
+  let reason: ClassifierFallbackReason = 'unreachable';
   try {
     const res = await fetch(`${OLLAMA_HOST}/api/chat`, {
       method: 'POST',
-      signal: AbortSignal.timeout(1500),
+      signal: AbortSignal.timeout(classifierTimeoutMs()),
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         model: CLASSIFIER_MODEL,
@@ -61,6 +81,7 @@ async function classifyTaskTypeRaw(prompt: string, start: number): Promise<Class
         ],
       }),
     });
+    reason = 'bad_response';
     if (res.ok) {
       const out = JSON.parse((await res.json()).message.content);
       const parsed = TaskTypeSchema.safeParse(out.taskType);
@@ -73,8 +94,10 @@ async function classifyTaskTypeRaw(prompt: string, start: number): Promise<Class
         };
       }
     }
-  } catch { /* cold model, timeout, Ollama down — fall through */ }
-  return { ...keywordFallback(prompt), latencyMs: performance.now() - start };
+  } catch (err) {
+    if (isTimeoutError(err)) reason = 'timeout';
+  }
+  return { ...keywordFallback(prompt), latencyMs: performance.now() - start, fallbackReason: reason };
 }
 
 // File-write intent override. A task that must produce or modify a file on disk
