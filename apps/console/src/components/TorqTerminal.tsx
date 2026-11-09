@@ -659,6 +659,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
   // panel: each reads only frames matching its own nonce, so the two surfaces
   // never clobber each other.
   const [estimateNonce, setEstimateNonce] = useState<string | null>(null);
+  const estimatePrompt = useRef<string | null>(null);
   // A changing draft invalidates the last estimate immediately — never show a
   // number sized for text that is no longer in the box.
   useEffect(() => { setEstimateNonce(null); }, [input]);
@@ -671,6 +672,7 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
     // T-TCLAW-LOCAL-LANE-01-S2: re-arm or DISARM on every attempt — a failed
     // replacement send (e.g. after a controls change) must not leave the
     // previous estimate armed for the wrong controls.
+    estimatePrompt.current = sent ? prompt : null;
     setEstimateNonce(sent ? nonce : null);
   }, [debouncedInput, controls, sendCommand, roomsViewActive]);
   const estimateFrame = useMemo(
@@ -734,7 +736,9 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
     // whose frame already came back `dropped` is NOT adoptable (PRD amendment
     // 1): fall through to the own-send path below so the panel can recover.
     const estimateMeta = estimateFrame ? ((estimateFrame.metadata ?? {}) as Record<string, any>) : null;
-    if (estimateNonce !== null && !(estimateMeta && estimateMeta.dropped)) {
+    // Controls can re-arm an estimate for the previous debounced draft.
+    // Only adopt when its actual sent prompt matches the current input.
+    if (estimateNonce !== null && estimatePrompt.current === prompt && !(estimateMeta && estimateMeta.dropped)) {
       if (previewTimer.current) { clearTimeout(previewTimer.current); previewTimer.current = null; }
       setPreviewNonce(estimateNonce);
       if (estimateMeta) {
@@ -744,10 +748,12 @@ export default function TorqTerminal({ operatorCredential = '' }: { operatorCred
         return; // resolved: no timer to arm
       }
       setPreviewState({ kind: 'pending' });
-      previewTimer.current = setTimeout(
-        () => setPreviewState((s) => (s?.kind === 'pending' ? { kind: 'timeout' } : s)),
-        5000,
-      );
+      previewTimer.current = setTimeout(() => {
+        setPreviewState((s) => (s?.kind === 'pending' ? { kind: 'timeout' } : s));
+        // A lost response must not trap every retry on the same nonce.
+        // Preserve a newer estimate if it was armed while this timer ran.
+        setEstimateNonce((current) => current === estimateNonce ? null : current);
+      }, 5000);
       return;
     }
     const nonce = crypto.randomUUID(); // fresh PER CLICK — edit-back-race safety

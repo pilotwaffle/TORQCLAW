@@ -225,3 +225,15 @@ Observed outputs (rechecked after the evidence-only amendment): commit count `1`
 1. Restart the stack; type a prompt; wait for the estimate chip; click "simulate route" once → panel shows a result, not a drop. Result: ____
 2. Type again; click immediately → still one result. Result: ____
 3. Amendment-1 path: type; click BEFORE the chip appears; wait for the result; click again on the same text → expected: the panel shows "previewing…" then a result (a second PREVIEW_ROUTE was sent), never a stuck drop message. Result: ____
+
+## PR #70 review follow-up
+
+The original G2A approval applies to `49537f7d468c535ed1c214e44496d197db86ee2d`. After publication, GitHub review found a draft/control debounce race and the lost-frame timeout gap also noted by G2A. The operator authorized push and merge after the historical one-commit/no-push evidence above was recorded.
+
+The follow-up records the prompt sent with the armed estimate and checks it against the current input before adopting. When an adopted estimate times out, only that estimate nonce is disarmed; retry can send a fresh preview. Existing successful-result and pending-repeat-click behavior remains covered by the original tests.
+
+Added regression cases:
+- `simulate_uses_current_draft_after_control_change_during_debounce`
+- `simulate_retries_with_fresh_nonce_after_adopted_estimate_timeout`
+
+Both failed on the original component (5 passed / 2 failed) and passed after the fix. The combined adoption, preview, and cost test files pass 31 tests. `pnpm typecheck`, `pnpm build`, `pnpm --filter @torqclaw/contracts check`, and `pnpm reachability` all exit 0. These follow-up edits have not received a fresh independent G2A approval; no live browser/stack validation was performed.

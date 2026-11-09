@@ -317,4 +317,50 @@ describe('TorqTerminal — simulate route adopts the armed estimate (T-TCLAW-LOC
     rerender(<TorqTerminal />);
     expect(within(getPanel()).getByText(/on this machine/i)).toBeInTheDocument();
   });
+
+  it('simulate_uses_current_draft_after_control_change_during_debounce', () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<TorqTerminal />);
+    fireEvent.change(getInput(), { target: { value: 'old draft' } });
+    act(() => { vi.advanceTimersByTime(DEBOUNCE_MS); });
+    fireEvent.change(getInput(), { target: { value: 'current draft' } });
+    fireEvent.click(getFastCheckbox());
+    // The control effect can send an estimate for the previous debounced text.
+    expect(previewCalls()).toHaveLength(2);
+    expect(previewCalls()[1]!.prompt).toBe('old draft');
+    const staleNonce = previewCalls()[1]!.previewOf;
+    fireEvent.click(getButton());
+    expect(previewCalls()).toHaveLength(3);
+    expect(previewCalls()[2]!.prompt).toBe('current draft');
+    const freshNonce = previewCalls()[2]!.previewOf;
+    expect(freshNonce).not.toBe(staleNonce);
+    stream.events = [previewResultFrame(staleNonce)];
+    rerender(<TorqTerminal />);
+    expect(within(getPanel()).getByText(PENDING)).toBeInTheDocument();
+    stream.events = [...stream.events, previewResultFrame(freshNonce)];
+    rerender(<TorqTerminal />);
+    expect(within(getPanel()).getByText(/on this machine/i)).toBeInTheDocument();
+  });
+
+  it('simulate_retries_with_fresh_nonce_after_adopted_estimate_timeout', () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<TorqTerminal />);
+    fireEvent.change(getInput(), { target: { value: 'summarize this file' } });
+    act(() => { vi.advanceTimersByTime(DEBOUNCE_MS); });
+    const estimateNonce = previewCalls()[0]!.previewOf;
+    fireEvent.click(getButton());
+    expect(previewCalls()).toHaveLength(1);
+    act(() => { vi.advanceTimersByTime(PREVIEW_TIMEOUT_MS); });
+    expect(screen.getByText(TIMEOUT_TEXT)).toBeInTheDocument();
+    fireEvent.click(getButton());
+    expect(previewCalls()).toHaveLength(2);
+    const freshNonce = previewCalls()[1]!.previewOf;
+    expect(freshNonce).not.toBe(estimateNonce);
+    stream.events = [previewResultFrame(estimateNonce)];
+    rerender(<TorqTerminal />);
+    expect(within(getPanel()).getByText(PENDING)).toBeInTheDocument();
+    stream.events = [...stream.events, previewResultFrame(freshNonce)];
+    rerender(<TorqTerminal />);
+    expect(within(getPanel()).getByText(/on this machine/i)).toBeInTheDocument();
+  });
 });
